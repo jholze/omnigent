@@ -1,5 +1,6 @@
 """Lifecycle notices remain named, ordered, and idempotent across native delivery races."""
 
+import json
 from typing import Any
 from unittest.mock import Mock
 
@@ -254,7 +255,7 @@ async def test_claude_completion_survives_retries_and_late_child_discovery(
         assert all(call.args[1] != "running" for call in publish_status.call_args_list)
 
 
-@pytest.mark.parametrize("tool_name", ["Agent", "Task"])
+@pytest.mark.parametrize("tool_name", ["Agent", "Task", "SendMessage"])
 @pytest.mark.asyncio
 async def test_claude_resume_rejects_previous_invocation_completion(
     db_uri: str, monkeypatch: pytest.MonkeyPatch, tool_name: str
@@ -270,10 +271,21 @@ async def test_claude_resume_rejects_previous_invocation_completion(
             "omnigent.claude_native.tool_use_id": "tool-1",
         },
     )
+    other_child = store.create_conversation(
+        kind="sub_agent",
+        parent_conversation_id=parent.id,
+        labels={
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            "omnigent.claude_native.subagent_id": "agent-other",
+            CLAUDE_SUBAGENT_OUTCOME_LABEL: "completed",
+        },
+    )
     publish_status = Mock()
     monkeypatch.setattr("omnigent.server.routes._sessions.helpers._publish_status", publish_status)
 
-    async def deliver(source: str, data: dict[str, Any], item_type: str) -> None:
+    async def deliver(
+        source: str, data: dict[str, Any], item_type: str, return_id: str | None = None
+    ) -> None:
         await _persist_external_conversation_items(
             parent.id,
             [
@@ -284,9 +296,7 @@ async def test_claude_resume_rejects_previous_invocation_completion(
                         "response_id": "parent-turn",
                         "item_type": item_type,
                         "item_data": data,
-                        "subagent_return_id": "agent-1"
-                        if item_type == "function_call_output" or source == "old-handback"
-                        else None,
+                        "subagent_return_id": return_id,
                     },
                 )
             ],
@@ -295,7 +305,10 @@ async def test_claude_resume_rejects_previous_invocation_completion(
 
     async def complete(call_id: str) -> None:
         await deliver(
-            call_id + "-result", {"call_id": call_id, "output": "Done"}, "function_call_output"
+            call_id + "-result",
+            {"call_id": call_id, "output": "Done"},
+            "function_call_output",
+            "agent-1",
         )
 
     await record_subagent_activity(child.id, "delegated", store)
@@ -305,7 +318,7 @@ async def test_claude_resume_rejects_previous_invocation_completion(
         "<task-notification><task-id>agent-1</task-id>"
         "<status>completed</status></task-notification>"
     )
-    await deliver("old-handback", old_handback, "message")
+    await deliver("old-handback", old_handback, "message", "agent-1")
     await deliver("old-task-notification", old_notification, "message")
     assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
     publish_status.reset_mock()
@@ -335,7 +348,19 @@ async def test_claude_resume_rejects_previous_invocation_completion(
         "agent": "Claude",
         "name": tool_name,
         "call_id": "tool-2",
-        "arguments": '{"resume":"agent-1","prompt":"Continue"}',
+        "arguments": json.dumps(
+            {
+                "to": "agent-1",
+                "summary": "Continue review",
+                "message": "Continue",
+                "type": "message",
+                "recipient": "agent-1",
+                "recipient_kind": "agent",
+                "content": "Continue",
+            }
+            if tool_name == "SendMessage"
+            else {"resume": "agent-1", "prompt": "Continue"}
+        ),
     }
     with monkeypatch.context() as patch:
         patch.setattr(store, "set_labels", Mock(side_effect=RuntimeError("write failed")))
@@ -344,11 +369,16 @@ async def test_claude_resume_rejects_previous_invocation_completion(
     assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
     await deliver("resume", resume, "function_call")
     assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == ""
+    assert store.get_conversation(other_child.id).labels == other_child.labels
     publish_status.assert_called_once_with(child.id, "running")
     publish_status.reset_mock()
+    if tool_name == "SendMessage":
+        await deliver(
+            "send-ack", {"call_id": "tool-2", "output": "Message sent"}, "function_call_output"
+        )
     await record_subagent_activity(child.id, "delegated", store)
     await complete("tool-1")
-    await deliver("old-handback", old_handback, "message")
+    await deliver("old-handback", old_handback, "message", "agent-1")
     await deliver("old-task-notification", old_notification, "message")
     await deliver(
         "old-notification",
@@ -360,12 +390,83 @@ async def test_claude_resume_rejects_previous_invocation_completion(
     )
     publish_status.assert_not_called()
     assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == ""
-    await complete("tool-2")
+    if tool_name == "SendMessage":
+        await deliver(
+            "continued-result",
+            _message(
+                "<task-notification><task-id>agent-1</task-id>"
+                "<tool-use-id>tool-2</tool-use-id><status>completed</status></task-notification>"
+            ),
+            "message",
+        )
+    else:
+        await complete("tool-2")
     assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
     publish_status.reset_mock()
     await deliver("resume", resume, "function_call")
     publish_status.assert_not_called()
     assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"type": "broadcast"},
+        {"type": "shutdown_request"},
+        {"type": "shutdown_response"},
+        {"recipient_kind": "human"},
+        {"recipient": "unknown-agent", "to": "unknown-agent"},
+        {"to": "different-agent"},
+        {"recipient": None},
+    ],
+)
+@pytest.mark.asyncio
+async def test_claude_send_message_ignores_non_child_continuations(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, updates: dict[str, Any]
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation()
+    child = store.create_conversation(
+        parent_conversation_id=parent.id,
+        labels={
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            "omnigent.claude_native.subagent_id": "agent-1",
+            CLAUDE_SUBAGENT_OUTCOME_LABEL: "completed",
+        },
+    )
+    publish_status = Mock()
+    monkeypatch.setattr("omnigent.server.routes._sessions.helpers._publish_status", publish_status)
+    await _persist_external_conversation_items(
+        parent.id,
+        [
+            SessionEventInput(
+                type="external_conversation_item",
+                data={
+                    "source_id": "message",
+                    "response_id": "parent-turn",
+                    "item_type": "function_call",
+                    "item_data": {
+                        "agent": "Claude",
+                        "name": "SendMessage",
+                        "call_id": "tool-2",
+                        "arguments": json.dumps(
+                            {
+                                "type": "message",
+                                "recipient_kind": "agent",
+                                "recipient": "agent-1",
+                                "to": "agent-1",
+                                "content": "Continue",
+                                **updates,
+                            }
+                        ),
+                    },
+                },
+            )
+        ],
+        store,
+    )
+    publish_status.assert_not_called()
+    assert store.get_conversation(child.id).labels == child.labels
 
 
 @pytest.mark.asyncio

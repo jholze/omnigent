@@ -362,13 +362,24 @@ async def _record_claude_subagent_return(
 ) -> None:
     task_ids, call_ids = _claude_completion_ids(item)
     resume_id = None
-    if isinstance(item.data, FunctionCallData) and item.data.name in AGENT_TOOL_NAMES:
+    if isinstance(item.data, FunctionCallData) and (
+        item.data.name in AGENT_TOOL_NAMES or item.data.name == "SendMessage"
+    ):
         try:
             arguments = json.loads(item.data.arguments)
         except (TypeError, ValueError):
             return
-        if isinstance(arguments, dict) and isinstance(arguments.get("resume"), str):
-            resume_id = arguments["resume"]
+        if isinstance(arguments, dict):
+            if item.data.name in AGENT_TOOL_NAMES and isinstance(arguments.get("resume"), str):
+                resume_id = arguments["resume"]
+            elif (
+                item.data.name == "SendMessage"
+                and arguments.get("type") == "message"
+                and arguments.get("recipient_kind") == "agent"
+                and isinstance(recipient := arguments.get("recipient"), str)
+                and arguments.get("to", recipient) == recipient
+            ):
+                resume_id = recipient
     if not task_ids and not call_ids and not resume_id:
         return
     after: str | None = None
