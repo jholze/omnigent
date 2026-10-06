@@ -63,6 +63,10 @@ class _TunneledByteStream(httpx.AsyncByteStream):
                 if item is None:
                     # Sentinel: end-event signalled, no more chunks.
                     break
+                # Draining this frame frees a server buffer slot; let the
+                # registry grant the runner more send credit so the stream
+                # keeps flowing without the undelivered tail piling up.
+                await self._registry.note_body_consumed(state, item)
                 # Mypy/runtime: item must be a ResponseBodyFrame here.
                 if isinstance(item, ResponseBodyFrame):
                     yield decode_body(item.body, item.encoding)

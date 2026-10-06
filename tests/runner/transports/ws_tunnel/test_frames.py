@@ -21,6 +21,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
     PingFrame,
     PongFrame,
     RequestCancelFrame,
+    RequestFlowFrame,
     RequestFrame,
     ResponseBodyFrame,
     ResponseEndFrame,
@@ -241,6 +242,20 @@ def test_request_cancel_round_trip() -> None:
     decoded = decode_frame(encode_frame(f))
     assert isinstance(decoded, RequestCancelFrame)
     assert decoded.reason == "client_disconnected"
+
+
+def test_request_flow_round_trip() -> None:
+    f = RequestFlowFrame(id="req_abc", credits=16)
+    decoded = decode_frame(encode_frame(f))
+    assert isinstance(decoded, RequestFlowFrame)
+    assert decoded.id == "req_abc"
+    assert decoded.credits == 16
+
+
+def test_request_flow_requires_credits() -> None:
+    """A flow frame without a credit count is malformed, not a silent zero."""
+    with pytest.raises(ValueError, match="credits"):
+        decode_frame(json.dumps({"kind": FrameKind.REQUEST_FLOW.value, "id": "req_abc"}))
 
 
 def test_ping_pong_round_trip() -> None:

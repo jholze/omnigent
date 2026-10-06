@@ -37,6 +37,7 @@ class FrameKind(str, Enum):
     RESPONSE_BODY = "response.body"
     RESPONSE_END = "response.end"
     REQUEST_CANCEL = "request.cancel"
+    REQUEST_FLOW = "request.flow"
     PING = "ping"
     PONG = "pong"
     # WebSocket-channel frames: carry tunneled WS attach to the runner
@@ -146,6 +147,26 @@ class RequestCancelFrame:
 
 
 @dataclass
+class RequestFlowFrame:
+    """Server → runner: grant more response-body send credits for a request."""
+
+    id: str
+    credits: int
+
+
+# Flow control: the runner keeps at most RESPONSE_FLOW_WINDOW_FRAMES frames in
+# flight; the server grants more in RESPONSE_FLOW_CREDIT_BATCH batches as it
+# drains them (window > batch so the final partial batch never stalls).
+RESPONSE_FLOW_WINDOW_FRAMES = 48
+RESPONSE_FLOW_CREDIT_BATCH = 16
+
+# A single ASGI body chunk is split into frames of at most this many bytes, so
+# the send window bounds buffered memory by bytes, not just frame count. 64 KiB
+# matches the download read size, so ordinary downloads frame as before.
+RESPONSE_BODY_FRAME_MAX_BYTES = 64 * 1024
+
+
+@dataclass
 class PingFrame:
     """Either direction: tunnel-level keepalive (request half)."""
 
@@ -238,6 +259,7 @@ Frame = (
     | ResponseBodyFrame
     | ResponseEndFrame
     | RequestCancelFrame
+    | RequestFlowFrame
     | PingFrame
     | PongFrame
     | WSOpenFrame
@@ -320,6 +342,14 @@ def encode_frame(frame: Frame) -> str:
                 "kind": FrameKind.REQUEST_CANCEL.value,
                 "id": frame.id,
                 "reason": frame.reason,
+            }
+        )
+    if isinstance(frame, RequestFlowFrame):
+        return json.dumps(
+            {
+                "kind": FrameKind.REQUEST_FLOW.value,
+                "id": frame.id,
+                "credits": frame.credits,
             }
         )
     if isinstance(frame, PingFrame):
@@ -446,6 +476,11 @@ def _decode_known_frame(kind: FrameKind, msg: _JsonObject) -> Frame:
             )
         case FrameKind.REQUEST_CANCEL:
             return _decode_request_cancel(msg)
+        case FrameKind.REQUEST_FLOW:
+            credits = _required_int(msg, "credits")
+            if credits < 1:
+                raise ValueError("request.flow credits must be positive")
+            return RequestFlowFrame(id=_required_str(msg, "id"), credits=credits)
         case FrameKind.PING:
             return PingFrame(ts=_required_int(msg, "ts"))
         case FrameKind.PONG:

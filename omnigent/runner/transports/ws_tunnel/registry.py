@@ -45,13 +45,16 @@ import httpx
 
 from omnigent.debug_logging import runner_primary_session_id
 from omnigent.runner.transports.ws_tunnel.frames import (
+    RESPONSE_FLOW_CREDIT_BATCH,
     Frame,
     HelloFrame,
+    RequestFlowFrame,
     ResponseBodyFrame,
     ResponseEndFrame,
     ResponseHeadFrame,
     WSCloseFrame,
     WSFrame,
+    encode_frame,
 )
 
 _logger = logging.getLogger(__name__)
@@ -145,14 +148,18 @@ class RequestState:
     :param end_event: Event set when the response end frame arrives.
     :param aborted_with: Error to raise from the body iterator after
         a tunnel disconnect or registry abort.
+    :param req_id: Tunnel request id, used to address flow-credit grants back.
+    :param credits_pending: Drained frames awaiting a batched credit grant.
     """
 
     loop: asyncio.AbstractEventLoop
     session: RunnerSession
     head_future: asyncio.Future[ResponseHeadFrame]
     body_queue: asyncio.Queue[ResponseBodyFrame | None]
+    req_id: str
     end_event: asyncio.Event = field(default_factory=asyncio.Event)
     aborted_with: BaseException | None = None
+    credits_pending: int = 0
 
 
 # Inbound channel-queue item shape:
@@ -582,6 +589,7 @@ class TunnelRegistry:
                 session=session,
                 head_future=loop.create_future(),
                 body_queue=asyncio.Queue(),
+                req_id=req_id,
             )
             session.in_flight[req_id] = state
             return state
@@ -754,6 +762,31 @@ class TunnelRegistry:
 
         _call_session_soon_threadsafe(session, _enqueue)
         await asyncio.wrap_future(ack)
+
+    async def note_body_consumed(
+        self, state: RequestState, item: ResponseBodyFrame | None
+    ) -> None:
+        """Grant a batched send credit back for a drained body frame.
+        Credits bound how far ahead a slow consumer lets the runner stream;
+        the end sentinel grants nothing."""
+        if not isinstance(item, ResponseBodyFrame):
+            return
+        state.credits_pending += 1
+        if state.credits_pending < RESPONSE_FLOW_CREDIT_BATCH:
+            return
+        granted = state.credits_pending
+        state.credits_pending = 0
+        await self._send_response_flow(state, granted)
+
+    async def _send_response_flow(self, state: RequestState, credits: int) -> None:
+        """Grant ``credits`` response-body send credits back to the runner."""
+        # A replaced tunnel means the request is ending anyway, so the
+        # ungranted credits no longer matter.
+        with contextlib.suppress(ConnectionError):
+            await self.send_text(
+                state.session,
+                encode_frame(RequestFlowFrame(id=state.req_id, credits=credits)),
+            )
 
     # ── Routing incoming frames ──────────────────────────
 
