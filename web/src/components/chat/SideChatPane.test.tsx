@@ -9,6 +9,10 @@ import * as sessionsApi from "@/lib/sessionsApi";
 import type * as ChatStoreModule from "@/store/chatStore";
 import { useChatStore, type ChatState } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
+import {
+  TerminalFirstContextProvider,
+  type TerminalFirstContextValue,
+} from "@/shell/TerminalFirstContext";
 import { SideChatPane } from "./SideChatPane";
 
 vi.mock("@/store/chatStore", async (importOriginal) => ({
@@ -109,6 +113,39 @@ describe("side-chat working indicator", () => {
 
     expect(screen.getByTestId("working-indicator")).toHaveTextContent("Blocked on: tool approval");
     expect(screen.getByRole("button", { name: "Interrupt side chat" })).toBeEnabled();
+  });
+
+  it("keeps a child's dialog hint textual: the Terminal view shows the parent's terminal", () => {
+    const setView = vi.fn();
+    const terminalFirst: TerminalFirstContextValue = {
+      isClaudeNative: true,
+      isNativeWrapper: true,
+      isTerminalFirst: true,
+      isShellView: false,
+      view: "chat",
+      terminalViewKey: null,
+      setView,
+      terminalsAvailable: true,
+      terminalStartingUp: false,
+    };
+    renderPane(
+      <TerminalFirstContextProvider value={terminalFirst}>
+        <SideChatPane childId={childId} />
+      </TerminalFirstContextProvider>,
+    );
+
+    act(() =>
+      conversationRegistry.acquire(childId).setState({
+        sessionStatus: "waiting",
+        blockedOn: "dialog open",
+        activeResponse: { responseId: "codex_turn_side", state: "streaming", error: null },
+      }),
+    );
+
+    const indicator = screen.getByTestId("working-indicator");
+    expect(indicator).toHaveTextContent(/open the terminal view to respond/i);
+    expect(screen.queryByRole("button", { name: /terminal view/i })).toBeNull();
+    expect(setView).not.toHaveBeenCalled();
   });
 
   it("shows progress while creating a fork and restores the draft after failure", async () => {

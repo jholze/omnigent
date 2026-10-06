@@ -1,0 +1,109 @@
+"""E2E: chat blocked on a Claude Code dialog must route the user to the Terminal view.
+
+A claude-native session has two kinds of terminal: the agent's terminal behind
+the header's Chat view / Terminal view switcher, and user shells that open as
+terminal tabs in the Workspace rail. A slash command sent from the chat composer
+(``/theme``) opens a dialog inside Claude Code, and the chat parks on a
+blocked-on-a-dialog indicator while the dialog is visible only in Terminal view.
+With a shell tab open beside the chat, telling the user to "open the terminal
+tab" sends them to a terminal that shows no dialog, so the session reads as hung.
+
+Contract: the indicator names the Terminal view and carries a control that opens
+it, so the user lands on the dialog in one click. Drives the real Claude Code CLI
+(mock model) so the ``dialog open`` status comes from Claude's own session status
+file rather than an injected event; the injected-status variant lives in
+``test_blocked_dialog_terminal_routing.py``.
+"""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+from playwright.sync_api import Locator, Page, expect
+
+from tests.e2e_ui.conftest import open_right_rail
+
+_WORKING = '[data-testid="working-indicator"]'
+_BLOCKED_ON_DIALOG = re.compile(r"dialog", re.IGNORECASE)
+# The visible name of the header segment that shows the agent's terminal.
+_NAMES_TERMINAL_VIEW = re.compile(r"terminal view", re.IGNORECASE)
+# The Workspace rail's user shells — never where the dialog is.
+_NAMES_TERMINAL_TAB = re.compile(r"terminal tab", re.IGNORECASE)
+_TERMINAL_READY_TIMEOUT_MS = 180_000
+_DIALOG_TIMEOUT_MS = 120_000
+# Hold each state long enough for a viewer to read it.
+_HOLD_MS = 3_000
+
+
+def _open_rail_shell(page: Page) -> Locator:
+    open_right_rail(page)
+    rail = page.get_by_role("complementary", name="Workspace")
+    rail.get_by_role("button", name="Open new").click()
+    page.get_by_role("menuitem", name=re.compile("Shell")).click()
+    shell = rail.get_by_test_id("terminal-view").last
+    expect(shell).to_have_attribute("data-state", "connected", timeout=90_000)
+    return shell
+
+
+def _send_from_composer(page: Page, text: str) -> None:
+    composer = page.get_by_role("textbox", name="Message the agent")
+    expect(composer).to_be_visible(timeout=30_000)
+    composer.fill(text)
+    page.get_by_role("button", name="Send", exact=True).click()
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.browser_context_args(
+    viewport={"width": 1440, "height": 900},
+    record_video_size={"width": 1440, "height": 900},
+)
+def test_chat_blocked_on_dialog_names_the_terminal_that_holds_it(
+    request: pytest.FixtureRequest,
+    native_claude_mock_session: tuple[str, str],
+) -> None:
+    base_url, session_id = native_claude_mock_session
+    # Requested after the session fixture so a recording starts at the journey.
+    page: Page = request.getfixturevalue("page")
+
+    page.goto(f"{base_url}/c/{session_id}")
+    terminal_segment = page.get_by_test_id("view-mode-terminal")
+    expect(terminal_segment).to_have_attribute(
+        "aria-label", "Terminal view", timeout=_TERMINAL_READY_TIMEOUT_MS
+    )
+    page.get_by_test_id("view-mode-chat").click()
+    composer = page.get_by_role("textbox", name="Message the agent")
+    expect(composer).to_be_visible(timeout=30_000)
+
+    rail_shell = _open_rail_shell(page)
+    expect(composer).to_be_visible()
+
+    _send_from_composer(page, "/theme")
+
+    working = page.locator(_WORKING)
+    expect(working).to_contain_text(_BLOCKED_ON_DIALOG, timeout=_DIALOG_TIMEOUT_MS)
+    page.wait_for_timeout(_HOLD_MS)
+    indicator_text = working.inner_text()
+    expect(rail_shell).to_be_visible()
+    assert _NAMES_TERMINAL_VIEW.search(indicator_text) and not _NAMES_TERMINAL_TAB.search(
+        indicator_text
+    ), (
+        "Chat is parked on a Claude Code dialog with a user shell open as a terminal tab "
+        f"beside it, but the indicator says {indicator_text!r}: it must name the header's "
+        "Terminal view, where the dialog is, not a 'terminal tab' (the rail shell shows no "
+        "dialog)."
+    )
+
+    # The indicator's own control takes the user to the dialog.
+    open_terminal_view = working.get_by_role(
+        "button", name=re.compile("terminal view", re.IGNORECASE)
+    )
+    expect(open_terminal_view).to_be_visible()
+    open_terminal_view.click()
+    main_terminal = page.locator('[data-testid="main-terminal-view"][data-visible="true"]')
+    expect(main_terminal).to_be_visible(timeout=30_000)
+    expect(main_terminal.locator('[data-testid="terminal-view"]').last).to_have_attribute(
+        "data-state", "connected", timeout=60_000
+    )
+    expect(terminal_segment).to_have_attribute("aria-pressed", "true")
+    page.wait_for_timeout(_HOLD_MS)

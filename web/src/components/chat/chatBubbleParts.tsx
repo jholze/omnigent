@@ -52,6 +52,7 @@ import { SubagentActivityMessage } from "@/components/blocks/SubagentActivityMes
 import { isSystemUserContent, parseSystemMessage } from "@/lib/systemMessage";
 import { Button } from "@/components/ui/button";
 import { BrandLogo } from "@/components/BrandLogo";
+import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { cn } from "@/lib/utils";
 import { mentionItemPath, type MentionItem } from "@/lib/composerMentions";
 import type { ImageContentBlock, MessageContentBlock } from "@/lib/blocks";
@@ -408,6 +409,11 @@ function useAgentTurnActive(): boolean {
   return computeIsTurnActive(sessionStatus, localSending);
 }
 
+// A "dialog open" block lives in the agent's own terminal, shown by the header's
+// Terminal view — not in a Workspace-rail shell tab.
+const DIALOG_OPEN_LABEL = "Waiting on a dialog in the agent's terminal.";
+const OPEN_TERMINAL_VIEW_LABEL = "Open the Terminal view to respond";
+
 /**
  * The label shown next to the working shimmer. When the agent is parked on a
  * dialog (`blockedOn`) it says so; otherwise it rotates through
@@ -415,10 +421,8 @@ function useAgentTurnActive(): boolean {
  */
 export function workingIndicatorLabel(tick = 0, blockedOn: string | null = null): string {
   if (blockedOn) {
-    // A "dialog open" block lives only in the terminal tab, so point the user
-    // there to respond rather than leaving the session looking hung.
     if (blockedOn === "dialog open") {
-      return "Waiting on a dialog in the terminal. Open the terminal tab to respond.";
+      return `${DIALOG_OPEN_LABEL} ${OPEN_TERMINAL_VIEW_LABEL}.`;
     }
     return `Blocked on: ${blockedOn}`;
   }
@@ -436,12 +440,19 @@ export function WorkingIndicator() {
   const agentWorking = scopedConversationId
     ? computeIsTurnActive(scopedState.sessionStatus, scopedState.status === "streaming")
     : rootAgentWorking;
+  const terminalFirst = useTerminalFirst();
   const tick = useWorkingLabelTick();
   // Once the turn ends but background shells outlive it, BackgroundTaskPill owns
   // the state and the shimmer stays off (it would misread as the agent still
   // thinking). While the turn is active the shimmer shows, with the pill beside it.
   if (isBackgroundTasksOnly(bgCount, blockedOn, agentWorking)) return null;
-  const label = workingIndicatorLabel(tick, blockedOn);
+  // Only the root conversation can switch this session to its agent's terminal;
+  // a side chat's dialog belongs to another session, so it keeps the text hint.
+  const openTerminalView =
+    blockedOn === "dialog open" && !scopedConversationId && terminalFirst?.isTerminalFirst
+      ? () => terminalFirst.setView("terminal")
+      : null;
+  const label = openTerminalView ? DIALOG_OPEN_LABEL : workingIndicatorLabel(tick, blockedOn);
   return (
     <>
       {/* Sole aria-live region for the working state. A stable "Working…" (not
@@ -451,13 +462,28 @@ export function WorkingIndicator() {
       <span role="status" aria-live="polite" className="sr-only">
         Working…
       </span>
-      <Message from="assistant" data-testid="working-indicator" aria-hidden="true">
+      <Message from="assistant" data-testid="working-indicator">
         <MessageContent>
-          <div className="flex items-center gap-1.5 py-0.5">
-            <BrandLogo variant="icon" className="otto-working h-4 w-auto shrink-0" />
-            <Shimmer className="text-sm font-mono" duration={1.5}>
-              {label}
-            </Shimmer>
+          <div className="flex flex-wrap items-center gap-1.5 py-0.5">
+            <span aria-hidden="true" className="flex items-center gap-1.5">
+              <BrandLogo variant="icon" className="otto-working h-4 w-auto shrink-0" />
+              <Shimmer className="text-sm font-mono" duration={1.5}>
+                {label}
+              </Shimmer>
+            </span>
+            {openTerminalView && (
+              <Button
+                type="button"
+                variant="link"
+                size="xs"
+                className="h-auto px-0 font-mono text-sm"
+                onClick={openTerminalView}
+                data-testid="working-indicator-open-terminal-view"
+                componentId="chat.working_indicator.open_terminal_view"
+              >
+                {OPEN_TERMINAL_VIEW_LABEL}
+              </Button>
+            )}
           </div>
         </MessageContent>
       </Message>

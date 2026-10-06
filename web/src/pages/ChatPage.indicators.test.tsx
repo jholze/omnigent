@@ -1,8 +1,12 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatStore } from "@/store/chatStore";
 import type { Bubble } from "@/lib/renderItems";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
+import {
+  TerminalFirstContextProvider,
+  type TerminalFirstContextValue,
+} from "@/shell/TerminalFirstContext";
 import { BubbleView, WorkingIndicator } from "./ChatPage";
 import {
   ConnectionIndicator,
@@ -179,6 +183,62 @@ describe("WorkingIndicator", () => {
     act(() => useChatStore.setState({ sessionStatus: "running" }));
     rerender(<WorkingIndicator />);
     expect(screen.getByTestId("working-indicator")).toBeInTheDocument();
+  });
+
+  const terminalFirstCtx = (setView = vi.fn()): TerminalFirstContextValue => ({
+    isClaudeNative: true,
+    isNativeWrapper: true,
+    isTerminalFirst: true,
+    isShellView: false,
+    view: "chat",
+    terminalViewKey: null,
+    setView,
+    terminalsAvailable: true,
+    terminalStartingUp: false,
+  });
+
+  it("offers to open the Terminal view when parked on a dialog in a terminal-first session", () => {
+    // WHY: the dialog lives in the agent's terminal behind the header's Terminal
+    // view, not in a Workspace-rail shell tab — the indicator must name that
+    // view and get the user there in one click.
+    const setView = vi.fn();
+    useChatStore.setState({ blockedOn: "dialog open", sessionStatus: "running" });
+    render(
+      <TerminalFirstContextProvider value={terminalFirstCtx(setView)}>
+        <WorkingIndicator />
+      </TerminalFirstContextProvider>,
+    );
+    const indicator = screen.getByTestId("working-indicator");
+    expect(indicator).toHaveTextContent("Waiting on a dialog in the agent's terminal.");
+    expect(indicator).not.toHaveTextContent(/terminal tab/i);
+    fireEvent.click(screen.getByRole("button", { name: "Open the Terminal view to respond" }));
+    expect(setView).toHaveBeenCalledExactlyOnceWith("terminal");
+  });
+
+  it("keeps the Terminal view hint as text where no view switch is available", () => {
+    // WHY: outside a terminal-first provider there is nothing to switch, so the
+    // label itself must still say where to respond.
+    useChatStore.setState({ blockedOn: "dialog open", sessionStatus: "running" });
+    render(<WorkingIndicator />);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByTestId("working-indicator")).toHaveTextContent(
+      /open the terminal view to respond/i,
+    );
+  });
+
+  it("offers no view switch for other block reasons", () => {
+    // WHY: only a terminal dialog lives behind the Terminal view; a permission
+    // prompt keeps its plain reason.
+    useChatStore.setState({ blockedOn: "permission prompt", sessionStatus: "running" });
+    render(
+      <TerminalFirstContextProvider value={terminalFirstCtx()}>
+        <WorkingIndicator />
+      </TerminalFirstContextProvider>,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByTestId("working-indicator")).toHaveTextContent(
+      "Blocked on: permission prompt",
+    );
   });
 });
 
