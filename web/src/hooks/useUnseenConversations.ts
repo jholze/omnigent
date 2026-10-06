@@ -7,10 +7,10 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source; the server seed only ever *raises* a baseline (max-merge), which
-// also picks up newer reads from the user's other devices when the serving
-// replica happens to have them. Cross-device unread is best-effort by
-// design.
+// source; the server seed only ever *raises* a baseline (max-merge), and
+// every list refresh re-merges a newer server baseline, so a read on the
+// user's other devices clears the dot here without a reload whenever the
+// serving replica has it. Cross-device unread is best-effort by design.
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -89,12 +89,16 @@ function persistToStorage(): void {
 
 hydrateFromStorage();
 
-// Sessions already seeded from the list. Seeding is once-per-session: the
-// first time a conversation is seen we copy its server `viewer_*` into the
-// mirror, then ignore later list values so an in-flight poll can't clobber a
-// local optimistic write. Cross-device changes after first load surface on a
-// reload (a deliberate Phase-1 scope: live merge is a follow-up).
+// Sessions already seeded from the list. Their first list value is merged in
+// full; later values go through mergeNewerServerReadState, so another
+// device's read clears the dot here without a reload.
 const seeded = new Set<string>();
+
+// Wall-clock ms of each conversation's last local write. A list value inside
+// the grace window may predate that write (an in-flight poll or push), so the
+// live merge skips it; the next refresh carries the post-write state.
+const localWriteAt = new Map<string, number>();
+const LOCAL_WRITE_GRACE_MS = 5_000;
 
 // Until the first seed runs we don't know the server's baselines, so the
 // automatic mark-seen (useMarkConversationSeen) must NOT write — a deep-link
@@ -114,6 +118,7 @@ export function nowSeconds(): number {
  * call when there's no baseline to report (nothing meaningful to sync).
  */
 async function syncReadState(conversationId: string): Promise<void> {
+  localWriteAt.set(conversationId, Date.now());
   const lastSeen = lastSeenMap[conversationId];
   if (lastSeen === undefined) return;
   try {
@@ -136,21 +141,41 @@ export interface ReadStateSeed {
 }
 
 /**
+ * Live merge for an already-seeded conversation: adopt the server's read-state
+ * only when its baseline is strictly newer than ours (another device acted
+ * after this client's last write). Older, equal, missing, or in-grace values
+ * are ignored, so a stale replica or in-flight poll can't undo a local write.
+ */
+function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
+  if (typeof conv.viewer_last_seen !== "number") return false;
+  const local = lastSeenMap[conv.id];
+  if (local !== undefined && conv.viewer_last_seen <= local) return false;
+  const writtenAt = localWriteAt.get(conv.id);
+  if (writtenAt !== undefined && now - writtenAt < LOCAL_WRITE_GRACE_MS) return false;
+  lastSeenMap[conv.id] = conv.viewer_last_seen;
+  if (conv.viewer_unread) explicitlyUnread.add(conv.id);
+  else explicitlyUnread.delete(conv.id);
+  return true;
+}
+
+/**
  * Seeds the local mirror from the conversation list (the server's per-viewer
- * read path). Once-per-session: a conversation is merged the first time it
- * appears, then ignored, so an in-flight list poll can't clobber a local
- * optimistic write. The merge is max(localStorage baseline, server value) —
- * last-seen is monotonic, so taking the max is always safe and picks up a
- * newer read from another device when the serving replica has it. A session
- * with no baseline on either side seeds to its `updated_at` ("read as of
- * load"): pod-independent, so a replica that can't see the user's read-state
- * can never freeze a row's dot off. Flips {@link hydrated} on the first call
- * (even for an empty list) so the automatic mark-seen can resume.
+ * read path). A conversation's first list value merges as max(localStorage
+ * baseline, server value) — last-seen is monotonic, so the max is always safe.
+ * With no baseline on either side it seeds to its `updated_at` ("read as of
+ * load"), so a replica that can't see the user's read-state can't freeze a
+ * row's dot off. Later values go through {@link mergeNewerServerReadState}.
+ * Flips {@link hydrated} on the first call (even for an empty list) so the
+ * automatic mark-seen can resume.
  */
 export function seedReadState(conversations: readonly ReadStateSeed[]): void {
   let changed = false;
+  const now = Date.now();
   for (const conv of conversations) {
-    if (seeded.has(conv.id)) continue;
+    if (seeded.has(conv.id)) {
+      if (mergeNewerServerReadState(conv, now)) changed = true;
+      continue;
+    }
     seeded.add(conv.id);
     const local = lastSeenMap[conv.id];
     const server = typeof conv.viewer_last_seen === "number" ? conv.viewer_last_seen : undefined;
@@ -202,6 +227,7 @@ export function resetReadStateForTests(): void {
   lastSeenMap = {};
   explicitlyUnread.clear();
   seeded.clear();
+  localWriteAt.clear();
   hydrated = false;
   try {
     globalThis.localStorage?.removeItem(STORAGE_KEY);
