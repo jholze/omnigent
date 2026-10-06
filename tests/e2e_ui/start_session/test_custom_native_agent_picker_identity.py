@@ -229,7 +229,9 @@ def open_landing_picker(page: Page, base_url: str) -> None:
 def reveal_row(page: Page, agent_id: str) -> Locator:
     """The picker row for *agent_id*, opening the Other... submenus when it is not inline."""
     row = page.get_by_test_id(f"new-chat-landing-agent-{agent_id}")
-    if row.count() > 0:
+    # count() alone matches an attached-but-hidden row; require visibility so a
+    # row still inside a closed submenu falls through to the hover path below.
+    if row.count() > 0 and row.is_visible():
         return row
     for submenu in ("new-chat-landing-harness-more", "new-chat-landing-custom-agents"):
         trigger = page.get_by_test_id(submenu)
@@ -257,8 +259,11 @@ def test_custom_native_agents_keep_their_own_picker_rows(
     expected = {TEMPLATE_AGENT_NAME, SEEDED_AGENT_NAME, STOCK_AGENT_NAME}
     missing = expected - rows.keys()
     assert not missing, f"agents {sorted(missing)} missing from catalog: {sorted(rows)}"
-    if any("builtin" not in rows[name] for name in expected):
-        pytest.skip("server catalog omits the 'builtin' flag this identity check depends on")
+    # The current server always serializes 'builtin'; a missing flag is the
+    # catalog regression this test guards, so fail loudly rather than skip.
+    assert all("builtin" in rows[name] for name in expected), (
+        f"catalog omitted the 'builtin' flag this identity check depends on: {sorted(rows)}"
+    )
     template, seeded, stock = (
         rows[TEMPLATE_AGENT_NAME],
         rows[SEEDED_AGENT_NAME],

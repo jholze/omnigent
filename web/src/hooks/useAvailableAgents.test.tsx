@@ -1116,6 +1116,49 @@ describe("prefetchAvailableAgentDetails", () => {
     // Shadow removed; only the seeded built-in remains.
     expect(queryClient.getQueryData(["available-agents"])).toEqual([kiroBuiltin]);
   });
+
+  it("keeps a session agent when its only native peer is an explicitly flagged custom agent", async () => {
+    // The sole kiro peer is a user-flagged custom agent, not the stock
+    // wrapper, so enrichment must not fold the session row into it. Both keep
+    // their own rows.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const customKiro = testAgent("ag_teamkiro", "teamkiro", {
+      display_name: "Teamkiro",
+      harness: "kiro-native",
+      builtin: true,
+    });
+    const sessionKiro = testAgent("ag_session_kiro", "kiro-naitive", {
+      display_name: "Kiro-naitive",
+      harness: null,
+      sessionId: "conv_kiro",
+    });
+    queryClient.setQueryData(["available-agents"], [customKiro, sessionKiro]);
+
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "ag_session_kiro",
+        object: "agent",
+        name: "kiro-naitive",
+        harness: "kiro-native",
+        skills: [],
+      }),
+    );
+
+    await prefetchAvailableAgentDetails(sessionKiro, queryClient);
+
+    expect(queryClient.getQueryData(["available-agents"])).toEqual([
+      customKiro,
+      {
+        id: "ag_session_kiro",
+        name: "kiro-naitive",
+        display_name: "Kiro-naitive",
+        description: null,
+        harness: "kiro-native",
+        skills: [],
+        sessionId: "conv_kiro",
+      },
+    ]);
+  });
 });
 
 // Pinned agents (e.g. a project's configured default) must survive discovery:
