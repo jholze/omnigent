@@ -7451,9 +7451,9 @@ def _claude_terminal_env_unset(
     Always drops ``CLAUDECODE`` because Claude Code rejects any child launch
     carrying that nested-session marker, regardless of its auth mode.
 
-    Always drops ``BROWSER`` (see :data:`_NATIVE_PANE_BROWSER_ENV_UNSET`) so a
-    launcher's SSO sign-in does not auto-open a tab per pane. When the launch
-    config carries an ``apiKeyHelper``, also drops the raw ``ANTHROPIC_API_KEY``:
+    Always drops ``BROWSER`` (:data:`_NATIVE_PANE_BROWSER_ENV_UNSET`) so sign-in
+    opens only from the user-driven chat card. When the launch config carries an
+    ``apiKeyHelper``, also drops the raw ``ANTHROPIC_API_KEY``:
     seeing both opens Claude Code's "Detected a custom API key" menu, whose
     selected row uses the same ``❯`` glyph the tmux delivery path waits for, so
     the first web message is typed into the menu.
