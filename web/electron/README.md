@@ -479,6 +479,13 @@ webview/iframe can't provide screenshots, arbitrary in-page JS, or cross-origin
 navigation, so each browser is a native Electron **`WebContentsView`**
 positioned over a placeholder `<div>` the SPA measures — not an in-page element.
 
+### Agent-driven localhost previews
+
+Agent-driven localhost previews are currently supported only for internal
+Databricks use with Arca. They require the desktop internal-feature flag
+(`databricksInternalFeaturesEnabled`) and a managed Databricks server. General
+embedded-browser tools remain available independently of Arca.
+
 ```mermaid
 sequenceDiagram
     participant A as Agent (runner — any host)
