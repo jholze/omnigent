@@ -4172,10 +4172,7 @@ def create_runner_app(
     async def _check_and_start_next_turn(
         session_id: str,
     ) -> None:
-        _ingest_lock = _ingest_locks.get(session_id)
-        if _ingest_lock is None:
-            _ingest_lock = asyncio.Lock()
-            _ingest_locks[session_id] = _ingest_lock
+        _ingest_lock = _ingest_locks.setdefault(session_id, asyncio.Lock())
         async with _ingest_lock:
             if session_id in _active_turns:
                 return
@@ -6198,10 +6195,7 @@ def create_runner_app(
             if _is_native_harness(conversation_id):
                 resource_registry.note_session_turn_started(conversation_id)
 
-            _ingest_lock = _ingest_locks.get(conversation_id)
-            if _ingest_lock is None:
-                _ingest_lock = asyncio.Lock()
-                _ingest_locks[conversation_id] = _ingest_lock
+            _ingest_lock = _ingest_locks.setdefault(conversation_id, asyncio.Lock())
             async with _ingest_lock:
                 _raw_content = message_body.get("content")
                 if isinstance(_raw_content, list):

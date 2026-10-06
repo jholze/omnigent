@@ -1722,10 +1722,7 @@ def build_native_controls(
         # the slot — the two turns then clobber each other's `_active_turns`
         # entry and race the single live SDK client. Under the gate one reaches
         # its bind before the other's check, so the loser buffers instead.
-        _ingest_lock = _ingest_locks.get(conv_id)
-        if _ingest_lock is None:
-            _ingest_lock = asyncio.Lock()
-            _ingest_locks[conv_id] = _ingest_lock
+        _ingest_lock = _ingest_locks.setdefault(conv_id, asyncio.Lock())
         async with _ingest_lock:
             # A turn is already running: buffer so /compact runs as the next turn
             # rather than racing the live one; the buffer drains via
