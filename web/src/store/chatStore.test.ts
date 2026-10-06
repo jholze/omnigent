@@ -1261,12 +1261,9 @@ describe("chatStore — switchTo", () => {
   });
 
   it("keeps the working indicator lit when a mid-turn reconnect's stream status outruns a stale snapshot", async () => {
-    // The /stream endpoint is live-tail only, so a mid-turn (re)connect learns
-    // a running turn from the stream's snapshot-on-connect status replay, not
-    // the getSession snapshot — which can read a stale `idle` when the
-    // persisted row lags the live push on a replica-routed deployment. The
-    // cold-bind patch must not let that stale snapshot downgrade the indicator
-    // the stream just relit.
+    // A mid-turn (re)connect learns a running turn from the stream's status replay on
+    // connect, not the getSession snapshot, which can read a stale `idle` when the
+    // persisted row lags the live push. The cold-bind patch must not undo the relit status.
     const sink = pushableStream();
     seedSession("conv_relight", []);
     const base = fetchMock.getMockImplementation()!;

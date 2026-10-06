@@ -5048,24 +5048,11 @@ def _publish_status(
 
 
 def session_status_snapshot_event(session_id: str) -> dict[str, Any] | None:
-    """Replay the current live status as a snapshot-on-connect ``session.status``.
-
-    The ``/stream`` endpoint is live-tail only — it never replays the
-    turn-start ``running`` edge — so a client binding or reconnecting mid-turn
-    relies on the getSession snapshot carrying ``running``. On a replica-routed
-    deployment the persisted ``live_status`` row lags the live push, so a bind
-    landing in that window reads ``idle`` and the chat working indicator never
-    relights for the rest of the turn (while the terminal pane, which tails its
-    own channel, keeps its spinner). The stream always connects to the replica
-    holding the runner tunnel, whose ``_session_status_cache`` is authoritative,
-    so re-emitting the cached status here closes the gap directly.
-
-    Only an actively-working turn needs the replay: ``idle`` / ``failed`` are
-    durable on the snapshot (``last_task_error`` and the sticky background
-    tally), so emitting them on connect would add nothing. Returns ``None`` when
-    there is nothing to replay.
-    """
+    """Replay the cached live status as a snapshot-on-connect ``session.status`` frame."""
     status = _session_status_cache.get(session_id)
+    # The live tail never re-sends the turn-start edge and a replica-lagged getSession
+    # snapshot can read ``idle``, so only an active turn is replayed; ``idle``/``failed``
+    # are durable on the snapshot and need nothing on connect.
     if status not in ("running", "waiting"):
         return None
     event = SessionStatusEvent(

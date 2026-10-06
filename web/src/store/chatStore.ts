@@ -4295,11 +4295,9 @@ async function bindStream(
     throw new Error("chatStore.bindStream: queryClient not initialized");
   }
   const stateBeforeFetch = get();
-  // The stream opened above; a `session.status` edge it replays on connect
-  // (the server re-emits a running turn's status, which the live tail never
-  // replays) can land while the snapshot fetch below is in flight. Track the
-  // revision so the cold-bind patch can tell a fresher live edge from the
-  // snapshot, which may lag the live push on a replica-routed deployment.
+  // The stream is already open, so a `session.status` edge it replays on connect can
+  // land while the snapshot fetch below is in flight; the revision lets the cold-bind
+  // patch tell that fresher live edge from a snapshot that lags the live push.
   const revisionBeforeFetch = streamEventRevisions.get(id) ?? 0;
   const launchBeforeFetch = mcpStartupBeforeSnapshot(id, stateBeforeFetch);
   try {
@@ -4455,12 +4453,9 @@ async function bindStream(
               ...structuredErrorFields(session.lastTaskError, session.lastTaskError.agent_name),
             }
           : null;
-      // A cold entry starts `idle`, so a working `sessionStatus` here can only
-      // come from a live `session.status` edge the stream replayed on connect
-      // while this snapshot was in flight. That edge is fresher than the
-      // snapshot, which can read a stale `idle` when the persisted row lags the
-      // live push on a replica-routed deployment; don't let it downgrade the
-      // relit indicator. A genuine turn end arrives as its own live edge.
+      // A cold entry starts `idle`, so a working `sessionStatus` here came from a live
+      // edge the stream replayed while this snapshot was in flight. That edge is fresher
+      // than a snapshot lagging the live push; a genuine turn end arrives as its own edge.
       const liveTurnSupersedesSnapshot =
         hydratePending &&
         (streamEventRevisions.get(id) ?? 0) !== revisionBeforeFetch &&

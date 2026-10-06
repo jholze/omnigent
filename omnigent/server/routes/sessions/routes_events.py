@@ -2870,10 +2870,9 @@ def register_events_routes(
             stay in this async hook.
             """
             events: list[dict[str, Any]] = []
-            # Replay the current live status first so a mid-turn (re)connect
-            # relights the chat working indicator straight from the stream, even
-            # when the getSession snapshot lags the live push. The live tail
-            # never re-sends the turn-start ``running`` edge.
+            # Replay a running turn's status first: the live tail never re-sends the
+            # turn-start edge, so a mid-turn (re)connect relights the working indicator
+            # from the stream even when the getSession snapshot lags the live push.
             status_event = session_status_snapshot_event(session_id)
             if status_event is not None:
                 events.append(status_event)

@@ -515,16 +515,9 @@ def test_publish_session_status_rejects_unknown_status() -> None:
 
 
 def test_session_status_snapshot_event_replays_active_turn() -> None:
-    """``session_status_snapshot_event`` replays the cached live status.
+    """``session_status_snapshot_event`` replays the cached live status on connect.
 
-    The ``/stream`` endpoint is live-tail only, so a bind landing mid-turn never
-    re-sees the turn-start ``running`` edge. The snapshot-on-connect re-emits the
-    cached live status (the replica holding the runner tunnel owns the
-    authoritative cache) so the chat working indicator relights even when the
-    getSession snapshot still reads ``idle``. The replayed dict must be the same
-    flat ``session.status`` wire shape a live edge carries, and only an actively
-    working turn is replayed — ``idle``/``failed`` are durable on the snapshot.
-    """
+    Only an active turn is replayed, in the flat ``session.status`` wire shape."""
     from omnigent.runtime import session_stream as cs
     from omnigent.server.routes._sessions.helpers import session_status_snapshot_event
     from omnigent.server.routes.sessions import _publish_status as _publish_session_status

@@ -109,55 +109,49 @@ def test_snapshot_idle_clears_working_on_heartbeat_only_stream(
 
 
 def _install_stale_idle_snapshot(page: Page, session_id: str) -> None:
-    """Serve this session's snapshot GET as ``idle`` once armed via sessionStorage.
-
-    Overriding ``window.fetch`` inside the page keeps the stale snapshot
-    entirely client-side, so no Playwright route handler can outlive the browser
-    and fail teardown on a disposed response. The rewrite is gated on a
-    sessionStorage flag so the first bind still reads the real ``running``
-    snapshot and only the post-reload reconnect sees the lagging ``idle``.
-    """
-    script = """
-        (() => {
-          const sessionId = __SESSION_ID__;
-          const snapshotPath = `/v1/sessions/${sessionId}`;
-          const originalFetch = window.fetch.bind(window);
-          window.fetch = async (input, init) => {
-            const url = typeof input === "string" ? input : input.url;
-            const method =
-              (init && init.method) ||
-              (typeof input === "object" && input && input.method) ||
-              "GET";
-            if (
-              window.sessionStorage.getItem("__forceIdleSnapshot") !== "1" ||
-              method.toUpperCase() !== "GET" ||
-              new URL(url, window.location.origin).pathname !== snapshotPath
-            ) {
-              return originalFetch(input, init);
-            }
-            const response = await originalFetch(input, init);
-            let body;
-            try {
-              body = await response.clone().json();
-            } catch (err) {
-              return response;
-            }
-            if (body && typeof body === "object" && body.status) {
-              body.status = "idle";
-              body.active_response_id = null;
-              body.background_task_count = 0;
-              body.background_tasks = [];
-            }
-            const headers = new Headers(response.headers);
-            headers.set("content-type", "application/json");
-            return new Response(JSON.stringify(body), {
-              status: response.status,
-              statusText: response.statusText,
-              headers,
-            });
-          };
-        })()
-        """
+    """Serve this session's snapshot GET as ``idle`` once armed via sessionStorage."""
+    script = """(() => {
+      const sessionId = __SESSION_ID__;
+      const snapshotPath = `/v1/sessions/${sessionId}`;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        const method =
+          (init && init.method) ||
+          (typeof input === "object" && input && input.method) ||
+          "GET";
+        if (
+          window.sessionStorage.getItem("__forceIdleSnapshot") !== "1" ||
+          method.toUpperCase() !== "GET" ||
+          new URL(url, window.location.origin).pathname !== snapshotPath
+        ) {
+          return originalFetch(input, init);
+        }
+        const response = await originalFetch(input, init);
+        let body;
+        try {
+          body = await response.clone().json();
+        } catch (err) {
+          return response;
+        }
+        if (body && typeof body === "object" && body.status) {
+          body.status = "idle";
+          body.active_response_id = null;
+          body.background_task_count = 0;
+          body.background_tasks = [];
+        }
+        const headers = new Headers(response.headers);
+        headers.set("content-type", "application/json");
+        return new Response(JSON.stringify(body), {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      };
+    })()"""
+    # An in-page override cannot outlive the browser the way a Playwright route handler
+    # can (and fail teardown on a disposed response); the flag keeps the first bind on
+    # the real snapshot so only the reconnect sees the lagging ``idle``.
     page.add_init_script(script.replace("__SESSION_ID__", json.dumps(session_id)))
 
 
@@ -167,13 +161,7 @@ def test_running_turn_relights_working_after_reconnect_from_stale_snapshot(
 ) -> None:
     """A chat that binds mid-turn must still show the working indicator.
 
-    The SSE stream is snapshot + live tail with no replay of the turn-start
-    ``running`` edge, so a client (re)connecting mid-turn depends on the
-    ``getSession`` snapshot carrying ``running``. The persisted row lags the
-    live push, so a bind landing in that window reads ``idle`` and never shows
-    the indicator for the rest of the turn. The stale snapshot is injected as a
-    deterministic stand-in for the production row-lag/reconnect race.
-    """
+    The injected stale ``idle`` snapshot stands in for the production row-lag race."""
     base_url, session_id = seeded_session
     _publish_status(base_url, session_id, "running")
     assert _snapshot_status(base_url, session_id) == "running"

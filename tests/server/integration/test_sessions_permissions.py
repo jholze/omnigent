@@ -3196,12 +3196,7 @@ async def test_stream_presence_join_broadcast_and_snapshot(
 
 
 def _sse_status_events(body: str) -> list[dict[str, Any]]:
-    """
-    Parse ``session.status`` frames out of a raw SSE body.
-
-    :param body: The buffered ``text/event-stream`` payload.
-    :returns: Decoded status event dicts, in wire order.
-    """
+    """Parse ``session.status`` frames, in wire order, out of a buffered SSE body."""
     events: list[dict[str, Any]] = []
     for line in body.splitlines():
         if not line.startswith("data: ") or line == "data: [DONE]":
@@ -3215,24 +3210,15 @@ def _sse_status_events(body: str) -> list[dict[str, Any]]:
 async def test_stream_replays_running_status_on_connect(
     auth_client: httpx.AsyncClient,
 ) -> None:
-    """A bind landing mid-turn relights the chat working indicator from the
-    stream itself: the stream's snapshot-on-connect re-emits the cached live
-    ``running`` status.
+    """The stream's snapshot-on-connect re-emits the cached live ``running`` status.
 
-    ``/stream`` is live-tail only, so the turn-start ``running`` edge posted
-    before this connect is never re-seen, and a replica-lagged getSession
-    snapshot can read ``idle``. Without the ``_resource_snapshot`` replay this
-    body carries no ``session.status`` frame and the indicator stays dark for
-    the rest of the turn (while the terminal pane, tailing its own channel,
-    keeps its spinner).
-    """
+    Without it a mid-turn bind whose getSession snapshot lags to ``idle`` never relights."""
     agent = await create_test_agent(auth_client, user="alice@example.com")
     session_id = (await _create_session_as(auth_client, agent["id"], "alice@example.com"))["id"]
 
-    # A running turn's status edge, as the native forwarder posts it. This
-    # populates the authoritative per-replica status cache and is published to
-    # the live stream now — before this test subscribes — so only the
-    # snapshot-on-connect can carry it to a later bind.
+    # Post the running edge before subscribing: it fills the per-replica status cache
+    # and is published to the live stream now, so only the snapshot-on-connect can
+    # carry it to the later bind.
     ack = await auth_client.post(
         f"/v1/sessions/{session_id}/events",
         headers={"X-Forwarded-Email": "alice@example.com"},
