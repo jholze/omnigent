@@ -509,9 +509,8 @@ describe("useAvailableAgents", () => {
           object: "list",
           data: [
             { id: "ag_native", name: "claude-native-ui", harness: "claude-native", builtin: true },
-            // A fork clone carries the stock wrapper's name, so it folds into
-            // the vendor row even when the server flags it: stock-name
-            // recognition precedes the explicit-flag exemption.
+            // A fork clone carries the stock wrapper's name, so it folds into the
+            // vendor row even when flagged: stock-name recognition wins over the exemption.
             {
               id: "ag_clone",
               name: "claude-native-ui (fork conv_7)",
