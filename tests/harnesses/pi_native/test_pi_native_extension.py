@@ -434,9 +434,8 @@ def test_distinct_messages_with_identical_usage_are_not_collapsed(
 
 
 def test_usage_baseline_survives_native_restart(tmp_path: Path) -> None:
-    """A relaunched Pi process restarts its cumulative counters at 0, so without a
-    restored baseline its first flush is below the server peak and the clamp
-    freezes the usage display; assert the restored baseline keeps advancing.
+    """A relaunched Pi process restarts its cumulative counters at 0, so its first
+    flush falls below the server peak and is clamped; assert the baseline advances.
     """
     node = shutil.which("node")
     if node is None:
@@ -556,8 +555,7 @@ function launchExtension() {
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exit(1);
-});
-"""
+});"""
     _run_extension_script(node, extension_path, script)
 
 
