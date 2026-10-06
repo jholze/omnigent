@@ -113,7 +113,7 @@ import {
   supportsSideChat,
   usesNativeSideChatFork,
 } from "@/lib/sideChat";
-import { shouldQueueSend } from "@/lib/messageQueue";
+import { mergeQueuedMessages, shouldQueueSend } from "@/lib/messageQueue";
 import { readAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 import { skillInvocationPrefix } from "@/lib/harnessSetup";
 import { DEVIN_NATIVE_PERMISSION_MODES } from "@/lib/nativeHarnessModes";
@@ -942,6 +942,7 @@ export function ChatPage() {
           chat.queuedMessages,
           readAlwaysSteer(),
           opensSideChat,
+          chat.sharedQueue,
         )
       ) {
         chat.enqueueMessage(text, files, replyDraft);
@@ -2505,6 +2506,7 @@ function ComposerImpl(
   // the sidebar surface which sessions have unfinished composer content.
   const conversationId = useChatStore((s) => s.conversationId);
   const queuedMessages = useChatStore((s) => s.queuedMessages);
+  const sharedQueue = useChatStore((s) => s.sharedQueue);
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const flushBoundAgentId = useChatStore((s) => s.boundAgentId);
   const maybeFlushQueuedHead = useChatStore((s) => s.maybeFlushQueuedHead);
@@ -2520,7 +2522,9 @@ function ComposerImpl(
   // re-fires this effect and drains. `boundAgentId` is a dep because the flush
   // needs it: on navigate-back the binding lands after the status settles, and
   // without this dep the effect wouldn't re-fire to drain a queue for the
-  // returned-to conversation.
+  // returned-to conversation. `sharedQueue` is a dep because a follow-up
+  // another window held ahead of ours may leave the queue without any local
+  // status change.
   useEffect(() => {
     if (unreachable) return;
     maybeFlushQueuedHead();
@@ -2528,6 +2532,7 @@ function ComposerImpl(
     status,
     sessionStatus,
     queuedMessages,
+    sharedQueue,
     conversationId,
     flushBoundAgentId,
     unreachable,
@@ -2568,8 +2573,14 @@ function ComposerImpl(
     workspace: composerWorkspace ?? null,
     creationBranch: composerSession?.gitBranch ?? composerBranch ?? null,
   });
-  const composerQueuedMessages = queuedMessages.filter(
-    (message) => message.conversationId === conversationId,
+  // This client's own queue for the conversation plus the follow-ups other
+  // windows of the same session hold, in session-wide flush order.
+  const composerQueuedMessages = useMemo(
+    () =>
+      conversationId === null
+        ? []
+        : mergeQueuedMessages(queuedMessages, sharedQueue, conversationId),
+    [queuedMessages, sharedQueue, conversationId],
   );
   const hasQueuedComposerMessages = composerQueuedMessages.length > 0;
   const composerContextWindow = useChatStore((s) => s.contextWindow);
@@ -3049,6 +3060,8 @@ function ComposerImpl(
             chat.sessionStatus,
             chat.queuedMessages,
             readAlwaysSteer(),
+            false,
+            chat.sharedQueue,
           )
         ) {
           toast.error("Compact is disabled while a chat is in progress", { richColors: true });

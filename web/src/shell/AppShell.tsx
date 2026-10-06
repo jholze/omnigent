@@ -1009,6 +1009,8 @@ export function AppShell() {
             chat.sessionStatus,
             chat.queuedMessages,
             readAlwaysSteer(),
+            false,
+            chat.sharedQueue,
           )
         ) {
           chat.enqueueMessage(text, files);

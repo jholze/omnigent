@@ -1228,6 +1228,10 @@ before opening the fork's SSE stream or posting events.
 
 ### Stream Session
 
+Send `X-Omnigent-Client-Id: <client_id>` (the id used with **Publish Queued
+Follow-ups**) so the follow-ups this client has published stay in the
+session's merged queue while the stream is open.
+
 ```
 GET /v1/sessions/{session_id}/stream
 
@@ -1268,6 +1272,45 @@ is closed; events flow in publish order. Multiple subscribers to the
 same session receive the same events. The stream terminates with
 `data: [DONE]\n\n`.
 
+### Publish Queued Follow-ups
+
+```
+PUT /v1/sessions/{session_id}/queue
+
+Request Body (JSON)
+  client_id (string, required)   Identity of the publishing client instance
+                                 (one per page load), e.g. "c_7f3a…".
+  messages (array, required)     This client's complete queue for the session,
+                                 head first; [] clears its share. Max 50.
+    queue_id (string)            The client's own id for the entry; stable
+                                 across republishes so a reorder keeps its slot.
+    text (string)                Message text as shown in the strip (≤ 4000).
+    attachments (array of string, optional)  Attachment filenames.
+    stable_id (string, optional) Idempotency id the client will POST with.
+    requires_retry (bool, optional)  The client's send failed; other clients
+                                 skip it when deciding whose head flushes next.
+
+204 No Content
+404 Not Found — no session, or the caller lacks edit access
+422 Unprocessable Entity — body fails validation
+```
+
+The web composer holds a message typed while the agent is busy in a
+client-side queue and flushes it when the turn ends; the message body (and
+any attachment blobs) stays in that client until it is POSTed. This endpoint
+publishes the *view* of that queue: the server keeps one share per
+`(user, client_id)`, merges every client's share into one list ordered by a
+per-session sequence (a client that reorders its own entries keeps the same
+slots), and broadcasts the merged list as `session.queue` to every stream of
+the session, so two windows show the same queue in the same order. Each
+client flushes its own head only when it is the session-wide head.
+
+A share lives while the client holds the session's stream open — the stream
+request carries the same id in the `X-Omnigent-Client-Id` header — plus a
+15 s grace window, after which the server drops it and broadcasts the
+remaining queue. A share published without a matching stream also expires
+after the grace. The registry is process-local, like presence.
+
 ### Stream Events
 
 **Single source of truth: [`openapi.json`](../../openapi.json)** at
@@ -1297,6 +1340,7 @@ stream and surface queue/interrupt semantics.
 | `session.input.consumed` | `SessionInputConsumedEvent` | `{type, data: {queued_item_id, type, data, position}}` (nested envelope) |
 | `session.interrupted` | `SessionInterruptedEvent` | `{type, data: {requested_at, queued_item_id?: null}}` (nested envelope) |
 | `session.created` | `SessionCreatedEvent` | `{type, conversation_id: <parent>, child_conversation_id, agent_id, ...}` — emitted on the PARENT session's stream when a sub-agent is spawned. |
+| `session.queue` | `SessionQueueEvent` | `{type, conversation_id, messages: [{queue_id, client_id, seq, text, attachments, stable_id, created_by, requires_retry}]}` — full state, flush order; see **Publish Queued Follow-ups**. Also emitted once as a snapshot-on-connect. |
 
 > **Note on `session.input.consumed`:** This event name and payload
 > may change in a future revision; clients should isolate the

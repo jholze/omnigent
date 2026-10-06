@@ -15,10 +15,11 @@ from typing import Any, Literal, cast
 import httpx
 from fastapi import (
     APIRouter,
+    Header,
     HTTPException,
     Request,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.routing import APIRoute
 from starlette.datastructures import Headers
 from starlette.types import Message, Receive, Scope, Send
@@ -62,7 +63,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.server import presence
+from omnigent.server import presence, queued_messages
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -253,6 +254,7 @@ from omnigent.server.schemas import (
     ErrorDetail,
     McpServerStartup,
     SessionEventInput,
+    SessionQueueSyncRequest,
 )
 from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
@@ -2797,6 +2799,7 @@ def register_events_routes(
         request: Request,
         session_id: str,
         idle: bool = False,
+        client_id: str | None = Header(default=None, alias="X-Omnigent-Client-Id"),
     ) -> StreamingResponse:
         """
         Subscribe to the session's live SSE event stream.
@@ -2823,6 +2826,11 @@ def register_events_routes(
             at connect time (tab backgrounded ≥ its debounce). An
             idle *flip* mid-view arrives as a reconnect carrying the
             new value — there is no separate update endpoint.
+        :param client_id: The web client instance's id, from the
+            ``X-Omnigent-Client-Id`` header. While this stream is open,
+            the follow-ups that client published via
+            ``PUT /sessions/{id}/queue`` stay in the session's merged
+            queue; they expire shortly after its last stream closes.
         :returns: An SSE :class:`StreamingResponse`.
         :raises OmnigentError: 404 if no session exists.
         """
@@ -2929,6 +2937,10 @@ def register_events_routes(
             # edge to learn who's here. Scoped to the session tree's root
             # so a sub-agent page sees viewers of every agent in the tree.
             events.append(presence.snapshot(conv.root_conversation_id, session_id))
+            # Current merged queue of client-held follow-ups (full state), so
+            # a joiner sees what other windows have queued without waiting
+            # for one of them to change it.
+            events.append(queued_messages.snapshot(session_id))
             return events
 
         return StreamingResponse(
@@ -2945,6 +2957,8 @@ def register_events_routes(
                 # the CHILD conversation's stream, and per-conversation
                 # scoping would hide co-viewers on other agents.
                 presence_root_id=conv.root_conversation_id,
+                queue_client_id=client_id,
+                queue_user_id=_attribution_user(user_id),
             ),
             media_type="text/event-stream",
             headers={
@@ -2962,6 +2976,51 @@ def register_events_routes(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # ── PUT /sessions/{session_id}/queue ───────────────────────────
+
+    @router.put(
+        "/sessions/{session_id}/queue",
+        status_code=204,
+        response_model=None,
+    )
+    async def replace_queued_messages(
+        request: Request,
+        session_id: str,
+        body: SessionQueueSyncRequest,
+    ) -> Response:
+        """
+        Publish this client's queued follow-ups so other clients see them.
+
+        The web composer holds a message typed while the agent is busy in
+        a client-side queue until the turn ends. This replaces the calling
+        client's share of the session's queue (scoped by ``client_id``, so
+        one window cannot drop another's entries) and broadcasts the
+        merged, flush-ordered list as ``session.queue`` to every stream of
+        the session. Requires edit access, like posting the message itself.
+
+        A share lives while the client holds the session's SSE stream open
+        (``X-Omnigent-Client-Id`` on ``GET /sessions/{id}/stream``) plus a
+        short grace window, so a closed window's entries disappear instead
+        of blocking other clients' flushes.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        :param body: The client's complete current queue for this session,
+            head first; an empty list clears its share.
+        :returns: ``204 No Content``.
+        :raises OmnigentError: 404 if no session exists or the caller
+            lacks edit access.
+        """
+        user_id, _conv = await _authorized_conversation(request, session_id)
+        queued_messages.replace(
+            session_id,
+            client_id=body.client_id,
+            user_id=_attribution_user(user_id),
+            messages=body.messages,
+        )
+        return Response(status_code=204)
 
     # ── DELETE /sessions/{session_id} ──────────────────────────────
 

@@ -1,0 +1,315 @@
+"""In-memory registry of the follow-ups each client holds queued for a session.
+
+The web composer parks a message typed while the agent is busy in a
+client-side queue and flushes it when the turn ends (see
+``docs/QUEUE_STEER_DESIGN.md``). The message itself — including any
+attachment blobs — stays in that client until it is POSTed, so the queue
+cannot live on the server. What the server owns instead is the *session-wide
+view* of those queues: every client publishes the entries it holds for a
+conversation (``PUT /v1/sessions/{id}/queue``), the registry merges all
+clients' shares into one FIFO list, and broadcasts it as ``session.queue`` to
+every stream of that conversation. Two windows on one session therefore show
+the same queue in the same order, and each flushes its own head only when it
+is the session-wide head.
+
+Shares are keyed by ``(user, client_id)``: a client can only replace its own
+entries, so one window cannot drop another's. Ordering is a per-conversation
+sequence number assigned when an entry is first seen; a client that reorders
+its entries keeps the same sequence slots (refilled in the new order), so its
+position relative to other clients' entries is stable.
+
+Lifecycle: a client's share is tied to its open SSE streams for the
+conversation (:func:`attach` / :func:`detach`, driven by the stream route
+exactly like presence). When the last stream closes — or a share arrives from
+a client with no stream — the share expires after :data:`_DETACH_GRACE_S`
+unless a stream (re)attaches, so a closed window cannot leave phantom entries
+blocking other clients' flushes while a transient reconnect stays invisible.
+Like :mod:`omnigent.server.presence`, the registry is process-local ephemeral
+state and dies with the process; clients repair it from the snapshot-on-connect
+event and republish what they still hold.
+
+All mutating entry points run on the server's event loop; the lock guards
+snapshot reads that may interleave with the loop-callback expiry timer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from dataclasses import dataclass, field
+from typing import Any
+
+from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.runtime import session_stream
+from omnigent.server.schemas import QueuedMessageInput
+
+# Delay between a client's last stream for a conversation closing and its
+# share being dropped. Mirrors presence's leave grace so the ingress'
+# ~5-minute stream cap and page refreshes don't flicker the queue.
+_DETACH_GRACE_S = 15.0
+
+_ShareKey = tuple[str, str]
+
+
+@dataclass
+class _Entry:
+    """
+    One queued follow-up as published by its owning client.
+
+    :param queue_id: The owner's client-local id, e.g. ``"q_3"``.
+    :param seq: Per-conversation ordering slot; lower flushes first.
+    :param text: Message text (display only; the owner holds the real payload).
+    :param attachments: Attachment filenames for the strip's badge.
+    :param stable_id: The owner's idempotency id for the eventual POST.
+    :param requires_retry: The owner's send failed; it waits for the user.
+    """
+
+    queue_id: str
+    seq: int
+    text: str
+    attachments: list[str]
+    stable_id: str | None
+    requires_retry: bool
+
+
+@dataclass
+class _Share:
+    """
+    One client's queued entries for one conversation plus its stream count.
+
+    :param created_by: Attribution identity of the publishing user, or
+        ``None`` in single-user mode.
+    :param entries: The client's entries in its own order.
+    :param connections: Open streams this client holds for the conversation.
+    """
+
+    created_by: str | None
+    entries: list[_Entry] = field(default_factory=list)
+    connections: int = 0
+
+
+@dataclass
+class _ConversationQueue:
+    """
+    Every client's share for one conversation.
+
+    :param shares: ``(user_key, client_id)`` → that client's share.
+    :param next_seq: Next ordering slot to hand out.
+    """
+
+    shares: dict[_ShareKey, _Share] = field(default_factory=dict)
+    next_seq: int = 1
+
+
+_queues: WorkspaceScopedCache[str, _ConversationQueue] = WorkspaceScopedCache()
+_pending_expiries: WorkspaceScopedCache[tuple[str, _ShareKey], asyncio.TimerHandle] = (
+    WorkspaceScopedCache()
+)
+_lock = threading.Lock()
+
+
+def _share_key(user_id: str | None, client_id: str) -> _ShareKey:
+    return (user_id or "", client_id)
+
+
+def snapshot(conversation_id: str) -> dict[str, Any]:
+    """
+    Build the current full-state ``session.queue`` event.
+
+    Used both as the broadcast payload on every change and as the
+    snapshot-on-connect event a newly-subscribed stream receives, so
+    clients replace their view wholesale on every ``session.queue``.
+
+    :param conversation_id: The conversation whose queue to report.
+    :returns: Event dict shaped like ``{"type": "session.queue",
+        "conversation_id": …, "messages": [{"queue_id", "client_id", "seq",
+        "text", "attachments", "stable_id", "created_by", "requires_retry"}]}``
+        with messages in flush order.
+    """
+    with _lock:
+        queue = _queues.get(conversation_id)
+        rows = (
+            [
+                (entry.seq, client_id, share.created_by, entry)
+                for (_user, client_id), share in queue.shares.items()
+                for entry in share.entries
+            ]
+            if queue is not None
+            else []
+        )
+    rows.sort(key=lambda row: row[0])
+    return {
+        "type": "session.queue",
+        "conversation_id": conversation_id,
+        "messages": [
+            {
+                "queue_id": entry.queue_id,
+                "client_id": client_id,
+                "seq": seq,
+                "text": entry.text,
+                "attachments": list(entry.attachments),
+                "stable_id": entry.stable_id,
+                "created_by": created_by,
+                "requires_retry": entry.requires_retry,
+            }
+            for seq, client_id, created_by, entry in rows
+        ],
+    }
+
+
+def _broadcast(conversation_id: str) -> None:
+    session_stream.publish(conversation_id, snapshot(conversation_id))
+
+
+def _assign_entries(
+    queue: _ConversationQueue, previous: list[_Entry], messages: list[QueuedMessageInput]
+) -> list[_Entry]:
+    """
+    Build a share's new entry list, preserving ordering slots where possible.
+
+    Entries the client still holds take the share's existing slots in the
+    client's new order, so a pure reorder keeps the share's position among
+    other clients. Entries appended at the tail get fresh slots. Once a new
+    entry appears ahead of surviving ones, every later entry also gets a fresh
+    slot: the client's own order always wins over slot reuse.
+    """
+    surviving = {entry.queue_id for entry in previous} & {m.queue_id for m in messages}
+    slots = iter(sorted(entry.seq for entry in previous if entry.queue_id in surviving))
+    reuse_slots = True
+    entries: list[_Entry] = []
+    seen: set[str] = set()
+    for message in messages:
+        if message.queue_id in seen:
+            continue
+        seen.add(message.queue_id)
+        if reuse_slots and message.queue_id in surviving:
+            seq = next(slots)
+        else:
+            reuse_slots = False
+            seq = queue.next_seq
+            queue.next_seq += 1
+        entries.append(
+            _Entry(
+                queue_id=message.queue_id,
+                seq=seq,
+                text=message.text,
+                attachments=list(message.attachments),
+                stable_id=message.stable_id,
+                requires_retry=message.requires_retry,
+            )
+        )
+    return entries
+
+
+def replace(
+    conversation_id: str,
+    *,
+    client_id: str,
+    user_id: str | None,
+    messages: list[QueuedMessageInput],
+) -> None:
+    """
+    Replace one client's queued entries for a conversation and broadcast.
+
+    :param conversation_id: Session/conversation identifier.
+    :param client_id: The publishing SPA instance's id, e.g. ``"c_7f3a…"``.
+    :param user_id: Attribution identity of the caller (``None`` single-user).
+    :param messages: The client's complete current queue for this
+        conversation, head first. An empty list clears its share.
+    """
+    key = _share_key(user_id, client_id)
+    schedule_expiry = False
+    with _lock:
+        queue = _queues.setdefault(conversation_id, _ConversationQueue())
+        share = queue.shares.get(key)
+        previous = share.entries if share is not None else []
+        entries = _assign_entries(queue, previous, messages)
+        changed = entries != previous
+        if share is None:
+            share = _Share(created_by=user_id)
+            queue.shares[key] = share
+        share.entries = entries
+        if share.connections == 0:
+            if not entries:
+                _drop_share_locked(conversation_id, queue, key)
+            elif (conversation_id, key) not in _pending_expiries:
+                schedule_expiry = True
+    if schedule_expiry:
+        _schedule_expiry(conversation_id, key)
+    if changed:
+        _broadcast(conversation_id)
+
+
+def attach(conversation_id: str, *, client_id: str, user_id: str | None) -> None:
+    """
+    Register one newly-opened stream of a client for a conversation.
+
+    Cancels a pending expiry so a reconnect within the grace window keeps
+    the client's entries visible to everyone else.
+    """
+    key = _share_key(user_id, client_id)
+    with _lock:
+        queue = _queues.setdefault(conversation_id, _ConversationQueue())
+        share = queue.shares.setdefault(key, _Share(created_by=user_id))
+        share.connections += 1
+        timer = _pending_expiries.pop((conversation_id, key), None)
+    if timer is not None:
+        timer.cancel()
+
+
+def detach(conversation_id: str, *, client_id: str, user_id: str | None) -> None:
+    """
+    Deregister one closed stream; on the client's last one, start the grace timer.
+    """
+    key = _share_key(user_id, client_id)
+    schedule_expiry = False
+    with _lock:
+        queue = _queues.get(conversation_id)
+        share = queue.shares.get(key) if queue is not None else None
+        if share is None or share.connections == 0:
+            return
+        share.connections -= 1
+        if share.connections == 0:
+            if share.entries:
+                schedule_expiry = (conversation_id, key) not in _pending_expiries
+            else:
+                assert queue is not None
+                _drop_share_locked(conversation_id, queue, key)
+    if schedule_expiry:
+        _schedule_expiry(conversation_id, key)
+
+
+def _schedule_expiry(conversation_id: str, key: _ShareKey) -> None:
+    handle = asyncio.get_running_loop().call_later(_DETACH_GRACE_S, _expire, conversation_id, key)
+    with _lock:
+        _pending_expiries[(conversation_id, key)] = handle
+
+
+def _expire(conversation_id: str, key: _ShareKey) -> None:
+    """Grace-timer callback: drop a still-disconnected client's share and broadcast."""
+    with _lock:
+        _pending_expiries.pop((conversation_id, key), None)
+        queue = _queues.get(conversation_id)
+        share = queue.shares.get(key) if queue is not None else None
+        if queue is None or share is None or share.connections:
+            return
+        had_entries = bool(share.entries)
+        _drop_share_locked(conversation_id, queue, key)
+    if had_entries:
+        _broadcast(conversation_id)
+
+
+def _drop_share_locked(conversation_id: str, queue: _ConversationQueue, key: _ShareKey) -> None:
+    queue.shares.pop(key, None)
+    if not queue.shares:
+        _queues.pop(conversation_id, None)
+
+
+def reset_for_tests() -> None:
+    """Clear all shares and cancel pending expiry timers (test isolation)."""
+    with _lock:
+        timers = _pending_expiries.all_values()
+        _pending_expiries.clear()
+        _queues.clear()
+    for timer in timers:
+        timer.cancel()

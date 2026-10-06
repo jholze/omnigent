@@ -44,6 +44,7 @@ import {
 } from "@/lib/sessionDrafts";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { PRESENCE_IDLE_AFTER_MS } from "@/lib/presenceIdle";
+import { CLIENT_ID } from "@/lib/clientId";
 import {
   setOmnigentHostConfig,
   type OmnigentAnalyticsEvent,
@@ -58,6 +59,7 @@ import type {
   SessionResourceDeletedEvent,
   SessionStatusEvent,
   SessionTerminalPendingEvent,
+  SharedQueuedMessage,
   StreamEvent,
 } from "@/lib/events";
 import type { TerminalInfo } from "@/hooks/useTerminals";
@@ -17442,5 +17444,260 @@ describe("chatStore — one error card per failed turn", () => {
       error: { code: "runner_error", message: error.message },
     });
     expect(errorBlocks()).toHaveLength(2);
+  });
+});
+
+describe("chatStore — queue shared across windows of a session", () => {
+  const remoteEntry = (
+    queueId: string,
+    seq: number,
+    text: string,
+    extra: Partial<SharedQueuedMessage> = {},
+  ): SharedQueuedMessage => ({
+    queueId,
+    clientId: "c_other",
+    seq,
+    text,
+    attachments: [],
+    requiresRetry: false,
+    ...extra,
+  });
+  const ownEcho = (queueId: string, seq: number, text: string): SharedQueuedMessage => ({
+    queueId,
+    clientId: CLIENT_ID,
+    seq,
+    text,
+    attachments: [],
+    requiresRetry: false,
+  });
+  const queuePuts = (id: string) =>
+    fetchMock.mock.calls
+      .filter(
+        ([u, init]) => u === `/v1/sessions/${id}/queue` && (init as RequestInit)?.method === "PUT",
+      )
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+  const eventPosts = (id: string) =>
+    fetchMock.mock.calls.filter(
+      ([u, init]) => u === `/v1/sessions/${id}/events` && (init as RequestInit)?.method === "POST",
+    );
+  const acceptQueuePuts = () => {
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/queue") && (init as RequestInit)?.method === "PUT") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return defaultFetchHandler(input as RequestInfo, init as RequestInit);
+    });
+  };
+
+  it("publishes this window's queue on every change, including clearing it", async () => {
+    acceptQueuePuts();
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    useChatStore.getState().enqueueMessage("first follow-up");
+    useChatStore
+      .getState()
+      .enqueueMessage("second follow-up", [new File(["x"], "shot.png", { type: "image/png" })]);
+    await tick();
+    // One PUT per burst of changes, carrying the whole share in queue order.
+    const puts = queuePuts("conv_abc");
+    expect(puts).toHaveLength(1);
+    expect(puts[0]).toEqual({
+      client_id: CLIENT_ID,
+      messages: [
+        {
+          queue_id: expect.any(String),
+          text: "first follow-up",
+          attachments: [],
+          stable_id: expect.any(String),
+          requires_retry: false,
+        },
+        {
+          queue_id: expect.any(String),
+          text: "second follow-up",
+          attachments: ["shot.png"],
+          stable_id: expect.any(String),
+          requires_retry: false,
+        },
+      ],
+    });
+
+    const [head] = useChatStore.getState().queuedMessages;
+    useChatStore.getState().dequeueMessage(head!.queueId);
+    useChatStore.getState().dequeueMessage(useChatStore.getState().queuedMessages[0]!.queueId);
+    await tick();
+    // The other window must learn the queue emptied, not keep phantom rows.
+    expect(queuePuts("conv_abc").at(-1)).toEqual({ client_id: CLIENT_ID, messages: [] });
+  });
+
+  it("keeps a flushing head in the published share until its send settles", async () => {
+    acceptQueuePuts();
+    let settleSend!: () => void;
+    const sendSpy = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settleSend = resolve;
+        }),
+    );
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [
+        { queueId: "q_1", text: "mine", conversationId: "conv_abc", stableId: "s1" },
+      ],
+    });
+    await tick();
+    expect(queuePuts("conv_abc")).toHaveLength(1);
+    fetchMock.mockClear();
+
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+    // Other windows still list the entry: they must learn the turn started
+    // before they learn the slot freed, or they would send into the same turn.
+    expect(queuePuts("conv_abc")).toEqual([]);
+
+    settleSend();
+    await tick();
+    expect(queuePuts("conv_abc")).toEqual([{ client_id: CLIENT_ID, messages: [] }]);
+  });
+
+  it("waits behind a follow-up another window holds, then flushes once it is gone", async () => {
+    const sendSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [{ queueId: "q_1", text: "mine", conversationId: "conv_abc" }],
+      sharedQueue: [remoteEntry("q_1", 1, "theirs"), ownEcho("q_1", 2, "mine")],
+    });
+    // Idle, but the desktop app's follow-up is the session-wide head: it
+    // sends first (one message per turn), so ours stays queued.
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual(["mine"]);
+
+    // A failed remote send waits for its owner and must not block us…
+    useChatStore.setState({
+      sharedQueue: [
+        remoteEntry("q_1", 1, "theirs", { requiresRetry: true }),
+        ownEcho("q_1", 2, "mine"),
+      ],
+    });
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy.mock.calls[0]!.slice(0, 2)).toEqual(["mine", "agent_xyz"]);
+
+    // …and once the other window's head has left the list, ours is next.
+    useChatStore.setState({
+      queuedMessages: [{ queueId: "q_2", text: "mine again", conversationId: "conv_abc" }],
+      sharedQueue: [ownEcho("q_2", 3, "mine again")],
+    });
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    expect(sendSpy.mock.calls[1]!.slice(0, 2)).toEqual(["mine again", "agent_xyz"]);
+  });
+
+  it("applies session.queue to the delivering conversation and republishes a lost share", async () => {
+    acceptQueuePuts();
+    const id = "conv_shared";
+    seedSession(id, []);
+    await useChatStore.getState().switchTo(id);
+    useChatStore.setState({
+      boundAgentId: "agent_xyz",
+      status: "streaming",
+      sessionStatus: "running",
+      queuedMessages: [{ queueId: "q_1", text: "mine", conversationId: id, stableId: "s1" }],
+    });
+    await tick();
+    fetchMock.mockClear();
+
+    // The server lost our share (stream gap past its grace, or a replacement
+    // server): the next full-state event lacks our entry, so we publish again.
+    handleSessionEvent({
+      type: "session_queue",
+      conversationId: id,
+      messages: [remoteEntry("q_1", 1, "theirs")],
+    });
+    expect(conversationRegistry.peek(id)!.getState().sharedQueue).toEqual([
+      remoteEntry("q_1", 1, "theirs"),
+    ]);
+    await tick();
+    expect(queuePuts(id)).toEqual([
+      {
+        client_id: CLIENT_ID,
+        messages: [
+          {
+            queue_id: "q_1",
+            text: "mine",
+            attachments: [],
+            stable_id: "s1",
+            requires_retry: false,
+          },
+        ],
+      },
+    ]);
+
+    // A list that already carries our entry is just applied.
+    fetchMock.mockClear();
+    handleSessionEvent({
+      type: "session_queue",
+      conversationId: id,
+      messages: [remoteEntry("q_1", 1, "theirs"), ownEcho("q_1", 2, "mine")],
+    });
+    await tick();
+    expect(queuePuts(id)).toEqual([]);
+    expect(useChatStore.getState().sharedQueue.map((m) => m.clientId)).toEqual([
+      "c_other",
+      CLIENT_ID,
+    ]);
+  });
+
+  it("holds a background conversation's flush behind another window's head", async () => {
+    acceptQueuePuts();
+    const id = "conv_bg_shared";
+    seedSession(id, []);
+    await useChatStore.getState().switchTo(id);
+    useChatStore.setState({ boundAgentId: "agent_xyz", status: "idle", sessionStatus: "idle" });
+    useChatStore.setState({
+      queuedMessages: [{ queueId: "q_1", text: "mine", conversationId: id }],
+    });
+    handleSessionEvent({
+      type: "session_queue",
+      conversationId: id,
+      messages: [remoteEntry("q_1", 1, "theirs"), ownEcho("q_1", 2, "mine")],
+    });
+    seedSession("conv_other", []);
+    await useChatStore.getState().switchTo("conv_other");
+    seedConversationsCache([conv(id, "idle"), conv("conv_other", "idle")]);
+    await tick();
+    fetchMock.mockClear();
+
+    useChatStore.getState().flushBackgroundQueues();
+    await tick();
+    expect(eventPosts(id)).toHaveLength(0);
+    expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual(["mine"]);
+
+    // The other window drained its head: the event drives this flush directly,
+    // since nothing else about the background conversation changed.
+    handleSessionEvent(
+      { type: "session_queue", conversationId: id, messages: [ownEcho("q_1", 2, "mine")] },
+      id,
+    );
+    await tick();
+    expect(eventPosts(id)).toHaveLength(1);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 });

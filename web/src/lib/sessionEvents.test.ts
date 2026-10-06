@@ -22,6 +22,7 @@ import type {
   SessionModelEvent,
   SessionPermissionModeEvent,
   SessionPresenceEvent,
+  SessionQueueEvent,
   SessionReasoningEffortEvent,
   SessionResourceCreatedEvent,
   SessionResourceDeletedEvent,
@@ -1730,5 +1731,81 @@ describe("session.model_options (FLAT envelope)", () => {
       type: "session.model_options",
     });
     expect(out).toEqual([]);
+  });
+});
+
+describe("session.queue (FLAT envelope)", () => {
+  it("lifts the merged queue with ownership, order, and attachments", () => {
+    const out = parse("session.queue", {
+      type: "session.queue",
+      conversation_id: "conv_abc",
+      messages: [
+        {
+          queue_id: "q_1",
+          client_id: "c_desktop",
+          seq: 1,
+          text: "desktop follow-up",
+          attachments: ["shot.png"],
+          stable_id: "s1",
+          created_by: "alice@example.com",
+          requires_retry: false,
+        },
+        {
+          queue_id: "q_1",
+          client_id: "c_browser",
+          seq: 2,
+          text: "browser follow-up",
+          attachments: [],
+          stable_id: null,
+          created_by: null,
+          requires_retry: true,
+        },
+      ],
+    });
+    expect(out).toHaveLength(1);
+    const ev = out[0] as SessionQueueEvent;
+    expect(ev.type).toBe("session_queue");
+    expect(ev.conversationId).toBe("conv_abc");
+    // Content, not just shape: ownership and order decide which window's strip
+    // row is actionable and whose head flushes next.
+    expect(ev.messages).toEqual([
+      {
+        queueId: "q_1",
+        clientId: "c_desktop",
+        seq: 1,
+        text: "desktop follow-up",
+        attachments: ["shot.png"],
+        stableId: "s1",
+        createdBy: "alice@example.com",
+        requiresRetry: false,
+      },
+      {
+        queueId: "q_1",
+        clientId: "c_browser",
+        seq: 2,
+        text: "browser follow-up",
+        attachments: [],
+        requiresRetry: true,
+      },
+    ]);
+  });
+
+  it("parses an empty queue (every window drained)", () => {
+    const out = parse("session.queue", {
+      type: "session.queue",
+      conversation_id: "conv_abc",
+      messages: [],
+    });
+    expect(out).toHaveLength(1);
+    expect((out[0] as SessionQueueEvent).messages).toEqual([]);
+  });
+
+  it("drops a frame with a malformed entry rather than a partial list", () => {
+    const out = parse("session.queue", {
+      type: "session.queue",
+      conversation_id: "conv_abc",
+      messages: [{ queue_id: 1, client_id: "c_desktop", seq: 1, text: "x" }],
+    });
+    expect(out).toHaveLength(0);
   });
 });

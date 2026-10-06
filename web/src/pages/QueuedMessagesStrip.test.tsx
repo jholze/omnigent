@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QueuedMessage } from "@/store/chatStore";
-import { QueuedMessagesStrip, queuedMessageCollisionDetection } from "./QueuedMessagesStrip";
+import {
+  QueuedMessagesStrip,
+  queuedMessageCollisionDetection,
+  queuedReorderTarget,
+} from "./QueuedMessagesStrip";
 
 const msg = (queueId: string, text: string): QueuedMessage => ({
   queueId,
@@ -406,5 +410,75 @@ describe("QueuedMessagesStrip", () => {
       "overflow-y-auto",
       "overscroll-contain",
     );
+  });
+});
+
+describe("QueuedMessagesStrip — follow-ups another window holds", () => {
+  const remote = (queueId: string, text: string, extra: Partial<QueuedMessage["remote"]> = {}) =>
+    ({
+      queueId: `c_other:${queueId}`,
+      text,
+      conversationId: "conv_abc",
+      remote: { clientId: "c_other", attachments: [], ...extra },
+    }) satisfies QueuedMessage;
+
+  it("lists a remote row read-only, in the session's order, with its attachments", () => {
+    const onDelete = vi.fn();
+    const onEdit = vi.fn();
+    const onSteer = vi.fn();
+    render(
+      <TooltipProvider>
+        <QueuedMessagesStrip
+          messages={[
+            remote("q_1", "desktop follow-up", {
+              attachments: ["shot.png"],
+              createdBy: "alice@example.com",
+            }),
+            msg("q_1", "browser follow-up"),
+          ]}
+          onDelete={onDelete}
+          onEdit={onEdit}
+          onSteer={onSteer}
+          onReorder={vi.fn()}
+        />
+      </TooltipProvider>,
+    );
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("desktop follow-up"),
+      expect.stringContaining("browser follow-up"),
+    ]);
+    // The remote row says where it came from and shows its attachment names,
+    // but offers none of the own-row actions: those act on state this window
+    // does not hold.
+    expect(rows[0]).toHaveTextContent("Queued by alice@example.com in another window");
+    expect(screen.getByTestId("queued-message-attachments")).toHaveAttribute("title", "shot.png");
+    const within = (row: HTMLElement, name: string) =>
+      Array.from(row.querySelectorAll("button")).filter(
+        (button) => button.getAttribute("aria-label") === name,
+      );
+    for (const name of [
+      "Edit queued message",
+      "Send queued message now",
+      "Remove queued message",
+      "Reorder queued message",
+    ]) {
+      expect(within(rows[0]!, name)).toHaveLength(0);
+      expect(within(rows[1]!, name)).toHaveLength(1);
+    }
+  });
+
+  it("reorders own rows past a remote row without naming it as the target", () => {
+    const messages = [msg("q_1", "mine first"), remote("q_1", "theirs"), msg("q_2", "mine second")];
+    // Dropping "mine first" onto the remote row lands after it: before "mine second".
+    expect(queuedReorderTarget(messages, "q_1", "c_other:q_1")).toBe("q_2");
+    // Dropping "mine second" up onto the remote row would land before the next
+    // own row after it — itself — so nothing moves: remote rows keep their place.
+    expect(queuedReorderTarget(messages, "q_2", "c_other:q_1")).toBeUndefined();
+    // Dropping "mine second" onto "mine first" lands before it; dropping "mine
+    // first" onto "mine second" lands at the end.
+    expect(queuedReorderTarget(messages, "q_2", "q_1")).toBe("q_1");
+    expect(queuedReorderTarget(messages, "q_1", "q_2")).toBeNull();
+    expect(queuedReorderTarget(messages, "q_1", "q_1")).toBeUndefined();
   });
 });

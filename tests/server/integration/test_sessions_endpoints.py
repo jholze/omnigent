@@ -11961,3 +11961,86 @@ async def test_external_info_error_item_publishes_and_persists_level(
     errors = [item for item in items.json()["data"] if item["type"] == "error"]
     assert len(errors) == 1
     assert errors[0]["level"] == "info"
+
+
+async def test_put_queue_publishes_merged_session_queue(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``PUT /sessions/{id}/queue`` replaces one client's queued follow-ups and
+    broadcasts the merged, flush-ordered list as ``session.queue``.
+
+    Two windows on one session publish their own shares; each event lists
+    both so every window's strip shows the same queue in the same order.
+    """
+    published: list[tuple[str, dict[str, Any]]] = []
+    _capture_published(monkeypatch, published)
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    resp = await client.put(
+        f"/v1/sessions/{session['id']}/queue",
+        json={
+            "client_id": "c_desktop",
+            "messages": [
+                {"queue_id": "q_1", "text": "desktop follow-up", "attachments": ["shot.png"]}
+            ],
+        },
+    )
+    assert resp.status_code == 204, resp.text
+    resp = await client.put(
+        f"/v1/sessions/{session['id']}/queue",
+        json={
+            "client_id": "c_browser",
+            "messages": [{"queue_id": "q_1", "text": "browser follow-up"}],
+        },
+    )
+    assert resp.status_code == 204, resp.text
+
+    assert [ev["type"] for _, ev in published] == ["session.queue", "session.queue"]
+    assert all(sid == session["id"] for sid, _ in published)
+    merged = published[1][1]
+    assert merged["conversation_id"] == session["id"]
+    assert [(m["client_id"], m["text"]) for m in merged["messages"]] == [
+        ("c_desktop", "desktop follow-up"),
+        ("c_browser", "browser follow-up"),
+    ]
+    assert merged["messages"][0]["attachments"] == ["shot.png"]
+
+    # Clearing one share leaves the other window's entry in place.
+    resp = await client.put(
+        f"/v1/sessions/{session['id']}/queue",
+        json={"client_id": "c_desktop", "messages": []},
+    )
+    assert resp.status_code == 204, resp.text
+    assert [(m["client_id"], m["text"]) for m in published[2][1]["messages"]] == [
+        ("c_browser", "browser follow-up")
+    ]
+
+
+async def test_put_queue_rejects_malformed_body_and_unknown_session(
+    client: httpx.AsyncClient,
+) -> None:
+    """A missing client id or oversized share is a 422; an unknown session a 404."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    resp = await client.put(
+        f"/v1/sessions/{session['id']}/queue",
+        json={"messages": [{"queue_id": "q_1", "text": "x"}]},
+    )
+    assert resp.status_code == 422, resp.text
+    resp = await client.put(
+        f"/v1/sessions/{session['id']}/queue",
+        json={
+            "client_id": "c_1",
+            "messages": [{"queue_id": f"q_{i}", "text": "x"} for i in range(51)],
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    resp = await client.put(
+        "/v1/sessions/does-not-exist/queue",
+        json={"client_id": "c_1", "messages": []},
+    )
+    assert resp.status_code == 404, resp.text
