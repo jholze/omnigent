@@ -1,9 +1,7 @@
-// Mermaid returns its SVG as an HTML serialisation: under securityLevel
-// "strict" DOMPurify re-emits the <foreignObject> labels with bare <br> and
-// &nbsp;, which no XML parser accepts. Streamdown's download menu saves that
-// string as diagram.svg and rasterises it through <img> for PNG, so both
-// exports break on any multi-line label. The plugin is the only seam the app
-// controls on that path, so re-serialise every rendered SVG as XML here.
+// Mermaid returns its SVG HTML-serialised: under securityLevel "strict",
+// DOMPurify re-emits multi-line <foreignObject> labels with bare <br> and
+// &nbsp;, which no XML parser accepts, yet Streamdown saves that string as
+// diagram.svg and rasterises it through <img> for PNG.
 import {
   mermaid as streamdownMermaid,
   type DiagramPlugin,
@@ -35,7 +33,11 @@ function withXmlSvg(instance: MermaidInstance): MermaidInstance {
   };
 }
 
-/** Streamdown's mermaid plugin, with every rendered SVG usable as a standalone file. */
+/**
+ * Streamdown's mermaid plugin, with every rendered SVG usable as a standalone
+ * file. Streamdown's download menu renders through the plugin, so this is the
+ * only seam the app controls on that path.
+ */
 export const mermaid: DiagramPlugin = {
   ...streamdownMermaid,
   getMermaid: (config) => withXmlSvg(streamdownMermaid.getMermaid(config)),
