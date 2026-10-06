@@ -1128,6 +1128,36 @@ def test_registration_wait_fails_when_daemon_exits_during_final_probe(
     assert "exited before registering with the server" in str(excinfo.value)
 
 
+def test_registration_wait_reports_daemon_exit_before_unreachable_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon that died is reported as exited even when no probe reached the server.
+
+    The crash (and its log tail) is the more accurate diagnosis; blaming the
+    server URL would send the user the wrong way.
+    """
+    alive = True
+
+    def _probe(record: object, **_kw: object) -> cli._HostHttpResult:
+        nonlocal alive
+        alive = False
+        return cli._HostHttpResult(
+            status_code=0,
+            body="ConnectError: [Errno 111] Connection refused",
+            unreachable=True,
+        )
+
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: alive)
+    monkeypatch.setattr(cli, "_BACKGROUND_HOST_REGISTRATION_GRACE_S", 0.0)
+    monkeypatch.setattr(cli, "_daemon_host_status_probe", _probe)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._confirm_background_host_registered(_server_record())
+
+    assert "exited before registering with the server" in str(excinfo.value)
+    assert "Could not reach" not in str(excinfo.value)
+
+
 # Every proxy variable httpx consults, so the cases below see exactly the
 # ambient proxy configuration they set up (a developer's own ``NO_PROXY``
 # would otherwise exempt loopback and skip the proxy transport entirely).

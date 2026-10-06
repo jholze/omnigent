@@ -8970,12 +8970,13 @@ def _confirm_background_host_registered(record: _HostDaemonRecord) -> bool:
             )
             announced = True
         if time.monotonic() >= deadline:
-            if not server_responded and last_transport_error is not None:
-                raise _server_unreachable_error(record, transport_error=last_transport_error)
             # The probe above may have blocked for a second; a daemon that died
-            # meanwhile must not be reported as still connecting.
+            # meanwhile must not be reported as still connecting (or blamed on
+            # the server).
             if not _pid_alive(record.pid):
                 raise _daemon_exited_error(record)
+            if not server_responded and last_transport_error is not None:
+                raise _server_unreachable_error(record, transport_error=last_transport_error)
             return False
         time.sleep(0.2)
 
@@ -9060,24 +9061,22 @@ def _run_background_host(
     record = _find_daemon_record(target)
     if record is None:
         # A local daemon may already own the requested URL under its local
-        # registry key. It is reusable only after its host is online too.
+        # registry key; adopt it, reporting a pending registration if its
+        # host is not online yet.
         if _local_daemon_serves_target(target, server or None):
             local_record = _find_daemon_record(_LOCAL_DAEMON_MARKER)
             if local_record is not None:
-                from omnigent.util.server_url import display_server_url
-
-                if _confirm_background_host_registered(local_record):
-                    click.echo(
-                        f"The local host daemon already serves {display_server_url(target)}."
-                    )
-                else:
-                    click.echo(
-                        f"The local host daemon (pid {local_record.pid}) serves "
-                        f"{display_server_url(target)} but has not registered with it yet; "
-                        f"check on it with `{cli_invocation()} host status`."
-                    )
-                    if local_record.log_path is not None:
-                        _echo_host_field("log", _display_path(Path(local_record.log_path)))
+                _report_background_host(
+                    local_record,
+                    server_url=target,
+                    registered=_confirm_background_host_registered(local_record),
+                    reused=True,
+                    # That daemon lives under the local registry key, so the
+                    # caller's URL-targeted stop command would miss it.
+                    stop_command=_host_stop_command(""),
+                    non_interactive=non_interactive,
+                    no_open=no_open,
+                )
                 return
         raise click.ClickException(
             "Could not spawn the background host daemon. "
@@ -9100,6 +9099,37 @@ def _run_background_host(
             with contextlib.suppress(click.ClickException):
                 _terminate_daemon(record, force=True)
         raise
+    _report_background_host(
+        record,
+        server_url=server_url,
+        registered=registered,
+        reused=reused,
+        stop_command=stop_command,
+        non_interactive=non_interactive,
+        no_open=no_open,
+    )
+
+
+def _report_background_host(
+    record: _HostDaemonRecord,
+    *,
+    server_url: str,
+    registered: bool,
+    reused: bool,
+    stop_command: str,
+    non_interactive: bool,
+    no_open: bool,
+) -> None:
+    """Report a background host daemon's state and open the web UI once it is online.
+
+    :param record: Registry record of the daemon being reported.
+    :param server_url: Server the daemon registers with; shown in display form.
+    :param registered: Whether the server reported the host online.
+    :param reused: Whether an already-running daemon was adopted.
+    :param stop_command: Copy-pasteable command that stops this daemon.
+    :param non_interactive: Never launch a browser when ``True``.
+    :param no_open: Skip the web-UI auto-open when ``True``.
+    """
     if registered:
         headline = _cli_style(
             "Host daemon already running"

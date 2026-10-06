@@ -98,7 +98,9 @@ class StallingTunnelProxy:
         self._thread.start()
 
     def stop(self) -> None:
-        self._server.shutdown()
+        # ``shutdown`` would block forever if ``serve_forever`` never started.
+        if self._thread.is_alive():
+            self._server.shutdown()
         self._server.server_close()
 
     def _handle(self, client: socket.socket) -> None:
@@ -398,11 +400,12 @@ def test_start_brings_late_registering_host_online(
     registration; the host registers once its slow step completes.
     """
     proxy = StallingTunnelProxy(upstream_server_url, stall_s=TUNNEL_STALL_S)
-    proxy.start()
-    state = _CliState.create(tmp_path, proxy.url)
-    launched = time.monotonic()
+    state: _CliState | None = None
     spawned_pids: list[int] = []
     try:
+        proxy.start()
+        state = _CliState.create(tmp_path, proxy.url)
+        launched = time.monotonic()
         run = state.run("start", "--non-interactive", timeout=_START_DEADLINE_S)
         spawned_pids = run.daemon_pids
         host_id = state.host_id()
@@ -433,7 +436,8 @@ def test_start_brings_late_registering_host_online(
             f"`omnigent start` output:\n{run.output}"
         )
     finally:
-        state.run("stop", "--force", timeout=120)
+        if state is not None:
+            state.run("stop", "--force", timeout=120)
         # `stop` only knows daemons still in its registry; never leak the rest.
         for pid in spawned_pids:
             if _pid_alive(pid):
