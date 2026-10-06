@@ -429,6 +429,9 @@ async def test_clamped_pick_does_not_resurface_the_dropped_model_as_raw() -> Non
     assert result is not None
     assert result.model == "databricks-gpt-5-4-nano"
     assert result.raw_model is None
+    # The rewritten rationale positively names the applied model, so a clamp
+    # cannot pass with an empty or unrelated explanation.
+    assert "databricks-gpt-5-4-nano" in result.rationale
 
 
 @pytest.mark.asyncio
