@@ -4599,16 +4599,16 @@ class HostProcess:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
             if stamp_write is not None:
-                # Let an in-flight stamp land before clearing it, off the loop;
-                # shielded so a cancellation during teardown still clears.
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await asyncio.shield(stamp_write)
+                # Clear only after the in-flight stamp has landed, off the loop;
+                # one shielded coroutine keeps that order even when this task is
+                # cancelled during teardown.
+                async def _settle_stamp() -> None:
+                    with contextlib.suppress(Exception):
+                        await stamp_write
+                    await asyncio.to_thread(self._set_daemon_registered, False)
+
                 with contextlib.suppress(asyncio.CancelledError, RuntimeError):
-                    await asyncio.shield(
-                        asyncio.ensure_future(
-                            asyncio.to_thread(self._set_daemon_registered, False)
-                        )
-                    )
+                    await asyncio.shield(asyncio.ensure_future(_settle_stamp()))
 
     async def _harness_readiness_loop(
         self,

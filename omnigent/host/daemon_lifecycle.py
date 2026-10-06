@@ -141,8 +141,8 @@ def write_daemon_record(
     path.parent.mkdir(parents=True, exist_ok=True)
     with _record_update_lock(path):
         path.write_text(json.dumps(asdict(record), indent=2, sort_keys=True) + "\n")
-    if update_legacy_pidfile:
-        (root / "host.pid").write_text(f"{record.pid}\n{record.target}\n")
+        if update_legacy_pidfile:
+            (root / "host.pid").write_text(f"{record.pid}\n{record.target}\n")
 
 
 def record_update_lock_path(record_path: Path) -> Path:

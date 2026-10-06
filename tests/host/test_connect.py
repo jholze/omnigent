@@ -34,7 +34,11 @@ from omnigent.host.connect import (
     _RunnerHandle,
     run_host_process,
 )
-from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, daemon_record_path
+from omnigent.host.daemon_lifecycle import (
+    DaemonLifecycleLock,
+    daemon_record_path,
+    read_daemon_record_text,
+)
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -1302,8 +1306,9 @@ class _AckThenDisconnectTunnel:
         if self._record_path is not None:
             # The stamp is written off the receive loop; give it a moment.
             for _ in range(200):
-                self.record_after_ack = json.loads(self._record_path.read_text())
-                if self.record_after_ack.get("registered_at") is not None:
+                with contextlib.suppress(ValueError):
+                    self.record_after_ack = json.loads(read_daemon_record_text(self._record_path))
+                if (self.record_after_ack or {}).get("registered_at") is not None:
                     break
                 await asyncio.sleep(0.01)
         raise ConnectionError("test disconnect")
@@ -2181,10 +2186,11 @@ async def test_serve_frames_stamps_registration_on_first_server_frame(tmp_path: 
 
 
 class _AckThenPongWatchTunnel(_AckThenDisconnectTunnel):
-    """Ack tunnel that notes whether the stamp had landed when the pong was sent."""
+    """Ack tunnel that holds the stamp write back until the pong has been sent."""
 
     def __init__(self, record_path: Path) -> None:
         super().__init__(record_path)
+        self.release_stamp = threading.Event()
         self.stamped_before_pong: bool | None = None
 
     async def recv(self) -> str:
@@ -2195,8 +2201,9 @@ class _AckThenPongWatchTunnel(_AckThenDisconnectTunnel):
                 break
             await asyncio.sleep(0.005)
         assert self._record_path is not None
-        payload = json.loads(self._record_path.read_text())
+        payload = json.loads(read_daemon_record_text(self._record_path))
         self.stamped_before_pong = payload.get("registered_at") is not None
+        self.release_stamp.set()
         return await super().recv()
 
 
@@ -2211,7 +2218,7 @@ async def test_serve_frames_dispatches_frames_while_stamp_write_is_slow(
 
     def slow_set(registered: bool) -> None:
         if registered:
-            time.sleep(0.4)
+            assert tunnel.release_stamp.wait(5.0), "the pong never released the stamp write"
         real_set(registered)
 
     monkeypatch.setattr(host, "_set_daemon_registered", slow_set)

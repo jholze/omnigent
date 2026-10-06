@@ -2989,10 +2989,12 @@ def _update_daemon_resolved_server_url(target: str, server_url: str) -> None:
     record = _find_daemon_record(target)
     if record is None:
         return
+    record_path = _daemon_record_path(record.target)
     # Only a daemon known solely through the legacy pidfile gets a record
     # materialized; a JSON record deleted meanwhile must stay deleted.
+    legacy_only = legacy_only and not record_path.exists()
     _update_daemon_record_fields(
-        _daemon_record_path(record.target),
+        record_path,
         pid=record.pid,
         create=record if legacy_only else None,
         resolved_server_url=server_url.rstrip("/"),

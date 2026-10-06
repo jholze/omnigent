@@ -280,6 +280,8 @@ def _host_online(client: httpx.Client, host_id: str) -> bool:
     )
 
 
+@pytest.mark.min_server_version("0.18.0")
+@pytest.mark.min_runner_version("0.18.0")
 @pytest.mark.timeout(180)
 def test_host_background_keeps_registered_daemon_on_stale_status_read(
     live_server: str,

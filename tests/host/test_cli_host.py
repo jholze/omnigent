@@ -1006,9 +1006,11 @@ def test_daemon_record_rewrite_waits_for_daemon_stamp(
     record_path = cli_module._daemon_record_path(target)
     lock_fd = os.open(record_update_lock_path(record_path), os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    started = threading.Event()
     rewritten = threading.Event()
     worker = threading.Thread(
         target=lambda: (
+            started.set(),
             cli_module._update_daemon_resolved_server_url(target, "http://127.0.0.1:6767"),
             rewritten.set(),
         ),
@@ -1016,6 +1018,7 @@ def test_daemon_record_rewrite_waits_for_daemon_stamp(
     )
     try:
         worker.start()
+        assert started.wait(2.0)
         assert not rewritten.wait(0.3), "CLI rewrite did not wait for the writer lock"
         # The daemon's stamp lands while the CLI rewrite is held back.
         data = json.loads(record_path.read_text())

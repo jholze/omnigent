@@ -255,12 +255,14 @@ def test_mark_daemon_registered_waits_for_concurrent_record_writer(tmp_path: Pat
     _write_record(record, os.getpid())
     lock_fd = os.open(record_update_lock_path(record), os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    started = threading.Event()
     stamped = threading.Event()
     worker = threading.Thread(
-        target=lambda: (mark_daemon_registered(record), stamped.set()), daemon=True
+        target=lambda: (started.set(), mark_daemon_registered(record), stamped.set()), daemon=True
     )
     try:
         worker.start()
+        assert started.wait(2.0)
         assert not stamped.wait(0.3), "stamp did not wait for the writer lock"
         assert "registered_at" not in json.loads(record.read_text())
     finally:
@@ -280,16 +282,22 @@ def test_write_daemon_record_waits_for_concurrent_writer(tmp_path: Path) -> None
     _write_record(record, os.getpid())
     lock_fd = os.open(record_update_lock_path(record), os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    started = threading.Event()
     written = threading.Event()
     replacement = HostDaemonRecord(
         pid=os.getpid(), target="local", mode="local", server_url=None, log_path=None, started_at=1
     )
     worker = threading.Thread(
-        target=lambda: (write_daemon_record(replacement, base_dir=tmp_path), written.set()),
+        target=lambda: (
+            started.set(),
+            write_daemon_record(replacement, base_dir=tmp_path),
+            written.set(),
+        ),
         daemon=True,
     )
     try:
         worker.start()
+        assert started.wait(2.0)
         assert not written.wait(0.3), "record write did not wait for the writer lock"
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
