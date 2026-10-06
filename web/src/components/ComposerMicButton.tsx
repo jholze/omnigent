@@ -110,14 +110,17 @@ export const ComposerMicButton = ({
   // Web Speech is primary whenever the browser has the constructor
   // (Chrome/Safari, unchanged behavior); with no constructor at all
   // (Firefox) takes use server dictation when GET /v1/info advertises it.
-  // A constructor is no guarantee of a backend — Electron and plain
-  // Chromium error at runtime with "network" — so a failed Web Speech
-  // take falls back to the server per take (see handleError). Per-take,
-  // not sticky: a transient blip in real Chrome must not permanently
-  // downgrade the page to the local model.
+  // A constructor is no guarantee of a backend — plain Chromium errors at
+  // runtime with "network" — so a failed Web Speech take falls back to the
+  // server per take (see handleError). Per-take, not sticky: a transient
+  // blip in real Chrome must not permanently downgrade the page to the
+  // local model. Electron's constructor never has a backend, so there the
+  // server is the only path: without it no dictation can work.
   const [Ctor] = useState(getRecognitionCtor);
+  const electron = isElectronShell();
   const serverInfo = useServerInfo();
   const serverAvailable = serverInfo !== "loading" && serverInfo.dictation_available;
+  const canDictate = serverAvailable || (Ctor !== null && !electron);
   // Mirrored into a ref so the mount-time recognition handlers (closed
   // over [Ctor, lang]) see the current probe result.
   const serverAvailableRef = useRef(serverAvailable);
@@ -441,11 +444,10 @@ export const ComposerMicButton = ({
       return;
     }
     // In Electron the SpeechRecognition constructor exists but has no backend,
-    // so a Web Speech take always fails with "network" and only THEN falls back
-    // to the server — a visible ~1s "fail then recover" on every first take.
-    // When the server can serve, go straight to it and skip the doomed attempt.
-    // (Real browsers keep Web Speech primary; it genuinely works there.)
-    if (!Ctor || (serverAvailable && isElectronShell())) {
+    // so a Web Speech take always fails; go straight to the server instead of
+    // the doomed attempt. (Real browsers keep Web Speech primary; it genuinely
+    // works there.)
+    if (!Ctor || electron) {
       if (serverAvailable) void toggleServer();
       return;
     }
@@ -462,12 +464,12 @@ export const ComposerMicButton = ({
       // user can try again, and let the next event reconcile state.
       transitionRef.current = false;
     }
-  }, [isListening, Ctor, serverAvailable, toggleServer]);
+  }, [isListening, Ctor, electron, serverAvailable, toggleServer]);
 
   // ⌘⌥V toggles dictation from anywhere — same as clicking the button. Enabled
-  // whenever dictation could run (Web Speech OR the server path) and the
-  // composer isn't disabled, so the chord is inert when it can't do anything.
-  useVoiceDictationHotkey(toggle, enableHotkey && (Boolean(Ctor) || serverAvailable) && !disabled);
+  // only while a dictation path can run and the composer isn't disabled, so
+  // the chord is inert when it can't do anything.
+  useVoiceDictationHotkey(toggle, enableHotkey && canDictate && !disabled);
 
   // While listening, Enter commits (end the take, keep the text) and Esc
   // cancels (end the take, discard back to the pre-dictation snapshot). Bound in
@@ -510,7 +512,7 @@ export const ComposerMicButton = ({
     return () => window.removeEventListener("keydown", handler, true);
   }, [isListening, toggle]);
 
-  if (!Ctor && !serverAvailable) return null;
+  if (!canDictate) return null;
 
   // Stable accessible name with aria-pressed signals toggle state to
   // screen readers. Error text takes over the tooltip when set.

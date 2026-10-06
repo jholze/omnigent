@@ -4,7 +4,8 @@
 // Web Speech mode: the button toggles a SpeechRecognition session; final
 // transcripts are emitted via onTranscript. It renders nothing when the
 // browser has no SpeechRecognition constructor AND the server offers no
-// dictation. None of this is e2e-testable (CI has no real mic / Web Speech
+// dictation — likewise in the Electron shell, whose constructor has no
+// backend, whenever the server offers none. None of this is e2e-testable (CI has no real mic / Web Speech
 // engine), so it's pinned here by stubbing the global SpeechRecognition
 // constructor with a fake whose addEventListener captures the handlers the
 // test then fires. getUserMedia (used only for the visualizer) is stubbed to
@@ -21,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { CapabilitiesContext } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import type { DictationSessionEvents } from "@/lib/dictation";
+import { isMacPlatform } from "@/lib/hotkeys";
 import { ComposerMicButton } from "./ComposerMicButton";
 
 // Controllable DictationSession stand-in for the server-mode tests. The
@@ -371,6 +373,29 @@ async function clickMic() {
   });
 }
 
+/** Run `body` with the Electron preload bridge present, as the desktop shell exposes it. */
+async function inElectronShell(body: () => Promise<void> | void) {
+  (window as unknown as Record<string, unknown>).omnigentDesktop = { kind: "electron" };
+  try {
+    await body();
+  } finally {
+    delete (window as unknown as Record<string, unknown>).omnigentDesktop;
+  }
+}
+
+/** The platform's dictation chord: ⌘⌥V on macOS, Ctrl+Alt+V elsewhere. */
+function dictationChord() {
+  const mac = isMacPlatform();
+  return new KeyboardEvent("keydown", {
+    code: "KeyV",
+    altKey: true,
+    metaKey: mac,
+    ctrlKey: !mac,
+    bubbles: true,
+    cancelable: true,
+  });
+}
+
 describe("ComposerMicButton (server dictation)", () => {
   it("renders the button when the server advertises dictation", () => {
     renderServerMode();
@@ -613,6 +638,50 @@ describe("ComposerMicButton (server dictation)", () => {
     } finally {
       delete (window as unknown as Record<string, unknown>).omnigentDesktop;
     }
+  });
+
+  it("in Electron without server dictation, offers no mic", async () => {
+    // Electron's Web Speech has no backend, so without the server fallback no
+    // dictation path can work — a mic there could only fail when clicked.
+    await inElectronShell(() => {
+      render(
+        <CapabilitiesContext.Provider value={NO_DICTATION_INFO}>
+          <ComposerMicButton onTranscript={vi.fn()} />
+        </CapabilitiesContext.Provider>,
+      );
+      expect(screen.queryByRole("button", { name: "Voice dictation" })).toBeNull();
+    });
+  });
+
+  it("in Electron without server dictation, the dictation hotkey is inert", async () => {
+    await inElectronShell(async () => {
+      render(
+        <CapabilitiesContext.Provider value={NO_DICTATION_INFO}>
+          <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
+        </CapabilitiesContext.Provider>,
+      );
+      await act(async () => {
+        window.dispatchEvent(dictationChord());
+      });
+      expect(startSpy).not.toHaveBeenCalled();
+      expect(sessionStartMock).not.toHaveBeenCalled();
+      expect(showToastMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("in Electron with server dictation, the dictation hotkey starts a server take", async () => {
+    await inElectronShell(async () => {
+      render(
+        <CapabilitiesContext.Provider value={DICTATION_INFO}>
+          <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
+        </CapabilitiesContext.Provider>,
+      );
+      await act(async () => {
+        window.dispatchEvent(dictationChord());
+      });
+      expect(sessionStartMock).toHaveBeenCalledTimes(1);
+      expect(startSpy).not.toHaveBeenCalled();
+    });
   });
 
   it("Enter while listening ends the server take via stop (keeps the tail)", async () => {
