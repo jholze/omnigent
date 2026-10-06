@@ -637,10 +637,7 @@ class LLMRoutingClient:
                 )
                 raw_model = model
                 model = flat[0]
-                rationale = (
-                    f"The selected model is not available in this session; "
-                    f"using {model}."
-                )
+                rationale = f"The selected model is not available in this session; using {model}."
             else:
                 self.last_error = "no candidate models were available"
                 return None
