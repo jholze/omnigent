@@ -288,10 +288,9 @@ async def teardown_all_opencode_native_servers() -> None:
 async def reap_native_session(session_id: str) -> None:
     """Cancel a session's transcript forwarder and close any native server it owns.
 
-    Shared by the delete route's spawn-family walk, the reconnect reconciler, and
-    failed-spawn teardown. Reaps both the OpenCode server and the Codex app-server
-    so a reaped native session can never orphan either subprocess; each teardown
-    is a no-op when the session has no server of that kind.
+    Reaps both the OpenCode server and the Codex app-server so a reaped native
+    session can never orphan either subprocess; each teardown is a no-op when the
+    session has no server of that kind.
 
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.

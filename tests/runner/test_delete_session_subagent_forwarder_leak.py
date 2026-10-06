@@ -11,8 +11,6 @@ drained is still reaped.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import uuid
 from collections.abc import AsyncIterator
 
@@ -24,16 +22,11 @@ from omnigent.runner import create_runner_app
 from omnigent.runner import subagent_work as sw
 from omnigent.runner.native import orchestration as orch
 from tests.runner.helpers import NullServerClient
-
-
-class _FakeAppServer:
-    """Stand-in for a native app-server whose close() the teardown must await."""
-
-    def __init__(self) -> None:
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
+from tests.runner.native_forwarder_leak_helpers import (
+    FakeAppServer,
+    drain_forwarder,
+    register_forwarder,
+)
 
 
 @pytest.fixture
@@ -46,17 +39,6 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://runner") as c:
         yield c
-
-
-async def _forever() -> None:
-    await asyncio.sleep(3600)
-
-
-def _register_forwarder(session_id: str) -> asyncio.Task[object]:
-    task: asyncio.Task[object] = asyncio.ensure_future(_forever())
-    task.set_name(f"claude-forwarder-{session_id}")
-    orch._register_auto_forwarder_task(session_id, task)
-    return task
 
 
 async def test_delete_parent_cancels_descendant_native_forwarders(
@@ -82,13 +64,13 @@ async def test_delete_parent_cancels_descendant_native_forwarders(
         wrapper_label="claude-code-native-ui",
     )
 
-    parent_task = _register_forwarder(parent)
-    child_task = _register_forwarder(child)
-    grand_task = _register_forwarder(grand)
+    parent_task = register_forwarder(parent)
+    child_task = register_forwarder(child)
+    grand_task = register_forwarder(grand)
 
     # A native descendant whose forwarder never adopted its server leaves the
     # app-server registered; reaping the descendant must close it too.
-    child_app_server = _FakeAppServer()
+    child_app_server = FakeAppServer()
     orch._AUTO_CODEX_APP_SERVERS[child] = child_app_server  # type: ignore[assignment]
 
     cleaned: list[str] = []
@@ -126,12 +108,9 @@ async def test_delete_parent_cancels_descendant_native_forwarders(
     finally:
         registry.cleanup_session = original_cleanup  # type: ignore[method-assign]
         orch._AUTO_CODEX_APP_SERVERS.pop(child, None)
-        for sid, task in ((parent, parent_task), (child, child_task), (grand, grand_task)):
-            orch._AUTO_FORWARDER_TASKS.pop(sid, None)
-            if not task.done():
-                task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await drain_forwarder(parent, parent_task)
+        await drain_forwarder(child, child_task)
+        await drain_forwarder(grand, grand_task)
         sw.unregister_child_session(child)
         sw.unregister_child_session(grand)
         sw.unregister_subagent_work(child_session_id=child)
@@ -166,8 +145,8 @@ async def test_delete_parent_cancels_drained_child_native_forwarder(
     assert sw.get_subagent_work(drained) is None
     assert sw.list_subagent_work(parent) == []
 
-    parent_task = _register_forwarder(parent)
-    drained_task = _register_forwarder(drained)
+    parent_task = register_forwarder(parent)
+    drained_task = register_forwarder(drained)
 
     cleaned: list[str] = []
     registry = app.state.session_resource_registry
@@ -191,10 +170,6 @@ async def test_delete_parent_cancels_drained_child_native_forwarder(
         assert drained in cleaned, "drained child did not get per-session resource cleanup"
     finally:
         registry.cleanup_session = original_cleanup  # type: ignore[method-assign]
-        for sid, task in ((parent, parent_task), (drained, drained_task)):
-            orch._AUTO_FORWARDER_TASKS.pop(sid, None)
-            if not task.done():
-                task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await drain_forwarder(parent, parent_task)
+        await drain_forwarder(drained, drained_task)
         sw.unregister_child_session(drained)

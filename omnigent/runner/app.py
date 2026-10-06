@@ -3234,13 +3234,26 @@ def create_runner_app(
         )
 
     async def _reap_deleted_session(target_session_id: str) -> None:
-        """Tear a confirmed-deleted session down fully: forwarder and native
-        servers, harness process, panes and envs, and spawn-family state."""
+        """Release the native runtime a confirmed-deleted session leaves behind.
+
+        Covers a session the runner never gets its own DELETE for (a tree-deleted
+        descendant or one deleted while the tunnel was down): forwarder, both
+        native servers, routing endpoint (a live loopback server plus its on-disk
+        bearer token), harness process, resource registry, and spawn-family state.
+        It does not replay the delete route's per-session cache eviction, which
+        only frees in-memory bookkeeping.
+        """
+        from omnigent.runner.subagent_routing import shutdown_session_router
+        from omnigent.runner.tool_dispatch import forget_spawn_family
+
         await _native_runtime.reap_native_session(target_session_id)
         if process_manager is not None:
             await process_manager.release(target_session_id)
         if resource_registry is not None:
             await resource_registry.cleanup_session(target_session_id)
+        await asyncio.to_thread(shutdown_session_router, target_session_id)
+        forget_session_routing_class(target_session_id)
+        forget_spawn_family(target_session_id)
         unregister_child_session(target_session_id)
         unregister_subagent_work_for_session(target_session_id)
 
@@ -7380,32 +7393,44 @@ def create_runner_app(
 
     async def _reconcile_forwarders_after_reconnect() -> None:
         # Sessions deleted while the tunnel was down never got runner cleanup, so
-        # their forwarders keep POSTing to dead sessions. Only a definitive GET
-        # 404 reaps one; a transient error or a 200 leaves it running.
-        async def _deleted_during_gap(forwarder_session_id: str) -> bool:
+        # their forwarders keep POSTing to dead sessions and their native servers
+        # stay up. Scan every session still holding a forwarder or a native server
+        # (a forwarder can crash out of its registry while its server lingers).
+        # Only a definitive GET 404 reaps one; a transient error or a 200 leaves
+        # it in place.
+        async def _deleted_during_gap(native_session_id: str) -> bool:
             try:
                 resp = await server_client.get(
-                    f"/v1/sessions/{forwarder_session_id}",
+                    f"/v1/sessions/{native_session_id}",
                     params=_SESSION_METADATA_PARAMS,
                     timeout=10.0,
                 )
-            except (httpx.HTTPError, RuntimeError):
+            except (httpx.HTTPError, RuntimeError) as exc:
+                _logger.debug(
+                    "Reconnect reconciler probe failed for %s; leaving it in place: %r",
+                    native_session_id,
+                    exc,
+                )
                 return False
             return resp.status_code == 404
 
-        forwarder_ids = list(_native_runtime._AUTO_FORWARDER_TASKS)
-        deleted_flags = await asyncio.gather(*(_deleted_during_gap(sid) for sid in forwarder_ids))
-        for forwarder_session_id, deleted in zip(forwarder_ids, deleted_flags, strict=True):
+        native_session_ids = sorted(
+            set(_native_runtime._AUTO_FORWARDER_TASKS)
+            | set(_native_runtime._AUTO_CODEX_APP_SERVERS)
+            | set(_native_runtime._AUTO_OPENCODE_SERVERS)
+        )
+        deleted_flags = await asyncio.gather(
+            *(_deleted_during_gap(sid) for sid in native_session_ids)
+        )
+        for native_session_id, deleted in zip(native_session_ids, deleted_flags, strict=True):
             if not deleted:
                 continue
             _logger.info(
                 "Reaping session deleted during disconnect: %s",
-                forwarder_session_id,
-                extra={"session_id": forwarder_session_id},
+                native_session_id,
+                extra={"session_id": native_session_id},
             )
-            await _reap_deleted_session(forwarder_session_id)
-
-    app.state.reconcile_forwarders_after_reconnect = _reconcile_forwarders_after_reconnect
+            await _reap_deleted_session(native_session_id)
 
     async def _catch_up_scan() -> None:
         recreated_prompts = pending_approvals.notify_server_reconnect()
@@ -7436,7 +7461,14 @@ def create_runner_app(
         # those stranded wakes or the parent never learns its child finished.
         _retry_stranded_wakes()
         # Reap forwarders whose sessions were deleted while the tunnel was down.
-        await _reconcile_forwarders_after_reconnect()
+        try:
+            await _reconcile_forwarders_after_reconnect()
+        except Exception:  # noqa: BLE001 — best-effort; never block catch-up.
+            _logger.warning(
+                "Forwarder reconciliation failed after reconnect",
+                exc_info=True,
+                extra={"session_id": runner_primary_session_id()},
+            )
         for session_id in list(_session_histories):
             if _is_native_harness(session_id):
                 continue
