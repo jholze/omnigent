@@ -1,14 +1,11 @@
 """The viewer's local timezone, remembered per session.
 
-A web client reports its IANA zone on every user message it sends
-(``client_timezone`` on ``POST /v1/sessions/{id}/events``); the server
-validates it and forwards it on the turn body. The runner keeps the latest
-value per session so the tools and prompt of that session can speak in the
-user's wall-clock time: ``sys_scheduled_task_create`` evaluates a schedule in
-this zone when the model omits one, and the composed instructions tell the
-model which zone the user is in. Nothing is remembered for sessions whose
-clients never report a zone (CLI, SDK), so those keep the existing UTC
-defaults.
+A web client reports its IANA zone on each user message (``client_timezone``
+on ``POST /v1/sessions/{id}/events``); the server validates it and the runner
+keeps the latest value per session. The session's tools and prompt then speak
+in the user's wall clock: ``sys_scheduled_task_create`` defaults an omitted
+schedule zone to it, and the composed instructions name it. Sessions whose
+clients never report a zone (CLI, SDK) keep the UTC defaults.
 """
 
 from __future__ import annotations

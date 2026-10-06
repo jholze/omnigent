@@ -154,6 +154,26 @@ async def test_create_keeps_an_explicit_timezone_over_the_client_zone() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_client_timezones")
+@pytest.mark.parametrize("empty_timezone", [None, ""])
+async def test_create_with_a_degenerate_timezone_uses_the_client_zone(
+    empty_timezone: str | None,
+) -> None:
+    """A null/empty explicit zone falls back to the client zone, not a 400."""
+    remember_client_timezone("conv_1", "America/Los_Angeles")
+    client = _RecordingClient()
+
+    await _execute_scheduled_task_tool(
+        "sys_scheduled_task_create",
+        json.dumps({**_CREATE_ARGS, "timezone": empty_timezone}),
+        server_client=client,
+        conversation_id="conv_1",
+    )
+
+    assert client.calls[0][2] == {**_CREATE_ARGS, "timezone": "America/Los_Angeles"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_client_timezones")
 @pytest.mark.parametrize("conversation_id", ["conv_without_client_zone", None])
 async def test_create_without_a_client_zone_leaves_the_server_default(
     conversation_id: str | None,

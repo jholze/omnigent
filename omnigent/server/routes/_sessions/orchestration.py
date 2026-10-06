@@ -6658,14 +6658,15 @@ async def _forward_event_to_runner(
         runner_body["reasoning"] = {"effort": conv.reasoning_effort}
     # The sending client's local zone, so the agent reads unqualified times in
     # the user's wall clock. A zone this host's tz database cannot resolve is
-    # dropped rather than failing the send: the runner falls back to UTC.
+    # dropped rather than failing the send; the runner keeps the last zone it
+    # accepted for the session, or UTC when it has none.
     if body.client_timezone is not None:
         if is_valid_timezone(body.client_timezone):
             runner_body["client_timezone"] = body.client_timezone
         else:
             _logger.debug(
                 "Ignoring unknown client_timezone %r for session=%s",
-                body.client_timezone,
+                body.client_timezone[:64],
                 session_id,
                 extra={"session_id": session_id},
             )

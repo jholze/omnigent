@@ -4701,7 +4701,9 @@ async def _execute_scheduled_task_tool(
         elif tool_name == "sys_scheduled_task_create":
             payload = {k: args[k] for k in _SCHEDULED_TASK_CREATE_FIELDS if k in args}
             client_timezone = client_timezone_for(conversation_id)
-            if "timezone" not in payload and client_timezone is not None:
+            # An omitted zone, and a degenerate explicit null/empty one, both
+            # fall back to the session's remembered client zone.
+            if not payload.get("timezone") and client_timezone is not None:
                 payload["timezone"] = client_timezone
             resp = await server_client.post("/v1/scheduled-tasks", json=payload, timeout=30.0)
         elif tool_name in ("sys_scheduled_task_update", "sys_scheduled_task_delete"):

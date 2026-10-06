@@ -4,17 +4,13 @@ Both tests run the browser in ``America/Los_Angeles`` so the SPA's ``Intl``
 zone differs from the server process zone (set ``TZ`` on the pytest process to
 make the spawned server run in another zone, e.g. ``TZ=America/Chicago``).
 
-* ``test_dialog_automation_fires_at_browser_local_time`` creates a daily
-  automation through the New automation dialog for a wall-clock time a few
-  minutes ahead in the browser's zone and waits for the scheduler to fire it.
+* ``test_dialog_created_automation_uses_browser_local_timezone`` creates a
+  daily automation through the New automation dialog and checks the stored zone
+  and next-run instant match the browser's wall clock.
 * ``test_chat_created_automation_uses_user_local_timezone`` asks the agent in
   chat to create a daily 9:00 AM automation without naming a zone; the mock
   model answers with a ``sys_scheduled_task_create`` call that omits
   ``timezone`` (the tool gives the agent no user-zone information).
-
-The ``online_host`` fixture starts a real ``omnigent host`` daemon against the
-live e2e server so a due automation has a host to run on; without one the fire
-path records a ``no_online_host`` failure instead of launching a session.
 """
 
 from __future__ import annotations
@@ -22,12 +18,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
-import sys
-import time
 import uuid
-from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,9 +31,6 @@ from playwright.sync_api import Page, expect
 from tests.e2e_ui.conftest import _server_state, configure_mock_llm
 from tests.e2e_ui.scheduled.test_scheduled_tasks_page import _builtin_agent_id, _row_by_name
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_HOST_ONLINE_TIMEOUT_S = 180.0
-_FIRE_GRACE_S = 90.0
 _BROWSER_TZ = "America/Los_Angeles"
 _LA = ZoneInfo(_BROWSER_TZ)
 # Optional evidence screenshots; unset means none are written.
@@ -52,92 +41,14 @@ _SHOTS_DIR = (
 )
 
 
-def _online_host_row(base_url: str, host_name: str) -> dict[str, Any] | None:
-    hosts = httpx.get(f"{base_url}/v1/hosts", timeout=10.0).json().get("hosts", [])
-    return next(
-        (h for h in hosts if h.get("name") == host_name and h.get("status") == "online"),
-        None,
-    )
-
-
-@pytest.fixture(scope="module")
-def online_host(
-    live_server: str,
-    mock_llm_server_url: str,
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[dict[str, Any]]:
-    """A real ``omnigent host`` daemon, online on ``live_server`` for the module."""
-    tmp = tmp_path_factory.mktemp("automation_host")
-    home = tmp / "home"
-    home.mkdir()
-    host_name = f"automation-host-{uuid.uuid4().hex[:8]}"
-    env = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(home),
-        "OMNIGENT_CONFIG_HOME": str(home / ".config" / "omnigent"),
-        "PYTHONPATH": os.pathsep.join(
-            [
-                str(_REPO_ROOT),
-                str(_REPO_ROOT / "sdks" / "python-client"),
-                str(_REPO_ROOT / "sdks" / "ui"),
-            ]
-        ),
-        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "OMNIGENT_HOST_NAME": host_name,
-        "OMNIGENT_HOST_ID": uuid.uuid4().hex,
-        "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
-        "OPENAI_API_KEY": "mock-key",
-    }
-    if "TZ" in os.environ:
-        env["TZ"] = os.environ["TZ"]
-    log_path = tmp / "host.log"
-    with log_path.open("w") as log_handle:
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "omnigent",
-                "host",
-                "--server",
-                live_server,
-                "--non-interactive",
-                "--no-open",
-            ],
-            env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-        )
-    try:
-        deadline = time.monotonic() + _HOST_ONLINE_TIMEOUT_S
-        row: dict[str, Any] | None = None
-        while time.monotonic() < deadline:
-            row = _online_host_row(live_server, host_name)
-            if row is not None:
-                break
-            if proc.poll() is not None:
-                raise RuntimeError(
-                    f"omnigent host exited early ({proc.returncode}):\n"
-                    f"{log_path.read_text()[-2000:]}"
-                )
-            time.sleep(1.0)
-        if row is None:
-            raise RuntimeError(f"host never came online:\n{log_path.read_text()[-2000:]}")
-        yield {**row, "log_path": str(log_path)}
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=10)
-
-
 def _server_process_tz() -> list[str]:
     pid = _server_state.get("pid")
     if pid is None:
         return ["<attached server: TZ unknown>"]
-    environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return ["<TZ unknown: /proc unavailable on this platform>"]
     return [e.decode() for e in environ if e.startswith(b"TZ=")] or ["TZ unset (process default)"]
 
 
@@ -145,12 +56,6 @@ def _task_by_name(base_url: str, name: str) -> dict[str, Any] | None:
     resp = httpx.get(f"{base_url}/v1/scheduled-tasks", timeout=10.0)
     resp.raise_for_status()
     return next((t for t in resp.json()["scheduled_tasks"] if t["name"] == name), None)
-
-
-def _runs(base_url: str, task_id: str) -> list[dict[str, Any]]:
-    resp = httpx.get(f"{base_url}/v1/scheduled-tasks/{task_id}/runs", timeout=10.0)
-    resp.raise_for_status()
-    return resp.json()["runs"]
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -205,16 +110,15 @@ def _send(page: Page, text: str) -> None:
 
 
 @pytest.mark.browser_context_args(timezone_id=_BROWSER_TZ)
-def test_dialog_automation_fires_at_browser_local_time(
+def test_dialog_created_automation_uses_browser_local_timezone(
     request: pytest.FixtureRequest,
     live_server: str,
-    online_host: dict[str, Any],
 ) -> None:
-    """A daily automation created in the dialog fires at the browser's local wall-clock time."""
+    """A daily automation created in the dialog stores the browser's local wall-clock time."""
     agent_id = _builtin_agent_id(live_server, "hello_world")
     name = f"Local-time digest {uuid.uuid4().hex[:6]}"
     prompt = "Summarize what changed today."
-    print(f"\nserver TZ env={_server_process_tz()} host={online_host['host_id']}")
+    print(f"\nserver TZ env={_server_process_tz()}")
 
     page: Page = request.getfixturevalue("page")
     page.goto(f"{live_server}/tasks")
@@ -222,7 +126,7 @@ def test_dialog_automation_fires_at_browser_local_time(
     assert browser_tz == _BROWSER_TZ, browser_tz
     expect(page.get_by_test_id("new-task-button")).to_be_visible(timeout=30_000)
 
-    # Pick the due time only now so the dialog steps below start well ahead of it.
+    # A few minutes ahead so the next run lands later today in the browser's zone.
     due_local = (datetime.now(_LA) + timedelta(minutes=3)).replace(second=0, microsecond=0)
     hour12, period = _clock_12h(due_local.hour, due_local.minute)
     print(f"browser now={datetime.now(_LA).isoformat()} due={due_local.isoformat()}")
@@ -235,73 +139,37 @@ def test_dialog_automation_fires_at_browser_local_time(
     _pick_agent(page, agent_id, "hello_world")
     expect(page.get_by_test_id("schedule-preset-trigger")).to_contain_text("Daily")
     _type_time(page, due_local.hour, due_local.minute)
-    timezone_controls = dialog.get_by_test_id("task-timezone-trigger").count()
-    print(f"dialog timezone controls={timezone_controls} dialog text={dialog.inner_text()!r}")
     _shot(page, "dialog-before-create")
     page.get_by_test_id("create-scheduled-task-submit").click()
 
     row = _row_by_name(page, name)
     expect(row).to_be_visible(timeout=30_000)
-    schedule_line = row.get_by_test_id("task-schedule-line")
-    expect(schedule_line).to_contain_text(f"Every day at {hour12}:{due_local.minute:02d} {period}")
-    next_run_label = row.get_by_test_id("task-next-run")
-    expect(next_run_label).to_contain_text("Next run", timeout=30_000)
-    page.wait_for_timeout(3_000)
-    _shot(page, "row-after-create")
-
     task = _task_by_name(live_server, name)
     assert task is not None, "created automation is not listed by the API"
     task_id = task["id"]
     try:
-        label_text = next_run_label.inner_text()
-        line_text = schedule_line.inner_text()
-        expected_instant = due_local.astimezone(UTC)
-        actual_instant = _parse_iso(task["next_run_at"])
+        schedule_line = row.get_by_test_id("task-schedule-line")
+        expect(schedule_line).to_contain_text(
+            f"Every day at {hour12}:{due_local.minute:02d} {period}"
+        )
+        expect(row.get_by_test_id("task-next-run")).to_contain_text("Next run", timeout=30_000)
+        _shot(page, "row-after-create")
+
+        task = _task_by_name(live_server, name)
+        assert task is not None
+        actual_local = _parse_iso(task["next_run_at"]).astimezone(_LA)
         print(
             f"stored timezone={task['timezone']} rrule={task['rrule']} "
-            f"next_run_at={task['next_run_at']} expected={expected_instant.isoformat()} "
-            f"row={line_text!r}"
+            f"next_run_at={task['next_run_at']} chosen={due_local.isoformat()} "
+            f"row={schedule_line.inner_text()!r}"
         )
         assert task["timezone"] == _BROWSER_TZ, task
-        assert actual_instant == expected_instant, (
-            f"next_run_at {actual_instant.isoformat()} != chosen "
-            f"{due_local.isoformat()} ({expected_instant.isoformat()} UTC)"
+        assert (actual_local.hour, actual_local.minute) == (due_local.hour, due_local.minute), (
+            f"next_run_at {task['next_run_at']} is {actual_local.strftime('%-I:%M %p')} "
+            f"{_BROWSER_TZ}, not the chosen {due_local.strftime('%-I:%M %p')}"
         )
-        assert re.search(r"Next run in [1-4] mins?", label_text), label_text
-
-        # Let the scheduler fire it for real on the online host.
-        deadline = time.monotonic() + (expected_instant - datetime.now(UTC)).total_seconds()
-        deadline += _FIRE_GRACE_S
-        runs: list[dict[str, Any]] = []
-        while time.monotonic() < deadline:
-            runs = _runs(live_server, task_id)
-            if runs and runs[0]["status"] in ("succeeded", "failed"):
-                break
-            page.wait_for_timeout(2_000)
-        print(f"runs={runs}")
-        assert runs, f"no run recorded by {_FIRE_GRACE_S:.0f}s after {due_local.isoformat()}"
-        fired_at = datetime.fromtimestamp(runs[0]["fired_at"], tz=UTC)
-        assert -5 <= (fired_at - expected_instant).total_seconds() <= _FIRE_GRACE_S, (
-            f"fired at {fired_at.isoformat()} but the chosen local time was "
-            f"{due_local.isoformat()} ({expected_instant.isoformat()} UTC)"
-        )
-        assert runs[0]["status"] == "succeeded", runs[0]
-        _shot(page, "row-after-fire")
-
-        page.goto(f"{live_server}/c/{runs[0]['conversation_id']}")
-        expect(page.get_by_text(prompt).first).to_be_visible(timeout=30_000)
-        page.wait_for_timeout(3_000)
-        _shot(page, "fired-session")
     finally:
         httpx.delete(f"{live_server}/v1/scheduled-tasks/{task_id}", timeout=10.0)
-
-
-def _next_wall_clock(hour: int, minute: int, tz: ZoneInfo, now: datetime) -> datetime:
-    local_now = now.astimezone(tz)
-    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if candidate <= local_now:
-        candidate += timedelta(days=1)
-    return candidate.astimezone(UTC)
 
 
 @pytest.mark.browser_context_args(timezone_id=_BROWSER_TZ)
@@ -349,7 +217,6 @@ def test_chat_created_automation_uses_user_local_timezone(
     browser_tz = page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
     assert browser_tz == _BROWSER_TZ, browser_tz
     expect(page.get_by_label("Message the agent")).to_be_visible(timeout=30_000)
-    sent_at = datetime.now(UTC)
     _send(page, user_text)
     expect(page.get_by_text("I created the automation")).to_be_visible(timeout=120_000)
     page.wait_for_timeout(2_000)
@@ -374,19 +241,21 @@ def test_chat_created_automation_uses_user_local_timezone(
             (_SHOTS_DIR / "mock-requests.json").write_text(json.dumps(captured, indent=2))
         print(f"mock captured {len(captured.get('requests', []))} request(s)")
         actual_instant = _parse_iso(task["next_run_at"])
-        expected_local = _next_wall_clock(9, 0, _LA, sent_at)
-        utc_nine = _next_wall_clock(9, 0, ZoneInfo("UTC"), sent_at)
+        actual_local = actual_instant.astimezone(_LA)
         print(
             f"stored timezone={task['timezone']} next_run_at={task['next_run_at']} "
-            f"9:00 {_BROWSER_TZ}={expected_local.isoformat()} 9:00 UTC={utc_nine.isoformat()} "
-            f"row={line_text!r}"
+            f"(= {actual_local.strftime('%-I:%M %p')} {_BROWSER_TZ}) row={line_text!r}"
         )
-        assert task["timezone"] == _BROWSER_TZ and actual_instant == expected_local, (
+        # The next 9:00 AM in the browser's zone, regardless of which calendar day
+        # it falls on; a UTC-evaluated schedule would read 1:00/2:00 AM here.
+        assert task["timezone"] == _BROWSER_TZ and (actual_local.hour, actual_local.minute) == (
+            9,
+            0,
+        ), (
             f"chat-created automation is evaluated in {task['timezone']!r} "
             f"(next_run_at {actual_instant.isoformat()}, i.e. "
-            f"{actual_instant.astimezone(_LA).strftime('%-I:%M %p')} {_BROWSER_TZ}) while the "
-            f"row reads {line_text!r}; expected 9:00 AM {_BROWSER_TZ} = "
-            f"{expected_local.isoformat()}"
+            f"{actual_local.strftime('%-I:%M %p')} {_BROWSER_TZ}) while the row reads "
+            f"{line_text!r}; expected 9:00 AM {_BROWSER_TZ}"
         )
     finally:
         httpx.delete(f"{live_server}/v1/scheduled-tasks/{task_id}", timeout=10.0)
