@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 import sys
 from collections.abc import Callable, Iterable
 
 import pytest
 
 from omnigent.util.open_file_limit import (
+    _MACOS_OPEN_MAX,
     DEFAULT_SOFT_OPEN_FILE_LIMIT,
     OpenFileLimit,
     raise_soft_open_file_limit,
@@ -111,6 +114,20 @@ def test_rejected_attempts_warn_and_keep_the_inherited_limit(
     assert "could not raise soft open-file limit from 256 (hard unlimited)" in caplog.text
 
 
+def test_rejected_attempt_above_open_max_is_informational(
+    fake_resource: Callable[..., _FakeResource], caplog: pytest.LogCaptureFixture
+) -> None:
+    """An inherited limit already above OPEN_MAX leaves headroom, so a rejected raise is INFO."""
+    fake = fake_resource(12000, _INFINITY, reject={DEFAULT_SOFT_OPEN_FILE_LIMIT})
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        result = raise_soft_open_file_limit()
+
+    assert result == OpenFileLimit(12000, _INFINITY)
+    assert fake.calls == [(65536, _INFINITY)]
+    assert [r.levelno for r in caplog.records if r.name == _LOGGER_NAME] == [logging.INFO]
+
+
 def test_platform_without_rlimits_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows has no ``resource`` module; startup must not depend on it."""
     monkeypatch.setitem(sys.modules, "resource", None)
@@ -119,22 +136,35 @@ def test_platform_without_rlimits_is_a_no_op(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_real_process_raises_its_own_soft_limit() -> None:
-    """Against the live kernel: a lowered soft limit comes back up to the hard-bounded target."""
-    resource = pytest.importorskip("resource")
-    original = resource.getrlimit(resource.RLIMIT_NOFILE)
-    soft, hard = original
-    lowered = min(soft, 1024)
-    try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (lowered, hard))
+    """Against the live kernel: a process inheriting a soft limit of 256 raises it at startup.
 
-        result = raise_soft_open_file_limit()
-
-        expected = (
-            DEFAULT_SOFT_OPEN_FILE_LIMIT
-            if hard == resource.RLIM_INFINITY
-            else min(hard, DEFAULT_SOFT_OPEN_FILE_LIMIT)
-        )
-        assert result == OpenFileLimit(expected, hard)
-        assert resource.getrlimit(resource.RLIMIT_NOFILE) == (expected, hard)
-    finally:
-        resource.setrlimit(resource.RLIMIT_NOFILE, original)
+    Runs in a child so the rlimit mutation never touches the test runner.
+    """
+    pytest.importorskip("resource")
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, resource\n"
+            "from omnigent.util.open_file_limit import raise_soft_open_file_limit\n"
+            "_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+            "resource.setrlimit(resource.RLIMIT_NOFILE, (min(_soft, 256), hard))\n"
+            "raised = raise_soft_open_file_limit()\n"
+            "print(json.dumps([list(raised), list(resource.getrlimit(resource.RLIMIT_NOFILE)),"
+            " hard == resource.RLIM_INFINITY]))\n",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    raised, live, hard_unlimited = json.loads(child.stdout)
+    soft, hard = live
+    # macOS may reject 65536 under an unlimited hard limit and settle on OPEN_MAX.
+    accepted = (
+        {DEFAULT_SOFT_OPEN_FILE_LIMIT, _MACOS_OPEN_MAX}
+        if hard_unlimited
+        else {min(hard, DEFAULT_SOFT_OPEN_FILE_LIMIT)}
+    )
+    assert raised == live
+    assert soft in accepted and soft > 256

@@ -68,7 +68,9 @@ def raise_soft_open_file_limit(target: int = DEFAULT_SOFT_OPEN_FILE_LIMIT) -> Op
             _describe(hard, infinity),
         )
         return OpenFileLimit(*resource.getrlimit(resource.RLIMIT_NOFILE))
-    _logger.warning(
+    # An inherited limit already at or above OPEN_MAX leaves ample headroom.
+    log = _logger.info if soft >= _MACOS_OPEN_MAX else _logger.warning
+    log(
         "could not raise soft open-file limit from %d (hard %s): %s; long sessions "
         "may run out of file descriptors",
         soft,

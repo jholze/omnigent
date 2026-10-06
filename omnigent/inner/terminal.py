@@ -1109,6 +1109,11 @@ class TerminalInstance:
     _probe_start_failures: int = field(default=0, repr=False)
     _probe_start_last_warned: float | None = field(default=None, repr=False)
     _probe_start_outage_warned: bool = field(default=False, repr=False)
+    # The threaded watcher and async probes such as is_alive() update the
+    # outage fields from different threads.
+    _probe_start_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     @property
     def tmux_target(self) -> str:
@@ -1935,31 +1940,45 @@ class TerminalInstance:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
 
-    def _record_probe_start_failure(self, probe: str, exc: BaseException) -> None:
-        """Log a probe that could not start, once per outage window rather than per attempt."""
-        now = time.monotonic()
-        if self._probe_start_outage_began is None:
-            self._probe_start_outage_began = now
-            self._probe_start_failures = 0
-            self._probe_start_outage_warned = False
-        self._probe_start_failures += 1
-        warn = (
-            self._probe_start_last_warned is None
-            or now - self._probe_start_last_warned >= _TMUX_PROBE_START_FAILURE_REWARN_SECONDS
-        )
-        if warn:
-            self._probe_start_last_warned = now
-            self._probe_start_outage_warned = True
+    def _record_probe_start_failure(
+        self, probe: str, exc: BaseException, *, retrying: bool = True
+    ) -> None:
+        """Log a probe that could not start, once per outage window rather than per attempt.
+
+        :param retrying: Whether the caller is a watcher loop that waits
+            :meth:`_probe_start_retry_delay` and probes again. ``False`` for
+            one-shot callers such as :meth:`is_alive`.
+        """
+        with self._probe_start_lock:
+            now = time.monotonic()
+            began = self._probe_start_outage_began
+            if began is None:
+                began = now
+                self._probe_start_outage_began = now
+                self._probe_start_failures = 0
+                self._probe_start_outage_warned = False
+            self._probe_start_failures += 1
+            # The last-warned stamp persists across outages so flapping at the
+            # descriptor ceiling cannot re-warn more than once per window.
+            warn = (
+                self._probe_start_last_warned is None
+                or now - self._probe_start_last_warned >= _TMUX_PROBE_START_FAILURE_REWARN_SECONDS
+            )
+            if warn:
+                self._probe_start_last_warned = now
+                self._probe_start_outage_warned = True
+            failures = self._probe_start_failures
+            delay = self._probe_start_retry_delay()
         logger.log(
             logging.WARNING if warn else logging.DEBUG,
             "tmux %s probe could not start for terminal %s:%s; liveness remains unknown "
-            "(%d failed attempt(s) over %.1fs, retrying in %.1fs): %s",
+            "(%d failed attempt(s) over %.1fs%s): %s",
             probe,
             self.name,
             self.session_key,
-            self._probe_start_failures,
-            now - self._probe_start_outage_began,
-            self._probe_start_retry_delay(),
+            failures,
+            now - began,
+            f", retrying in {delay:.1f}s" if retrying else "",
             exc,
         )
 
@@ -1972,20 +1991,24 @@ class TerminalInstance:
 
     def _record_probe_started(self) -> None:
         """Close a start-failure outage once a probe process starts again."""
-        if self._probe_start_outage_began is None:
-            return
-        if self._probe_start_outage_warned:
+        with self._probe_start_lock:
+            began = self._probe_start_outage_began
+            if began is None:
+                return
+            warned = self._probe_start_outage_warned
+            failures = self._probe_start_failures
+            self._probe_start_outage_began = None
+            self._probe_start_failures = 0
+            self._probe_start_outage_warned = False
+        if warned:
             logger.info(
                 "tmux probes can start again for terminal %s:%s after %d failed attempt(s) "
                 "over %.1fs",
                 self.name,
                 self.session_key,
-                self._probe_start_failures,
-                time.monotonic() - self._probe_start_outage_began,
+                failures,
+                time.monotonic() - began,
             )
-        self._probe_start_outage_began = None
-        self._probe_start_failures = 0
-        self._probe_start_outage_warned = False
 
     async def _idle_watch_loop(
         self,
@@ -2492,7 +2515,7 @@ class TerminalInstance:
             )
         except OSError as exc:
             if _is_transient_tmux_process_start_error(exc):
-                self._record_probe_start_failure("liveness", exc)
+                self._record_probe_start_failure("liveness", exc, retrying=False)
                 return self.running
             self.running = False
             return False

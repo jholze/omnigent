@@ -430,3 +430,59 @@ def test_probe_start_flapping_stays_within_one_warning_per_window(
     assert levels.count(logging.WARNING) == 1
     assert levels.count(logging.INFO) == 1
     assert levels.count(logging.DEBUG) == 2
+
+
+def test_probe_start_bookkeeping_survives_concurrent_failures_and_recoveries(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The threaded watcher and async probes update the outage state concurrently.
+
+    A recovery clearing the outage between a failure's None-check and its
+    duration arithmetic used to raise TypeError and kill the watcher thread.
+    """
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    errors: list[BaseException] = []
+    start = threading.Barrier(2)
+
+    def fail_repeatedly() -> None:
+        start.wait()
+        try:
+            for _ in range(2000):
+                instance._record_probe_start_failure(
+                    "capture-pane", OSError(errno.EMFILE, "Too many open files", "tmux")
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def recover_repeatedly() -> None:
+        start.wait()
+        try:
+            for _ in range(2000):
+                instance._record_probe_started()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=fail_repeatedly, name="watcher"),
+        threading.Thread(target=recover_repeatedly, name="is_alive"),
+    ]
+    with caplog.at_level(logging.DEBUG, logger=terminal_mod.__name__):
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+    assert not errors, errors
+    assert all(not thread.is_alive() for thread in threads)
+    if instance._probe_start_outage_began is None:
+        assert instance._probe_start_failures == 0
+    else:
+        assert instance._probe_start_failures >= 1
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import errno
 import json
 import logging
 import os
@@ -40,12 +39,12 @@ from typing import Any
 import httpx
 import pytest
 
+from omnigent.native.fd_exhaustion import fd_exhaustion_errno
 from tests._helpers.live_server import isolated_local_server
 from tests._helpers.native_session import create_native_session
 
-# CI shells can carry an egress proxy; every HTTP call here targets 127.0.0.1.
-_http = httpx.Client(trust_env=False)
-
+#: launchd's inherited soft fd limit on the reported macOS environment.
+_INHERITED_SOFT_LIMIT = 256
 #: Fast poll so the exhaustion window covers many poll iterations.
 _POLL_INTERVAL_S = 0.05
 #: How long the fd table is kept pinned full (~ 30 poll iterations).
@@ -108,15 +107,8 @@ def _format_record(record: logging.LogRecord) -> str:
 
 
 def _fd_exhaustion_in_chain(exc: BaseException | None) -> bool:
-    """True if *exc* or its cause/context chain is an EMFILE/ENFILE OSError."""
-    seen: set[int] = set()
-    current = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, OSError) and current.errno in (errno.EMFILE, errno.ENFILE):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    """True if *exc* or its explicit cause chain is an EMFILE/ENFILE OSError."""
+    return exc is not None and fd_exhaustion_errno(exc) is not None
 
 
 def _fill_fd_table(ballast: list[int]) -> None:
@@ -126,9 +118,9 @@ def _fill_fd_table(ballast: list[int]) -> None:
             ballast.append(os.open(os.devnull, os.O_RDONLY))
 
 
-def _mirrored_texts(base_url: str, session_id: str) -> list[str]:
+def _mirrored_texts(http: httpx.Client, base_url: str, session_id: str) -> list[str]:
     """Return every text block committed to the conversation store."""
-    resp = _http.get(
+    resp = http.get(
         f"{base_url}/v1/sessions/{session_id}/items",
         params={"limit": 1000, "order": "asc"},
         timeout=30.0,
@@ -143,12 +135,14 @@ def _mirrored_texts(base_url: str, session_id: str) -> list[str]:
     ]
 
 
-def _wait_for_mirrored(base_url: str, session_id: str, needles: tuple[str, ...]) -> None:
+def _wait_for_mirrored(
+    http: httpx.Client, base_url: str, session_id: str, needles: tuple[str, ...]
+) -> None:
     """Block until every needle appears in a mirrored content block."""
     deadline = time.monotonic() + _MIRROR_DEADLINE_S
     texts: list[str] = []
     while time.monotonic() < deadline:
-        texts = _mirrored_texts(base_url, session_id)
+        texts = _mirrored_texts(http, base_url, session_id)
         if all(any(needle in text for text in texts) for needle in needles):
             return
         time.sleep(0.2)
@@ -182,7 +176,11 @@ def _seed_transcript(bridge_dir: Path) -> Path:
 
 
 async def _drive_forwarder_through_fd_exhaustion(
-    base_url: str, session_id: str, bridge_dir: Path, transcript_path: Path
+    http: httpx.Client,
+    base_url: str,
+    session_id: str,
+    bridge_dir: Path,
+    transcript_path: Path,
 ) -> None:
     """Run the real forwarder loop through a genuine fd-exhaustion window.
 
@@ -209,7 +207,7 @@ async def _drive_forwarder_through_fd_exhaustion(
     try:
         # 1. Baseline: the seeded turn mirrors into the conversation.
         await asyncio.to_thread(
-            _wait_for_mirrored, base_url, session_id, (_BASELINE_USER, _BASELINE_ASSISTANT)
+            _wait_for_mirrored, http, base_url, session_id, (_BASELINE_USER, _BASELINE_ASSISTANT)
         )
 
         # 2. The fault: exhaust the fd table for real and keep it pinned full
@@ -217,7 +215,9 @@ async def _drive_forwarder_through_fd_exhaustion(
         # slot otherwise).
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         saved_limits = (soft, hard)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (min(soft, 256), hard))
+        # Cap just above what the process already holds so ballast can still open.
+        cap = min(soft, max(_INHERITED_SOFT_LIMIT, len(os.listdir("/dev/fd")) + 32))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (cap, hard))
         _fill_fd_table(ballast)
         assert ballast, "fd ballast could not be established"
         with pytest.raises(OSError):
@@ -254,7 +254,7 @@ async def _drive_forwarder_through_fd_exhaustion(
             },
         )
         await asyncio.to_thread(
-            _wait_for_mirrored, base_url, session_id, (_RECOVERY_USER, _RECOVERY_ASSISTANT)
+            _wait_for_mirrored, http, base_url, session_id, (_RECOVERY_USER, _RECOVERY_ASSISTANT)
         )
     finally:
         task.cancel()
@@ -288,16 +288,18 @@ def test_fd_exhaustion_polls_do_not_storm_the_forwarder_error_log(tmp_path: Path
     fwd_logger = logging.getLogger("omnigent.harnesses.claude_native.forwarder")
     fwd_logger.addHandler(capture)
     try:
-        with isolated_local_server(tmp_path) as base_url:
-            session_id = str(
-                create_native_session(_http, base_url, harness="claude")["session_id"]
-            )
+        # CI shells can carry an egress proxy; every HTTP call here targets 127.0.0.1.
+        with (
+            isolated_local_server(tmp_path) as base_url,
+            httpx.Client(trust_env=False) as http,
+        ):
+            session_id = str(create_native_session(http, base_url, harness="claude")["session_id"])
             bridge_dir = prepare_bridge_dir(session_id, workspace=workspace)
             transcript_path = _seed_transcript(bridge_dir)
 
             asyncio.run(
                 _drive_forwarder_through_fd_exhaustion(
-                    base_url, session_id, bridge_dir, transcript_path
+                    http, base_url, session_id, bridge_dir, transcript_path
                 )
             )
     finally:

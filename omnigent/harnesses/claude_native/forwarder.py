@@ -1578,6 +1578,7 @@ async def forward_claude_transcript_to_session(
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
+                next_poll_delay = poll_interval_s
             except Exception as exc:
                 fd_errno = fd_exhaustion_errno(exc)
                 if fd_errno is None:
@@ -1591,6 +1592,8 @@ async def forward_claude_transcript_to_session(
                     now = time.monotonic()
                     if fd_exhausted_since is None:
                         fd_exhausted_since = now
+                    # The last-warned stamp persists across outages so flapping at
+                    # the descriptor ceiling cannot re-warn more than once per window.
                     rewarn = (
                         fd_exhaustion_last_warned is None
                         or now - fd_exhaustion_last_warned >= _FD_EXHAUSTION_REWARN_S
