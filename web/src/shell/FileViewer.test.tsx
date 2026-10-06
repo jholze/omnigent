@@ -1923,6 +1923,29 @@ describe("FileViewer Escape closes the active tab", () => {
   });
 });
 
+describe("FileViewer binary files", () => {
+  // Binary files render CodeViewer's "Preview not available" notice; Monaco
+  // would only show their bytes as replacement characters, so the diff toggle
+  // is suppressed even when the file is a changed file.
+  beforeEach(() => {
+    useCommentsMock.mockReturnValue(makeCommentsQuery([]));
+  });
+
+  it.each(["bundle.zip", "recording.mp4"])(
+    "suppresses the diff toggle for %s even when it is a changed file",
+    (path) => {
+      vi.mocked(useWorkspaceChangedFiles).mockReturnValue({
+        data: {
+          available: true,
+          data: [{ path, bytes: 10, modified_at: null, name: path, status: "modified" }],
+        },
+      } as ReturnType<typeof useWorkspaceChangedFiles>);
+      renderViewer({ open: true, path });
+      expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
+    },
+  );
+});
+
 describe("FileViewer 3D model files", () => {
   // Models render through CodeViewer's <ModelViewer> like images: they always
   // resolve to the source surface and have no diff representation, so the diff
