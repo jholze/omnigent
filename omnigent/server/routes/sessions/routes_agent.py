@@ -240,7 +240,9 @@ def register_agent_routes(
                 code=ErrorCode.INTERNAL_ERROR,
             )
         try:
-            bundle_bytes = artifact_store.get(agent.bundle_location)
+            bundle_bytes = await asyncio.to_thread(
+                artifact_store.get, agent.bundle_location
+            )
         except KeyError as exc:
             raise agent_bundle_missing_error(agent) from exc
         return Response(
@@ -355,7 +357,7 @@ def register_agent_routes(
         # Idempotency: same bundle content = no-op, unless the artifact store
         # lost the blob the row still names; re-uploading it is the restore path.
         if new_loc == agent.bundle_location:
-            if not artifact_store.exists(new_loc):
+            if not await asyncio.to_thread(artifact_store.exists, new_loc):
                 _logger.warning(
                     "Restoring an agent bundle lost from the artifact store",
                     extra=debug_event(
@@ -364,10 +366,10 @@ def register_agent_routes(
                         bundle_location=new_loc,
                     ),
                 )
-                artifact_store.put(new_loc, bundle_bytes)
+                await asyncio.to_thread(artifact_store.put, new_loc, bundle_bytes)
             return _to_agent_object(agent, agent_cache, mcp_servers_editable=True)
 
-        artifact_store.put(new_loc, bundle_bytes)
+        await asyncio.to_thread(artifact_store.put, new_loc, bundle_bytes)
         updated = await asyncio.to_thread(agent_store.update, agent.id, new_loc, user_id)
         if updated is None:
             raise OmnigentError(
