@@ -238,13 +238,14 @@ describe("FileViewer — diff fetch for files it never diffs", () => {
   });
 
   it("still requests the diff for a deleted changed text file", async () => {
-    // A deleted file has no readable content, so its metadata request fails, but
-    // it still diffs against its previous contents — the diff must be fetched
-    // rather than left disabled behind the pending-metadata gate.
+    // A deleted file's content request keeps retrying its 404, so its metadata
+    // stays pending; the diff must still be fetched (it diffs against previous
+    // contents) rather than wait behind the pending-metadata gate. Using the
+    // pending phase makes this fail if the deleted-file exception is removed.
     const queryClient = openChangedFile({
       path: "removed.txt",
       status: "deleted",
-      phase: "error",
+      phase: "loading",
     });
     expect(await diffRequests(queryClient)).toEqual([diffUrl("removed.txt")]);
   });

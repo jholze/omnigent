@@ -699,12 +699,9 @@ function FileViewerBody({
     (changedFiles.data?.data.some((f) => f.path === path) ?? false);
   const isDeletedFile =
     changedFiles.data?.data.some((f) => f.path === path && f.status === "deleted") ?? false;
-  // Prefetch the diff only once file classification settles. While the content
-  // request is still pending the checks above fall back to the extension, so a
-  // media/binary file typed only by its encoding would fetch a diff never shown;
-  // wait for its metadata to resolve (or fail) first. Deleted files have no
-  // readable content but still diff against their previous contents, so keep
-  // their diff enabled regardless.
+  // Enable the prefetch once file classification settles: while content is still
+  // pending the type checks fall back to the extension, so an encoding-only binary
+  // would fetch a diff never shown. Deleted files always diff against prior content.
   const diffQuery = useFileDiff(conversationId, path, {
     enabled: isDiffAvailable && (!fileQuery.isPending || isDeletedFile),
   });
