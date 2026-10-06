@@ -527,8 +527,8 @@ function launchExtension() {
   assert.equal(beforeRestart[0].data.cumulative_input_tokens, 150000);
   assert.equal(beforeRestart[0].data.cumulative_output_tokens, 30000);
 
-  // Relaunch: a brand-new process restores the baseline on session_start, then
-  // reports ONE short post-restart turn.
+  // Relaunch: a brand-new process restores and re-asserts the baseline on
+  // session_start, then reports one short post-restart turn.
   postedEvents.length = 0;
   const second = launchExtension();
   await second.session_start({}, ctx);
@@ -545,7 +545,12 @@ function launchExtension() {
   );
 
   const afterRestart = usageEvents();
-  assert.equal(afterRestart.length, 1, JSON.stringify(postedEvents));
+  // session_start re-asserts the restored baseline (so an idle resume or a
+  // failed pre-exit flush still reaches the server), then the new turn advances
+  // it: two posts, the first re-asserting 150000/30000.
+  assert.equal(afterRestart.length, 2, JSON.stringify(postedEvents));
+  assert.equal(afterRestart[0].data.cumulative_input_tokens, 150000, JSON.stringify(postedEvents));
+  assert.equal(afterRestart[0].data.cumulative_output_tokens, 30000, JSON.stringify(postedEvents));
   const data = afterRestart[afterRestart.length - 1].data;
   // Must ADVANCE from the restored baseline (150000 + 900, 30000 + 250), not the
   // lone 900/250 turn the unfixed extension reports (clamped away, frozen).

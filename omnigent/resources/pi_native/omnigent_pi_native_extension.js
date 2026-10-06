@@ -1633,7 +1633,9 @@ module.exports = function (pi) {
   // ``message_end`` / ``turn_end`` / ``agent_end`` carrying the same assistant
   // message never double-counts. ``usageModel`` tracks the latest message's
   // model (mirrors a mid-session model switch). ``lastPostedUsageKey`` dedups
-  // the POST itself so a flush with no new tokens is skipped.
+  // the POST itself so a flush with no new tokens is skipped. The set restarts
+  // empty after a relaunch, which is safe: a restored baseline already subsumes
+  // every pre-relaunch message and the product never re-emits their usage.
   const countedUsageMessages = new Set();
   let cumulativeInputTokens = 0;
   let cumulativeOutputTokens = 0;
@@ -1756,10 +1758,9 @@ module.exports = function (pi) {
     if (cacheRead > cumulativeCacheReadTokens) cumulativeCacheReadTokens = cacheRead;
     if (!usageModel && typeof saved.model === "string" && saved.model)
       usageModel = saved.model;
-    // The server already holds this seeded baseline (this process wrote it
-    // before exiting), so dedup an immediate re-flush of the unchanged total;
-    // the first NEW message advances the key and posts.
-    lastPostedUsageKey = `${cumulativeInputTokens}-${cumulativeOutputTokens}-${cumulativeCacheReadTokens}-${usageModel || ""}`;
+    // Leave lastPostedUsageKey empty so session_start re-asserts this baseline:
+    // a failed pre-exit flush can leave the server behind, and re-posting an
+    // already-recorded total is a no-op under the server's grow-only clamp.
   }
 
   function rememberContext(ctx) {
@@ -2002,6 +2003,9 @@ module.exports = function (pi) {
   pi.on("session_start", async (_event, ctx) => {
     rememberContext(ctx);
     restoreCumulativeUsage();
+    // Re-assert the restored baseline so an idle resume reaches the server even
+    // when the pre-exit flush failed; a no-op for a fresh or already-held total.
+    await postSessionUsage();
     registerTaskToolIfMissing();
     restoreTaskList(ctx);
     if (taskList.length) await publishTaskList();

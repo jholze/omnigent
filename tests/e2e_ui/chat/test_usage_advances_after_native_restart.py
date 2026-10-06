@@ -25,7 +25,8 @@ _EXTENSION_PATH = (
 )
 
 # One node process per launch: a fresh process is a relaunched Pi whose
-# in-memory cumulative counters start back at 0.
+# in-memory cumulative counters start back at 0. ``onlyRestore`` models an idle
+# resume that fires session_start but no new turn.
 _LAUNCH_SCRIPT = r"""
 const extensionPath = process.argv[1];
 const configPath = process.argv[2];
@@ -52,23 +53,25 @@ const ctx = {
 
 (async () => {
   if (handlers.session_start) await handlers.session_start({}, ctx);
-  await handlers.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: turn.model,
-        timestamp: turn.timestamp,
-        usage: {
-          input: turn.input,
-          output: turn.output,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: turn.input + turn.output,
+  if (!turn.onlyRestore) {
+    await handlers.message_end(
+      {
+        message: {
+          role: "assistant",
+          model: turn.model,
+          timestamp: turn.timestamp,
+          usage: {
+            input: turn.input,
+            output: turn.output,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: turn.input + turn.output,
+          },
         },
       },
-    },
-    ctx,
-  );
+      ctx,
+    );
+  }
   process.exit(0);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
@@ -76,20 +79,42 @@ const ctx = {
 });"""
 
 
+def _write_config(tmp_path: Path, base_url: str, session_id: str) -> tuple[Path, Path]:
+    bridge_dir = tmp_path / "bridge"
+    inbox_dir = tmp_path / "inbox"
+    bridge_dir.mkdir()
+    inbox_dir.mkdir()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "serverUrl": base_url,
+                "sessionId": session_id,
+                "inboxDir": str(inbox_dir),
+                "bridgeDir": str(bridge_dir),
+                "authHeaders": {},
+            }
+        )
+    )
+    return config_path, bridge_dir
+
+
 def _launch_extension(
     node: str,
     config_path: Path,
     *,
-    model: str,
-    timestamp: int,
-    input_tokens: int,
-    output_tokens: int,
+    model: str | None = None,
+    timestamp: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    only_restore: bool = False,
 ) -> None:
     turn = {
         "model": model,
         "timestamp": timestamp,
         "input": input_tokens,
         "output": output_tokens,
+        "onlyRestore": only_restore,
     }
     result = subprocess.run(
         [node, "-e", _LAUNCH_SCRIPT, str(_EXTENSION_PATH), str(config_path), json.dumps(turn)],
@@ -129,22 +154,7 @@ def test_usage_display_advances_after_native_restart(
         pytest.skip("node is required to launch the real pi-native extension")
     base_url, session_id = seeded_session
 
-    bridge_dir = tmp_path / "bridge"
-    inbox_dir = tmp_path / "inbox"
-    bridge_dir.mkdir()
-    inbox_dir.mkdir()
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "serverUrl": base_url,
-                "sessionId": session_id,
-                "inboxDir": str(inbox_dir),
-                "bridgeDir": str(bridge_dir),
-                "authHeaders": {},
-            }
-        )
-    )
+    config_path, _bridge_dir = _write_config(tmp_path, base_url, session_id)
 
     _launch_extension(
         node, config_path, model=_MODEL, timestamp=1000, input_tokens=150_000, output_tokens=30_000
@@ -165,6 +175,9 @@ def test_usage_display_advances_after_native_restart(
     _launch_extension(
         node, config_path, model=_MODEL, timestamp=2000, input_tokens=900, output_tokens=250
     )
+    # Wait for the server to record the advanced total before reloading, so the
+    # UI assertion observes the grown peak rather than racing the flush.
+    _wait_for_model_input(base_url, session_id, _MODEL, 150_900)
 
     page.reload(wait_until="domcontentloaded")
     expect(page.get_by_placeholder("Send a message…")).to_be_editable(timeout=30_000)
@@ -174,3 +187,36 @@ def test_usage_display_advances_after_native_restart(
     # The row must grow past the pre-relaunch total rather than stay clamped at it.
     expect(model_row).to_contain_text("150.9K", timeout=8_000)
     expect(model_row).to_contain_text("30.3K")
+
+
+def test_restart_reasserts_persisted_baseline_server_never_recorded(
+    seeded_session: tuple[str, str],
+    tmp_path: Path,
+) -> None:
+    """An idle resume re-posts the persisted baseline, so a failed pre-exit flush
+    does not leave the server undercounted forever."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to launch the real pi-native extension")
+    base_url, session_id = seeded_session
+
+    config_path, bridge_dir = _write_config(tmp_path, base_url, session_id)
+
+    _launch_extension(
+        node, config_path, model=_MODEL, timestamp=1000, input_tokens=150_000, output_tokens=30_000
+    )
+    _wait_for_model_input(base_url, session_id, _MODEL, 150_000)
+
+    # postSessionUsage persists the running total before its best-effort POST, so
+    # a flush that failed can leave the on-disk baseline ahead of the server.
+    # Bump the persisted file above the server's recorded peak to model that.
+    state = bridge_dir / "cumulative_usage.json"
+    saved = json.loads(state.read_text())
+    saved["cumulative_input_tokens"] = 160_000
+    saved["cumulative_output_tokens"] = 32_000
+    state.write_text(json.dumps(saved))
+
+    # An idle resume (session_start only, no new turn) must still re-assert the
+    # persisted baseline rather than suppress it as an already-posted total.
+    _launch_extension(node, config_path, only_restore=True)
+    _wait_for_model_input(base_url, session_id, _MODEL, 160_000)

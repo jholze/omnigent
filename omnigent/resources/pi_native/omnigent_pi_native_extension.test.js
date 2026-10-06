@@ -614,9 +614,9 @@ async function testUsageBaselineSurvivesNativeRestart() {
   // The process is gone on relaunch; stop its inbox poller.
   if (first.pi.__omnigentInboxPoller) clearInterval(first.pi.__omnigentInboxPoller);
 
-  // Process 2: a relaunch reusing the SAME session-scoped bridge dir. Pi does
-  // not re-emit the loaded history, so only the single post-restart turn's
-  // usage arrives.
+  // Process 2: a relaunch reusing the SAME session-scoped bridge dir.
+  // session_start re-asserts the restored baseline, then the single post-restart
+  // turn advances it; Pi does not re-emit the loaded history.
   const second = makeHarness({ captureEvents: true, inboxDir: first.inboxDir });
   const ctx2 = makeCtx({ idle: true });
   await second.handlers.session_start({}, ctx2);
