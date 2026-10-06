@@ -580,8 +580,11 @@ async def _bridge_spawn_in_cwd(cwd: str) -> AsyncIterator[None]:
 _SDK_TOKEN_FACTORY = "_new_auth_token"
 
 
-def _argv_safe_auth_token() -> str:
-    """Mint a callback auth token that never starts with ``-``."""
+def _argv_safe_auth_token(*_args: object, **_kwargs: object) -> str:
+    """Mint a callback auth token that never starts with ``-``.
+
+    Ignores any arguments so it can replace the SDK factory whatever its signature.
+    """
     while True:
         token = secrets.token_urlsafe(32)
         if not token.startswith("-"):
@@ -589,14 +592,11 @@ def _argv_safe_auth_token() -> str:
 
 
 def _harden_cursor_sdk_callback_tokens() -> None:
-    """Keep cursor-sdk's callback auth tokens out of the bridge's flag parser.
+    """Swap cursor-sdk's callback-token factories for argv-safe ones.
 
-    cursor-sdk 0.1.x mints ``secrets.token_urlsafe`` tokens and passes them to
-    the bridge as ``--tool-callback-auth-token <token>``; the bridge treats any
-    value starting with ``-`` as a missing flag value, so about one launch in 64
-    died before discovery with "Missing value for --tool-callback-auth-token".
-    Newer SDKs mint safe tokens themselves and no longer expose this seam, in
-    which case this is a no-op.
+    The SDK passes these tokens to the bridge as flag values, and the bridge
+    rejects a value with a leading ``-`` as a missing value. No-op when the
+    factories are absent: newer SDKs mint safe tokens themselves.
     """
     for module_name in ("cursor_sdk._tool_callback", "cursor_sdk._store_callback"):
         try:

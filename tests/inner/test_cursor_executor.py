@@ -12,6 +12,8 @@ invoking a bridged tool) lives in the gated e2e test.
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 import json
 import os
 import secrets
@@ -1990,9 +1992,12 @@ async def test_bridge_launch_hardens_sdk_callback_tokens(
     assert errors == [], [e.message for e in errors]
     assert any(isinstance(e, TurnComplete) for e in events)
     assert len(sdk_state["launch_kwargs"]) == 1
+    # Both swapped factories redraw past a dash-leading token, even when called
+    # with a byte length like some factory signatures take.
     for name, module in generators.items():
-        tokens = {module._new_auth_token() for _ in range(256)}
-        assert all(not token.startswith("-") for token in tokens), name
+        draws = iter(["-dash-first", "safe-second"])
+        monkeypatch.setattr(secrets, "token_urlsafe", lambda nbytes=None, draws=draws: next(draws))
+        assert module._new_auth_token(32) == "safe-second", name
 
 
 async def test_real_bridge_launch_survives_dash_leading_callback_token(
@@ -2005,16 +2010,26 @@ async def test_real_bridge_launch_survives_dash_leading_callback_token(
     without the ``cursor`` extra). Only ``AsyncAgent.create`` is faked: a real
     agent needs Cursor credentials and network, while bridge launch -- the
     boundary under test -- does not. The first ``secrets.token_urlsafe`` draw
-    is scripted to the 1-in-64 dash-leading case so the test is deterministic.
+    is scripted to the 1-in-64 dash-leading case, and the test checks that the
+    hardened factory is what consumed it.
     """
     cursor_sdk = pytest.importorskip("cursor_sdk")
     monkeypatch.delenv("RUNNER_SERVER_URL", raising=False)
+    # The executor swaps the SDK's factories in place; restore them on teardown.
+    for name in ("cursor_sdk._tool_callback", "cursor_sdk._store_callback"):
+        module = importlib.import_module(name)
+        factory = getattr(module, "_new_auth_token", None)
+        if factory is not None:
+            monkeypatch.setattr(module, "_new_auth_token", factory)
 
     real_token_urlsafe = secrets.token_urlsafe
     scripted = iter(["-" + real_token_urlsafe(32)[1:]])
+    draws: list[tuple[str, str]] = []
 
     def token_urlsafe(nbytes: int | None = None) -> str:
-        return next(scripted, None) or real_token_urlsafe(nbytes)
+        token = next(scripted, None) or real_token_urlsafe(nbytes)
+        draws.append((inspect.stack()[1].function, token))
+        return token
 
     monkeypatch.setattr(secrets, "token_urlsafe", token_urlsafe)
 
@@ -2053,6 +2068,9 @@ async def test_real_bridge_launch_survives_dash_leading_callback_token(
     assert errors == [], [e.message for e in errors]
     assert any(isinstance(e, TurnComplete) for e in events)
     assert len(clients) == 1 and isinstance(clients[0], cursor_sdk.AsyncClient)
+    # The dash-leading draw was consumed by the hardened factory, not elsewhere.
+    assert next(scripted, None) is None
+    assert draws[0][0] == "_argv_safe_auth_token" and draws[0][1].startswith("-")
 
 
 async def test_hooks_json_not_written_without_server_url(
