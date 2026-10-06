@@ -246,16 +246,6 @@ def _set_color(page: Page, test_id: str, value: str) -> None:
     page.keyboard.press("Escape")
 
 
-def _canvas_paint(page: Page) -> dict[str, str]:
-    """The ``--background`` token and the ``.app-shell`` background as painted."""
-    return page.evaluate(
-        "() => { const shell = getComputedStyle(document.querySelector('.app-shell')); "
-        "return { background: getComputedStyle(document.documentElement)"
-        ".getPropertyValue('--background').trim(), "
-        "shell: `${shell.backgroundColor}|${shell.backgroundImage}` }; }"
-    )
-
-
 def test_color_palette_applies_persists_and_resets(page: Page, live_server: str) -> None:
     """Selecting a palette skins ``<html>`` + persists; the default clears it.
 
@@ -423,15 +413,15 @@ def test_background_tint_recolors_the_dark_canvas(
     page.emulate_media(color_scheme="dark")
     base_url, _session_id = seeded_session
     _open_appearance(page, base_url)
-    stock_dark = _canvas_paint(page)
+    stock_dark = _computed_theme_tokens(page)
 
     light = _theme_radiogroup(page).get_by_role("radio", name="Light")
     light.click()
     expect(light).to_have_attribute("aria-checked", "true")
-    stock_light = _canvas_paint(page)
+    stock_light = _computed_theme_tokens(page)
     _set_color(page, "custom-theme-tint", "#ff0000")
     expect(_color_theme_select(page)).to_contain_text("Custom")
-    assert _canvas_paint(page)["background"] != stock_light["background"], (
+    assert _computed_theme_tokens(page)["background"] != stock_light["background"], (
         "control case: the tint did not change the light canvas"
     )
 
@@ -442,7 +432,7 @@ def test_background_tint_recolors_the_dark_canvas(
 
     page.get_by_role("link", name="Back", exact=True).click()
     expect(page.get_by_role("heading", name="What should we build?")).to_be_visible(timeout=30_000)
-    tinted_dark = _canvas_paint(page)
+    tinted_dark = _computed_theme_tokens(page)
     assert _data_theme(page) == "custom"
     assert tinted_dark["background"] != stock_dark["background"], (
         f"Background tint left the dark canvas at the stock {stock_dark['background']}"

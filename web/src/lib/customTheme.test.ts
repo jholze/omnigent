@@ -13,6 +13,11 @@ import { setEmbedRoot, setEmbedScopeRoot } from "./host";
 
 const STORAGE_KEY = "omnigent:custom-theme";
 
+function rgbChannel(hex: string, name: "r" | "g" | "b"): number {
+  const offset = { r: 1, g: 3, b: 5 }[name];
+  return Number.parseInt(hex.slice(offset, offset + 2), 16);
+}
+
 afterEach(() => {
   localStorage.clear();
   setEmbedScopeRoot(null);
@@ -235,26 +240,43 @@ describe("customTheme", () => {
     expect(tinted.light.background).not.toBe(palette.tokens.light.background);
     expect(tinted.dark.background).not.toBe(palette.tokens.dark.background);
     expect(tinted.dark.shellBackground).not.toBe(palette.tokens.dark.shellBackground);
-    expect(deriveCustomTheme({ ...theme })).toEqual(palette.tokens);
   });
 
-  it("casts only the tint's hue onto dark surfaces", () => {
-    const theme = createCustomThemeFromPalette(PALETTES[0]);
-    const [red, green, blue] = [1, 3, 5].map((offset) =>
-      Number.parseInt(
-        deriveCustomTheme({ ...theme, tint: "#ff0000" }).dark.background.slice(offset, offset + 2),
-        16,
-      ),
-    );
+  it.each(PALETTES)("measures the tint's hue against $label's own light background", (palette) => {
+    const theme = createCustomThemeFromPalette(palette);
+    const preset = palette.tokens.dark.background;
+    const red = deriveCustomTheme({ ...theme, tint: "#ff0000" }).dark.background;
 
-    // A saturated tint pulls the canvas toward its hue without washing it out...
-    expect(red).toBeGreaterThan(0x0e);
-    expect(green).toBeLessThan(0x10);
-    expect(blue).toBeLessThan(0x13);
-    // ...while a neutral tint, which only differs in lightness, leaves it alone.
-    const neutral = deriveCustomTheme({ ...theme, tint: "#808080" });
-    expect(neutral.dark.background).toBe(PALETTES[0].tokens.dark.background);
-    expect(neutral.dark.shellBackground).toBe(PALETTES[0].tokens.dark.shellBackground);
+    // A saturated tint pulls the canvas toward its hue without lifting it toward
+    // the tint's lightness...
+    expect(rgbChannel(red, "r")).toBeGreaterThan(rgbChannel(preset, "r"));
+    expect(rgbChannel(red, "g")).toBeLessThanOrEqual(rgbChannel(preset, "g"));
+    expect(rgbChannel(red, "b")).toBeLessThanOrEqual(rgbChannel(preset, "b"));
+    // ...and re-entering the preset's own light background changes nothing.
+    expect(
+      deriveCustomTheme({ ...theme, tint: palette.tokens.light.background }).dark.background,
+    ).toBe(preset);
+  });
+
+  it("treats a neutral tint relative to the preset's light background", () => {
+    // Omnigent's light canvas is white, so a grey tint carries no hue change.
+    const omni = deriveCustomTheme({
+      ...createCustomThemeFromPalette(PALETTES[0]),
+      tint: "#808080",
+    });
+    expect(omni.dark).toMatchObject({
+      background: PALETTES[0].tokens.dark.background,
+      shellBackground: PALETTES[0].tokens.dark.shellBackground,
+    });
+
+    // Gruvbox's light canvas is a warm cream, so the same grey removes that
+    // warmth from its dark canvas instead of leaving it untouched.
+    const gruvbox = PALETTES.find((candidate) => candidate.id === "gruvbox")!;
+    const cooled = deriveCustomTheme({ ...createCustomThemeFromPalette(gruvbox), tint: "#808080" });
+    expect(cooled.dark.background).not.toBe(gruvbox.tokens.dark.background);
+    expect(rgbChannel(cooled.dark.background, "b")).toBeGreaterThan(
+      rgbChannel(gruvbox.tokens.dark.background, "b"),
+    );
   });
 
   it("shifts the colours inside Omnigent's preset gradients and keeps their structure", () => {
