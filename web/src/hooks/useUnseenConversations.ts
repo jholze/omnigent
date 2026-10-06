@@ -7,11 +7,8 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source; the server seed only ever *raises* a baseline (max-merge), and a
-// list refresh re-raises it from a newer server value, so a read on another
-// device clears an activity dot here without a reload. An explicit "Mark as
-// unread" is local and sticky: a stale replica can't clear it, and a full
-// seed adopts an explicit unread set on another device.
+// source; both the server seed and later list refreshes only ever *raise* a
+// baseline, never lower it (see seedReadState and mergeNewerServerReadState).
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its

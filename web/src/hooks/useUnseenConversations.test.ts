@@ -169,14 +169,21 @@ describe("live cross-device merge", () => {
     const mod = await loadFresh();
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000 }]);
     mod.markConversationSeen("conv-1", 3_000);
+    const { result } = renderHook(() => mod.useUnseenTick());
+    const before = result.current;
 
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 2_000, viewer_unread: true }]);
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, viewer_unread: true }]);
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: null, viewer_unread: true }]);
+    // Each stale value is applied and checked on its own, so an accepted older
+    // one can't be repaired by a later equal value and slip past the assert.
+    act(() => mod.seedReadState([{ id: "conv-1", viewer_last_seen: 2_000, viewer_unread: true }]));
+    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false); // older ignored
+    act(() => mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, viewer_unread: true }]));
+    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false); // equal ignored
+    act(() => mod.seedReadState([{ id: "conv-1", viewer_last_seen: null, viewer_unread: true }]));
+    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false); // missing ignored
 
     expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
-    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false); // baseline still 3_000
     expect(mod.isConversationUnseen("conv-1", 3_500, "idle")).toBe(true);
+    expect(result.current).toBe(before); // ignored values must not notify subscribers
   });
 });
 

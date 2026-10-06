@@ -22,7 +22,16 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from playwright.sync_api import Browser, Locator, Page, Playwright, Response, WebSocket, expect
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Locator,
+    Page,
+    Playwright,
+    Response,
+    WebSocket,
+    expect,
+)
 
 from tests.e2e_ui.conftest import (
     _create_runner_bound_session,
@@ -156,10 +165,11 @@ class _ListObserver:
         if response.request.method != "GET" or urlparse(response.url).path != "/v1/sessions":
             return
         try:
-            self._ingest(response.json())
+            payload = response.json()
         except Exception:
             # A body that is gone or not JSON is not a list refresh.
             return
+        self._ingest(payload)
 
     def _on_websocket(self, ws: WebSocket) -> None:
         if not urlparse(ws.url).path.endswith("/v1/sessions/updates"):
@@ -167,10 +177,11 @@ class _ListObserver:
 
         def on_frame(payload: str | bytes) -> None:
             try:
-                self._ingest(json.loads(payload))
+                parsed = json.loads(payload)
             except Exception:
                 # Non-JSON frames carry no rows.
                 return
+            self._ingest(parsed)
 
         ws.on("framereceived", on_frame)
 
@@ -244,8 +255,9 @@ def test_read_on_desktop_clears_unread_on_open_mobile_client(
 
     mobile_ctx = browser.new_context(**playwright.devices["Pixel 7"])
     mobile_ctx.add_init_script(_ANDROID_SHELL_INIT_SCRIPT)
-    desktop_ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+    desktop_ctx: BrowserContext | None = None
     try:
+        desktop_ctx = browser.new_context(viewport={"width": 1280, "height": 800})
         mobile = mobile_ctx.new_page()
         desktop = desktop_ctx.new_page()
         observer = _ListObserver()
@@ -291,7 +303,6 @@ def test_read_on_desktop_clears_unread_on_open_mobile_client(
 
         synced = _wait_for_list_refresh(mobile, observer, session_ids, read_floor)
         print(f"mobile list carried desktop read-state: {synced} ({observer.seen})")
-        mobile.wait_for_timeout(5_000)
         mobile.screenshot(path=str(artifacts / "mobile-after-desktop-read.png"))
         print(f"mobile badge after desktop read: {_last_badge(mobile)}")
 
@@ -309,4 +320,5 @@ def test_read_on_desktop_clears_unread_on_open_mobile_client(
             expect(_unread_dot(_row(mobile, sid))).to_have_count(0)
     finally:
         mobile_ctx.close()
-        desktop_ctx.close()
+        if desktop_ctx is not None:
+            desktop_ctx.close()
