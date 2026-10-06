@@ -218,7 +218,8 @@ async def test_share_without_a_stream_expires_after_grace(
 ) -> None:
     """A share whose client holds no stream — a closed window's, or one that never
     attached — stays listed through the grace window, then disappears."""
-    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.05)
+    # Long enough that awaiting the publish broadcast cannot outlast the grace.
+    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.5)
     collector = await start_session_stream_collector(CONV)
     try:
         if streamed:

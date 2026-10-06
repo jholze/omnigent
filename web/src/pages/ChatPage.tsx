@@ -905,9 +905,9 @@ export function ChatPage() {
 
   const onSend = useCallback(
     (text: string, files?: File[], replyDraft?: StoredReplyDraft) => {
-      if (!agentId) return;
+      if (!agentId) return undefined;
       // No server session yet (still creating) — nothing to POST to.
-      if (isTempConvId(urlConvId)) return;
+      if (isTempConvId(urlConvId)) return undefined;
       // An unbound coding clone (fork-source label) needs a directory before
       // it can run: open the picker and stash this message to replay after
       // the bind. Pin the prompt to THIS session so it replays here, never
@@ -916,12 +916,12 @@ export function ChatPage() {
       if (urlConvId && runnerOnline === false && (isUnboundFork || canResumeOnLocalHost)) {
         setPendingResumePrompt({ sessionId: urlConvId, text, files: files ?? [], replyDraft });
         setResumeDirDialogOpen(true);
-        return;
+        return undefined;
       }
       // Recover the unreachable host before dispatching another turn.
       if (urlConvId && isUnreachable) {
         void reconnect();
-        return;
+        return undefined;
       }
       // Queue instead of POSTing now (see shouldQueueSend). enqueueMessage flushes
       // FIFO immediately when genuinely idle, so nothing stalls. With the
@@ -946,8 +946,7 @@ export function ChatPage() {
           chat.sharedQueueStale,
         )
       ) {
-        chat.enqueueMessage(text, files, replyDraft);
-        return;
+        return chat.enqueueMessage(text, files, replyDraft);
       }
       void useChatStore.getState().send(text, agentId, files, {
         replyDraft,
@@ -959,6 +958,7 @@ export function ChatPage() {
           navigate(`/c/${newId}`, { replace: true });
         },
       });
+      return undefined;
     },
     [
       agentId,
@@ -1384,7 +1384,7 @@ interface MainAgentSurfaceProps {
   liveness: SessionLiveness;
   agentsError: unknown;
   disabled: boolean;
-  onSend: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
+  onSend: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => boolean | void;
   /**
    * Invoke a skill via the `slash_command` event path. Gated off inside
    * `MainAgentSurface` for terminal-first (native) sessions, where `/skill`
@@ -1689,7 +1689,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   const handleSend = useCallback(
     (...args: Parameters<MainAgentSurfaceProps["onSend"]>) => {
       setSendScrollNonce((n) => n + 1);
-      onSend(...args);
+      return onSend(...args);
     },
     [onSend],
   );
@@ -1963,7 +1963,7 @@ interface ComposerProps {
   /** Local stream OR cross-client `session.status: running`. */
   isWorking: boolean;
   disabled: boolean;
-  onSend: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
+  onSend: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => boolean | void;
   /**
    * Send a recognised skill as a `slash_command` event (the REPL's wire
    * shape) instead of plaintext. When present and the typed command names
@@ -3455,8 +3455,8 @@ function ComposerImpl(
     // server queues the message and delivers it to the running task
     // (or starts a fresh one once the current drains). Escape still
     // interrupts.
-    if (trimmed) appendEntry(fullText, storedReplyDraft);
     const sendFiles = files.length > 0 ? files : undefined;
+    let taken: boolean | void;
     if (draft.quotes.length > 0) {
       // Preserve authored whitespace and quote provenance, including mention markers.
       const outgoing = {
@@ -3465,10 +3465,13 @@ function ComposerImpl(
           index === 0 ? { ...quote, before: mentionPreamble + quote.before } : quote,
         ),
       };
-      onSend(serializeReplyDraft(outgoing), sendFiles, snapshotReplyDraft(outgoing));
+      taken = onSend(serializeReplyDraft(outgoing), sendFiles, snapshotReplyDraft(outgoing));
     } else {
-      onSend(mentionPreamble + trimmed, sendFiles);
+      taken = onSend(mentionPreamble + trimmed, sendFiles);
     }
+    // A message the queue refused (it is full) stays in the composer.
+    if (taken === false) return;
+    if (trimmed) appendEntry(fullText, storedReplyDraft);
     dirtyRef.current = true;
     clearComposerAfterSend(resetNativeInputSession);
     clearAttachments();

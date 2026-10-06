@@ -1287,7 +1287,9 @@ Request Body (JSON)
   client_id (string, required)   Identity of the publishing client instance
                                  (one per page load), e.g. "c_7f3a…".
   messages (array, required)     This client's complete queue for the session,
-                                 head first; [] clears its share. Max 50.
+                                 head first; [] clears its share. Max 50 — the
+                                 web composer refuses to queue a 51st follow-up
+                                 so every queued message keeps its own slot.
     queue_id (string)            The client's own id for the entry; stable
                                  across republishes so a reorder keeps its slot.
     text (string)                Message text as shown in the strip (≤ 4000).

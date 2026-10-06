@@ -71,8 +71,7 @@ export function ownFlushHead(
 
 // Preserve FIFO even with always-steer enabled or a transient idle status.
 // Waiting on background work is idle for sending; native side chats bypass the queue.
-// A follow-up another client holds (`sharedQueue`) also keeps a new send in line,
-// as does not yet knowing what the others hold (`sharedQueueStale`).
+// Other clients' follow-ups (`sharedQueue`) or a not-yet-seen queue (`sharedQueueStale`) also keep a send in line.
 export function shouldQueueSend(
   conversationId: string | null,
   status: "idle" | "streaming",

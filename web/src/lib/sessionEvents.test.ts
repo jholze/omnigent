@@ -7,7 +7,7 @@
 // just stops seeing the event). These tests fail loud when the wire
 // shape drifts.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   ElicitationRequest,
   SessionAgentChangedEvent,
@@ -1800,7 +1800,8 @@ describe("session.queue (FLAT envelope)", () => {
     expect((out[0] as SessionQueueEvent).messages).toEqual([]);
   });
 
-  it("drops a frame with a malformed entry rather than a partial list", () => {
+  it("drops a frame with a malformed entry rather than a partial list, and says so", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const malformed = [
       { queue_id: 1, client_id: "c_desktop", seq: 1, text: "x" },
       { queue_id: "q_1", client_id: "c_desktop", seq: Number.NaN, text: "x" },
@@ -1814,5 +1815,8 @@ describe("session.queue (FLAT envelope)", () => {
       });
       expect(out).toHaveLength(0);
     }
+    // A dropped snapshot delays idle sends until the fallback: that must be diagnosable.
+    expect(warn).toHaveBeenCalledTimes(malformed.length);
+    warn.mockRestore();
   });
 });

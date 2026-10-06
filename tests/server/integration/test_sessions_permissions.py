@@ -3136,19 +3136,20 @@ async def _end_stream_via_close(session_id: str, task: asyncio.Task[Any]) -> htt
     return await asyncio.wait_for(task, 2.0)
 
 
-def _sse_presence_events(body: str) -> list[dict[str, Any]]:
+def _sse_events(body: str, event_type: str) -> list[dict[str, Any]]:
     """
-    Parse ``session.presence`` frames out of a raw SSE body.
+    Parse the frames of one event type out of a raw SSE body.
 
     :param body: The buffered ``text/event-stream`` payload.
-    :returns: Decoded presence event dicts, in wire order.
+    :param event_type: The wire ``type`` to keep, e.g. ``"session.presence"``.
+    :returns: Decoded event dicts of that type, in wire order.
     """
     events: list[dict[str, Any]] = []
     for line in body.splitlines():
         if not line.startswith("data: ") or line == "data: [DONE]":
             continue
         payload = json.loads(line[len("data: ") :])
-        if payload.get("type") == "session.presence":
+        if payload.get("type") == event_type:
             events.append(payload)
     return events
 
@@ -3185,7 +3186,7 @@ async def test_stream_presence_join_broadcast_and_snapshot(
         # presence snapshot must list the connecting viewer themself.
         # An empty list here means the ``_resource_snapshot`` append is
         # missing — joiners would see nobody until the next edge.
-        snapshots = _sse_presence_events(resp.text)
+        snapshots = _sse_events(resp.text, "session.presence")
         assert snapshots, f"no session.presence frame in stream body: {resp.text[:500]}"
         assert [v["user_id"] for v in snapshots[0]["viewers"]] == ["alice@example.com"]
         assert snapshots[0]["viewers"][0]["idle"] is True
@@ -3260,7 +3261,7 @@ async def test_stream_local_single_user_not_tracked(
         # The stream's own snapshot-on-connect ran AFTER any (buggy)
         # registration would have happened, so a "local" viewer in it
         # proves the attribution filter was dropped from the route.
-        snapshots = _sse_presence_events(resp.text)
+        snapshots = _sse_events(resp.text, "session.presence")
         assert snapshots, f"no session.presence frame in stream body: {resp.text[:500]}"
         assert snapshots[0]["viewers"] == []
         # Top-level session: the presence scope (root) is the session itself.
@@ -3503,23 +3504,6 @@ async def test_shared_parent_readiness_remains_private(
 # ``X-Omnigent-Client-Id`` header ties a client's queue share to its stream.
 
 
-def _sse_queue_events(body: str) -> list[dict[str, Any]]:
-    """
-    Parse ``session.queue`` frames out of a raw SSE body.
-
-    :param body: The buffered ``text/event-stream`` payload.
-    :returns: Decoded queue event dicts, in wire order.
-    """
-    events: list[dict[str, Any]] = []
-    for line in body.splitlines():
-        if not line.startswith("data: ") or line == "data: [DONE]":
-            continue
-        payload = json.loads(line[len("data: ") :])
-        if payload.get("type") == "session.queue":
-            events.append(payload)
-    return events
-
-
 async def test_stream_snapshot_carries_other_windows_queue(
     auth_client: httpx.AsyncClient,
 ) -> None:
@@ -3548,9 +3532,11 @@ async def test_stream_snapshot_carries_other_windows_queue(
         assert join["type"] == "session.presence"
         resp = await _end_stream_via_close(session_id, task)
         assert resp.status_code == 200
-        # The client holds idle sends for the snapshot only on streams that announce it.
-        assert resp.headers["x-omnigent-stream-features"] == "queue"
-        snapshots = _sse_queue_events(resp.text)
+        # The client holds idle sends for the snapshot only on streams that announce
+        # it; the header is a token list, so check membership.
+        features = [f.strip() for f in resp.headers["x-omnigent-stream-features"].split(",")]
+        assert "queue" in features
+        snapshots = _sse_events(resp.text, "session.queue")
         assert snapshots, f"no session.queue frame in stream body: {resp.text[:500]}"
         assert [(m["client_id"], m["text"]) for m in snapshots[0]["messages"]] == [
             ("c_desktop", "held")

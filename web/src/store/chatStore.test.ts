@@ -69,6 +69,8 @@ import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSe
 import {
   ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
   HELD_SHARE_RELEASE_TIMEOUT_MS,
+  QUEUE_SHARE_RETRY_MS,
+  QUEUED_MESSAGE_LIMIT,
   SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS,
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
   beginLocalConversation,
@@ -17465,13 +17467,19 @@ describe("chatStore — queue shared across windows of a session", () => {
     requiresRetry: false,
     ...extra,
   });
-  const ownEcho = (queueId: string, seq: number, text: string): SharedQueuedMessage => ({
+  const ownEcho = (
+    queueId: string,
+    seq: number,
+    text: string,
+    extra: Partial<SharedQueuedMessage> = {},
+  ): SharedQueuedMessage => ({
     queueId,
     clientId: CLIENT_ID,
     seq,
     text,
     attachments: [],
     requiresRetry: false,
+    ...extra,
   });
   const queuePuts = (id: string) =>
     fetchMock.mock.calls
@@ -17491,13 +17499,16 @@ describe("chatStore — queue shared across windows of a session", () => {
       return defaultFetchHandler(input as RequestInfo, init as RequestInit);
     });
   };
+  type MockServer = "shared-queue" | "older";
   /**
-   * Route `/stream` to a sink held open for the test. A server with the shared
-   * queue announces its snapshot in `X-Omnigent-Stream-Features` and accepts
-   * the share PUT; an older one does neither.
+   * Route each `/stream` open, in order, to a sink held open for the test (the
+   * last kind repeats). A server with the shared queue announces its snapshot
+   * in `X-Omnigent-Stream-Features` and accepts the share PUT; an older one
+   * does neither. Returns the sinks so a test can drop a connection.
    */
-  const holdStreamOpen = (server: "shared-queue" | "older") => {
+  const holdStreamOpen = (...servers: MockServer[]): StreamSink[] => {
     const sinks: StreamSink[] = [];
+    const serverAt = (index: number) => servers[Math.min(index, servers.length - 1)]!;
     onTestFinished(() => {
       for (const sink of sinks) {
         try {
@@ -17510,6 +17521,7 @@ describe("chatStore — queue shared across windows of a session", () => {
     fetchMock.mockImplementation((input, init) => {
       const url = String(input);
       if (/\/v1\/sessions\/[^/]+\/stream$/.test(url)) {
+        const server = serverAt(sinks.length);
         const sink = pushableStream();
         sinks.push(sink);
         const response = mockResponse(null, { bodyStream: sink.stream });
@@ -17518,7 +17530,7 @@ describe("chatStore — queue shared across windows of a session", () => {
       }
       if (url.endsWith("/queue") && (init as RequestInit)?.method === "PUT") {
         return Promise.resolve(
-          server === "shared-queue"
+          serverAt(Math.max(sinks.length - 1, 0)) === "shared-queue"
             ? new Response(null, { status: 204 })
             : new Response(JSON.stringify({ detail: "Not Found" }), {
                 status: 404,
@@ -17528,6 +17540,19 @@ describe("chatStore — queue shared across windows of a session", () => {
       }
       return defaultFetchHandler(input as RequestInfo, init as RequestInit);
     });
+    return sinks;
+  };
+  /** Drop the live stream and wait for the pump to open the next one. */
+  const reconnect = async (sinks: StreamSink[], drain: () => Promise<unknown> = tick) => {
+    const before = sinks.length;
+    sinks[before - 1]!.close();
+    /* oxlint-disable no-await-in-loop */
+    for (let i = 0; i < 40 && sinks.length === before; i += 1) await drain();
+    /* oxlint-enable no-await-in-loop */
+    expect(sinks).toHaveLength(before + 1);
+    // The open was issued; let the pump read its response headers too.
+    await drain();
+    await drain();
   };
   /** The composer's send decision, from the store's current state. */
   const composerWouldQueue = (id: string) => {
@@ -17629,19 +17654,24 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(puts[1]!.body.messages.map((m) => m.text)).toEqual(["second"]);
   });
 
-  it("bounds the published share and discloses the remainder as one row", async () => {
+  it("bounds the published attachment names and refuses to queue past the share limit", async () => {
     acceptQueuePuts();
     const id = "conv_bounded";
     seedSession(id, []);
     await useChatStore.getState().switchTo(id);
     await tick();
+    useChatStore.setState({
+      boundAgentId: "agent_xyz",
+      status: "streaming",
+      sessionStatus: "running",
+    });
     fetchMock.mockClear();
     const files = Array.from(
       { length: 40 },
       (_, index) => new File(["x"], `shot-${index}.png`, { type: "image/png" }),
     );
     useChatStore.setState({
-      queuedMessages: Array.from({ length: 60 }, (_, index) => ({
+      queuedMessages: Array.from({ length: QUEUED_MESSAGE_LIMIT }, (_, index) => ({
         queueId: `q_${index}`,
         text: `message ${index}`,
         conversationId: id,
@@ -17652,15 +17682,20 @@ describe("chatStore — queue shared across windows of a session", () => {
     const [put] = queuePuts(id) as {
       messages: { queue_id: string; text: string; attachments: string[] }[];
     }[];
-    expect(put!.messages).toHaveLength(50);
-    expect(put!.messages.at(-1)).toMatchObject({
-      queue_id: "overflow",
-      text: "+11 more queued messages",
-    });
+    expect(put!.messages).toHaveLength(QUEUED_MESSAGE_LIMIT);
     expect(put!.messages[0]!.attachments).toHaveLength(32);
     expect(put!.messages[0]!.attachments.at(-1)).toBe("+9 more");
-    // The server echoing exactly that representation is not a disagreement.
+    // One more would have no slot of its own in the session-wide order, so it
+    // is refused (the composer keeps it) rather than hidden from other windows.
+    const toastError = vi.spyOn(toast, "error").mockReturnValue("queue-full");
+    onTestFinished(() => toastError.mockRestore());
     fetchMock.mockClear();
+    expect(useChatStore.getState().enqueueMessage("one more")).toBe(false);
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().queuedMessages).toHaveLength(QUEUED_MESSAGE_LIMIT);
+    await tick();
+    expect(queuePuts(id)).toEqual([]);
+    // The server echoing exactly that representation is not a disagreement.
     handleSessionEvent({
       type: "session_queue",
       conversationId: id,
@@ -17834,7 +17869,7 @@ describe("chatStore — queue shared across windows of a session", () => {
     handleSessionEvent({
       type: "session_queue",
       conversationId: id,
-      messages: [remoteEntry("q_1", 1, "theirs"), ownEcho("q_1", 2, "mine")],
+      messages: [remoteEntry("q_1", 1, "theirs"), ownEcho("q_1", 2, "mine", { stableId: "s1" })],
     });
     await tick();
     expect(queuePuts(id)).toEqual([]);
@@ -17842,6 +17877,91 @@ describe("chatStore — queue shared across windows of a session", () => {
       "c_other",
       CLIENT_ID,
     ]);
+
+    // The same ids in another order, or with other content, disagree too: a
+    // reorder or edit whose publish was lost must still reach the other windows.
+    useChatStore.setState({
+      queuedMessages: [
+        { queueId: "q_1", text: "mine", conversationId: id, stableId: "s1" },
+        { queueId: "q_2", text: "mine too", conversationId: id, stableId: "s2" },
+      ],
+    });
+    await tick();
+    const echoes = (first: SharedQueuedMessage, second: SharedQueuedMessage) =>
+      handleSessionEvent({ type: "session_queue", conversationId: id, messages: [first, second] });
+    fetchMock.mockClear();
+    echoes(
+      ownEcho("q_2", 2, "mine too", { stableId: "s2" }),
+      ownEcho("q_1", 3, "mine", { stableId: "s1" }),
+    );
+    await tick();
+    expect(
+      queuePuts(id).map((p: { messages: { queue_id: string }[] }) =>
+        p.messages.map((m) => m.queue_id),
+      ),
+    ).toEqual([["q_1", "q_2"]]);
+    fetchMock.mockClear();
+    echoes(
+      ownEcho("q_1", 2, "mine, before the edit", { stableId: "s1" }),
+      ownEcho("q_2", 3, "mine too", { stableId: "s2" }),
+    );
+    await tick();
+    expect(queuePuts(id)).toHaveLength(1);
+    fetchMock.mockClear();
+    echoes(
+      ownEcho("q_1", 2, "mine", { stableId: "s1" }),
+      ownEcho("q_2", 3, "mine too", { stableId: "s2" }),
+    );
+    await tick();
+    expect(queuePuts(id)).toEqual([]);
+  });
+
+  it("retries a share publication that failed transiently, but not one the server rejected", async () => {
+    vi.useFakeTimers();
+    const drain = () => vi.advanceTimersByTimeAsync(0);
+    const statuses: number[] = [];
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/queue") && (init as RequestInit)?.method === "PUT") {
+        const status = statuses.shift() ?? 204;
+        return Promise.resolve(
+          status === 204
+            ? new Response(null, { status })
+            : new Response(JSON.stringify({ detail: "nope" }), {
+                status,
+                headers: { "content-type": "application/json" },
+              }),
+        );
+      }
+      return defaultFetchHandler(input as RequestInfo, init as RequestInit);
+    });
+    await drain();
+    fetchMock.mockClear();
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    useChatStore.getState().enqueueMessage("mine");
+    await drain();
+    expect(queuePuts("conv_abc")).toHaveLength(1);
+    // Clearing the share fails on the way to the server: left alone, the other
+    // window would keep waiting behind an entry this one no longer holds.
+    statuses.push(503);
+    useChatStore.getState().dequeueMessage(useChatStore.getState().queuedMessages[0]!.queueId);
+    await drain();
+    expect(queuePuts("conv_abc")).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(QUEUE_SHARE_RETRY_MS);
+    expect(queuePuts("conv_abc")).toHaveLength(3);
+    expect(queuePuts("conv_abc")[2]).toEqual({ client_id: CLIENT_ID, messages: [] });
+    // A share the server rejects (no queue route, read-only caller) is not retried.
+    fetchMock.mockClear();
+    statuses.push(404);
+    useChatStore.getState().enqueueMessage("again");
+    await drain();
+    expect(queuePuts("conv_abc")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(QUEUE_SHARE_RETRY_MS * 16);
+    expect(queuePuts("conv_abc")).toHaveLength(1);
   });
 
   it("holds a background conversation's flush behind another window's head", async () => {
@@ -17917,50 +18037,73 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
-  it("keeps sending and draining locally against an older server without the shared queue", async () => {
-    holdStreamOpen("older");
+  it("drops the cached view and drains locally once the stream reconnects to an older server", async () => {
+    const sinks = holdStreamOpen("shared-queue", "older");
     const id = "conv_older_server";
     seedSession(id, []);
     await useChatStore.getState().switchTo(id);
     await tick();
     useChatStore.setState({ boundAgentId: "agent_xyz" });
-    fetchMock.mockClear();
-    // The stream announced no queue snapshot, so nothing is waited for.
-    expect(useChatStore.getState().sharedQueueStale).toBe(false);
-    expect(composerWouldQueue(id)).toBe(false);
-    // A follow-up queued mid-turn still drains on idle even though the share
-    // PUT is rejected (404) and no `session.queue` ever arrives.
+    // The first connection learned another window's head and queued behind it.
+    handleSessionEvent(
+      { type: "session_queue", conversationId: id, messages: [remoteEntry("q_1", 1, "theirs")] },
+      id,
+    );
     useChatStore.setState({ status: "streaming", sessionStatus: "running" });
     useChatStore.getState().enqueueMessage("mine");
     await tick();
     expect(queuePuts(id)).toHaveLength(1);
-    expect(eventPosts(id)).toEqual([]);
+    fetchMock.mockClear();
+    // The stream drops and reconnects to a server without the shared queue (a
+    // rolling deployment): no header, no snapshot, and nothing that could ever
+    // remove that entry, so the previous connection's view goes with it.
+    await reconnect(sinks);
+    expect(useChatStore.getState().sharedQueueStale).toBe(false);
+    expect(useChatStore.getState().sharedQueue).toEqual([]);
+    // The share PUT is now rejected (404) and no `session.queue` ever arrives;
+    // the follow-up still drains on idle.
     useChatStore.setState({ status: "idle", sessionStatus: "idle" });
     useChatStore.getState().maybeFlushQueuedHead();
     await tick();
     expect(eventPosts(id)).toHaveLength(1);
     expect(useChatStore.getState().queuedMessages).toEqual([]);
+    // With that entry gone, an idle send on this connection posts right away.
+    const { sharedQueue, sharedQueueStale } = useChatStore.getState();
+    expect(
+      shouldQueueSend(id, "idle", "idle", [], false, false, sharedQueue, sharedQueueStale),
+    ).toBe(false);
   });
 
-  it("frees a held send after the fallback when an announced queue snapshot never lands", async () => {
+  it("frees a held send and drops the cached view after the fallback when an announced snapshot never lands", async () => {
     vi.useFakeTimers();
-    holdStreamOpen("shared-queue");
+    const drain = () => vi.advanceTimersByTimeAsync(0);
+    const sinks = holdStreamOpen("shared-queue");
     const id = "conv_no_snapshot";
     seedSession(id, []);
     const switching = useChatStore.getState().switchTo(id);
-    await vi.advanceTimersByTimeAsync(0);
+    await drain();
     await switching;
-    await vi.advanceTimersByTimeAsync(0);
+    await drain();
     useChatStore.setState({ boundAgentId: "agent_xyz" });
+    // The first connection's snapshot listed another window's head.
+    handleSessionEvent(
+      { type: "session_queue", conversationId: id, messages: [remoteEntry("q_1", 1, "theirs")] },
+      id,
+    );
+    expect(useChatStore.getState().sharedQueueStale).toBe(false);
+    // The stream drops; the next connection announces a snapshot that never comes.
+    await reconnect(sinks, drain);
+    expect(useChatStore.getState().sharedQueueStale).toBe(true);
     fetchMock.mockClear();
     useChatStore.getState().enqueueMessage("mine");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(useChatStore.getState().sharedQueueStale).toBe(true);
+    await drain();
     expect(eventPosts(id)).toEqual([]);
     await vi.advanceTimersByTimeAsync(SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS);
+    // Nothing on this connection can remove that entry, so it stops gating sends.
     expect(useChatStore.getState().sharedQueueStale).toBe(false);
+    expect(useChatStore.getState().sharedQueue).toEqual([]);
     useChatStore.getState().maybeFlushQueuedHead();
-    await vi.advanceTimersByTimeAsync(0);
+    await drain();
     expect(eventPosts(id)).toHaveLength(1);
   });
 });

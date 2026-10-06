@@ -9268,9 +9268,9 @@ async def _stream_live_events(
         presence_token = presence.connect(
             presence_root_id, session_id, viewer_user_id, viewer_idle
         )
-    if queue_client_id is not None:
-        queued_messages.attach(session_id, client_id=queue_client_id, user_id=queue_user_id)
     try:
+        if queue_client_id is not None:
+            queued_messages.attach(session_id, client_id=queue_client_id, user_id=queue_user_id)
         # ``aclosing`` propagates outer ``aclose`` into ``subscribe``;
         # a bare ``async for`` would leave the subscriber slot until GC.
         async with contextlib.aclosing(
@@ -9309,16 +9309,22 @@ async def _stream_live_events(
         if not shutdown_state.server_shutting_down():
             yield "data: [DONE]\n\n"
     finally:
-        # The non-None checks besides presence_token's are type
-        # narrowing only: a minted token implies both were set above.
-        if (
-            presence_token is not None
-            and viewer_user_id is not None
-            and presence_root_id is not None
-        ):
-            presence.disconnect(presence_root_id, viewer_user_id, presence_token)
-        if queue_client_id is not None:
-            queued_messages.detach(session_id, client_id=queue_client_id, user_id=queue_user_id)
+        try:
+            # The non-None checks besides presence_token's are type
+            # narrowing only: a minted token implies both were set above.
+            if (
+                presence_token is not None
+                and viewer_user_id is not None
+                and presence_root_id is not None
+            ):
+                presence.disconnect(presence_root_id, viewer_user_id, presence_token)
+        finally:
+            # A failed presence cleanup must not skip this one: a share whose
+            # stream never detaches stays visible to every other client.
+            if queue_client_id is not None:
+                queued_messages.detach(
+                    session_id, client_id=queue_client_id, user_id=queue_user_id
+                )
 
 
 def _validate_terminal_launch_args(value: list[str] | None) -> list[str] | None:

@@ -56,7 +56,12 @@ message is only sent to the server when it's flushed or steered.
   the queue as unknown: an idle send queues rather than overtake a follow-up it
   has not seen yet, and the flush waits for the snapshot (with a bounded
   fallback). An older server's stream carries no announcement, so sends there
-  behave as before.
+  behave as before. A window queues at most 50 follow-ups per session (the
+  server's share bound): the composer refuses the next one and keeps its text,
+  so every queued message has its own ordering slot and none is hidden from
+  other windows. A share update that fails for a transient reason is retried
+  with backoff, and a `session.queue` list that disagrees with the published
+  share in membership, order or content is republished.
 
 ### Per-message actions
 

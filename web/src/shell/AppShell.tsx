@@ -1014,8 +1014,8 @@ export function AppShell() {
             chat.sharedQueueStale,
           )
         ) {
-          chat.enqueueMessage(text, files);
-          signal(true, "Queued for agent.");
+          if (chat.enqueueMessage(text, files) === false) signal(false, "The queue is full.");
+          else signal(true, "Queued for agent.");
         } else {
           void chat
             .send(text, boundAgentId, files)
