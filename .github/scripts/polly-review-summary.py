@@ -140,6 +140,9 @@ def compose_review(review: str, stats: dict) -> str:
         if not header_seen:
             raise ValueError("Incomplete Polly review: missing test assessment table header.")
     missing = [path for path in stats["test_files"] if not any(path in row for row in rows)]
+    # Case-only rows are unambiguous when the diff has just one test file.
+    if len(stats["test_files"]) == 1 and rows and all("/" not in row for row in rows):
+        missing = []
     if missing:
         raise ValueError(f"Incomplete Polly review: unassessed test files: {', '.join(missing)}")
     result = (
