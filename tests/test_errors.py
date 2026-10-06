@@ -85,6 +85,9 @@ def test_omnigent_error_with_harness_violation_code_returns_500() -> None:
         (ErrorCode.HARNESS_PROTOCOL_VIOLATION, 500),
         (ErrorCode.UPSTREAM_CANCELLED, 499),
         (ErrorCode.STALE_CURSOR, 400),
+        # 409, not 410: re-uploading the bundle restores it.
+        (ErrorCode.AGENT_BUNDLE_MISSING, 409),
+        (ErrorCode.SESSION_AGENT_MISSING, 410),
     ],
 )
 def test_all_error_codes_have_http_status_mapping(code: str, expected_status: int) -> None:
@@ -127,6 +130,8 @@ def test_every_error_code_has_a_concrete_category() -> None:
         (ErrorCode.INVALID_INPUT, ErrorCategory.USER),
         (ErrorCode.UNAUTHORIZED, ErrorCategory.USER),
         (ErrorCode.WORKSPACE_MISSING, ErrorCategory.USER),
+        # The deployment lost the blob; the caller did nothing wrong.
+        (ErrorCode.AGENT_BUNDLE_MISSING, ErrorCategory.CONFIG),
         (ErrorCode.UPSTREAM_CANCELLED, ErrorCategory.UPSTREAM),
         (ErrorCode.STALE_CURSOR, ErrorCategory.USER),
     ],
@@ -194,6 +199,7 @@ def test_every_error_code_has_an_impact() -> None:
         (ErrorCode.INTERNAL_ERROR, ErrorImpact.BLOCKING),
         (ErrorCode.HARNESS_NOT_CONFIGURED, ErrorImpact.BLOCKING),
         (ErrorCode.WORKSPACE_MISSING, ErrorImpact.BLOCKING),
+        (ErrorCode.AGENT_BUNDLE_MISSING, ErrorImpact.BLOCKING),
         (ErrorCode.UNAUTHORIZED, ErrorImpact.BLOCKING),
         # Transient: self-healing, no lost progress.
         (ErrorCode.RUNNER_UNAVAILABLE, ErrorImpact.TRANSIENT),
@@ -388,6 +394,7 @@ def test_every_error_code_has_a_phase() -> None:
         (ErrorCode.RUNNER_UNAVAILABLE, ErrorPhase.RUNNER_LAUNCH, True),
         (ErrorCode.HARNESS_NOT_CONFIGURED, ErrorPhase.HARNESS_SETUP, True),
         (ErrorCode.WORKSPACE_MISSING, ErrorPhase.HARNESS_SETUP, True),
+        (ErrorCode.AGENT_BUNDLE_MISSING, ErrorPhase.HARNESS_SETUP, True),
         (ErrorCode.HARNESS_PROTOCOL_VIOLATION, ErrorPhase.TURN, False),
         (ErrorCode.INTERNAL_ERROR, ErrorPhase.UNKNOWN, False),
         (ErrorCode.UPSTREAM_CANCELLED, ErrorPhase.UNKNOWN, False),

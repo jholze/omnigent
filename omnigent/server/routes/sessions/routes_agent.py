@@ -36,7 +36,11 @@ from omnigent.server.auth import (
     AuthProvider,
     local_single_user_enabled,
 )
-from omnigent.server.bundles import bundle_location, validate_agent_bundle
+from omnigent.server.bundles import (
+    agent_bundle_missing_error,
+    bundle_location,
+    validate_agent_bundle,
+)
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes._auth_helpers import (
     can_mutate_session_agent as _can_mutate_session_agent,
@@ -174,6 +178,7 @@ def register_agent_routes(
         responses={
             200: {"content": {"application/gzip": {}}},
             404: {"description": "Session or agent not found"},
+            409: {"description": "Agent bundle missing from the artifact store"},
         },
     )
     async def get_session_agent_contents(
@@ -191,8 +196,9 @@ def register_agent_routes(
         :param session_id: Session identifier, e.g.
             ``"conv_abc123"``.
         :returns: Raw bundle bytes as ``application/gzip``.
-        :raises OmnigentError: If the session, agent, or bundle is
-            not found.
+        :raises OmnigentError: If the session or agent is not found, or
+            ``agent_bundle_missing`` (409) when the agent row exists but
+            the artifact store no longer holds its bundle.
         """
         managed_token = request.headers.get(MANAGED_HOST_TOKEN_HEADER)
         if managed_token:
@@ -232,12 +238,10 @@ def register_agent_routes(
                 "Artifact store not configured",
                 code=ErrorCode.INTERNAL_ERROR,
             )
-        bundle_bytes = artifact_store.get(agent.bundle_location)
-        if bundle_bytes is None:
-            raise OmnigentError(
-                "Agent bundle not found in artifact store",
-                code=ErrorCode.INTERNAL_ERROR,
-            )
+        try:
+            bundle_bytes = artifact_store.get(agent.bundle_location)
+        except KeyError as exc:
+            raise agent_bundle_missing_error(agent) from exc
         return Response(
             content=bundle_bytes,
             media_type="application/gzip",
@@ -269,7 +273,8 @@ def register_agent_routes(
         Validates the new bundle, checks that the spec name matches
         the existing agent, stores the bundle under a
         content-addressed key, updates the agent row, and warm-swaps
-        the cache. Idempotent when the bundle content is unchanged.
+        the cache. Idempotent when the bundle content is unchanged,
+        except that a blob the artifact store lost is stored again.
         Requires session-owner permission because a bundle can replace MCP servers.
 
         :param request: The incoming FastAPI request.
@@ -340,8 +345,11 @@ def register_agent_routes(
 
         new_loc = bundle_location(agent.id, bundle_bytes)
 
-        # Idempotency: same bundle content = no-op
+        # Idempotency: same bundle content = no-op, unless the artifact store
+        # lost the blob the row still names; re-uploading it is the restore path.
         if new_loc == agent.bundle_location:
+            if artifact_store is not None and not artifact_store.exists(new_loc):
+                artifact_store.put(new_loc, bundle_bytes)
             return _to_agent_object(agent, agent_cache, mcp_servers_editable=True)
 
         if artifact_store is None:
