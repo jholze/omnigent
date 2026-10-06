@@ -716,25 +716,81 @@ def _get_current_db_revision(engine: Engine) -> str | None:
             return ctx.get_current_revision()
 
 
+def _declared_migration_revision(path: Path) -> str | None:
+    """Return the ``revision`` a migration file declares, without importing it."""
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        else:
+            continue
+        if (
+            isinstance(target, ast.Name)
+            and target.id == "revision"
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            return node.value.value
+    return None
+
+
+def _find_duplicate_migration_files(versions_dir: Path) -> dict[str, list[Path]]:
+    """Map each revision declared by more than one file in *versions_dir* to those files."""
+    files_by_revision: dict[str, list[Path]] = {}
+    for path in sorted(versions_dir.glob("*.py")):
+        revision = _declared_migration_revision(path)
+        if revision is not None:
+            files_by_revision.setdefault(revision, []).append(path)
+    return {rev: paths for rev, paths in files_by_revision.items() if len(paths) > 1}
+
+
 def _get_head_db_revision(db_uri: str) -> str:
     """
     Return the head Alembic revision for our migrations directory.
 
     Reads the migration scripts on disk (not the database). Raises
     if the migrations directory is empty or otherwise has no head —
-    that would indicate a packaging bug.
+    that would indicate a packaging bug — or if a revision is declared
+    by more than one file, as when an upgrade leaves a stale copy of a
+    migration file behind.
 
     :param db_uri: Database URL — only used to build an Alembic
         ``Config`` pointing at our scripts directory; the database
         itself is not contacted.
     :returns: The head revision hash, e.g. ``"c9d3a1f2e4b5"``.
-    :raises RuntimeError: If no head revision is defined.
+    :raises RuntimeError: If no head revision is defined, or a revision
+        is declared by more than one migration file.
     """
     from alembic.script import ScriptDirectory
+    from alembic.util import CommandError
 
     config = _build_alembic_config(db_uri)
     script = ScriptDirectory.from_config(config)
-    head = script.get_current_head()
+    try:
+        head = script.get_current_head()
+    except CommandError as exc:
+        # Alembic keeps a shadowed duplicate revision as an extra head and
+        # reports "multiple heads"; name the offending files instead.
+        duplicates = _find_duplicate_migration_files(Path(script.versions))
+        if not duplicates:
+            raise
+        listing = "\n".join(
+            f"  {revision}: " + ", ".join(str(path) for path in paths)
+            for revision, paths in sorted(duplicates.items())
+        )
+        raise RuntimeError(
+            "Omnigent's database migrations directory declares the same Alembic "
+            f"revision in more than one file:\n{listing}\n"
+            "This usually means an upgrade left a stale copy of a migration file "
+            "behind. Delete the stale copy (or reinstall Omnigent), then start it again."
+        ) from exc
     if head is None:
         raise RuntimeError(
             "No Alembic head revision found — the migrations directory appears to be empty."

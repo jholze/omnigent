@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import re
+import shutil
+import warnings
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from alembic import command
+from alembic.util import CommandError
 from sqlalchemy import create_engine, event, text
 
+from omnigent.db import utils as db_utils
 from omnigent.db.utils import (
     _LAKEBASE_POOL_RECYCLE_SECONDS,
     _SERVER_POOL_RECYCLE_SECONDS,
@@ -848,6 +852,110 @@ def test_initialize_or_verify_schema_does_not_migrate_database_from_newer_build(
         engine.dispose()
 
     run_migrations.assert_not_called()
+
+
+def _stage_migrations_with_extra_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **header: str,
+) -> tuple[Path, Path]:
+    """
+    Copy the shipped Alembic config + migrations into *tmp_path* and add a
+    second copy of the ``z7a2b3c4d5e6`` migration file — the state an
+    in-place upgrade leaves behind when an old migration file is not
+    removed. *header* rewrites module-level assignments in the copy
+    (``revision``, ``down_revision``) to shape which edition it mimics.
+
+    :returns: ``(shipped, copy)`` paths of the original and the extra file.
+    """
+    db_src = Path(db_utils.__file__).parent
+    staged = tmp_path / "db"
+    staged.mkdir()
+    shutil.copy(db_src / "alembic.ini", staged / "alembic.ini")
+    shutil.copytree(
+        db_src / "migrations",
+        staged / "migrations",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shipped = staged / "migrations" / "versions" / "z7a2b3c4d5e6_convert_ids_to_binary_uuid.py"
+    copy = shipped.with_name("z7a2b3c4d5e6_convert_ids_to_binary_uuid_stale.py")
+    text = shipped.read_text()
+    for name, value in header.items():
+        text, count = re.subn(rf"^{name}\b.*$", f'{name} = "{value}"', text, count=1, flags=re.M)
+        assert count == 1, name
+    copy.write_text(text)
+    # _build_alembic_config locates alembic.ini and the scripts dir relative to this module file.
+    monkeypatch.setattr(db_utils, "__file__", str(staged / "utils.py"))
+    return shipped, copy
+
+
+@pytest.mark.parametrize(
+    "stale_header",
+    [{}, {"down_revision": "9d820f91deef"}],
+    ids=["identical-copy", "older-edition"],
+)
+def test_initialize_or_verify_schema_reports_stale_duplicate_migration_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stale_header: dict[str, str],
+) -> None:
+    """
+    A leftover second copy of a shipped migration file (same ``revision``)
+    must not abort startup with Alembic's raw multiple-heads ``CommandError``:
+    the error names the duplicated revision and both files, and the fresh
+    database is left untouched.
+    """
+    uri = f"sqlite:///{tmp_path / 'fresh.db'}"
+    shipped, stale = _stage_migrations_with_extra_copy(tmp_path, monkeypatch, **stale_header)
+
+    engine = create_engine(uri)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "Revision .* is present more than once")
+            with pytest.raises(RuntimeError, match="more than one file") as exc_info:
+                _initialize_or_verify_schema(engine, uri)
+        assert _get_current_db_revision(engine) is None
+    finally:
+        engine.dispose()
+
+    msg = str(exc_info.value)
+    assert "z7a2b3c4d5e6" in msg
+    assert str(shipped) in msg and str(stale) in msg
+    assert "multiple heads" not in msg
+
+
+def test_run_migrations_reports_stale_duplicate_migration_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manual db-upgrade path names the duplicate too and leaves the database alone."""
+    stale_revision = "8a4f1e9c2b07"
+    uri = _make_db_at_revision(tmp_path / "stale.db", stale_revision)
+    shipped, stale = _stage_migrations_with_extra_copy(tmp_path, monkeypatch)
+
+    engine = create_engine(uri)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "Revision .* is present more than once")
+            with pytest.raises(RuntimeError, match="more than one file") as exc_info:
+                _run_migrations(engine, uri)
+        assert _get_current_db_revision(engine) == stale_revision
+    finally:
+        engine.dispose()
+
+    msg = str(exc_info.value)
+    assert str(shipped) in msg and str(stale) in msg
+
+
+def test_get_head_db_revision_keeps_alembic_error_for_genuine_branches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two distinct revisions sharing a parent is real branching, not a stale copy."""
+    _stage_migrations_with_extra_copy(tmp_path, monkeypatch, revision="z7a2b3c4d5e7")
+
+    with pytest.raises(CommandError, match="multiple heads"):
+        _get_head_db_revision("sqlite:///:memory:")
 
 
 def test_run_migrations_reports_database_from_newer_build(tmp_path: Path) -> None:
