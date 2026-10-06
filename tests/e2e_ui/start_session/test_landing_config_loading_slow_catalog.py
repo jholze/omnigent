@@ -24,7 +24,15 @@ from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import Page, Response, expect
+from playwright.sync_api import (
+    Locator,
+    Page,
+    Response,
+    expect,
+)
+from playwright.sync_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -214,6 +222,26 @@ def _confirm_setup_dialog(page: Page) -> bool:
     return True
 
 
+def _hover_past_setup_dialog(
+    page: Page, hover_target: Locator, observation: StallObservation, started: float
+) -> None:
+    """Hover the submit wrapper, confirming the setup dialog whenever it is in the way.
+
+    "Your setup is ready" can open a moment after the composer renders, and its
+    overlay swallows pointer events, so one early check is not enough.
+    """
+    deadline = time.monotonic() + 30.0
+    while True:
+        if _confirm_setup_dialog(page):
+            observation.setup_dialogs_confirmed_at.append(round(time.monotonic() - started, 1))
+        try:
+            hover_target.hover(timeout=2_000)
+            return
+        except PlaywrightTimeoutError:
+            if time.monotonic() >= deadline:
+                raise
+
+
 def _ensure_claude_code_selected(page: Page) -> None:
     """Pick Claude Code when the landing offers a choice; a loading landing keeps its pick."""
     picker = page.get_by_test_id("new-chat-landing-agent-select")
@@ -263,7 +291,7 @@ def observe_landing_stall(
         submit = page.get_by_test_id("new-chat-landing-submit")
         # The disabled button takes no pointer events; its tooltip wrapper does.
         hover_target = submit.locator("xpath=..")
-        hover_target.hover()
+        _hover_past_setup_dialog(page, hover_target, observation, started)
         tooltip = page.get_by_test_id("new-chat-landing-submit-error-tooltip")
         marks = [30.0, 60.0, 120.0]
         deadline = started + _OBSERVE_CAP_S
@@ -271,7 +299,7 @@ def observe_landing_stall(
             elapsed = time.monotonic() - started
             if _confirm_setup_dialog(page):
                 observation.setup_dialogs_confirmed_at.append(round(elapsed, 1))
-                hover_target.hover()
+                _hover_past_setup_dialog(page, hover_target, observation, started)
             loading = _config_loading(page)
             enabled = submit.is_enabled()
             reason = tooltip.first.inner_text() if tooltip.count() > 0 else ""
