@@ -74,6 +74,23 @@ disappears and the box's host row is tagged **Arca instance** (recognized by
 the host id remembered at connect time). Like the server list, the flag is read from
 macOS on demand, so profile changes apply without a restart.
 
+Remote hosts need their own renewable **Omnigent** OAuth grant. Desktop browser
+sign-in and generic Arca credentials do not replace it. During explicit runner
+setup, an authentication-required result starts `isaac omni login <server-url>`
+on Arca and retries the noninteractive host command once after sign-in. The
+manual connect console asks **Sign in and retry** before doing the same.
+Arca Companion opens the browser and routes its callback to the remote CLI;
+tokens and login output are not forwarded to the desktop renderer. Closing
+the sign-in console cancels the command. Passive auto-connect never starts login.
+
+Use an Isaac release that supports Omnigent-app login and the
+`OMNIGENT_AUTH_REQUIRED` startup diagnostic before deploying this flow.
+SPOG entries can include `/omnigent?o=<workspace-id>` to select the workspace;
+the same full server URL is used for remote login and host startup.
+Connection status and overlapping setup sign-ins are shared only for the same
+full target, including `?o=`. Closing one setup window leaves a shared sign-in
+running for the others; closing the last waiting window cancels it.
+
 ## MDM profile example
 
 Use the standard `com.apple.ManagedClient.preferences` payload and the
@@ -165,6 +182,27 @@ defaults delete ai.omnigent.desktop databricksInternalFeaturesEnabled
 
 For development, substitute `ai.omnigent.desktop-dev` in the commands above.
 A profile for `ai.omnigent.desktop` doesn't apply to local builds, so they can
-be tested on a machine that already has one.
+be tested on a machine that already has one. `just electron-mdm` manages the
+development values:
+
+```bash
+just electron-mdm set "https://omnigent.corp.example.com/?omnigentServerName=Engineering" --internal
+just electron-mdm import   # copy this Mac's managed values for the release app
+just electron-mdm show
+just electron-mdm clear
+```
+
+To test the onboarding flows with a local build:
+
+| Scenario                     | Commands                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| New user, no managed servers | `just electron-mdm clear`, then `just electron-run --v2-flow --reset-state`     |
+| New user, managed servers    | `just electron-mdm set <url>`, then `just electron-run --v2-flow --reset-state` |
+| This Mac's managed setup     | `just electron-mdm import`, then `just electron-run --v2-flow --reset-state`    |
+| Returning user               | `just electron-run --v2-flow` after any of the above                            |
+
+`--reset-state` uninstalls the CLI and removes the local build's app data, so
+the next launch starts as a new user.
+
 Production deployment should use an MDM-forced preference rather than a local
 user default.
