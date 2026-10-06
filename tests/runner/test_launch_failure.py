@@ -292,6 +292,7 @@ def test_429_still_classifies_as_rate_limit_not_transient() -> None:
         ("databricks_sign_in_pending", "Databricks sign-in"),
         ("agent_startup_pending", "still starting"),
         ("codex_thread_not_started", "never ran"),
+        ("runner_failed_to_start", "runner process exited on the host"),
     ],
 )
 def test_describe_failure_code_known(code: str, expected_substring: str) -> None:
