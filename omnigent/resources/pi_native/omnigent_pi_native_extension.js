@@ -1696,6 +1696,9 @@ module.exports = function (pi) {
     const postKey = `${cumulativeInputTokens}-${cumulativeOutputTokens}-${cumulativeCacheReadTokens}-${usageModel || ""}`;
     if (postKey === lastPostedUsageKey) return;
     lastPostedUsageKey = postKey;
+    // Persist the running total before the POST so a relaunch restores it even
+    // when the flush fails and the server never records this report.
+    persistCumulativeUsage();
     const data = {
       cumulative_input_tokens: cumulativeInputTokens,
       cumulative_output_tokens: cumulativeOutputTokens,
@@ -1703,6 +1706,60 @@ module.exports = function (pi) {
     };
     if (usageModel) data.model = usageModel;
     await postEvent(config, { type: "external_session_usage", data });
+  }
+
+  // A relaunched Pi process (idle reap, crash, resume) restarts these counters
+  // at 0; its first flush then lands below the server's monotonic peak and is
+  // dropped as a no-op, freezing the usage display until the baseline grows.
+  function usageStatePath() {
+    if (!config || !config.bridgeDir) return null;
+    return path.join(config.bridgeDir, "cumulative_usage.json");
+  }
+
+  function persistCumulativeUsage() {
+    const statePath = usageStatePath();
+    if (!statePath) return;
+    try {
+      const tmp = `${statePath}.tmp`;
+      fs.writeFileSync(
+        tmp,
+        JSON.stringify({
+          cumulative_input_tokens: cumulativeInputTokens,
+          cumulative_output_tokens: cumulativeOutputTokens,
+          cumulative_cache_read_input_tokens: cumulativeCacheReadTokens,
+          model: usageModel,
+        }),
+      );
+      fs.renameSync(tmp, statePath);
+    } catch (_err) {
+      // Best-effort: a failed persist only risks a one-time undercount on the
+      // next relaunch, never a crash or a wrong (clawed-back) total.
+    }
+  }
+
+  function restoreCumulativeUsage() {
+    const statePath = usageStatePath();
+    if (!statePath) return;
+    let saved;
+    try {
+      saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    } catch (_err) {
+      return; // Fresh session or unreadable state: start the counters at 0.
+    }
+    if (!saved || typeof saved !== "object") return;
+    const input = toInt(saved.cumulative_input_tokens);
+    const output = toInt(saved.cumulative_output_tokens);
+    const cacheRead = toInt(saved.cumulative_cache_read_input_tokens);
+    // Only raise the counters; a stale file must never pull a live total down.
+    if (input > cumulativeInputTokens) cumulativeInputTokens = input;
+    if (output > cumulativeOutputTokens) cumulativeOutputTokens = output;
+    if (cacheRead > cumulativeCacheReadTokens) cumulativeCacheReadTokens = cacheRead;
+    if (!usageModel && typeof saved.model === "string" && saved.model)
+      usageModel = saved.model;
+    // The server already holds this seeded baseline (this process wrote it
+    // before exiting), so dedup an immediate re-flush of the unchanged total;
+    // the first NEW message advances the key and posts.
+    lastPostedUsageKey = `${cumulativeInputTokens}-${cumulativeOutputTokens}-${cumulativeCacheReadTokens}-${usageModel || ""}`;
   }
 
   function rememberContext(ctx) {
@@ -1944,6 +2001,7 @@ module.exports = function (pi) {
 
   pi.on("session_start", async (_event, ctx) => {
     rememberContext(ctx);
+    restoreCumulativeUsage();
     registerTaskToolIfMissing();
     restoreTaskList(ctx);
     if (taskList.length) await publishTaskList();

@@ -433,6 +433,132 @@ def test_distinct_messages_with_identical_usage_are_not_collapsed(
     _run_extension_script(node, extension_path, script)
 
 
+def test_usage_baseline_survives_native_restart(tmp_path: Path) -> None:
+    """A relaunched Pi process restarts its cumulative counters at 0, so its first
+    flush falls below the server peak and is clamped; assert the baseline advances.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+    extension_path = (
+        Path(__file__).resolve().parents[3]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-restart-"));
+const bridgeDir = path.join(root, "bridge");
+const inboxDir = path.join(root, "inbox");
+fs.mkdirSync(bridgeDir, { recursive: true });
+fs.mkdirSync(inboxDir, { recursive: true });
+
+const configPath = path.join(root, "config.json");
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "session-1",
+    inboxDir,
+    bridgeDir,
+    authHeaders: { authorization: "Bearer test" },
+  }),
+);
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const postedEvents = [];
+global.fetch = async (_url, request) => {
+  postedEvents.push(JSON.parse(request.body));
+  return { ok: true };
+};
+global.setInterval = () => ({ fakeInterval: true });
+
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
+};
+
+function usageEvents() {
+  return postedEvents.filter((e) => e.type === "external_session_usage");
+}
+
+// Load a fresh copy of the extension, mimicking a relaunched Pi process whose
+// in-memory cumulative counters start back at 0.
+function launchExtension() {
+  delete require.cache[require.resolve(extensionPath)];
+  const handlers = {};
+  const pi = {
+    registerCommand() {},
+    on(eventName, handler) {
+      handlers[eventName] = handler;
+    },
+  };
+  require(extensionPath)(pi);
+  return handlers;
+}
+
+(async () => {
+  // A long conversation accrues a high cumulative total that the extension
+  // flushes to the server AND persists to the bridge dir.
+  const first = launchExtension();
+  await first.session_start({}, ctx);
+  await first.message_end(
+    {
+      message: {
+        role: "assistant",
+        model: "databricks-claude-sonnet-4-6",
+        timestamp: 1000,
+        usage: { input: 150000, output: 30000, cacheRead: 0, cacheWrite: 0, totalTokens: 180000 },
+      },
+    },
+    ctx,
+  );
+
+  const beforeRestart = usageEvents();
+  assert.equal(beforeRestart.length, 1, JSON.stringify(postedEvents));
+  assert.equal(beforeRestart[0].data.cumulative_input_tokens, 150000);
+  assert.equal(beforeRestart[0].data.cumulative_output_tokens, 30000);
+
+  // Relaunch: a brand-new process restores the baseline on session_start, then
+  // reports ONE short post-restart turn.
+  postedEvents.length = 0;
+  const second = launchExtension();
+  await second.session_start({}, ctx);
+  await second.message_end(
+    {
+      message: {
+        role: "assistant",
+        model: "databricks-claude-sonnet-4-6",
+        timestamp: 2000,
+        usage: { input: 900, output: 250, cacheRead: 0, cacheWrite: 0, totalTokens: 1150 },
+      },
+    },
+    ctx,
+  );
+
+  const afterRestart = usageEvents();
+  assert.equal(afterRestart.length, 1, JSON.stringify(postedEvents));
+  const data = afterRestart[afterRestart.length - 1].data;
+  // Must ADVANCE from the restored baseline (150000 + 900, 30000 + 250), not the
+  // lone 900/250 turn the unfixed extension reports (clamped away, frozen).
+  assert.equal(data.cumulative_input_tokens, 150900, JSON.stringify(data));
+  assert.equal(data.cumulative_output_tokens, 30250, JSON.stringify(data));
+  assert.equal(data.model, "databricks-claude-sonnet-4-6");
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});"""
+    _run_extension_script(node, extension_path, script)
+
+
 def test_agent_end_dedupes_real_shaped_messages_by_timestamp(
     tmp_path: Path,
 ) -> None:

@@ -32,8 +32,10 @@ const harnesses = [];
 // Build a fresh extension instance with its own temp inbox directory. Each call
 // produces independent closure state (activeResponseId, pendingInterruptUntil,
 // latestContext, ...).
-function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
-  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-native-inbox-"));
+function makeHarness({ captureEvents = false, existingTools = [], inboxDir: reuseInboxDir } = {}) {
+  // A provided inboxDir reuses a prior harness's session-scoped bridge dir,
+  // modelling a Pi process relaunch against the same resumed session.
+  const inboxDir = reuseInboxDir || fs.mkdtempSync(path.join(os.tmpdir(), "pi-native-inbox-"));
   const configPath = path.join(inboxDir, "config.json");
   // A serverUrl + sessionId make postEvent attempt a real fetch; with a mock
   // global fetch that lets a test capture the posted event bodies. Without
@@ -559,8 +561,89 @@ async function testQueuedPromptDuringStartupStaysRunningUntilAgentEnd() {
   }
 }
 
+// Build one completed assistant message carrying usage, as Pi emits on
+// message_end for a live agent-loop turn.
+function assistantUsageMessage({ input, output, model, cacheRead = 0, timestamp }) {
+  return {
+    role: "assistant",
+    model,
+    timestamp,
+    usage: {
+      input,
+      output,
+      cacheRead,
+      cacheWrite: 0,
+      totalTokens: input + output + cacheRead,
+    },
+    content: [],
+  };
+}
+
+function lastUsagePost(postedEvents) {
+  const posts = postedEvents.filter((e) => e && e.type === "external_session_usage");
+  return posts.length ? posts[posts.length - 1].data : null;
+}
+
+// A relaunched Pi process restarts its cumulative counters at 0, so without a
+// restored baseline its first flush is below the server peak and the clamp
+// freezes the usage display. Assert the restored baseline keeps advancing.
+async function testUsageBaselineSurvivesNativeRestart() {
+  // Process 1: accrue and flush a cumulative total, then "exit".
+  const first = makeHarness({ captureEvents: true });
+  const ctx1 = makeCtx({ idle: true });
+  await first.handlers.session_start({}, ctx1);
+  await first.handlers.message_end(
+    {
+      message: assistantUsageMessage({
+        input: 150_000,
+        output: 30_000,
+        model: "claude-opus-4",
+        timestamp: 1,
+      }),
+    },
+    ctx1,
+  );
+  const firstPost = lastUsagePost(first.postedEvents);
+  assert(
+    "process 1 flushes its cumulative total to the server",
+    !!firstPost &&
+      firstPost.cumulative_input_tokens === 150_000 &&
+      firstPost.cumulative_output_tokens === 30_000,
+    JSON.stringify(firstPost),
+  );
+  // The process is gone on relaunch; stop its inbox poller.
+  if (first.pi.__omnigentInboxPoller) clearInterval(first.pi.__omnigentInboxPoller);
+
+  // Process 2: a relaunch reusing the SAME session-scoped bridge dir. Pi does
+  // not re-emit the loaded history, so only the single post-restart turn's
+  // usage arrives.
+  const second = makeHarness({ captureEvents: true, inboxDir: first.inboxDir });
+  const ctx2 = makeCtx({ idle: true });
+  await second.handlers.session_start({}, ctx2);
+  await second.handlers.message_end(
+    {
+      message: assistantUsageMessage({
+        input: 900,
+        output: 250,
+        model: "claude-opus-4",
+        timestamp: 2,
+      }),
+    },
+    ctx2,
+  );
+  const resumePost = lastUsagePost(second.postedEvents);
+  assert(
+    "the first post-restart flush carries the restored baseline plus the new turn, not a below-peak rebase",
+    !!resumePost &&
+      resumePost.cumulative_input_tokens === 150_900 &&
+      resumePost.cumulative_output_tokens === 30_250,
+    JSON.stringify(resumePost),
+  );
+}
+
 (async () => {
   try {
+    await testUsageBaselineSurvivesNativeRestart();
     await testSessionStartupDoesNotCompleteATurn();
     await testSessionStartMarksInputReady();
     await testQueuedPromptDuringStartupStaysRunningUntilAgentEnd();
