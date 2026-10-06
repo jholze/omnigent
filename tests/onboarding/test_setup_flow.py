@@ -42,6 +42,15 @@ _JIRA = ProfileSpec("jira", "https://jira.example.com", "Jira MCP", False)
 _CLI = "/usr/bin/databricks"
 
 
+@pytest.fixture(autouse=True)
+def _port_preflight_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the scripted logins independent of the test host's own port 8020."""
+    monkeypatch.setattr(
+        "omnigent.onboarding.databricks_config.databricks_login_port_conflict",
+        lambda _bin: None,
+    )
+
+
 @pytest.fixture()
 def catalog(monkeypatch: pytest.MonkeyPatch) -> tuple[ProfileSpec, ...]:
     """Stub the internal-beta catalog with two known profiles."""

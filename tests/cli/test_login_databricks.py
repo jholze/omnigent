@@ -14,7 +14,11 @@ app-rejects-token failure, and non-interference with accounts mode.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
+import textwrap
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -111,6 +115,7 @@ def _patch_login_env(
     cached_tokens: list[str | None] | None = None,
     host_needs_selector: bool = False,
     default_workspace_id: str | None = None,
+    databricks_bin: Path | None = None,
 ) -> list[str]:
     """Patch the login command's collaborators for a scripted run.
 
@@ -127,6 +132,10 @@ def _patch_login_env(
     :param default_workspace_id: What ``_databricks_default_workspace_id``
         returns — the workspace the CLI recorded for the host. Defaults to
         ``None`` so tests never read the developer's real ``~/.databrickscfg``.
+    :param databricks_bin: A real executable to resolve ``databricks`` to.
+        When given, ``subprocess.run`` and the callback-port preflight are left
+        untouched so the login really spawns it (and the returned list stays
+        empty).
     :returns: A list capturing each ``subprocess.run`` argv (the
         ``databricks auth login`` invocations).
     """
@@ -158,6 +167,21 @@ def _patch_login_env(
     monkeypatch.setattr(cli_mod, "_databricks_workspace_auth_info", _auth_info)
 
     login_calls: list[str] = []
+    if databricks_bin is not None:
+        real_which = cli_mod.shutil.which
+        monkeypatch.setattr(
+            cli_mod.shutil,
+            "which",
+            lambda name: str(databricks_bin) if name == "databricks" else real_which(name),
+        )
+        return login_calls
+
+    # The scripted run never spawns a CLI, so the test host's own 127.0.0.1:8020
+    # must not steer these logins into the callback-port preflight.
+    monkeypatch.setattr(
+        "omnigent.onboarding.databricks_config.databricks_login_port_conflict",
+        lambda _bin: None,
+    )
 
     @dataclass
     class _Completed:
@@ -452,6 +476,82 @@ def test_login_runs_databricks_auth_login_when_no_cached_grant(
     # ``DEFAULT`` is left alone; ``?o=`` stays only on ``--host``.
     assert login_calls == [f"auth login --host {_WORKSPACE} --profile {_PROFILE}"]
     assert load_databricks_workspace_host(_APPS_URL) == _WORKSPACE
+
+
+def _legacy_databricks_cli(tmp_path: Path) -> Path:
+    """Write a stand-in for a Databricks CLI older than v0.265.0.
+
+    Those releases bind the OAuth callback listener to a fixed localhost:8020
+    and abort the login when another process already holds it.
+
+    :param tmp_path: Directory to write the executable into.
+    :returns: Path to the executable.
+    """
+    script = tmp_path / "databricks"
+    script.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json, socket, sys
+
+            args = sys.argv[1:]
+            if args[:1] in (["--version"], ["version"]):
+                if "json" in args:
+                    print(json.dumps({"Version": "0.244.0", "Major": 0, "Minor": 244, "Patch": 0}))
+                else:
+                    print("Databricks CLI v0.244.0")
+                sys.exit(0)
+            if args[:2] == ["auth", "login"]:
+                try:
+                    socket.create_server(("127.0.0.1", 8020)).close()
+                except OSError:
+                    sys.stderr.write(
+                        "Error: listen tcp 127.0.0.1:8020: bind: address already in use\\n"
+                    )
+                    sys.exit(1)
+                sys.exit(0)
+            sys.exit(1)
+            """
+        )
+    )
+    script.chmod(0o755)
+    return script
+
+
+@contextlib.contextmanager
+def _port_8020_held() -> Iterator[None]:
+    """Keep 127.0.0.1:8020 busy, like a remote-dev port forwarder does."""
+    try:
+        holder = socket.create_server(("127.0.0.1", 8020))
+    except OSError:
+        yield  # another process already holds it, which is the scenario itself
+        return
+    with holder:
+        yield
+
+
+def test_login_with_busy_callback_port_and_old_cli_names_the_port(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path, tmp_path: Path
+) -> None:
+    """Old CLI + busy 127.0.0.1:8020 → the error names the port, not the network.
+
+    A pre-v0.265.0 CLI dies on the callback bind before any workspace traffic,
+    so the "workspace unreachable (VPN / IP access lists)" hint is misleading.
+    """
+    fake = _FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})])
+    _patch_login_env(
+        monkeypatch,
+        fake_httpx=fake,
+        cached_tokens=[None],
+        databricks_bin=_legacy_databricks_cli(tmp_path),
+    )
+
+    with _port_8020_held():
+        result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+
+    assert result.exit_code != 0
+    assert "8020" in result.output, result.output
+    assert "VPN / IP access lists" not in result.output, result.output
 
 
 def test_login_fails_loud_when_app_rejects_workspace_token(
