@@ -1,10 +1,6 @@
 """A stalled server-side consumer must bound how much tunnel body the server buffers.
-
-Real sockets end to end: uvicorn hosts the server's tunnel route, the runner
-dials in with ``serve_tunnel``, and the consumer reads through
-``WSTunnelTransport``. Only TCP and the protocol can hold the runner back, so
-this is where flow control for a slow download has to show up.
-"""
+Real sockets end to end (uvicorn tunnel route, ``serve_tunnel`` runner,
+``WSTunnelTransport`` consumer) so only TCP and the protocol hold the runner back."""
 
 from __future__ import annotations
 
