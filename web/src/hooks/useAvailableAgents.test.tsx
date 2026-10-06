@@ -498,7 +498,7 @@ describe("useAvailableAgents", () => {
 
     const rows = (result.current.data ?? []).map((a) => [a.id, a.display_name]);
     expect(rows).toContainEqual(["ag_teamkiro", "Teamkiro"]);
-    expect(rows.map(([id]) => id)).toContain("ag_legacy_kiro");
+    expect(rows).toContainEqual(["ag_legacy_kiro", "Kiro"]);
   });
 
   it("defaults a missing harness to null", async () => {
