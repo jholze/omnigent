@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import threading
 from collections.abc import Coroutine
 from typing import Any, TypeVar
@@ -26,6 +27,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
 _T = TypeVar("_T")
+_logger = logging.getLogger(__name__)
 
 _MAX_FRAME_BYTES = 100 * 1024 * 1024
 # Hop-by-hop and handshake headers the proxy regenerates on its own legs.
@@ -64,7 +66,10 @@ class _Link:
             if self.zombie:
                 # The server leg is gone; keep the host leg open and drained so
                 # its protocol pings keep being answered until the host gives up.
-                await to_server
+                try:
+                    await to_server
+                except Exception:
+                    _logger.exception("zombie host leg pump failed; closing the host leg")
         finally:
             for task in (to_server, to_host):
                 task.cancel()
@@ -132,8 +137,12 @@ class ZombieTunnelProxy:
 
     def start(self) -> None:
         self._thread.start()
-        self._server = self._run(self._start())
-        self._port = self._server.sockets[0].getsockname()[1]
+        try:
+            self._server = self._run(self._start())
+            self._port = self._server.sockets[0].getsockname()[1]
+        except Exception:
+            self.stop()
+            raise
 
     def stop(self) -> None:
         if self._server is not None:
@@ -142,8 +151,9 @@ class ZombieTunnelProxy:
             self._server = None
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
-        if not self._thread.is_alive():
-            self._loop.close()
+        if self._thread.is_alive():
+            raise RuntimeError("zombie tunnel proxy loop thread did not stop within 10s")
+        self._loop.close()
 
     def wait_for_tunnel(self, timeout: float = 60.0) -> None:
         """Block until at least one host tunnel has been forwarded upstream."""

@@ -241,6 +241,14 @@ def _run_sever_case(tmp_path: Path, *, zombie: bool, deadline_s: float) -> None:
                 f"host reconnected without logging the tunnel drop\n"
                 f"{_describe(host, 'online', elapsed)}"
             )
+            if zombie:
+                # The recovery must come from the silence watchdog, not from the
+                # front door closing the host leg and the ordinary reconnect path.
+                log = host.log()
+                assert "No frame from the server for" in log, _describe(host, "online", elapsed)
+                assert "server went silent — prompt reconnect" in log, _describe(
+                    host, "online", elapsed
+                )
             assert host.proc.poll() is None, "host daemon exited instead of reconnecting"
         finally:
             host.stop()

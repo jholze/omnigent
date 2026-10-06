@@ -6799,16 +6799,21 @@ async def test_repeated_server_silence_honors_silent_connect_backoff(
     )
 
 
-async def test_silence_watchdog_closes_tunnel_without_transport(
+@pytest.mark.parametrize("abort_failure", ["missing transport", "abort raises"])
+async def test_silence_watchdog_closes_tunnel_when_abort_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    abort_failure: str,
 ) -> None:
-    """Without an abortable transport the watchdog still ends the dead tunnel via close()."""
+    """When the transport cannot be aborted the watchdog still ends the dead tunnel via close()."""
     monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.1)
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
     tunnel = _SilentPeerTunnel()
-    del tunnel.transport
+    if abort_failure == "missing transport":
+        del tunnel.transport
+    else:
+        tunnel.transport = SimpleNamespace(abort=Mock(side_effect=OSError("socket already gone")))
     host = _host()
 
     with (
@@ -6828,17 +6833,17 @@ async def test_server_application_pings_keep_the_tunnel_open(
 ) -> None:
     """Each server frame resets the silence watchdog, so a live tunnel is never dropped.
 
-    Pings arrive at a tenth of the (shortened) silence budget, so only a
+    Pings arrive at a twentieth of the (shortened) silence budget, so only a
     multi-second stall could expire it, and they keep coming for longer than
     that budget; the host answers each and never aborts the socket. The
-    watchdog also dies with the connection instead of firing afterwards.
+    watchdog task ends with the connection instead of lingering to fire later.
     """
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_CAP_S", 0.0)
-    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 1.0)
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 2.0)
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
-    pings = [encode_frame(PingFrame(ts=i)) for i in range(15)]
+    pings = [encode_frame(PingFrame(ts=i)) for i in range(25)]
     tunnel = _SilentPeerTunnel(pings, interval=0.1, then=ConnectionClosedError(None, None))
     spy = _ConnectSpy([tunnel, asyncio.CancelledError()])
     _patch_connect(monkeypatch, spy)
@@ -6846,15 +6851,15 @@ async def test_server_application_pings_keep_the_tunnel_open(
 
     with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
         await host.run()
-    await asyncio.sleep(1.2)
 
     assert not tunnel.transport.aborted.is_set()
     assert not [m for m in caplog.messages if m.startswith("No frame from the server")]
+    assert not [t for t in asyncio.all_tasks() if t.get_name() == "host-tunnel-silence-watchdog"]
     pongs = []
     for raw in tunnel.sent:
         with contextlib.suppress(ValueError):
             pongs.append(decode_frame(raw))
-    assert [frame.ts for frame in pongs if isinstance(frame, PongFrame)] == list(range(15))
+    assert [frame.ts for frame in pongs if isinstance(frame, PongFrame)] == list(range(25))
 
 
 async def test_connection_error_frame_fails_loudly_on_live_receive_path() -> None:

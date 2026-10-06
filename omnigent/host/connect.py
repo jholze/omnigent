@@ -4575,7 +4575,9 @@ class HostProcess:
         loop = asyncio.get_running_loop()
         self._last_server_frame_at = loop.time()
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
-        silence_task = asyncio.create_task(self._inbound_silence_watchdog(ws))
+        silence_task = asyncio.create_task(
+            self._inbound_silence_watchdog(ws), name="host-tunnel-silence-watchdog"
+        )
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
