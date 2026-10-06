@@ -17,6 +17,7 @@ import base64
 import binascii
 import contextlib
 import logging
+import math
 import os
 import random
 import time
@@ -471,9 +472,9 @@ async def serve_tunnel(
         draining.discard(task)
         cancelled = task.cancelled()
         error = None if cancelled else task.exception()
-        # A graceful shutdown drains (awaits) superseded connections rather than
-        # cancelling them, so count that drain as a local shutdown too.
-        local_shutdown = cancelled or (shutdown_event is not None and shutdown_event.is_set())
+        # Only a real graceful shutdown is a local shutdown; a drain cancelled by
+        # a fatal exit must not mask that failure in disconnect-reason metrics.
+        local_shutdown = shutdown_event is not None and shutdown_event.is_set()
         record_websocket_disconnected(
             "runner",
             error,
@@ -497,9 +498,9 @@ async def serve_tunnel(
         if auth_token_factory is None:
             return auth_token
         token = await asyncio.to_thread(auth_token_factory)
-        if token is None:
-            raise RuntimeError("auth token factory returned no credentials")
-        return token
+        # A None mint is a valid no-auth state (see _refresh_auth_token);
+        # keep the current token so renewal still replaces the socket.
+        return auth_token if token is None else token
 
     try:
         while True:
@@ -589,6 +590,9 @@ async def serve_tunnel(
                     draining.add(conn_task)
                     conn_task.add_done_callback(_reap_drained)
                     delay_s = _INITIAL_RECONNECT_DELAY_S
+                    # A healthy renewal is not a reconnect; keep the attempt
+                    # ordinal from inflating the replacement's telemetry rows.
+                    attempt = 0
                     continue
                 if not renewal_signal.done():
                     renewal_signal.cancel()
@@ -935,6 +939,8 @@ def _tunnel_renewal_interval_s() -> float | None:
         return _DEFAULT_TUNNEL_RENEWAL_INTERVAL_S
     try:
         interval_s = float(raw)
+        if not math.isfinite(interval_s):
+            raise ValueError(raw)
     except ValueError:
         _logger.warning(
             "ignoring unparseable %s=%r; using the default tunnel renewal interval",

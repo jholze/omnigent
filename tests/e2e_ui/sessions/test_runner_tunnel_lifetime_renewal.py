@@ -93,7 +93,7 @@ def _renewal_env() -> dict[str, str]:
 def artifacts_dir() -> Path:
     configured = os.environ.get(_ARTIFACTS_ENV)
     if configured:
-        path = Path(configured)
+        path = Path(configured) / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     else:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         path = _REPO_ROOT / ".omnigent" / "repro-artifacts" / "omni-11843" / f"run-{stamp}"
@@ -214,13 +214,17 @@ def spawn_proxied_runner(
     stdout_log = artifacts / "runner-stdout.log"
     handle = open(stdout_log, "w")  # noqa: SIM115 — closed with the process
     started_at = time.time()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.runner._entry"],
-        env=env,
-        cwd=workspace,
-        stdout=handle,
-        stderr=subprocess.STDOUT,
-    )
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "omnigent.runner._entry"],
+            env=env,
+            cwd=workspace,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    except BaseException:
+        handle.close()
+        raise
     runner = ProxiedRunner(runner_id, proc, data_dir, workspace, stdout_log, started_at, handle)
     deadline = time.monotonic() + _RUNNER_ONLINE_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -548,6 +552,11 @@ def test_tunnel_is_renewed_before_the_proxy_lifetime(
     if offline_ui:
         failures.append(
             f"the session showed a disconnect/offline indicator during the turn: {offline_ui}"
+        )
+    if aborts:
+        failures.append(
+            "the intermediary severed a tunnel at its lifetime boundary; make-before-break "
+            f"must retire the old socket first: aborts={[e.get('age_s') for e in aborts]}"
         )
     if offline_spans:
         failures.append(f"the runner was reported offline during the turn at {offline_spans}")

@@ -98,6 +98,18 @@ class _RecordingCredentials:
         return f"token-{self.calls}"
 
 
+class _NoAuthCredentials:
+    """A no-auth deployment's factory: every mint legitimately returns None."""
+
+    def __init__(self, timeline: _Timeline):
+        self._timeline = timeline
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        self._timeline.factory_calls.append(time.monotonic())
+
+
 async def _noop_app(scope: object, receive: object, send: object) -> None:
     del scope, receive, send
 
@@ -212,4 +224,22 @@ async def test_failed_renewal_keeps_the_existing_tunnel_serving(
     assert len(timeline.upgrades) == 1 and not timeline.closes, (
         "a failed credential refresh must keep the working socket open and retry later: "
         f"upgrades={timeline.rel(timeline.upgrades)} closes={timeline.rel(timeline.closes)}"
+    )
+
+
+async def test_renewal_reuses_current_credentials_when_factory_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-auth factory returns None on every mint; renewal must still open the
+    replacement using the existing credential instead of stalling until the
+    intermediary severs the socket at its lifetime boundary."""
+    _configure_short_renewal(monkeypatch)
+    timeline = await _drive(_NoAuthCredentials, run_for_s=_PEER_LIFETIME_S + 3)
+    boundary = timeline.lifetime_boundary()
+    upgrades_before = [t for t in timeline.upgrades if t < boundary]
+    assert len(upgrades_before) >= 2, (
+        "renewal stalled on a None-minting (no-auth) factory instead of reusing the "
+        f"current credential: upgrades={timeline.rel(timeline.upgrades)} "
+        f"factory_calls={timeline.rel(timeline.factory_calls)} "
+        f"aborts={timeline.rel(timeline.aborts)}"
     )

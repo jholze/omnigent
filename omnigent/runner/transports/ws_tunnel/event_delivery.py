@@ -146,7 +146,7 @@ class RunnerEventDispatcher:
             del self._pending[batch_id]
 
     def acknowledge(self, ack: EventAckFrame) -> None:
-        """Resolve only an acknowledgement from the current tunnel generation."""
+        """Resolve a pending batch by id; a draining generation's late ack still counts."""
         entry = self._pending.pop(ack.id, None)
         if entry is not None and not entry[0].done():
             entry[0].set_result(ack)

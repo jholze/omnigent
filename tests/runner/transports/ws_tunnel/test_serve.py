@@ -2952,13 +2952,15 @@ def test_tunnel_renewal_interval_non_positive_disables(
     assert serve_module._tunnel_renewal_interval_s() is None
 
 
+@pytest.mark.parametrize("raw", ["soon", "nan", "inf", "-inf"])
 def test_tunnel_renewal_interval_unparseable_warns_and_uses_default(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    raw: str,
 ) -> None:
     import logging
 
-    monkeypatch.setenv(serve_module._RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV, "soon")
+    monkeypatch.setenv(serve_module._RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV, raw)
     caplog.set_level(logging.WARNING, logger="omnigent.runner.transports.ws_tunnel.serve")
     assert (
         serve_module._tunnel_renewal_interval_s()
