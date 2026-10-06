@@ -195,6 +195,7 @@ describe(
           );
           assert.ok(stopped, "the take did not stop");
           assert.ok((await composer.inputValue()).includes(script), "stopping clobbered the text");
+          // Hold the final state on camera so the clip ends on the asserted result.
           await window.waitForTimeout(2000);
         } finally {
           saved = await teardownDesktop(desktop, clipName);

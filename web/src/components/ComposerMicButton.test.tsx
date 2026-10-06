@@ -61,6 +61,7 @@ function installDictationSession() {
 
 /** Captured event handlers keyed by event type, fed by the fake recognition. */
 let handlers: Record<string, (event: unknown) => void>;
+let constructSpy: Mock<() => void>;
 let startSpy: ReturnType<typeof vi.fn>;
 let stopSpy: ReturnType<typeof vi.fn>;
 let recognitionLang: string | undefined;
@@ -71,12 +72,16 @@ let originalLanguage: PropertyDescriptor | undefined;
 
 function installSpeechRecognition() {
   handlers = {};
+  constructSpy = vi.fn<() => void>();
   startSpy = vi.fn();
   stopSpy = vi.fn();
   recognitionLang = undefined;
   // A class (not an arrow fn) so `new Ctor()` is constructable — the component
   // does `new Ctor()` in its mount effect.
   class FakeRecognition {
+    constructor() {
+      constructSpy();
+    }
     private language = "en-US";
     get lang() {
       return this.language;
@@ -619,8 +624,7 @@ describe("ComposerMicButton (server dictation)", () => {
     // Electron HAS a SpeechRecognition constructor but no backend: a Web Speech
     // take always fails with "network" and only then falls back, a visible ~1s
     // stall. With the server available the button must skip it entirely.
-    (window as unknown as Record<string, unknown>).omnigentDesktop = { kind: "electron" };
-    try {
+    await inElectronShell(async () => {
       render(
         <CapabilitiesContext.Provider value={DICTATION_INFO}>
           <ComposerMicButton onTranscript={vi.fn()} />
@@ -635,9 +639,7 @@ describe("ComposerMicButton (server dictation)", () => {
         "aria-pressed",
         "true",
       );
-    } finally {
-      delete (window as unknown as Record<string, unknown>).omnigentDesktop;
-    }
+    });
   });
 
   it("in Electron without server dictation, offers no mic", async () => {
@@ -686,6 +688,43 @@ describe("ComposerMicButton (server dictation)", () => {
       });
       expect(chord.defaultPrevented).toBe(true);
       expect(sessionStartMock).toHaveBeenCalledTimes(1);
+      expect(startSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("in Electron, offers the mic and hotkey only once the server advertises dictation", async () => {
+    await inElectronShell(async () => {
+      const { rerender } = render(
+        <CapabilitiesContext.Provider value="loading">
+          <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
+        </CapabilitiesContext.Provider>,
+      );
+      // Nothing can be offered while the capability probe is in flight.
+      expect(screen.queryByRole("button", { name: "Voice dictation" })).toBeNull();
+      const loadingChord = dictationChord();
+      await act(async () => {
+        window.dispatchEvent(loadingChord);
+      });
+      expect(loadingChord.defaultPrevented).toBe(false);
+      expect(sessionStartMock).not.toHaveBeenCalled();
+
+      rerender(
+        <CapabilitiesContext.Provider value={DICTATION_INFO}>
+          <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
+        </CapabilitiesContext.Provider>,
+      );
+      expect(screen.getByRole("button", { name: "Voice dictation" })).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+      const chord = dictationChord();
+      await act(async () => {
+        window.dispatchEvent(chord);
+      });
+      expect(chord.defaultPrevented).toBe(true);
+      expect(sessionStartMock).toHaveBeenCalledTimes(1);
+      // Electron never builds a Web Speech recognizer, let alone starts one.
+      expect(constructSpy).not.toHaveBeenCalled();
       expect(startSpy).not.toHaveBeenCalled();
     });
   });
