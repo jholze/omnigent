@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -19,6 +20,11 @@ import pytest
 from playwright.sync_api import Page, Response, expect
 
 from tests.e2e_ui.conftest import open_right_rail
+
+# ``_server_rss_kib`` reads ``/proc/<pid>/status``, which only exists on Linux.
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="server RSS probe reads /proc, Linux-only"
+)
 
 _FILE_NAME = "big-download.bin"
 _FILE_BYTES = 48 * 1024 * 1024

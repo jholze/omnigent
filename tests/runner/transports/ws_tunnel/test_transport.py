@@ -285,6 +285,77 @@ async def test_cancelled_body_wait_sends_request_cancel_before_forgetting_reques
     assert cancels[0].id == "req1"
 
 
+@pytest.mark.asyncio
+async def test_cancelled_head_wait_sends_request_cancel_before_forgetting_request() -> None:
+    """A cancel while awaiting the response head must cancel the runner too.
+
+    Once the request frame reached a flow-controlled runner, abandoning the head
+    wait without a cancel strands that dispatch on exhausted send credit. The
+    head-exception path must send exactly one matching cancel before it forgets
+    the request, sharing ordering with the body-stream cleanup.
+    """
+    reg = TunnelRegistry()
+    hello = _hello()
+    hello.capabilities.append(RESPONSE_FLOW_CAPABILITY)
+    session = reg.register("r1", _NoopWS(), hello)
+    transport = WSTunnelTransport(reg, "r1")
+
+    task = asyncio.ensure_future(transport.handle_async_request(_make_request("GET", "/download")))
+    # Let the request frame go out and the head wait park; no head arrives.
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    sent = decode_frame(session.outbound_queue.get_nowait())
+    assert isinstance(sent, RequestFrame)
+    req_id = sent.id
+    assert req_id in session.in_flight
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert req_id not in session.in_flight
+    cancels: list[RequestCancelFrame] = []
+    while not session.outbound_queue.empty():
+        frame = decode_frame(session.outbound_queue.get_nowait())
+        if isinstance(frame, RequestCancelFrame):
+            cancels.append(frame)
+    assert len(cancels) == 1
+    assert cancels[0].id == req_id
+
+
+@pytest.mark.asyncio
+async def test_body_generator_finalization_sends_request_cancel() -> None:
+    """Finalizing a partially-consumed body generator still cancels the runner.
+
+    httpx closes the response via ``stream.aclose``, but an abandoned iterator is
+    finalized by throwing ``GeneratorExit`` into it. That ``finally`` must run the
+    same cancel-before-forget cleanup, exactly once, so a flow-controlled runner
+    is never stranded on exhausted credit.
+    """
+    reg = TunnelRegistry()
+    session = reg.register("r1", _NoopWS(), _hello())
+    state = reg.open_request("r1", "req1")
+    reg.route_response_frame("r1", ResponseHeadFrame(id="req1", status=200))
+    reg.route_response_frame("r1", ResponseBodyFrame(id="req1", body="chunk1", encoding="utf-8"))
+
+    stream = _TunneledByteStream(reg, "r1", "req1", state)
+    body = stream.__aiter__()
+    assert await anext(body) == b"chunk1"
+    # Finalize without draining the rest, as GC does to an abandoned generator.
+    await body.aclose()
+    await asyncio.sleep(0)
+
+    assert "req1" not in session.in_flight
+    cancels: list[RequestCancelFrame] = []
+    while not session.outbound_queue.empty():
+        frame = decode_frame(session.outbound_queue.get_nowait())
+        if isinstance(frame, RequestCancelFrame):
+            cancels.append(frame)
+    assert len(cancels) == 1
+    assert cancels[0].id == "req1"
+
+
 # ── WSTunnelTransport.aclose ────────────────────────────
 
 

@@ -47,6 +47,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
     RESPONSE_BODY_FRAME_MAX_BYTES,
     RESPONSE_FLOW_CAPABILITY,
+    RESPONSE_FLOW_WINDOW_FRAMES,
     EventAckFrame,
     EventReadyFrame,
     HelloFrame,
@@ -202,29 +203,33 @@ class _SendWindow:
     """Per-request response send-credit window.
 
     Wraps a semaphore so a graceful drain can unblock a credit-starved stream:
-    ``open_fully`` makes every later ``acquire`` return at once, so the dispatch
-    can flush its remaining frames and end sentinel instead of parking on an
-    exhausted window until the drain times out.
+    ``grant_drain_allowance`` releases one extra window so the dispatch can flush
+    its remaining frames and end sentinel instead of parking on an exhausted
+    window until the drain times out, while still bounding how much a stalled
+    bulk response buffers during the drain.
     """
 
     def __init__(self, window: int) -> None:
         self._sem = asyncio.Semaphore(window)
-        self._open = False
+        self._window = window
 
     async def acquire(self) -> None:
         """Spend one send credit, blocking while the window is exhausted."""
-        if self._open:
-            return
         await self._sem.acquire()
 
     def release(self) -> None:
         """Return one send credit granted by a ``request.flow`` frame."""
         self._sem.release()
 
-    def open_fully(self) -> None:
-        """Stop throttling and wake any dispatch parked in ``acquire``."""
-        self._open = True
-        self._sem.release()
+    def grant_drain_allowance(self) -> None:
+        """Release one extra window so a parked dispatch can flush its tail.
+
+        Bounds drain-time buffering: a stalled bulk response flushes at most one
+        more window of frames before re-parking, rather than draining its whole
+        upstream unbounded.
+        """
+        for _ in range(self._window):
+            self._sem.release()
 
 
 async def dispatch_via_asgi(
@@ -1216,8 +1221,9 @@ async def _graceful_drain(
     are torn down by the caller's ``_cancel_ws_channels``.
 
     :param dispatch_tasks: In-flight request/stream dispatch tasks.
-    :param flow_credits: Per-request send windows; each is opened so a
-        credit-starved stream can flush its final frames and end sentinel.
+    :param flow_credits: Per-request send windows; each is granted one extra
+        window so a credit-starved stream can flush its final frames and end
+        sentinel without unbounded drain-time buffering.
     :param on_graceful_shutdown: Sync callback that enqueues the sentinels;
         ``None`` skips the flush (nothing to drain).
     :returns: None.
@@ -1226,7 +1232,7 @@ async def _graceful_drain(
     # end sentinel; otherwise it waits out the whole drain timeout and is still
     # cut off, defeating the clean end-of-stream the drain exists to provide.
     for window in flow_credits.values():
-        window.open_fully()
+        window.grant_drain_allowance()
     if on_graceful_shutdown is not None:
         try:
             on_graceful_shutdown()
@@ -1383,7 +1389,9 @@ async def _handle_tunnel_frame(
         if flow_credits is not None:
             request_credits = flow_credits.get(frame.id)
             if request_credits is not None:
-                for _ in range(frame.credits):
+                # Cap a single grant at one window so a malformed or hostile
+                # server can't inflate the credit count past the memory bound.
+                for _ in range(min(frame.credits, RESPONSE_FLOW_WINDOW_FRAMES)):
                     request_credits.release()
     elif isinstance(frame, RequestCancelFrame):
         if on_activity is not None:

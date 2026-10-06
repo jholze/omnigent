@@ -3040,24 +3040,33 @@ async def test_handle_tunnel_frame_marks_flow_grant_activity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_window_open_fully_unblocks_parked_acquire() -> None:
-    """open_fully wakes a dispatch parked on an exhausted window and stops throttling."""
+async def test_send_window_grant_drain_allowance_unblocks_but_stays_bounded() -> None:
+    """The drain allowance wakes a parked dispatch yet keeps the window bounded.
+
+    A stalled bulk response flushes at most one more window during the drain and
+    then re-parks, instead of draining its whole upstream unbounded.
+    """
     window = _SendWindow(1)
-    await window.acquire()
+    await window.acquire()  # exhaust the window
     parked = asyncio.create_task(window.acquire())
     await asyncio.sleep(0)
     assert not parked.done()
 
-    window.open_fully()
+    window.grant_drain_allowance()  # releases exactly one window of credit
 
     await asyncio.wait_for(parked, timeout=1)
-    # A fully opened window no longer throttles.
-    await asyncio.wait_for(window.acquire(), timeout=1)
+    # Bounded: once the one-window allowance is spent, acquire re-parks.
+    reparked = asyncio.create_task(window.acquire())
+    await asyncio.sleep(0)
+    assert not reparked.done()
+    reparked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reparked
 
 
 @pytest.mark.asyncio
 async def test_graceful_drain_releases_credit_starved_dispatch() -> None:
-    """Graceful drain opens send windows so a credit-starved stream can finish."""
+    """Graceful drain grants a drain allowance so a credit-starved stream finishes."""
     window = _SendWindow(1)
     await window.acquire()  # exhaust the window
     finished = asyncio.Event()
