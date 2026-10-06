@@ -9092,6 +9092,26 @@ describe("chatStore — submitApproval", () => {
     expect(getAskUserQuestionDraft("elic_draft_ok")).toBeUndefined();
   });
 
+  it("clears the AskUserQuestion draft when a Cancel (decline) resolve POST succeeds", async () => {
+    // Cancel routes through submitApproval with action "decline"; it clears the
+    // draft on the same POST-success path as accept rather than leaving it behind.
+    clearAskUserQuestionDrafts();
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      blocks: [elicitationBlock("elic_draft_cancel")],
+    });
+    setAskUserQuestionDraft("elic_draft_cancel", {
+      currentIndex: 0,
+      selections: { Q: "A" },
+      customSelected: {},
+      customInputs: {},
+    });
+
+    await useChatStore.getState().submitApproval("elic_draft_cancel", "decline");
+
+    expect(getAskUserQuestionDraft("elic_draft_cancel")).toBeUndefined();
+  });
+
   it("keeps the AskUserQuestion draft when the resolve POST fails and rolls back", async () => {
     clearAskUserQuestionDrafts();
     fetchMock.mockImplementation((input, init) => {
