@@ -91,6 +91,7 @@ async def test_create_posts_payload() -> None:
             }
         ),
         server_client=client,
+        conversation_id=None,
     )
     verb, url, body = client.calls[0]
     assert (verb, url) == ("POST", "/v1/scheduled-tasks")
@@ -202,7 +203,9 @@ def test_create_tool_schema_describes_the_client_zone_default() -> None:
 @pytest.mark.asyncio
 async def test_list_gets() -> None:
     client = _RecordingClient(_Resp(body={"scheduled_tasks": []}))
-    out = await _execute_scheduled_task_tool("sys_scheduled_task_list", "", server_client=client)
+    out = await _execute_scheduled_task_tool(
+        "sys_scheduled_task_list", "", server_client=client, conversation_id=None
+    )
     assert client.calls[0] == ("GET", "/v1/scheduled-tasks", None)
     assert json.loads(out) == {"scheduled_tasks": []}
 
@@ -221,6 +224,7 @@ async def test_update_patches_by_id() -> None:
             }
         ),
         server_client=client,
+        conversation_id=None,
     )
     verb, url, body = client.calls[0]
     assert (verb, url) == ("PATCH", f"/v1/scheduled-tasks/{_TASK_ID}")
@@ -250,6 +254,7 @@ async def test_update_forwards_agent_switch_and_cost_cap() -> None:
             }
         ),
         server_client=client,
+        conversation_id=None,
     )
     _, _, body = client.calls[0]
     assert body == {"agent_id": "ag_pi", "max_cost_usd": 2.5}
@@ -262,6 +267,7 @@ async def test_delete_by_id() -> None:
         "sys_scheduled_task_delete",
         json.dumps({"scheduled_task_id": _TASK_ID.upper()}),
         server_client=client,
+        conversation_id=None,
     )
     assert client.calls[0] == ("DELETE", f"/v1/scheduled-tasks/{_TASK_ID}", None)
 
@@ -275,6 +281,7 @@ async def test_update_rejects_path_confusion_task_id() -> None:
             {"scheduled_task_id": "../0123456789abcdef0123456789abcdef", "state": "paused"}
         ),
         server_client=client,
+        conversation_id=None,
     )
     assert "canonical 32-character hex" in json.loads(out)["error"]
     assert client.calls == []
@@ -284,7 +291,10 @@ async def test_update_rejects_path_confusion_task_id() -> None:
 async def test_update_without_id_errors() -> None:
     client = _RecordingClient()
     out = await _execute_scheduled_task_tool(
-        "sys_scheduled_task_update", json.dumps({"state": "paused"}), server_client=client
+        "sys_scheduled_task_update",
+        json.dumps({"state": "paused"}),
+        server_client=client,
+        conversation_id=None,
     )
     assert "scheduled_task_id" in json.loads(out)["error"]
     assert client.calls == []  # never hit the server
@@ -297,13 +307,16 @@ async def test_server_error_becomes_clean_json() -> None:
         "sys_scheduled_task_create",
         json.dumps({"name": "x", "prompt": "p", "rrule": "FREQ=SECONDLY", "agent_id": "a"}),
         server_client=client,
+        conversation_id=None,
     )
     assert "server returned 400" in json.loads(out)["error"]
 
 
 @pytest.mark.asyncio
 async def test_no_server_client_errors() -> None:
-    out = await _execute_scheduled_task_tool("sys_scheduled_task_list", "", server_client=None)
+    out = await _execute_scheduled_task_tool(
+        "sys_scheduled_task_list", "", server_client=None, conversation_id=None
+    )
     assert "requires server access" in json.loads(out)["error"]
 
 

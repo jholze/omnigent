@@ -73,9 +73,11 @@ def _fmt_12h(dt: datetime) -> str:
     return f"{hour12}:{dt.minute:02d} {period}"
 
 
-def _shot(page: Page, name: str) -> None:
+def _shot(page: Page, name: str, settle_ms: int = 0) -> None:
     if _SHOTS_DIR is None:
         return
+    if settle_ms:
+        page.wait_for_timeout(settle_ms)
     _SHOTS_DIR.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(_SHOTS_DIR / f"{name}.png"))
 
@@ -222,8 +224,7 @@ def test_chat_created_automation_uses_user_local_timezone(
     expect(page.get_by_label("Message the agent")).to_be_visible(timeout=30_000)
     _send(page, user_text)
     expect(page.get_by_text("I created the automation")).to_be_visible(timeout=120_000)
-    page.wait_for_timeout(2_000)
-    _shot(page, "chat-reply")
+    _shot(page, "chat-reply", settle_ms=2_000)
 
     task = _task_by_name(live_server, name)
     assert task is not None, "the agent's sys_scheduled_task_create did not create a task"
@@ -234,8 +235,7 @@ def test_chat_created_automation_uses_user_local_timezone(
         expect(row).to_be_visible(timeout=30_000)
         expect(row.get_by_test_id("task-schedule-line")).to_contain_text("Every day at 9:00 AM")
         expect(row.get_by_test_id("task-next-run")).to_contain_text("Next run", timeout=30_000)
-        page.wait_for_timeout(3_000)
-        _shot(page, "chat-created-row")
+        _shot(page, "chat-created-row", settle_ms=3_000)
         line_text = row.get_by_test_id("task-schedule-line").inner_text()
 
         captured = httpx.get(f"{mock_llm_server_url}/mock/requests", timeout=10.0).json()
@@ -243,12 +243,13 @@ def test_chat_created_automation_uses_user_local_timezone(
             _SHOTS_DIR.mkdir(parents=True, exist_ok=True)
             (_SHOTS_DIR / "mock-requests.json").write_text(json.dumps(captured, indent=2))
         print(f"mock captured {len(captured.get('requests', []))} request(s)")
-        # The zone rides the framework instructions, not the tool call the model
-        # made (it omitted one), so this proves the prompt path carried it rather
-        # than only the tool-dispatch fallback that also fills the stored task.
+        # Scope to this turn (the session-scoped mock history isn't cleared), then
+        # check instructions specifically: the model omitted the tool's timezone,
+        # so a zone here proves the prompt path carried it, not the result echo.
+        turn_requests = [req for req in captured.get("requests", []) if nonce in json.dumps(req)]
+        assert turn_requests, "mock captured no request carrying this turn's nonce"
         assert any(
-            _BROWSER_TZ in json.dumps(req.get("instructions", ""))
-            for req in captured.get("requests", [])
+            _BROWSER_TZ in json.dumps(req.get("instructions", "")) for req in turn_requests
         ), f"framework instructions did not carry {_BROWSER_TZ} to the model"
         actual_instant = _parse_iso(task["next_run_at"])
         actual_local = actual_instant.astimezone(_LA)

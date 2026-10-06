@@ -4666,7 +4666,7 @@ async def _execute_scheduled_task_tool(
     arguments: str,
     *,
     server_client: httpx.AsyncClient | None,
-    conversation_id: str | None = None,
+    conversation_id: str | None,
 ) -> str:
     """
     Runner-local handler for the ``sys_scheduled_task_*`` family.
