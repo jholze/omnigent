@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -269,7 +270,11 @@ class SessionStatusPoller:
     unchanged file costs one ``stat``, and edge-deduping so a status
     callback fires only on ``running`` ⇄ ``idle`` transitions.
 
-    Lifecycle, all on the single watcher thread (no lock needed):
+    Lifecycle, driven by :meth:`tick` on the single watcher thread. A hook's
+    status arrives from the event-loop thread via :meth:`note_external_status`;
+    rather than touch the edge baseline across threads it parks the status in a
+    lock-guarded one-slot mailbox that the next :meth:`tick` folds in, keeping
+    the publish-time read-modify-write of :attr:`_last_edge` on one thread.
 
     - **Resolving:** each :meth:`tick` retries :func:`resolve_status_file`
       until it locks on or :data:`_MAX_RESOLVE_ATTEMPTS` is exhausted.
@@ -322,6 +327,11 @@ class SessionStatusPoller:
         self._last_mtime: float | None = None
         self._last_edge: tuple[str, str | None] | None = None
         self._last_status: SessionStatus | None = None
+        # One-slot mailbox for a hook's status, written from the event-loop
+        # thread and drained by the watcher thread in ``tick``. Guards the
+        # only cross-thread write so ``_last_edge`` stays single-threaded.
+        self._external_lock = threading.Lock()
+        self._pending_external_status: str | None = None
 
     @property
     def active(self) -> bool:
@@ -340,6 +350,7 @@ class SessionStatusPoller:
         Safe to call every poll; a no-op once resolution is exhausted, and
         an unchanged active file costs a single ``stat``.
         """
+        self._drain_external_status()
         if self._exhausted:
             return
         if self._path is None:
@@ -418,8 +429,26 @@ class SessionStatusPoller:
         self._last_edge = None
 
     def note_external_status(self, status: str) -> None:
-        """Adopt a hook's status without replaying the file's older contents."""
-        self._last_edge = (status, None)
+        """Adopt a hook's status without replaying the file's older contents.
+
+        Called from the event-loop thread, not the watcher thread that owns
+        the rest of this state. The status is parked in the one-slot mailbox
+        and folded into the edge baseline by the next :meth:`tick`.
+        """
+        with self._external_lock:
+            self._pending_external_status = status
+
+    def _drain_external_status(self) -> None:
+        """Apply a mailboxed hook status on the watcher thread.
+
+        Keeps ``_last_edge`` single-threaded: the hook's thread only writes
+        the mailbox, and the baseline update happens here under the watcher.
+        """
+        with self._external_lock:
+            pending = self._pending_external_status
+            self._pending_external_status = None
+        if pending is not None:
+            self._last_edge = (pending, None)
 
     @property
     def blocked_on(self) -> str | None:

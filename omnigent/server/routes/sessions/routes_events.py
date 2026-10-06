@@ -259,6 +259,7 @@ from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.subagent_activity import (
     CLAUDE_SUBAGENT_OUTCOME_LABEL,
+    SUBAGENT_TERMINAL_STATUSES,
     native_subagent_terminal_status,
     record_subagent_activity,
 )
@@ -845,9 +846,10 @@ def register_events_routes(
         - ``"external_session_status"`` publishes a terminal-observed
           ``session.status`` edge without persisting an item or
           starting/steering a task.
-        - ``"subagent.status"`` with ``data.idle=true`` publishes idle status
-          for transcript inactivity without forwarding a completion
-          to the runner.
+        - ``"subagent.status"`` with ``data.idle=true`` reports transcript
+          inactivity. It is observational only: a quiet transcript can
+          belong to a running tool, so the event is accepted and no-ops
+          rather than establishing completion or publishing idle.
         - ``"external_model_change"`` persists a terminal-observed
           model switch to ``model_override`` and publishes a
           ``session.model`` SSE event so the web picker reflects it.
@@ -1769,11 +1771,21 @@ def register_events_routes(
             if (
                 status == "running"
                 and conv.labels.get("omnigent.wrapper") == "claude-code-native-ui-subagent"
-                and conv.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL)
-                in {"completed", "failed", "cancelled"}
+                and conv.parent_conversation_id is not None
             ):
-                # Final child transcript chunks can arrive after the parent received its result.
-                return {"queued": False}
+                # Final child transcript chunks can arrive after the parent
+                # received its result. ``conv`` was read when the request
+                # started, so re-read the outcome under the parent's mirror
+                # lock to serialize against the result-recording path that
+                # writes it; a stale snapshot would let this ``running`` undo
+                # an already-recorded terminal outcome.
+                async with _native_mirror_lock(conv.parent_conversation_id):
+                    fresh = await asyncio.to_thread(
+                        conversation_store.get_conversation, session_id
+                    )
+                outcome = fresh.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL) if fresh else None
+                if outcome in SUBAGENT_TERMINAL_STATUSES:
+                    return {"queued": False}
             # ``None`` (field absent) = no information; leave the sticky
             # tally untouched (the PTY-activity ``idle`` carries none). An
             # explicit ``0`` from a ``Stop`` hook is authoritative and clears

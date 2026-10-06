@@ -269,6 +269,51 @@ async def test_child_result_survives_late_transcript_status(
     assert route.forwarded == []
 
 
+async def test_late_running_rechecks_outcome_under_parent_lock(
+    status_route: _StatusRoute,
+) -> None:
+    """A late ``running`` re-reads the outcome under the parent's mirror lock.
+
+    The result-recording path latches the terminal outcome while holding the
+    parent's mirror lock. A trailing ``running`` whose request snapshot predates
+    that write must not undo it: the handler re-reads the child under the same
+    lock, so an outcome recorded after the snapshot still suppresses the edge.
+    """
+    from omnigent.server.routes._sessions.orchestration import _native_mirror_lock
+
+    route = status_route
+    sid = route.child_id
+    route.store.set_labels(sid, {"omnigent.wrapper": "claude-code-native-ui-subagent"})
+
+    lock = _native_mirror_lock(route.parent_id)
+    await lock.acquire()
+    try:
+        task = asyncio.create_task(
+            route.client.post(
+                f"/v1/sessions/{sid}/events",
+                json={"type": "external_session_status", "data": {"status": "running"}},
+            )
+        )
+        # The handler takes its snapshot, then blocks here on the parent lock.
+        await asyncio.sleep(0.3)
+        assert not task.done(), "handler should block on the parent mirror lock"
+        # Latch the outcome only after the snapshot was taken.
+        route.store.set_labels(sid, {CLAUDE_SUBAGENT_OUTCOME_LABEL: "completed"})
+    finally:
+        lock.release()
+    response = await task
+    assert response.status_code == 202, response.text
+    assert response.json() == {"queued": False}
+    await _flush_live_state()
+    route.published.assert_not_called()
+    assert route.forwarded == []
+    child = route.store.get_conversation(sid)
+    assert child is not None
+    summary = sessions._child_session_summary_from_conversation(child, route.parent_id, None)
+    assert summary.busy is False
+    assert summary.current_task_status == "completed"
+
+
 @pytest.mark.parametrize(
     "data",
     [

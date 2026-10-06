@@ -461,3 +461,41 @@ def test_parked_session_stays_running_indefinitely(tmp_path: Path) -> None:
     poller.tick()
     assert published == [(RUNNING, "input needed")]
     assert poller.blocked_on == "input needed"
+
+
+def test_external_status_is_mailboxed_until_the_next_tick(tmp_path: Path) -> None:
+    """A hook's status is handed off to the watcher thread, not written inline.
+
+    ``note_external_status`` runs on the event-loop thread, so it parks the
+    status in the one-slot mailbox rather than touching the edge baseline
+    directly; the next ``tick`` on the watcher thread folds it in. Writing the
+    baseline inline instead would be the cross-thread hazard this guards.
+    """
+    sessions = tmp_path / "sessions"
+    _write_session_file(sessions, pid=1, session_id="s", status="busy")
+    published: list[str] = []
+    poller = SessionStatusPoller(
+        on_status=lambda status, _reason: published.append(status),
+        pane_pid_getter=_StubPidGetter(1),
+        session_id_getter=lambda: "s",
+        config_dir=tmp_path,
+    )
+    poller.tick()  # busy → running
+    assert published == [RUNNING]
+
+    # The hook reports idle: mailboxed, baseline untouched.
+    poller.note_external_status(IDLE)
+    assert poller._pending_external_status == IDLE
+    assert poller._last_edge == (RUNNING, None)
+
+    # The next tick drains the mailbox onto the baseline. The file still reads
+    # busy (unchanged mtime), so nothing republishes.
+    poller.tick()
+    assert poller._pending_external_status is None
+    assert poller._last_edge == (IDLE, None)
+    assert published == [RUNNING]
+
+    # A later real idle from the file is now deduped against the adopted edge.
+    _write_session_file(sessions, pid=1, session_id="s", status="idle")
+    poller.tick()
+    assert published == [RUNNING]

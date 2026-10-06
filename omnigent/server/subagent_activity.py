@@ -32,7 +32,7 @@ _TERMINAL_TASK_STATUS_RE = re.compile(
 _TASK_ID_RE = re.compile(r"<(task-id|tool-use-id)>\s*([^<]+?)\s*</\1>")
 _COMPLETION_EVENT_TYPE = "session.subagent.completion-observed"
 _COMPLETION_RESOURCE_TYPE = "subagent_completion"
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+SUBAGENT_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 CLAUDE_SUBAGENT_OUTCOME_LABEL = "omnigent.claude_native.task_outcome"
 
 
@@ -82,6 +82,16 @@ def _completion_marker_id(kind: str, native_id: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
+def _activation_marker_id(child_id: str, call_id: str) -> str:
+    """Stable id for a child's ``delegated`` activation marker.
+
+    Shared by the writer and both idempotency probes so the resume and
+    predates-resume guards keep matching the recorded marker.
+    """
+    key = f"{child_id}:delegated:{call_id}"
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
 def _completion_marker(kind: str, native_id: str, status: str) -> NewConversationItem:
     stable_id = _completion_marker_id(kind, native_id)
     return NewConversationItem(
@@ -115,7 +125,7 @@ def _completion_status(
         or not isinstance(resource, dict)
         or resource.get("kind") != kind
         or not isinstance(status, str)
-        or status not in _TERMINAL_STATUSES
+        or status not in SUBAGENT_TERMINAL_STATUSES
     ):
         return None
     return status
@@ -190,8 +200,11 @@ async def record_subagent_activity(
                     return
                 # A runner can die before producing any transcript for its first turn.
                 turn_id = child.id
-        key = f"{child.id}:{phase}:{turn_id or ''}"
-        stable_id = hashlib.sha256(key.encode()).hexdigest()[:32]
+        if phase == "delegated":
+            stable_id = _activation_marker_id(child.id, turn_id or "")
+        else:
+            key = f"{child.id}:{phase}:{turn_id or ''}"
+            stable_id = hashlib.sha256(key.encode()).hexdigest()[:32]
         item = NewConversationItem(
             type="resource_event",
             stable_id=stable_id,
@@ -214,10 +227,11 @@ async def record_subagent_activity(
             and confirmed
             and claude_mirror
             and isinstance(status, str)
-            and status in _TERMINAL_STATUSES
+            and status in SUBAGENT_TERMINAL_STATUSES
         ):
             from omnigent.server.routes._sessions.common import _session_status_cache
             from omnigent.server.routes._sessions.helpers import (
+                _persist_session_status_error_labels,
                 _publish_child_status_to_parent,
                 _publish_status,
             )
@@ -226,6 +240,14 @@ async def record_subagent_activity(
                 store.set_labels, child.id, {CLAUDE_SUBAGENT_OUTCOME_LABEL: status}
             )
             lifecycle_status = "failed" if status == "failed" else "idle"
+            if lifecycle_status == "idle" and _session_status_cache.get(child.id) == "failed":
+                # A confirmed success or cancellation is authoritative and
+                # supersedes a speculative offline-sweep failure. Clear the
+                # error labels so the summary stops reporting failed, and drop
+                # the sticky failed cache so the idle edge below is not swallowed
+                # by _publish_status's failed→idle guard.
+                await _persist_session_status_error_labels(child.id, None, store)
+                _session_status_cache.pop(child.id, None)
             unchanged = _session_status_cache.get(child.id) == lifecycle_status
             _publish_status(
                 child.id,
@@ -331,9 +353,10 @@ async def _claude_result_predates_resume(
 ) -> bool:
     """Use transcript positions to reject a result retried after a later resume."""
     call_id = child.labels.get("omnigent.claude_native.tool_use_id")
-    key = f"{child.id}:delegated:{call_id}"
-    activation_id = hashlib.sha256(key.encode()).hexdigest()[:32]
-    if not call_id or not await asyncio.to_thread(store.get_item, parent_id, activation_id):
+    if not call_id:
+        return False
+    activation_id = _activation_marker_id(child.id, call_id)
+    if not await asyncio.to_thread(store.get_item, parent_id, activation_id):
         return False
     cursor = item.id
     while True:
@@ -402,13 +425,13 @@ async def _record_claude_subagent_return(
                     _publish_status,
                 )
 
-                key = f"{child.id}:delegated:{item.data.call_id}"
-                activation_id = hashlib.sha256(key.encode()).hexdigest()[:32]
+                activation_id = _activation_marker_id(child.id, item.data.call_id)
                 if await asyncio.to_thread(store.get_item, parent_id, activation_id):
                     continue
                 if (
                     child.labels.get("omnigent.claude_native.tool_use_id") == item.data.call_id
-                    and child.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL) in _TERMINAL_STATUSES
+                    and child.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL)
+                    in SUBAGENT_TERMINAL_STATUSES
                 ):
                     continue
                 await asyncio.to_thread(

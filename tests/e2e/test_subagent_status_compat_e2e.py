@@ -30,7 +30,13 @@ async def test_subagent_idle_reporting_with_old_server(
     server_version: str,
     tmp_path: Path,
 ) -> None:
-    """An unsupported idle event is tried once; later items/statuses still arrive."""
+    """Transcript inactivity is observational for every server version.
+
+    An old server rejects ``subagent.status`` as an unknown event (tried once,
+    then suppressed); a new server accepts it but does not complete the child.
+    Either way the child stays ``running`` until an authoritative status, and
+    later items and statuses still arrive.
+    """
     agent_name = register_inline_agent(
         http_client,
         name=f"subagent-status-compat-{uuid.uuid4().hex[:8]}",
@@ -177,9 +183,11 @@ async def test_subagent_idle_reporting_with_old_server(
                 assert not capability.supported
                 expected_status = "running"
             else:
+                # A new server accepts the inactivity event but no longer maps
+                # it to idle: a quiet transcript can belong to a running tool.
                 assert all(r.status_code == 202 for r in idle_responses)
                 assert len(idle_responses) == cycle + 1
-                expected_status = "idle"
+                expected_status = "running"
             snapshot = await client.get(f"/v1/sessions/{child_id}")
             snapshot.raise_for_status()
             assert snapshot.json()["status"] == expected_status

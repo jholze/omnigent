@@ -977,14 +977,15 @@ Request body matches `SessionEventInput`:
                                   "idle" | "failed"}`
       - "subagent.status"        — internal transcript-inactivity observation.
                                   Payload: `{idle: true}`; only literal `true`
-                                  is accepted. Uses the existing idle publisher
-                                  (including persistence, response cleanup and
-                                  parent UI updates), then returns without
-                                  forwarding completion to the runner.
-                                  Optional fields: `response_id`,
-                                  `background_task_count`, `background_tasks`,
-                                  `blocked_on`, as for external_session_status.
-                                  Returns `{queued: false}`. Activity resumes
+                                  is accepted. Observational only: a quiet
+                                  transcript can belong to a running tool, so
+                                  the event is accepted and no-ops rather than
+                                  establishing completion. Nothing is persisted
+                                  and no `session.status` is published; only an
+                                  explicit result ends the task. `response_id`,
+                                  if present, must be a string. Returns
+                                  `{queued: false}`. Completion arrives through
+                                  the parent's result; running activity resumes
                                   through external_session_status running.
                                   On an older server's explicit unknown-event
                                   rejection (400, `invalid_input`), the native
