@@ -303,6 +303,10 @@ def _drop_share_locked(conversation_id: str, queue: _ConversationQueue, key: _Sh
     queue.shares.pop(key, None)
     if not queue.shares:
         _queues.pop(conversation_id, None)
+    # A stale timer would otherwise cut the next share's grace short.
+    timer = _pending_expiries.pop((conversation_id, key), None)
+    if timer is not None:
+        timer.cancel()
 
 
 def reset_for_tests() -> None:

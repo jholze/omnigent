@@ -17491,6 +17491,9 @@ describe("chatStore — queue shared across windows of a session", () => {
 
   it("publishes this window's queue on every change, including clearing it", async () => {
     acceptQueuePuts();
+    // Settle the publish the beforeEach reset may have scheduled before counting.
+    await tick();
+    fetchMock.mockClear();
     useChatStore.setState({
       conversationId: "conv_abc",
       boundAgentId: "agent_xyz",
@@ -17533,8 +17536,49 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(queuePuts("conv_abc").at(-1)).toEqual({ client_id: CLIENT_ID, messages: [] });
   });
 
+  it("sends one share PUT at a time so a slow earlier publish cannot overwrite a newer one", async () => {
+    // Settle the publish the beforeEach reset may have scheduled before counting.
+    await tick();
+    fetchMock.mockClear();
+    const puts: { body: { messages: { text: string }[] }; resolve: () => void }[] = [];
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/queue") && (init as RequestInit)?.method === "PUT") {
+        return new Promise<Response>((resolve) => {
+          puts.push({
+            body: JSON.parse((init as RequestInit).body as string),
+            resolve: () => resolve(new Response(null, { status: 204 })),
+          });
+        });
+      }
+      return defaultFetchHandler(input as RequestInfo, init as RequestInit);
+    });
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    useChatStore.getState().enqueueMessage("first");
+    await tick();
+    expect(puts).toHaveLength(1);
+    useChatStore.getState().enqueueMessage("second");
+    await tick();
+    useChatStore.getState().dequeueMessage(useChatStore.getState().queuedMessages[0]!.queueId);
+    await tick();
+    // The first PUT is still in flight, so nothing else goes out yet.
+    expect(puts).toHaveLength(1);
+    puts[0]!.resolve();
+    await tick();
+    // One follow-up PUT carries the latest state, not one per change.
+    expect(puts).toHaveLength(2);
+    expect(puts[1]!.body.messages.map((m) => m.text)).toEqual(["second"]);
+  });
+
   it("keeps a flushing head in the published share until its send settles", async () => {
     acceptQueuePuts();
+    // Settle the publish the beforeEach reset may have scheduled before counting.
+    await tick();
+    fetchMock.mockClear();
     let settleSend!: () => void;
     const sendSpy = vi.fn(
       () =>

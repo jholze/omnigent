@@ -3499,12 +3499,8 @@ async def test_shared_parent_readiness_remains_private(
 
 
 # ── SSE stream queue shares (follow-ups queued in other windows) ──────
-#
 # Same buffered-transport technique as the presence tests above. The
-# ``X-Omnigent-Client-Id`` header ties a client's published queue share to
-# its stream: the snapshot-on-connect carries the merged queue, the share
-# stays while the stream is open, and closing the stream expires it after
-# the grace window.
+# ``X-Omnigent-Client-Id`` header ties a client's queue share to its stream.
 
 
 def _sse_queue_events(body: str) -> list[dict[str, Any]]:

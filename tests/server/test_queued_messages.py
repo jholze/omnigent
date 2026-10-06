@@ -13,6 +13,7 @@ invisible; tests shrink ``_DETACH_GRACE_S`` via monkeypatch the same way
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -179,6 +180,40 @@ async def test_requires_retry_and_edits_propagate() -> None:
         failed = await collector.next_event()
         assert failed["messages"][0]["requires_retry"] is True
         assert failed["messages"][0]["seq"] == first["messages"][0]["seq"]
+        queued_messages.replace(
+            CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_1", "v2")]
+        )
+        edited = await collector.next_event()
+        assert edited["messages"][0]["text"] == "v2"
+        assert edited["messages"][0]["requires_retry"] is False
+        assert edited["messages"][0]["seq"] == first["messages"][0]["seq"]
+    finally:
+        await collector.stop()
+
+
+async def test_cleared_share_republished_while_detached_gets_full_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing a detached share cancels its expiry; a later share starts a fresh window."""
+    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.3)
+    collector = await start_session_stream_collector(CONV)
+    try:
+        queued_messages.replace(
+            CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_1", "d1")]
+        )
+        await collector.next_event()
+        await asyncio.sleep(0.15)
+        queued_messages.replace(CONV, client_id=DESKTOP, user_id=None, messages=[])
+        assert (await collector.next_event())["messages"] == []
+        queued_messages.replace(
+            CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_2", "d2")]
+        )
+        await collector.next_event()
+        # The first share's timer would have fired here; the new share must outlive it.
+        await collector.assert_no_event(within=0.2)
+        assert _order(queued_messages.snapshot(CONV)) == [(DESKTOP, "d2")]
+        expired = await collector.next_event()
+        assert expired["messages"] == []
     finally:
         await collector.stop()
 

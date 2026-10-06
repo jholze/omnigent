@@ -991,17 +991,19 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
     for (const raw of rawMessages) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
       const entry = raw as Record<string, unknown>;
+      const rawAttachments = entry.attachments ?? [];
       if (
         typeof entry.queue_id !== "string" ||
         typeof entry.client_id !== "string" ||
         typeof entry.seq !== "number" ||
-        typeof entry.text !== "string"
+        !Number.isFinite(entry.seq) ||
+        typeof entry.text !== "string" ||
+        !Array.isArray(rawAttachments) ||
+        rawAttachments.some((name) => typeof name !== "string")
       ) {
         return null;
       }
-      const attachments = Array.isArray(entry.attachments)
-        ? entry.attachments.filter((name): name is string => typeof name === "string")
-        : [];
+      const attachments = rawAttachments as string[];
       messages.push({
         queueId: entry.queue_id,
         clientId: entry.client_id,

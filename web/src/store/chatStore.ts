@@ -1750,6 +1750,8 @@ export function initChatStore(client: QueryClient): void {
   publishedQueueShares.clear();
   pendingQueueSharePublishes.clear();
   heldQueueShares.clear();
+  queueSharePublishInFlight.clear();
+  queueSharePublishDirty.clear();
   // Drop every live conversation: their streams must not outlive the app (or,
   // in tests, leak into the next case).
   conversationRegistry.clear();
@@ -1792,6 +1794,11 @@ function queueShareFor(conversationId: string): QueuedMessageShare[] {
     }));
 }
 
+// One PUT in flight per conversation; a change during the flight publishes
+// after it, so a slow earlier PUT can never land after a newer one.
+const queueSharePublishInFlight = new Map<string, Promise<void>>();
+const queueSharePublishDirty = new Set<string>();
+
 /** Publish once per burst of changes; `force` republishes an unchanged share the server lost. */
 function scheduleQueueSharePublish(conversationId: string, opts?: { force?: boolean }): void {
   if (isTempConvId(conversationId)) return;
@@ -1803,16 +1810,28 @@ function scheduleQueueSharePublish(conversationId: string, opts?: { force?: bool
     queueSharePublishScheduled = false;
     const ids = [...pendingQueueSharePublishes];
     pendingQueueSharePublishes.clear();
-    for (const id of ids) {
-      const share = heldQueueShares.get(id)?.share ?? queueShareFor(id);
-      const serialized = JSON.stringify(share);
-      if (publishedQueueShares.get(id) === serialized) continue;
-      publishedQueueShares.set(id, serialized);
-      void putQueuedMessages(id, share).catch(() => {
-        publishedQueueShares.delete(id);
-      });
-    }
+    for (const id of ids) publishQueueShare(id);
   });
+}
+
+function publishQueueShare(conversationId: string): void {
+  if (queueSharePublishInFlight.has(conversationId)) {
+    queueSharePublishDirty.add(conversationId);
+    return;
+  }
+  const share = heldQueueShares.get(conversationId)?.share ?? queueShareFor(conversationId);
+  const serialized = JSON.stringify(share);
+  if (publishedQueueShares.get(conversationId) === serialized) return;
+  publishedQueueShares.set(conversationId, serialized);
+  const flight = putQueuedMessages(conversationId, share)
+    .catch(() => {
+      publishedQueueShares.delete(conversationId);
+    })
+    .finally(() => {
+      queueSharePublishInFlight.delete(conversationId);
+      if (queueSharePublishDirty.delete(conversationId)) publishQueueShare(conversationId);
+    });
+  queueSharePublishInFlight.set(conversationId, flight);
 }
 
 /** Freeze the published share until the returned release runs; call before removing the entry being sent. */
@@ -7246,16 +7265,22 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // Full-state replacement, like presence. Own entries stay authoritative
       // in `queuedMessages`; this list orders them against other windows'.
       applyToNamedConversation(event.conversationId, { sharedQueue: event.messages });
-      // A list missing entries this client still holds means the server
-      // dropped its share (the stream was down past the grace window, or a
-      // replacement server started): publish it again.
+      // A list that disagrees with what this client holds (the server dropped
+      // its share past the grace window, or kept a stale one) is republished.
+      // Not while a send holds the share: the server rightly still lists it.
       const listed = new Set(
         event.messages.filter((m) => m.clientId === CLIENT_ID).map((m) => m.queueId),
       );
-      const own = useChatStore
-        .getState()
-        .queuedMessages.filter((m) => m.conversationId === event.conversationId);
-      if (own.some((m) => !listed.has(m.queueId))) {
+      const own = new Set(
+        useChatStore
+          .getState()
+          .queuedMessages.filter((m) => m.conversationId === event.conversationId)
+          .map((m) => m.queueId),
+      );
+      if (
+        !heldQueueShares.has(event.conversationId) &&
+        (own.size !== listed.size || [...own].some((id) => !listed.has(id)))
+      ) {
         scheduleQueueSharePublish(event.conversationId, { force: true });
       }
       // A follow-up another window held ahead of ours may have just left the

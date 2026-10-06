@@ -1801,11 +1801,18 @@ describe("session.queue (FLAT envelope)", () => {
   });
 
   it("drops a frame with a malformed entry rather than a partial list", () => {
-    const out = parse("session.queue", {
-      type: "session.queue",
-      conversation_id: "conv_abc",
-      messages: [{ queue_id: 1, client_id: "c_desktop", seq: 1, text: "x" }],
-    });
-    expect(out).toHaveLength(0);
+    const malformed = [
+      { queue_id: 1, client_id: "c_desktop", seq: 1, text: "x" },
+      { queue_id: "q_1", client_id: "c_desktop", seq: Number.NaN, text: "x" },
+      { queue_id: "q_1", client_id: "c_desktop", seq: 1, text: "x", attachments: ["a.png", 3] },
+    ];
+    for (const entry of malformed) {
+      const out = parse("session.queue", {
+        type: "session.queue",
+        conversation_id: "conv_abc",
+        messages: [entry],
+      });
+      expect(out).toHaveLength(0);
+    }
   });
 });

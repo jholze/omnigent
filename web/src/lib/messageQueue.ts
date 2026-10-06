@@ -71,8 +71,7 @@ export function ownFlushHead(
 
 // Preserve FIFO even with always-steer enabled or a transient idle status.
 // Waiting on background work is idle for sending; native side chats bypass the queue.
-// `sharedQueue` is the server's merged queue for `conversationId`: a follow-up
-// another client holds also keeps a new send in line behind it.
+// A follow-up another client holds (`sharedQueue`) also keeps a new send in line.
 export function shouldQueueSend(
   conversationId: string | null,
   status: "idle" | "streaming",
@@ -81,12 +80,13 @@ export function shouldQueueSend(
   alwaysSteer = false,
   opensSideChat = false,
   sharedQueue: SharedQueuedMessage[] = [],
+  clientId = CLIENT_ID,
 ): boolean {
   if (conversationId === null) return false;
   if (opensSideChat) return false;
   const hasQueued =
     queuedMessages.some((m) => m.conversationId === conversationId) ||
-    sharedQueue.some((m) => m.clientId !== CLIENT_ID && !m.requiresRetry);
+    sharedQueue.some((m) => m.clientId !== clientId && !m.requiresRetry);
   if (alwaysSteer) return hasQueued;
   const isBusy = status === "streaming" || sessionStatus === "running";
   return isBusy || hasQueued;

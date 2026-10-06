@@ -2834,6 +2834,10 @@ def register_events_routes(
         :returns: An SSE :class:`StreamingResponse`.
         :raises OmnigentError: 404 if no session exists.
         """
+        # Same bounds as SessionQueueSyncRequest.client_id; an id the PUT
+        # endpoint would reject cannot own a share, so ignore it here too.
+        if client_id is not None and not 0 < len(client_id) <= 64:
+            client_id = None
         user_id = _get_user_id(request, auth_provider)
         access = await _require_access_and_level(
             user_id, session_id, LEVEL_READ, permission_store, conversation_store
