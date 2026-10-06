@@ -46,7 +46,7 @@ from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispa
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
     RESPONSE_BODY_FRAME_MAX_BYTES,
-    RESPONSE_FLOW_WINDOW_FRAMES,
+    RESPONSE_FLOW_CAPABILITY,
     EventAckFrame,
     EventReadyFrame,
     HelloFrame,
@@ -188,10 +188,11 @@ def _iter_body_fragments(chunk: bytes, content_type: str) -> Iterator[bytes]:
     while start < size:
         end = min(start + RESPONSE_BODY_FRAME_MAX_BYTES, size)
         if text and end < size:
-            # Back off any UTF-8 continuation byte (0b10xxxxxx) so the cut
-            # lands on a character boundary. A character is at most 4 bytes,
-            # far below the cap, so this never empties the slice.
-            while end > start and (chunk[end] & 0xC0) == 0x80:
+            # Back off at most the 3 continuation bytes (0b10xxxxxx) a UTF-8
+            # character can have so the cut lands on a character boundary;
+            # invalid UTF-8 is cut at the cap rather than walked back forever.
+            floor = max(start, end - 3)
+            while end > floor and (chunk[end] & 0xC0) == 0x80:
                 end -= 1
         yield chunk[start:end]
         start = end
@@ -1257,6 +1258,7 @@ async def _send_hello(
                 frame_protocol_version=1,
                 capabilities=[
                     CAP_FILESYSTEM_ATTACHMENTS,
+                    RESPONSE_FLOW_CAPABILITY,
                     *([EVENT_INGEST_CAPABILITY] if event_dispatcher is not None else []),
                 ],
                 telemetry_opt_out=_tel_opt_out,
@@ -1299,8 +1301,9 @@ async def _handle_tunnel_frame(
     :param dispatch_tasks: Mutable request-id-to-task map.
     :param ws_channels: Mutable channel-id to runner-side WS channel
         state map.
-    :param flow_credits: Mutable request-id-to-send-credit-semaphore map;
-        ``request.flow`` frames release more credits. ``None`` disables it.
+    :param flow_credits: Mutable request-id-to-send-credit-semaphore map; a
+        request's ``flow_window`` opens one and ``request.flow`` frames release
+        more credits. ``None`` disables it.
     :param on_activity: Optional sync callback fired for non-ping
         frames that represent real runner work.
     :returns: None.
@@ -1327,8 +1330,8 @@ async def _handle_tunnel_frame(
         if on_activity is not None:
             on_activity()
         request_credits: asyncio.Semaphore | None = None
-        if flow_credits is not None:
-            request_credits = asyncio.Semaphore(RESPONSE_FLOW_WINDOW_FRAMES)
+        if flow_credits is not None and frame.flow_window is not None:
+            request_credits = asyncio.Semaphore(frame.flow_window)
             flow_credits[frame.id] = request_credits
         task = asyncio.create_task(
             dispatch_via_asgi(app, frame, send_text, request_credits),

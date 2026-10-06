@@ -31,6 +31,7 @@ from omnigent.runner.identity import (
 from omnigent.runner.transports.ws_tunnel import serve as serve_module
 from omnigent.runner.transports.ws_tunnel.frames import (
     RESPONSE_BODY_FRAME_MAX_BYTES,
+    RESPONSE_FLOW_CAPABILITY,
     PingFrame,
     RequestCancelFrame,
     RequestFrame,
@@ -863,6 +864,7 @@ async def test_serve_tunnel_once_sends_bearer_header(
     hello = decode_frame(captured["sent"])
     assert isinstance(hello, HelloFrame)
     assert CAP_FILESYSTEM_ATTACHMENTS in hello.capabilities
+    assert RESPONSE_FLOW_CAPABILITY in hello.capabilities
 
     # A reconnect's row carries the id the loop minted, the streak position
     # and the outage it ended, measured from when the previous connection
@@ -2967,3 +2969,42 @@ def test_iter_body_fragments_text_cuts_on_utf8_boundaries() -> None:
     for fragment in fragments:
         fragment.decode("utf-8")
     assert b"".join(fragments) == chunk
+
+
+def test_iter_body_fragments_invalid_text_still_advances() -> None:
+    """Invalid UTF-8 text is cut near the cap instead of stalling on continuation bytes."""
+    chunk = b"\x80" * (RESPONSE_BODY_FRAME_MAX_BYTES * 2 + 7)
+
+    fragments = _iter_body_fragments(chunk, "text/plain")
+    first_three = [next(fragments) for _ in range(3)]
+
+    assert all(0 < len(f) <= RESPONSE_BODY_FRAME_MAX_BYTES for f in first_three)
+    assert next(fragments, None) is None
+    assert b"".join(first_three) == chunk
+
+
+@pytest.mark.asyncio
+async def test_handle_tunnel_frame_opens_send_window_only_when_requested() -> None:
+    """A request's flow_window opens its credit window; requests without one stay unthrottled."""
+
+    async def _send_text(text: str) -> None:
+        del text
+
+    dispatch_tasks: dict[str, asyncio.Task[None]] = {}
+    flow_credits: dict[str, asyncio.Semaphore] = {}
+    windowed = RequestFrame(id="req-windowed", method="GET", path="/health", flow_window=4)
+    legacy = RequestFrame(id="req-legacy", method="GET", path="/health")
+
+    for frame in (windowed, legacy):
+        await _handle_tunnel_frame(
+            _noop_app,
+            encode_frame(frame),
+            _send_text,
+            dispatch_tasks,
+            {},
+            flow_credits=flow_credits,
+        )
+
+    assert set(flow_credits) == {"req-windowed"}
+    await asyncio.gather(*dispatch_tasks.values(), return_exceptions=True)
+    assert flow_credits == {}

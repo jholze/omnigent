@@ -258,6 +258,29 @@ def test_request_flow_requires_credits() -> None:
         decode_frame(json.dumps({"kind": FrameKind.REQUEST_FLOW.value, "id": "req_abc"}))
 
 
+def test_request_round_trip_with_flow_window() -> None:
+    f = RequestFrame(id="req_fw", method="GET", path="/download", flow_window=48)
+    decoded = decode_frame(encode_frame(f))
+    assert isinstance(decoded, RequestFrame)
+    assert decoded.flow_window == 48
+
+
+def test_request_without_flow_window_stays_legacy() -> None:
+    """Servers that predate flow control send no window; the runner must not invent one."""
+    wire = json.loads(encode_frame(RequestFrame(id="req_old", method="GET", path="/download")))
+    assert "flow_window" not in wire
+    decoded = decode_frame(json.dumps(wire))
+    assert isinstance(decoded, RequestFrame)
+    assert decoded.flow_window is None
+
+
+def test_request_flow_window_must_be_positive() -> None:
+    wire = json.loads(encode_frame(RequestFrame(id="req_bad", method="GET", path="/download")))
+    wire["flow_window"] = 0
+    with pytest.raises(ValueError, match="flow_window"):
+        decode_frame(json.dumps(wire))
+
+
 def test_ping_pong_round_trip() -> None:
     p = PingFrame(ts=1709654400000)
     decoded_p = decode_frame(encode_frame(p))

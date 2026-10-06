@@ -12,10 +12,16 @@ import httpx
 import pytest
 
 from omnigent.runner.transports.ws_tunnel.frames import (
+    RESPONSE_FLOW_CAPABILITY,
+    RESPONSE_FLOW_CREDIT_BATCH,
+    RESPONSE_FLOW_WINDOW_FRAMES,
     HelloFrame,
+    RequestFlowFrame,
+    RequestFrame,
     ResponseBodyFrame,
     ResponseEndFrame,
     ResponseHeadFrame,
+    decode_frame,
 )
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runner.transports.ws_tunnel.transport import (
@@ -251,3 +257,45 @@ async def test_transport_aclose_is_noop() -> None:
     reg = TunnelRegistry()
     transport = WSTunnelTransport(reg, "r1")
     await transport.aclose()  # Should not raise.
+
+
+# ── flow control negotiation ─────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capable", [True, False])
+async def test_flow_control_follows_runner_capability(capable: bool) -> None:
+    """Only runners advertising flow control get a send window and credit grants."""
+    reg = TunnelRegistry()
+    hello = _hello()
+    if capable:
+        hello.capabilities.append(RESPONSE_FLOW_CAPABILITY)
+    session = reg.register("r1", _NoopWS(), hello)
+    transport = WSTunnelTransport(reg, "r1")
+
+    task = asyncio.create_task(transport.handle_async_request(_make_request("GET", "/download")))
+    await asyncio.sleep(0.01)
+    raw = session.outbound_queue.get_nowait()
+    assert raw is not None
+    sent = decode_frame(raw)
+    assert isinstance(sent, RequestFrame)
+    assert sent.flow_window == (RESPONSE_FLOW_WINDOW_FRAMES if capable else None)
+
+    reg.route_response_frame(
+        "r1", ResponseHeadFrame(id=sent.id, status=200, headers=[["content-type", "text/plain"]])
+    )
+    for _ in range(RESPONSE_FLOW_CREDIT_BATCH):
+        reg.route_response_frame("r1", ResponseBodyFrame(id=sent.id, body="x", encoding="utf-8"))
+    reg.route_response_frame("r1", ResponseEndFrame(id=sent.id))
+    response = await task
+    body = b"".join([chunk async for chunk in response.stream])
+    assert body == b"x" * RESPONSE_FLOW_CREDIT_BATCH
+
+    grants: list[tuple[str, int]] = []
+    while not session.outbound_queue.empty():
+        raw = session.outbound_queue.get_nowait()
+        assert raw is not None
+        frame = decode_frame(raw)
+        if isinstance(frame, RequestFlowFrame):
+            grants.append((frame.id, frame.credits))
+    assert grants == ([(sent.id, RESPONSE_FLOW_CREDIT_BATCH)] if capable else [])

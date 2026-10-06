@@ -45,7 +45,9 @@ import httpx
 
 from omnigent.debug_logging import runner_primary_session_id
 from omnigent.runner.transports.ws_tunnel.frames import (
+    RESPONSE_FLOW_CAPABILITY,
     RESPONSE_FLOW_CREDIT_BATCH,
+    RESPONSE_FLOW_WINDOW_FRAMES,
     Frame,
     HelloFrame,
     RequestFlowFrame,
@@ -149,6 +151,8 @@ class RequestState:
     :param aborted_with: Error to raise from the body iterator after
         a tunnel disconnect or registry abort.
     :param req_id: Tunnel request id, used to address flow-credit grants back.
+    :param flow_window: Send window granted to the runner, or ``None`` when the
+        runner predates flow control and streams unthrottled.
     :param credits_pending: Drained frames awaiting a batched credit grant.
     """
 
@@ -159,6 +163,7 @@ class RequestState:
     req_id: str
     end_event: asyncio.Event = field(default_factory=asyncio.Event)
     aborted_with: BaseException | None = None
+    flow_window: int | None = None
     credits_pending: int = 0
 
 
@@ -590,6 +595,11 @@ class TunnelRegistry:
                 head_future=loop.create_future(),
                 body_queue=asyncio.Queue(),
                 req_id=req_id,
+                flow_window=(
+                    RESPONSE_FLOW_WINDOW_FRAMES
+                    if RESPONSE_FLOW_CAPABILITY in session.hello.capabilities
+                    else None
+                ),
             )
             session.in_flight[req_id] = state
             return state
@@ -767,9 +777,9 @@ class TunnelRegistry:
         self, state: RequestState, item: ResponseBodyFrame | None
     ) -> None:
         """Grant a batched send credit back for a drained body frame.
-        Credits bound how far ahead a slow consumer lets the runner stream;
-        the end sentinel grants nothing."""
-        if not isinstance(item, ResponseBodyFrame):
+        Credits bound how far ahead a slow consumer lets the runner stream; the
+        end sentinel grants nothing, and runners without flow control need none."""
+        if state.flow_window is None or not isinstance(item, ResponseBodyFrame):
             return
         state.credits_pending += 1
         if state.credits_pending < RESPONSE_FLOW_CREDIT_BATCH:

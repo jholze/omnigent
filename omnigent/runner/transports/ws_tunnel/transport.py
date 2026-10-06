@@ -174,6 +174,7 @@ class WSTunnelTransport(httpx.AsyncBaseTransport):
                         # Best-effort hint for streaming responses;
                         # not load-bearing on the runner side.
                         stream=True,
+                        flow_window=state.flow_window,
                     )
                 ),
             )

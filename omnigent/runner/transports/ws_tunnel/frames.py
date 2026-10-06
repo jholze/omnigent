@@ -104,6 +104,9 @@ class RequestFrame:
     body: str | None = None
     encoding: str = "utf-8"  # "utf-8" or "base64"
     stream: bool = False
+    # Body frames the runner may keep in flight before waiting for request.flow
+    # credits; None (servers that predate flow control) disables the window.
+    flow_window: int | None = None
 
 
 @dataclass
@@ -153,6 +156,10 @@ class RequestFlowFrame:
     id: str
     credits: int
 
+
+# Runners advertising this hello capability honour ``RequestFrame.flow_window``
+# and expect ``request.flow`` credit grants; older runners get neither.
+RESPONSE_FLOW_CAPABILITY = "response-flow-control-v1"
 
 # Flow control: the runner keeps at most RESPONSE_FLOW_WINDOW_FRAMES frames in
 # flight; the server grants more in RESPONSE_FLOW_CREDIT_BATCH batches as it
@@ -300,19 +307,20 @@ def encode_frame(frame: Frame) -> str:
             payload["direct_attach_token"] = frame.direct_attach_token
         return json.dumps(payload)
     if isinstance(frame, RequestFrame):
-        return json.dumps(
-            {
-                "kind": FrameKind.REQUEST.value,
-                "id": frame.id,
-                "method": frame.method,
-                "path": frame.path,
-                "query_string": frame.query_string,
-                "headers": [list(h) for h in frame.headers],
-                "body": frame.body,
-                "encoding": frame.encoding,
-                "stream": frame.stream,
-            }
-        )
+        request: dict[str, object] = {
+            "kind": FrameKind.REQUEST.value,
+            "id": frame.id,
+            "method": frame.method,
+            "path": frame.path,
+            "query_string": frame.query_string,
+            "headers": [list(h) for h in frame.headers],
+            "body": frame.body,
+            "encoding": frame.encoding,
+            "stream": frame.stream,
+        }
+        if frame.flow_window is not None:
+            request["flow_window"] = frame.flow_window
+        return json.dumps(request)
     if isinstance(frame, ResponseHeadFrame):
         return json.dumps(
             {
@@ -570,6 +578,7 @@ def _decode_request(msg: _JsonObject) -> RequestFrame:
         body=_optional_body(msg),
         encoding=_optional_str(msg, "encoding", "utf-8"),
         stream=_optional_bool(msg, "stream", False),
+        flow_window=_optional_flow_window(msg),
     )
 
 
@@ -726,6 +735,17 @@ def _optional_body(msg: _JsonObject) -> str | None:
     val = msg.get("body")
     if val is not None and not isinstance(val, str):
         raise ValueError("frame field must be a string or null: 'body'")
+    return val
+
+
+def _optional_flow_window(msg: _JsonObject) -> int | None:
+    """Return a request's send window, or ``None`` from servers that predate flow control.
+    :raises ValueError: If ``flow_window`` is present but not a positive integer."""
+    val = msg.get("flow_window")
+    if val is None:
+        return None
+    if not isinstance(val, int) or isinstance(val, bool) or val < 1:
+        raise ValueError("frame field must be a positive integer or null: 'flow_window'")
     return val
 
 
