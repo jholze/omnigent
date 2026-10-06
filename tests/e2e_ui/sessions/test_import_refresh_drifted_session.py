@@ -1,10 +1,6 @@
 """E2E: replacing a drifted Claude session by id refreshes its snapshot.
 
-Spawns a real host daemon (``omnigent.host._daemon_entry``) with a seeded Claude
-Code transcript, drives the real Settings > Import UI, appends a turn on disk to
-simulate drift, and checks that a plain re-import is still skipped while Replace
-existing snapshot pulls the newer turn into the same session.
-"""
+Runs a real host daemon with a seeded Claude transcript against the real Settings > Import UI."""
 
 from __future__ import annotations
 

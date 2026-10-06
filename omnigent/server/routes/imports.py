@@ -256,11 +256,7 @@ async def _serialize_source_import(body: ImportSessionRequest) -> AsyncIterator[
 
 
 def _ensure_import_replacement_safe(existing: Any) -> None:
-    """Reject replacement while the existing Omnigent session is active.
-
-    Replacement preserves the session id, so a later runner event could write
-    against the newly imported transcript and mix the old turn into it.
-    """
+    """Reject replacing an active session: a runner event would write into the new transcript."""
     status = _session_status_cache.get(existing.id, existing.live_status)
     runner_live = existing.runner_id is not None and runner_seen_is_fresh(
         existing.runner_last_seen
@@ -274,12 +270,7 @@ def _ensure_import_replacement_safe(existing: Any) -> None:
 
 
 def _ensure_import_source_matches(existing: Any, source: ImportSource) -> None:
-    """Reject replacing a session that belongs to a different harness.
-
-    The dedup lookup is by external session id alone, so without this check a
-    request naming another harness could overwrite the transcript while the
-    session's agent and import labels still name the original one.
-    """
+    """Reject replacing a session imported from another harness; lookup is by external id alone."""
     stored = existing.labels.get(IMPORT_SOURCE_LABEL_KEY)
     if stored is None:
         native_agent = native_coding_agent_for_harness(f"{source}-native")
@@ -469,17 +460,7 @@ def create_imports_router(
     ) -> tuple[str, str | None]:
         """Create the conversation, append items, stamp import labels, grant owner.
 
-        Shared by ``/imports`` (client-normalized items) and ``/imports/local``
-        (server-read transcripts). ``native_title`` is the harness's own title
-        when the caller has one; otherwise the title is synthesized from the
-        first user message. ``project_id`` files the session into a project the
-        caller owns (``/imports/local`` passes none). ``host_id`` binds the
-        session to the host that read the transcript (``/imports/local``), so
-        resuming defaults to the machine the workspace lives on; bound only
-        alongside a workspace (the ``ck_conversations_workspace_required_for_host``
-        check constraint). Caller handles the already-imported / force decision
-        first. Returns ``(conversation id, title)``.
-        """
+        Shared by ``/imports`` and ``/imports/local``; ``host_id`` binds only with a workspace."""
         native_agent, resolved_create = await _resolve_import_metadata(
             source=source,
             workspace=workspace,

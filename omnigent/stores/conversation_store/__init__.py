@@ -752,27 +752,9 @@ class ConversationStore(ABC):
         expected_runner_last_seen: int | None,
         expected_live_status: str | None,
     ) -> Conversation:
-        """Atomically replace imported transcript rows while preserving identity.
+        """Atomically replace imported items while keeping the conversation identity.
 
-        Backends that cannot perform the bounded replacement in one managed
-        transaction must reject before mutating any row. The SQLAlchemy store
-        implements this operation; lightweight backends can opt in explicitly.
-
-        :param conversation_id: Stable conversation id to retain.
-        :param items: Validated imported items, capped by the backend.
-        :param expected_runner_id: Runner binding observed before preparation.
-        :param expected_runner_last_seen: Liveness stamp observed before
-            preparation.
-        :param expected_live_status: Relay-observed status observed before
-            preparation.
-        :returns: The preserved conversation row after replacement.
-        :raises ConversationStoreOperationUnsupportedError: When the backend
-            cannot provide the atomic operation.
-        :raises ConversationReplacementConflictError: When binding or liveness
-            changed before the commit.
-        :raises ConversationReplacementTooLargeError: When the old or new
-            transcript exceeds the backend's hard cap.
-        """
+        Unsupported backends raise before mutating; the ``expected_*`` values guard the commit."""
         _ = (
             conversation_id,
             items,

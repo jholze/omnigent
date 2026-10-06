@@ -2600,10 +2600,7 @@ class SqlAlchemyConversationStore(ConversationStore):
     ) -> Conversation:
         """Atomically replace bounded imported items without changing identity.
 
-        The AP and metadata tables must share one engine for the commit-time
-        binding check. Split databases reject before any write because they
-        cannot provide the required cross-table transaction.
-        """
+        Split AP/metadata databases cannot make the cross-table commit check and reject first."""
         if self._conv_engine is not self._engine:
             raise ConversationStoreOperationUnsupportedError(
                 "atomic imported-transcript replacement requires a shared AP/metadata database"

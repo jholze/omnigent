@@ -1651,11 +1651,7 @@ async def test_local_import_by_id_refreshes_drifted_session(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plain re-import of a drifted session stays skipped; ``force`` refreshes it.
-
-    The skip is deliberate so an Omnigent-side continuation is never discarded
-    silently; replacement keeps the same conversation id and title.
-    """
+    """A plain re-import of a drifted session stays skipped; ``force`` refreshes it in place."""
     from omnigent.server.routes import imports as imports_module
 
     _seed_claude_agent(db_uri)
