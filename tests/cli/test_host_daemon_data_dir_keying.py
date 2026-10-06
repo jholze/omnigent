@@ -1,15 +1,8 @@
-"""One data dir, one host daemon: loopback spellings share the local record.
-
-The daemon registry used to key records on the raw ``--server`` string, so a
-single tracked local server accrued one record (and one live daemon) per
-loopback spelling, and ``host stop`` for one spelling left the others running.
-These tests pin the CLI-level keying: a loopback URL naming the data dir's
-tracked server collapses to the per-data-dir ``local`` record, and a collapsed
-spawn runs the daemon in local mode.
-"""
+"""Regression tests for per-data-dir daemon keying and loopback alias reuse."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -18,8 +11,8 @@ from omnigent import cli
 
 
 def _track_local_server(base: Path, port: int) -> None:
-    """Write a data-dir pidfile declaring *port* as the tracked local server."""
-    (base / "local_server.pid").write_text(f"4242\n{port}\n")
+    """Write a data-dir pidfile declaring *port* as this (live) process's local server."""
+    (base / "local_server.pid").write_text(f"{os.getpid()}\n{port}\n")
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +77,38 @@ def test_find_daemon_record_resolves_raw_url_record_as_local(tmp_path: Path) -> 
     assert found is not None
     assert found.target == "http://127.0.0.1:6767"
     assert found.pid == 4242
+
+
+def test_find_daemon_record_matches_local_record_by_server_url_without_pidfile(
+    tmp_path: Path,
+) -> None:
+    """A local daemon stays addressable by its server URL after the pidfile is gone.
+
+    A foreground server removes ``local_server.pid`` on exit while a daemon that
+    collapsed onto ``local`` may still be running, so ``host stop --server <url>``
+    must reach that record through its resolved server URL.
+    """
+    _track_local_server(tmp_path, 6767)
+    cli._write_daemon_record(
+        cli._HostDaemonRecord(
+            pid=4242,
+            target=cli._LOCAL_DAEMON_MARKER,
+            mode="local",
+            server_url=None,
+            log_path=None,
+            started_at=100,
+            host_id="host_abc",
+            resolved_server_url="http://127.0.0.1:6767",
+        )
+    )
+    (tmp_path / "local_server.pid").unlink()
+
+    target = cli._normalize_daemon_target("http://localhost:6767")
+    found = cli._find_daemon_record(target)
+
+    assert target == "http://localhost:6767"
+    assert found is not None
+    assert found.target == cli._LOCAL_DAEMON_MARKER
 
 
 def test_collapsed_spawn_runs_the_daemon_in_local_mode(

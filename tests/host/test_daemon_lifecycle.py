@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,9 +52,13 @@ def test_normalize_daemon_target(server_url: str | None, expected: str) -> None:
     assert normalize_daemon_target(server_url) == expected
 
 
-def _track_local_server(base: Path, port: int) -> None:
-    """Write a data-dir pidfile declaring *port* as the tracked local server."""
-    (base / "local_server.pid").write_text(f"4242\n{port}\n")
+def _track_local_server(base: Path, port: int, pid: int | None = None) -> None:
+    """Write a data-dir pidfile declaring *port* as the tracked local server.
+
+    The recorded pid defaults to this process so the server counts as alive.
+    """
+    owner = os.getpid() if pid is None else pid
+    (base / "local_server.pid").write_text(f"{owner}\n{port}\n")
 
 
 def test_normalize_collapses_tracked_loopback_spellings(tmp_path: Path) -> None:
@@ -87,6 +92,11 @@ def test_normalize_keeps_urls_of_other_servers(tmp_path: Path) -> None:
         normalize_daemon_target("https://x.example.com:6767", base_dir=tmp_path)
         == "https://x.example.com:6767"
     )
+    # The local server speaks plain http; an https spelling is a different endpoint.
+    assert (
+        normalize_daemon_target("https://localhost:6767", base_dir=tmp_path)
+        == "https://localhost:6767"
+    )
 
 
 def test_normalize_keeps_loopback_urls_without_a_tracked_server(tmp_path: Path) -> None:
@@ -96,8 +106,31 @@ def test_normalize_keeps_loopback_urls_without_a_tracked_server(tmp_path: Path) 
     )
 
 
-def test_normalize_tolerates_a_malformed_pidfile(tmp_path: Path) -> None:
-    (tmp_path / "local_server.pid").write_text("pid-and-port-missing\n")
+def test_normalize_keeps_loopback_url_of_a_dead_tracked_server(tmp_path: Path) -> None:
+    """A stale pidfile left by a crashed server must not capture an explicit target."""
+    reaped = subprocess.Popen([sys.executable, "-c", "pass"])
+    reaped.wait()
+    _track_local_server(tmp_path, 6767, pid=reaped.pid)
+
+    assert (
+        normalize_daemon_target("http://127.0.0.1:6767", base_dir=tmp_path)
+        == "http://127.0.0.1:6767"
+    )
+    # The same claim collapses once its server is reported alive.
+    assert (
+        normalize_daemon_target(
+            "http://127.0.0.1:6767", base_dir=tmp_path, pid_alive=lambda pid: True
+        )
+        == "local"
+    )
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [b"pid-and-port-missing\n", b"\xff\xfe\n6767\n", b"not-a-pid\n6767\n", b"4242\nnot-a-port\n"],
+)
+def test_normalize_tolerates_a_malformed_pidfile(tmp_path: Path, contents: bytes) -> None:
+    (tmp_path / "local_server.pid").write_bytes(contents)
     assert (
         normalize_daemon_target("http://127.0.0.1:6767", base_dir=tmp_path)
         == "http://127.0.0.1:6767"

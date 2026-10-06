@@ -2697,17 +2697,19 @@ def _normalize_daemon_target(server_url: str | None) -> str:
     """
     Normalize a daemon target key.
 
-    A loopback URL naming the port tracked by this data dir's
-    ``local_server.pid`` collapses to ``"local"``: it addresses the data
-    dir's own server instance, so every spelling shares one record.
+    A plain-http loopback URL naming the port of this data dir's live
+    tracked server (``local_server.pid``) collapses to ``"local"``: it
+    addresses the data dir's own instance, so every spelling shares one record.
 
     :param server_url: Requested Omnigent server URL, e.g.
         ``"https://example.databricksapps.com/"``. ``None`` or empty
         string selects local mode.
-    :returns: ``"local"`` for local mode or a loopback spelling of the
+    :returns: ``"local"`` for local mode or a loopback spelling of the live
         tracked local server, otherwise the canonical URL.
     """
-    return _normalize_daemon_target_impl(server_url, base_dir=_HOST_PID_PATH.parent)
+    return _normalize_daemon_target_impl(
+        server_url, base_dir=_HOST_PID_PATH.parent, pid_alive=_pid_alive
+    )
 
 
 def _daemon_host_status_probe(
@@ -2947,6 +2949,11 @@ def _find_daemon_record(target: str) -> _HostDaemonRecord | None:
             return record
     for record in records:
         if _normalize_daemon_target(record.target) == target:
+            return record
+    # A local daemon stays addressable by its server's loopback URL after the
+    # server pidfile is gone (a foreground server exited under a live daemon).
+    for record in records:
+        if record.resolved_server_url and _same_local_server(record.resolved_server_url, target):
             return record
     return None
 
@@ -3188,9 +3195,17 @@ def _local_daemon_serves_target(target: str, server_url: str | None) -> bool:
 
 
 def _same_local_server(local_url: str, requested_url: str) -> bool:
-    """Whether *requested_url* names the listener behind the local daemon's *local_url*."""
+    """Whether *requested_url* names the listener behind the local daemon's *local_url*.
+
+    Loopback spellings are compared by port, but only within one scheme: an
+    ``https`` request is a different endpoint from the plain-http local server.
+    """
+    from urllib.parse import urlsplit
+
     if local_url.rstrip("/") == requested_url.rstrip("/"):
         return True
+    if urlsplit(local_url).scheme.lower() != urlsplit(requested_url).scheme.lower():
+        return False
     local_port = _loopback_server_port(local_url)
     return local_port is not None and local_port == _loopback_server_port(requested_url)
 

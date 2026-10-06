@@ -1,22 +1,8 @@
-"""E2E reproduction: one server instance must map to one host daemon.
+"""E2E: loopback aliases reuse one local daemon and either alias can stop it.
 
-A local Omnigent server is reachable under several loopback spellings
-(``http://127.0.0.1:<port>``, ``http://localhost:<port>``), but daemon
-registry records are keyed on the requested URL string, so each spelling
-spawns its own host daemon instead of reusing the live one. Both daemons
-present the same machine-wide ``host_id`` and fight over the server's
-single registry slot (continuous ``replacing stale host connection``
-takeover churn), and ``omnigent host stop --server <url>`` only stops the
-daemon recorded under that exact spelling, so the machine never converges
-back to zero daemons without ``pkill``.
-
-This test drives the real user journey end-to-end against the real CLI:
-start the background local server, connect a host daemon via the
-``127.0.0.1`` spelling, connect again via the ``localhost`` spelling, and
-require that the second command reuses the live daemon (one daemon process
-for one server instance — which is also what prevents the host_id takeover
-churn); then run ``omnigent host stop`` via the second spelling and require
-that no daemon for this server survives it.
+Drives the real CLI against a real ``omnigent server --background``: connect a
+host via ``127.0.0.1``, connect again via ``localhost``, require one live
+daemon, then ``host stop`` via the second spelling and require none survive.
 """
 
 from __future__ import annotations
@@ -87,7 +73,7 @@ def _live_daemon_records(home: Path) -> dict[str, set[int]]:
             data = json.loads(path.read_text())
             pid = int(data["pid"])
             target = str(data["target"])
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             continue  # record mid-rewrite; in-place writes are not atomic
         if _pid_alive(pid):
             live.setdefault(target, set()).add(pid)

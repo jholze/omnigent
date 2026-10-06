@@ -80,6 +80,19 @@ def test_env_override_wins_over_data_dir_scoping(
     assert not (instance / "config.yaml").exists()
 
 
+def test_if_present_in_fresh_data_dir_reads_nothing_and_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read-only lookup in an unused custom data dir mints no identity or files."""
+    monkeypatch.delenv("OMNIGENT_HOST_ID", raising=False)
+    monkeypatch.delenv("OMNIGENT_HOST_NAME", raising=False)
+    instance = tmp_path / "fresh-instance"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(instance))
+
+    assert load_host_identity_if_present() is None
+    assert not instance.exists()
+
+
 def test_create_identity_when_no_config(tmp_path: Path) -> None:
     """
     Verify that load_or_create generates a host section in config.yaml
