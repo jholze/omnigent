@@ -1,9 +1,5 @@
-"""Browser e2e: a forked session shows up in the sidebar even when the list lags.
-
-Forks through the real UI while ``GET /v1/sessions`` omits the new fork for a
-while and the ``/v1/sessions/updates`` socket delivers no ``session_added``
-push, as on a search-indexed deployment. The dialog must paint and hold the
-"Fork of …" row itself, like a created session, until the list catches up.
+"""Browser e2e: a forked session stays listed in the sidebar while the session
+list lags and no ``session_added`` push arrives, like a created session.
 """
 
 from __future__ import annotations
@@ -100,12 +96,7 @@ def test_fork_row_while_list_lags_without_live_updates(
     seeded_session: tuple[str, str],
     mock_llm_server_url: str,
 ) -> None:
-    """Lagging list and no live-updates stream: the fork row appears at once and stays.
-
-    :param request: Used to create the recorded page after non-browser setup.
-    :param seeded_session: ``(base_url, session_id)`` for a runner-bound session.
-    :param mock_llm_server_url: Mock model server; the seed turn is scripted on it.
-    """
+    """Lagging list and no live-updates stream: the fork row appears at once and stays."""
     base_url, source_id = seeded_session
     configure_mock_llm(
         mock_llm_server_url, [{"text": "OK"}], key="fork-no-push-seed", match=_MARKER

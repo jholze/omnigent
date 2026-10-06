@@ -465,10 +465,7 @@ export interface Session {
    * identity label when the user is inside a child.
    */
   parentSessionId: string | null;
-  /**
-   * First-class project the session is filed under, or ``null``/absent when
-   * unfiled; lets a snapshot-derived sidebar row land in its folder.
-   */
+  /** First-class project the session is filed under; ``null``/absent when unfiled. */
   projectId?: string | null;
   /**
    * For sub-agent (child) sessions, the sub-agent type name within

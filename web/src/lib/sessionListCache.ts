@@ -349,9 +349,7 @@ export function unmarkRecentlyCreated(id: string): void {
 }
 
 /**
- * Sidebar row built from a session snapshot (a fork's `POST` response, the
- * cached `["session", id]` entry). Snapshots carry no `owner`, so the row
- * reads as viewer-owned.
+ * Sidebar row from a session snapshot; snapshots carry no `owner`, so it reads as viewer-owned.
  */
 export function conversationRowFromSession(session: Session): Conversation {
   return {
@@ -375,10 +373,8 @@ export function conversationRowFromSession(session: Session): Conversation {
 }
 
 /**
- * Paint a session the viewer just created (a fork) into every cached sidebar
- * list and arm the recently-created keep-alive, as create and the
- * `session_added` push do, so a lagging list refetch or a missed push can't
- * hide it until the index catches up. Filter-aware via `insertNewRowsIntoPages`.
+ * Paint a just-created session (a fork) into every cached sidebar list and arm the
+ * recently-created keep-alive, as create does, so a lagging list refetch can't hide it.
  */
 export function insertCreatedRowIntoCaches(queryClient: QueryClient, row: Conversation): void {
   markRecentlyCreated(row);
