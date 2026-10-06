@@ -273,6 +273,28 @@ def _ensure_import_replacement_safe(existing: Any) -> None:
         )
 
 
+def _ensure_import_source_matches(existing: Any, source: ImportSource) -> None:
+    """Reject replacing a session that belongs to a different harness.
+
+    The dedup lookup is by external session id alone, so without this check a
+    request naming another harness could overwrite the transcript while the
+    session's agent and import labels still name the original one.
+    """
+    stored = existing.labels.get(IMPORT_SOURCE_LABEL_KEY)
+    if stored is None:
+        native_agent = native_coding_agent_for_harness(f"{source}-native")
+        matches = native_agent is not None and existing.agent_id == builtin_agent_id(
+            native_agent.agent_name
+        )
+    else:
+        matches = stored == source
+    if not matches:
+        raise OmnigentError(
+            f"This session did not come from {source}; select the harness it was imported from.",
+            code=ErrorCode.CONFLICT,
+        )
+
+
 # Per-frame (inter-session) timeout: the host streams one session at a time, so
 # this bounds the gap between frames — one transcript's read — not the whole
 # batch. A batch of any size can take arbitrarily long without tripping it, so
@@ -545,21 +567,11 @@ def create_imports_router(
                     f"This {body.source} session already exists as {existing.id}",
                     code=ErrorCode.CONFLICT,
                 )
+            # The CLI contract applies the requested title/workspace/project on
+            # --force, so recreate rather than swap items in place.
+            _ensure_import_source_matches(existing, body.source)
             _ensure_import_replacement_safe(existing)
-            await _resolve_import_metadata(
-                source=body.source,
-                workspace=body.workspace,
-                user_id=user_id,
-                project_id=body.project_id,
-                host_id=body.host_id,
-            )
-            await _replace_imported_transcript(existing, items)
-            response.status_code = 201
-            return ImportSessionResponse(
-                session_id=existing.id,
-                status="imported",
-                item_count=len(items),
-            )
+            await conversation_store.delete_conversation(existing.id)
 
         session_id, _title = await _persist_import(
             source=body.source,
@@ -726,15 +738,24 @@ def create_imports_router(
                     permission_store,
                     conversation_store,
                 )
-                _ensure_import_replacement_safe(existing)
-                await _resolve_import_metadata(
-                    source=source,
-                    workspace=session_workspace if isinstance(session_workspace, str) else None,
-                    user_id=user_id,
-                    project_id=None,
-                    host_id=body.host_id,
-                )
-                await _replace_imported_transcript(existing, items)
+                try:
+                    _ensure_import_source_matches(existing, source)
+                    _ensure_import_replacement_safe(existing)
+                    await _resolve_import_metadata(
+                        source=source,
+                        workspace=(
+                            session_workspace if isinstance(session_workspace, str) else None
+                        ),
+                        user_id=user_id,
+                        project_id=None,
+                        host_id=body.host_id,
+                    )
+                    await _replace_imported_transcript(existing, items)
+                except OmnigentError as exc:
+                    # Expected rejections (active session, wrong harness, store
+                    # limits) stay actionable instead of a redacted stream error.
+                    _fail(external_session_id, source, exc.message)
+                    continue
                 counts["imported"] += 1
                 yield ImportedSessionRef(session_id=existing.id, title=existing.title)
                 continue

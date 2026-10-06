@@ -486,7 +486,7 @@ def test_cli_force_replaces_imported_chat(
     tmp_path: Path,
     harness: str,
 ) -> None:
-    """The CLI refreshes transcript content in place while preserving metadata."""
+    """The real CLI and server replace Claude and Codex imports in place."""
     source_session_id = _write_force_import_fixture(tmp_path, harness, "old prompt")
     env = os.environ.copy()
     env.update(
@@ -540,8 +540,7 @@ def test_cli_force_replaces_imported_chat(
         timeout=10,
     )
     session.raise_for_status()
-    # Replacement keeps the stable session metadata; only the transcript changes.
-    assert session.json()["title"] == "old prompt"
+    assert session.json()["title"] == "new prompt"
     items = httpx.get(f"{live_server}/v1/sessions/{session_id}/items", timeout=10)
     items.raise_for_status()
     assert [item["content"][0]["text"] for item in items.json()["data"]] == ["new prompt"]
