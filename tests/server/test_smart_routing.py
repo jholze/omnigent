@@ -415,8 +415,9 @@ async def test_clamped_pick_does_not_advertise_the_dropped_most_capable_model() 
 
 @pytest.mark.asyncio
 async def test_clamped_pick_does_not_resurface_the_dropped_model_as_raw() -> None:
-    # The dropped pick is unservable; keeping it as raw_model would feed it back
-    # into substitute_model downstream and could re-run the clamped-away model.
+    # Leave raw_model unset so downstream substitution in route_session_harness
+    # keeps selecting from the clamped pick (``raw_model or chosen_model``);
+    # a retained pick would change which servable substitute it chooses.
     dropped = "databricks-gpt-5-6-sol"
     verdict = {
         "harness": "codex",
