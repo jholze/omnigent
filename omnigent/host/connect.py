@@ -31,6 +31,7 @@ import httpx
 import psutil
 import websockets.asyncio.client
 from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI
+from websockets.protocol import State
 
 from omnigent._platform import (
     IS_POSIX,
@@ -4153,7 +4154,8 @@ class HostProcess:
                     self._woke_from_suspend = False
                     # The silence watchdog dropped a tunnel the server stopped
                     # pinging: the drop is ours and the server is expected to
-                    # be reachable, so reconnect as promptly as after a wake.
+                    # be reachable, so reconnect as promptly as after a wake,
+                    # unless the endpoint keeps accepting without ever speaking.
                     server_silent = self._server_silent
                     self._server_silent = False
                     classified_recycle = (
@@ -4168,16 +4170,16 @@ class HostProcess:
                             # the backoff ladder so a dead endpoint is probed
                             # gently instead of twice a second forever.
                             classified_recycle = False
-                    recycle = woke or server_silent or classified_recycle
+                    recycle = woke or (server_silent and not silent_churn) or classified_recycle
                     wait_s = _RECONNECT_BASE_S if recycle else backoff
-                    if woke:
+                    if not recycle:
+                        cadence = ""
+                    elif woke:
                         cadence = " (resumed from suspend — prompt reconnect)"
                     elif server_silent:
                         cadence = " (server went silent — prompt reconnect)"
-                    elif recycle:
-                        cadence = " (recycle — prompt reconnect)"
                     else:
-                        cadence = ""
+                        cadence = " (recycle — prompt reconnect)"
                     _logger.warning(
                         "Host tunnel disconnected: %s. Reconnecting in %.1fs%s",
                         exc,
@@ -4689,6 +4691,9 @@ class HostProcess:
             if remaining > 0:
                 await asyncio.sleep(remaining)
                 continue
+            if getattr(ws, "state", State.OPEN) is not State.OPEN:
+                # Already closing for another reason; let that path classify it.
+                return
             self._server_silent = True
             _logger.warning(
                 "No frame from the server for %.0fs (its application pings stopped); "
@@ -4696,9 +4701,17 @@ class HostProcess:
                 loop.time() - self._last_server_frame_at,
             )
             transport = getattr(ws, "transport", None)
+            aborted = False
             if transport is not None:
-                with contextlib.suppress(Exception):
+                try:
                     transport.abort()
+                    aborted = True
+                except Exception:  # noqa: BLE001 — whatever abort raised, close() must still run
+                    _logger.debug("silence watchdog transport abort raised", exc_info=True)
+            if not aborted:
+                # websockets aborts the transport itself once close_timeout passes.
+                with contextlib.suppress(Exception):
+                    await ws.close()
             return
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:

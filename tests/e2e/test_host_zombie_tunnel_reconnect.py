@@ -197,8 +197,7 @@ def _run_sever_case(tmp_path: Path, *, zombie: bool, deadline_s: float) -> None:
             if zombie:
                 # The server ran its disconnect path while the host heard
                 # nothing: it lists the host offline and refuses host-bound
-                # requests. A clean close reconnects within a second, too fast
-                # for this window to be observed reliably.
+                # requests (a clean close reconnects too fast to observe this).
                 wait_until(
                     lambda: host_status(client, host.host_id) == "offline",
                     timeout=30,

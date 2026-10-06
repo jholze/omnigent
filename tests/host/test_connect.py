@@ -5077,7 +5077,7 @@ class _SilentPeerTunnel:
     either raises *then* or, by default, models a front door that keeps the
     host-facing socket alive (answering protocol pings below the application)
     after the server leg is gone: ``recv`` blocks until ``transport.abort()``
-    and only then raises like a lost connection.
+    or ``close()`` and only then raises like a lost connection.
     """
 
     def __init__(
@@ -5089,6 +5089,8 @@ class _SilentPeerTunnel:
     ) -> None:
         self.sent: list[str] = []
         self.transport = _AbortableTransport()
+        self.closed = False
+        self._dead = self.transport.aborted
         self._frames = list(frames or [])
         self._interval = interval
         self._then = then
@@ -5096,13 +5098,17 @@ class _SilentPeerTunnel:
     async def send(self, data: str | bytes) -> None:
         self.sent.append(data if isinstance(data, str) else data.decode())
 
+    async def close(self) -> None:
+        self.closed = True
+        self._dead.set()
+
     async def recv(self) -> str:
         if self._frames:
             await asyncio.sleep(self._interval)
             return self._frames.pop(0)
         if self._then is not None:
             raise self._then
-        await self.transport.aborted.wait()
+        await self._dead.wait()
         raise ConnectionClosedError(None, None)
 
 
@@ -6728,6 +6734,11 @@ async def test_silent_server_drops_tunnel_and_reconnects_promptly(
     monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.2)
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    disconnects: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "omnigent.host.connect.record_websocket_disconnected",
+        lambda kind, error, **kwargs: disconnects.append({"kind": kind, **kwargs}),
+    )
     tunnel = _SilentPeerTunnel()
     spy = _ConnectSpy([tunnel, asyncio.CancelledError()])
     _patch_connect(monkeypatch, spy)
@@ -6745,6 +6756,70 @@ async def test_silent_server_drops_tunnel_and_reconnects_promptly(
     assert len(reconnects) == 1
     assert "(server went silent — prompt reconnect)" in reconnects[0]
     assert host._server_silent is False
+    assert disconnects == [
+        {
+            "kind": "host",
+            "local_shutdown": False,
+            "resumed_from_suspend": False,
+            "server_silent": True,
+        }
+    ]
+
+
+async def test_repeated_server_silence_honors_silent_connect_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An endpoint that keeps accepting but never speaks slows the silence redials too.
+
+    The first frameless connection redials promptly; once the silent-connect
+    streak escalates, the backoff ladder the escalation warning announces
+    applies to watchdog drops as well, so the cadence matches the message.
+    """
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_CAP_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect._SILENT_CONNECT_ESCALATE_ATTEMPTS", 2)
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    spy = _ConnectSpy([_SilentPeerTunnel() for _ in range(3)] + [asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host("http://127.0.0.1:18501")
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+        await host.run()
+
+    reconnects = [m for m in caplog.messages if "Reconnecting in" in m]
+    assert len(reconnects) == 3
+    assert "(server went silent — prompt reconnect)" in reconnects[0]
+    assert all("prompt reconnect" not in m for m in reconnects[1:]), reconnects
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert (
+        len(errors) == 1 and "2 consecutive connections but never responded" in errors[0].message
+    )
+
+
+async def test_silence_watchdog_closes_tunnel_without_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Without an abortable transport the watchdog still ends the dead tunnel via close()."""
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    tunnel = _SilentPeerTunnel()
+    del tunnel.transport
+    host = _host()
+
+    with (
+        caplog.at_level(logging.WARNING, logger="omnigent.host.connect"),
+        pytest.raises(ConnectionClosedError),
+    ):
+        await host._serve_frames(tunnel)  # type: ignore[arg-type]
+
+    assert tunnel.closed
+    assert host._server_silent is True
+    assert any(m.startswith("No frame from the server for") for m in caplog.messages)
 
 
 async def test_server_application_pings_keep_the_tunnel_open(
@@ -7522,70 +7597,8 @@ async def test_run_reconnects_promptly_after_suspend(
     :returns: None.
     """
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
-
-    class _BlockingTunnel:
-        """Accepted tunnel whose ``recv()`` blocks until the transport aborts."""
-
-        def __init__(self) -> None:
-            self._dead = asyncio.Event()
-            self.transport = SimpleNamespace(abort=self._dead.set)
-
-        async def send(self, data: str | bytes) -> None:
-            """Accept the ``host.hello`` frame silently.
-
-            :param data: Encoded frame payload (ignored).
-            :returns: None.
-            """
-            del data
-
-        async def recv(self) -> str:
-            """Block until aborted, then fail like a dropped connection.
-
-            :returns: Never returns a frame.
-            :raises ConnectionClosedError: Once the transport is aborted.
-            """
-            await self._dead.wait()
-            raise ConnectionClosedError(None, None)
-
-    class _BlockingConnect:
-        """Async-CM for a successful upgrade to a blocking tunnel."""
-
-        def __init__(self, tunnel: _BlockingTunnel) -> None:
-            self._tunnel = tunnel
-
-        async def __aenter__(self) -> _BlockingTunnel:
-            """Complete the handshake with the blocking tunnel.
-
-            :returns: The blocking tunnel.
-            """
-            return self._tunnel
-
-        async def __aexit__(self, *exc_info: object) -> bool:
-            """No-op async-CM exit.
-
-            :param exc_info: Standard ``__aexit__`` triple (unused).
-            :returns: ``False`` so the disconnect propagates.
-            """
-            del exc_info
-            return False
-
-    tunnel = _BlockingTunnel()
-    connect_calls = {"n": 0}
-
-    def _connect(url: str, **kwargs: object) -> object:
-        """Serve one live tunnel, then stop the loop.
-
-        :param url: Tunnel URL (ignored).
-        :param kwargs: Connect kwargs (ignored).
-        :returns: A blocking-tunnel CM on the first call; a CM that cancels
-            the loop thereafter.
-        """
-        del url, kwargs
-        connect_calls["n"] += 1
-        if connect_calls["n"] == 1:
-            return _BlockingConnect(tunnel)
-        return _HandshakeFailingConnect(asyncio.CancelledError())
-
+    # One live tunnel that blocks until aborted, then stop the loop.
+    spy = _ConnectSpy([_SilentPeerTunnel(), asyncio.CancelledError()])
     host = _make_host_process()  # loopback server_url (http://localhost:8000)
 
     async def _fake_watch(on_resume: object, **_kwargs: object) -> None:
@@ -7602,19 +7615,14 @@ async def test_run_reconnects_promptly_after_suspend(
         on_resume(3600.0)  # type: ignore[operator]
         await asyncio.Event().wait()
 
-    import websockets.asyncio.client as ws_client
-
-    import omnigent.runner._entry as entry_mod
-
-    monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda *, server_url=None: None)
-    monkeypatch.setattr(ws_client, "connect", _connect)
+    _patch_connect(monkeypatch, spy)
     monkeypatch.setattr("omnigent.host.connect.watch_for_resume", _fake_watch)
 
     with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
         await host.run()
 
     # Two connects: the initial live tunnel + the prompt reconnect after wake.
-    assert connect_calls["n"] == 2
+    assert spy.call_count == 2
     # The disconnect was attributed to the resume, and the flag was consumed.
     assert any("resumed from suspend" in r.message for r in caplog.records)
     assert host._woke_from_suspend is False

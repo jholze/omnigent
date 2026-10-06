@@ -117,7 +117,6 @@ class ZombieTunnelProxy:
         self._links: list[_Link] = []
         self._lock = threading.Lock()
         self._tunnel_open = threading.Event()
-        self.severed = 0
 
     @property
     def url(self) -> str:
@@ -194,7 +193,6 @@ class ZombieTunnelProxy:
             links = list(self._links)
         for link in links:
             await link.sever(zombie=zombie)
-        self.severed += len(links)
         return len(links)
 
     async def _forward_http(
@@ -203,7 +201,8 @@ class ZombieTunnelProxy:
         if request.headers.get("Upgrade", "").lower() == "websocket":
             return None
         # Plain GETs (the CLI's auth probe, /v1/me, host status) pass through so
-        # the front door looks like the server to the daemon and the CLI.
+        # the front door looks like the server to the daemon and the CLI;
+        # websockets rejects any other method before this hook runs.
         try:
             async with httpx.AsyncClient(trust_env=False, timeout=30.0) as client:
                 upstream = await client.get(
