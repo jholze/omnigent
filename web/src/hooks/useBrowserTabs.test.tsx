@@ -23,6 +23,7 @@ describe("browser soft tabs", () => {
       "session-a",
     );
     expect(browserViewConversationId(browserViewId("session:a/b", tabId))).toBe("session:a/b");
+    expect(browserViewConversationId("browser-tab:session-a:tab:1:2")).toBe("session-a");
     expect(browserViewConversationId("browser-tab:%E0%A4%A:tab")).toBe("browser-tab:%E0%A4%A:tab");
   });
 

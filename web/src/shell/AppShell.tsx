@@ -930,14 +930,9 @@ export function AppShell() {
     resyncBrowserSuppression();
   }, []);
 
-  // Design-mode submit routing. Lives here (with the hoisted relay) because the
-  // in-page popup posts back via preload IPC delivered to the always-mounted
-  // shell, not BrowserPane. On submit: build the `[Design Mode — …]` message,
-  // attach the cropped screenshot, send via the NORMAL chat path (no backend
-  // route), then signal the result back for green/red. Dismiss is a no-op.
-  // Routes to the conversation's own bound agent (the picked element belongs to
-  // the page it drives). The screenshot arrives on the earlier element-selected
-  // event, so we stash the latest per browser view and pair it at submit time.
+  // Design-mode submit routing lives in the always-mounted shell: the in-page
+  // popup posts back via preload IPC, not BrowserPane. Screenshots arrive on
+  // element-selected, so we stash the latest per browser view and pair at submit.
   const designShotRef = useRef<Map<string, string>>(new Map());
   const boundAgentId = boundAgent?.id ?? null;
   useEffect(() => {

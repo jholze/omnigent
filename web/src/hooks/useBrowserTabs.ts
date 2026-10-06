@@ -14,7 +14,7 @@ export function browserViewId(conversationId: string, tabId: string): string {
 
 /** Owning session of a browser view id; the inverse of `browserViewId`. */
 export function browserViewConversationId(viewId: string): string {
-  const tab = /^browser-tab:([^:]+):[^:]+$/.exec(viewId);
+  const tab = /^browser-tab:([^:]+):.+$/.exec(viewId);
   if (!tab) return viewId;
   try {
     return decodeURIComponent(tab[1]);
