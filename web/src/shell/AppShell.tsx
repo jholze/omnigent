@@ -70,7 +70,7 @@ import {
 } from "@/hooks/useChildSessions";
 import { useDebugMode } from "@/hooks/useDebugMode";
 import { useBrowserAgentRelay } from "@/hooks/useBrowserAgentRelay";
-import { openAgentBrowserTab } from "@/hooks/useBrowserTabs";
+import { browserViewConversationId, openAgentBrowserTab } from "@/hooks/useBrowserTabs";
 import { resyncBrowserSuppression } from "@/hooks/useSuppressBrowserView";
 import {
   findAgentTerminal,
@@ -937,7 +937,7 @@ export function AppShell() {
   // route), then signal the result back for green/red. Dismiss is a no-op.
   // Routes to the conversation's own bound agent (the picked element belongs to
   // the page it drives). The screenshot arrives on the earlier element-selected
-  // event, so we stash the latest per conversation and pair it at submit time.
+  // event, so we stash the latest per browser view and pair it at submit time.
   const designShotRef = useRef<Map<string, string>>(new Map());
   const boundAgentId = boundAgent?.id ?? null;
   useEffect(() => {
@@ -996,7 +996,8 @@ export function AppShell() {
         const shot = designShotRef.current.get(cid);
         const file = dataUrlToFile(shot, `design-element-${submitId}.png`);
         const chat = useChatStore.getState();
-        if (cid !== chat.conversationId) {
+        const ownerConversationId = browserViewConversationId(cid);
+        if (ownerConversationId !== chat.conversationId) {
           designShotRef.current.delete(cid);
           signal(false, "Return to this session before sending.");
           return;
@@ -1004,7 +1005,7 @@ export function AppShell() {
         const files = file ? [file] : undefined;
         if (
           shouldQueueSend(
-            cid,
+            ownerConversationId,
             chat.status,
             chat.sessionStatus,
             chat.queuedMessages,
