@@ -3017,6 +3017,48 @@ async def test_handle_tunnel_frame_opens_send_window_only_when_requested() -> No
 
 
 @pytest.mark.asyncio
+async def test_legacy_request_streams_unthrottled_past_one_window() -> None:
+    """A request without flow_window (old server) streams past a window with no gating."""
+    from omnigent.runner.transports.ws_tunnel.frames import ResponseBodyFrame, decode_frame
+
+    fragment_count = RESPONSE_FLOW_WINDOW_FRAMES + 8
+    body = os.urandom(fragment_count * RESPONSE_BODY_FRAME_MAX_BYTES)
+
+    async def _streaming_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        del receive
+        assert scope["type"] == "http"
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/octet-stream")],
+            }
+        )
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    body_frames = 0
+
+    async def _send_text(text: str) -> None:
+        nonlocal body_frames
+        if isinstance(decode_frame(text), ResponseBodyFrame):
+            body_frames += 1
+
+    dispatch_tasks: dict[str, asyncio.Task[None]] = {}
+    flow_credits: dict[str, _SendWindow] = {}
+    raw = encode_frame(RequestFrame(id="req-legacy-stream", method="GET", path="/stream"))
+
+    await _handle_tunnel_frame(
+        _streaming_app, raw, _send_text, dispatch_tasks, {}, flow_credits=flow_credits
+    )
+
+    # No credit window is opened for a legacy request...
+    assert flow_credits == {}
+    await asyncio.wait_for(dispatch_tasks["req-legacy-stream"], timeout=5)
+    # ...yet the whole body streams, past one window, with no credit grants.
+    assert body_frames == fragment_count > RESPONSE_FLOW_WINDOW_FRAMES
+
+
+@pytest.mark.asyncio
 async def test_handle_tunnel_frame_marks_flow_grant_activity() -> None:
     """A request.flow credit grant counts as activity so a slow download is not reaped."""
     activities: list[str] = []
@@ -3133,8 +3175,17 @@ async def test_request_dispatch_caps_oversized_flow_window() -> None:
         flow_credits=flow_credits,
     )
 
+    # Behavioral: only one window of credit is honored, not the advertised
+    # multiple. The no-op app sends no body, so it spends no credit itself.
     window = flow_credits["req-big-window"]
-    assert window._window == RESPONSE_FLOW_WINDOW_FRAMES
-    task = dispatch_tasks.get("req-big-window")
-    assert task is not None
+    task = dispatch_tasks["req-big-window"]
+    for _ in range(RESPONSE_FLOW_WINDOW_FRAMES):
+        await asyncio.wait_for(window.acquire(), timeout=1)
+    parked = asyncio.create_task(window.acquire())
+    await asyncio.sleep(0)
+    assert not parked.done()
+    parked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parked
+
     await asyncio.gather(task, return_exceptions=True)

@@ -22,6 +22,7 @@ abort propagates as a ``ConnectionError`` from the body iterator.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import AsyncIterator
 
@@ -55,15 +56,13 @@ async def _cancel_and_forget_request(
     try:
         if cancel and registry.request_is_open(state.session, req_id):
             # send_text enqueues onto the session loop before awaiting its ack,
-            # so a cancelling consumer still delivers the cancel frame; Exception
-            # (not CancelledError) is swallowed as best-effort.
-            try:  # noqa: SIM105 — contextlib.suppress doesn't work with await
+            # so a cancelling consumer still delivers the cancel frame; a failed
+            # send is best-effort (CancelledError still propagates).
+            with contextlib.suppress(Exception):
                 await registry.send_text(
                     state.session,
                     encode_frame(RequestCancelFrame(id=req_id, reason="client_disconnected")),
                 )
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
     finally:
         registry.close_request(runner_id, req_id, session=state.session)
 

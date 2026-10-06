@@ -191,7 +191,8 @@ def _iter_body_fragments(chunk: bytes, content_type: str) -> Iterator[bytes]:
         if text and end < size:
             # Back off at most the 3 continuation bytes (0b10xxxxxx) a UTF-8
             # character can have so the cut lands on a character boundary;
-            # invalid UTF-8 is cut at the cap rather than walked back forever.
+            # invalid UTF-8 is cut within 3 bytes of the cap, never walked back
+            # forever.
             floor = max(start, end - 3)
             while end > floor and (chunk[end] & 0xC0) == 0x80:
                 end -= 1
@@ -202,15 +203,10 @@ def _iter_body_fragments(chunk: bytes, content_type: str) -> Iterator[bytes]:
 class _SendWindow:
     """Per-request response send-credit window.
 
-    Wraps a semaphore so a graceful drain can unblock a credit-starved stream:
-    ``grant_drain_allowance`` releases one window so the dispatch can flush its
-    remaining frames and end sentinel instead of parking on an exhausted window
-    until the drain times out, while still bounding how much a stalled bulk
-    response buffers during the drain.
-
     Grants are clamped to one window of unspent credit, so repeated or oversized
-    ``request.flow`` frames from a malformed or hostile server cannot inflate the
-    credit past the memory bound. A well-behaved server never grants that much.
+    ``request.flow`` frames cannot inflate it past the memory bound. A graceful
+    drain grants one bounded window via ``grant_drain_allowance`` so a parked
+    stream can flush its tail instead of waiting out the drain timeout.
     """
 
     def __init__(self, window: int) -> None:
