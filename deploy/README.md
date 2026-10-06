@@ -199,8 +199,9 @@ session and agent rows survive but their bundles are gone, and resuming such a
 session fails with `409 agent_bundle_missing` until the same bundle is uploaded
 again (a new session from the same agent files, or `PUT
 /v1/sessions/{id}/agent`, restores it). Mount `/data/artifacts` on a persistent
-volume or point `OMNIGENT_ARTIFACT_URI` at a bucket, as the Fly, Render,
-Railway, and Cloudflare targets already do.
+volume or point `OMNIGENT_ARTIFACT_URI` at a bucket, as the Fly, Render, and
+Cloudflare targets already do; on Railway, add a Volume mounted at
+`/data/artifacts`.
 
 ## Serving: put an HTTP/2 proxy in front for many concurrent views
 
