@@ -139,7 +139,8 @@ def write_daemon_record(
     root = base_dir if base_dir is not None else data_dir()
     path = daemon_record_path(record.target, base_dir=root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(record), indent=2, sort_keys=True) + "\n")
+    with _record_update_lock(path):
+        path.write_text(json.dumps(asdict(record), indent=2, sort_keys=True) + "\n")
     if update_legacy_pidfile:
         (root / "host.pid").write_text(f"{record.pid}\n{record.target}\n")
 
@@ -147,6 +148,25 @@ def write_daemon_record(
 def record_update_lock_path(record_path: Path) -> Path:
     """Return the sidecar lock that serializes rewrites of *record_path*."""
     return record_path.with_name(record_path.name + ".lock")
+
+
+def read_daemon_record_text(record_path: Path) -> str:
+    """Read a record's JSON text without observing a writer's partial rewrite.
+
+    :param record_path: The daemon's ``<hash>.json`` registry record.
+    :returns: The record text.
+    :raises OSError: If the record cannot be read.
+    """
+    lock_path = record_update_lock_path(record_path)
+    if fcntl is None or not lock_path.exists():
+        return record_path.read_text(encoding="utf-8")
+    fd = os.open(lock_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        return record_path.read_text(encoding="utf-8")
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 @contextlib.contextmanager
@@ -185,21 +205,23 @@ def update_daemon_record_fields(
     :returns: ``True`` when the record was rewritten; ``False`` when it is
         missing, malformed, unwritable, or owned by another pid.
     """
+    if not record_path.exists():
+        return False
     try:
-        with _record_update_lock(record_path):
+        # One ``r+`` handle keeps the inode (the daemon's flock), fails on a
+        # record ``host stop`` removed meanwhile instead of resurrecting it, and
+        # writes back to the same file it validated.
+        with _record_update_lock(record_path), record_path.open("r+", encoding="utf-8") as handle:
             try:
-                data = json.loads(record_path.read_text())
-            except (OSError, ValueError):
+                data = json.loads(handle.read())
+            except ValueError:
                 return False
             if not isinstance(data, dict) or (pid is not None and data.get("pid") != pid):
                 return False
             data.update(fields)
-            payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
-            # ``r+`` keeps the inode (the daemon's flock) and fails on a record
-            # that ``host stop`` removed meanwhile instead of resurrecting it.
-            with record_path.open("r+", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.truncate()
+            handle.seek(0)
+            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            handle.truncate()
     except OSError:
         _logger.debug("daemon record update failed for %s", record_path, exc_info=True)
         return False

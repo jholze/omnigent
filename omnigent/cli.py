@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import import_module, resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast
@@ -75,10 +75,10 @@ from omnigent.host.daemon_lifecycle import (
     normalize_daemon_target as _normalize_daemon_target_impl,
 )
 from omnigent.host.daemon_lifecycle import (
-    record_flock_is_held as _record_flock_is_held,
+    read_daemon_record_text as _read_daemon_record_text,
 )
 from omnigent.host.daemon_lifecycle import (
-    record_update_lock_path as _record_update_lock_path,
+    record_flock_is_held as _record_flock_is_held,
 )
 from omnigent.host.daemon_lifecycle import (
     update_daemon_record_fields as _update_daemon_record_fields,
@@ -2872,7 +2872,7 @@ def _read_daemon_record(path: Path) -> _HostDaemonRecord | None:
     :returns: Parsed daemon record, or ``None`` if unreadable or malformed.
     """
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(_read_daemon_record_text(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
@@ -2901,10 +2901,10 @@ def _delete_daemon_record(record: _HostDaemonRecord) -> None:
 
     :param record: Record whose target path should be removed.
     """
-    record_path = _daemon_record_path(record.target)
-    for path in (record_path, _record_update_lock_path(record_path)):
-        with contextlib.suppress(OSError):
-            path.unlink()
+    # The ``.lock`` sidecar stays: unlinking it would let a new writer take a
+    # fresh lock while another still holds the old inode.
+    with contextlib.suppress(OSError):
+        _daemon_record_path(record.target).unlink()
     legacy = _read_host_pid_file()
     if legacy is not None and legacy[1] == record.target:
         with contextlib.suppress(OSError):
@@ -2985,9 +2985,18 @@ def _update_daemon_resolved_server_url(target: str, server_url: str) -> None:
     :param server_url: Concrete server URL, e.g.
         ``"http://127.0.0.1:8123"``.
     """
-    _update_daemon_record_fields(
-        _daemon_record_path(target), resolved_server_url=server_url.rstrip("/")
-    )
+    record = _find_daemon_record(target)
+    if record is None:
+        return
+    resolved = server_url.rstrip("/")
+    path = _daemon_record_path(record.target)
+    if _update_daemon_record_fields(path, resolved_server_url=resolved):
+        return
+    if not path.exists():
+        # A daemon known only through the legacy pidfile has no JSON record yet.
+        _write_daemon_record(
+            _HostDaemonRecord(**{**asdict(record), "resolved_server_url": resolved})
+        )
 
 
 def _load_existing_host_id() -> str | None:

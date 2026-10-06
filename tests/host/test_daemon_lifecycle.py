@@ -20,6 +20,7 @@ from omnigent.host.daemon_lifecycle import (
     normalize_daemon_target,
     record_flock_is_held,
     record_update_lock_path,
+    write_daemon_record,
 )
 from omnigent.host.identity import HostIdentity
 
@@ -269,11 +270,41 @@ def test_mark_daemon_registered_waits_for_concurrent_record_writer(tmp_path: Pat
     assert isinstance(json.loads(record.read_text())["registered_at"], int)
 
 
+def test_write_daemon_record_waits_for_concurrent_writer(tmp_path: Path) -> None:
+    """A whole-record write blocks while a field update holds the writer lock."""
+    fcntl = pytest.importorskip("fcntl")
+    import threading
+
+    record = daemon_record_path("local", base_dir=tmp_path)
+    _write_record(record, os.getpid())
+    lock_fd = os.open(record_update_lock_path(record), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    written = threading.Event()
+    replacement = HostDaemonRecord(
+        pid=os.getpid(), target="local", mode="local", server_url=None, log_path=None, started_at=1
+    )
+    worker = threading.Thread(
+        target=lambda: (write_daemon_record(replacement, base_dir=tmp_path), written.set()),
+        daemon=True,
+    )
+    try:
+        worker.start()
+        assert not written.wait(0.3), "record write did not wait for the writer lock"
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert written.wait(5.0)
+    worker.join(5.0)
+    assert json.loads(record.read_text())["started_at"] == 1
+
+
 def test_mark_daemon_registered_refuses_foreign_or_missing_record(tmp_path: Path) -> None:
     """A record owned by another pid — or absent — is never stamped."""
     record = daemon_record_path("local", base_dir=tmp_path)
 
     assert mark_daemon_registered(record) is False
+    # A missing record must not leave a stray writer lock behind either.
+    assert not record_update_lock_path(record).exists()
 
     _write_record(record, os.getpid() + 1)
 

@@ -101,9 +101,12 @@ class _StaleStatusProxy:
         self._start_error: BaseException | None = None
         self._thread = threading.Thread(target=self._run, args=(ready,), daemon=True)
         self._thread.start()
-        assert ready.wait(30), "stale-status proxy did not start within 30s"
+        if not ready.wait(30):
+            self.close()
+            raise AssertionError("stale-status proxy did not start within 30s")
         start_error = self._start_error
         if start_error is not None:
+            self.close()
             raise start_error
 
     @property
@@ -131,7 +134,11 @@ class _StaleStatusProxy:
         await site.start()
 
     def _fwd_headers(self, request: web.Request) -> dict[str, str]:
-        return {k: v for k, v in request.headers.items() if k.lower() not in _SKIP_REQ_HEADERS}
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in _SKIP_REQ_HEADERS}
+        # Keep the relay byte-safe: a compressed backend body would otherwise be
+        # forwarded without its Content-Encoding and break the JSON rewrite.
+        headers["Accept-Encoding"] = "identity"
+        return headers
 
     async def _handle(self, request: web.Request) -> web.StreamResponse:
         # The daemon's registration transport: forward the upgrade to the
@@ -222,6 +229,8 @@ class _StaleStatusProxy:
             asyncio.run_coroutine_threadsafe(_shutdown(), self._loop).result(timeout=10)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
+        if not self._thread.is_alive():
+            self._loop.close()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -277,7 +286,7 @@ def _host_online(client: httpx.Client, host_id: str) -> bool:
 
 
 @pytest.mark.timeout(180)
-def test_host_background_tears_down_registered_daemon_on_stale_status_read(
+def test_host_background_keeps_registered_daemon_on_stale_status_read(
     live_server: str,
     http_client: httpx.Client,
     tmp_path: Path,
@@ -371,7 +380,11 @@ def test_host_background_tears_down_registered_daemon_on_stale_status_read(
                 online_seen = True
             time.sleep(POLL_INTERVAL_S)
 
-        out, err = proc.communicate(timeout=30)
+        try:
+            out, err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
 
         # A fast (fixed) success can exit before the concurrent poll observed
         # the online transition; confirm registration once more while the

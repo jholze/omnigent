@@ -4551,7 +4551,7 @@ class HostProcess:
         self._ensure_model_options_prewarm()
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
-        registration_stamped = False
+        stamp_write: asyncio.Future[None] | None = None
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -4579,11 +4579,13 @@ class HostProcess:
                     # request frames run concurrently below; exceptions raised
                     # on those detached tasks are intentionally contained.
                     self._raise_connection_error_from_raw(raw)
-                    if not registration_stamped:
-                        registration_stamped = True
+                    if stamp_write is None:
                         # Off the receive loop: a slow filesystem must not stall
                         # the keepalive pong the server counts as liveness.
-                        await asyncio.to_thread(self._set_daemon_registered, True)
+                        stamp_write = asyncio.ensure_future(
+                            asyncio.to_thread(self._set_daemon_registered, True)
+                        )
+                        await asyncio.shield(stamp_write)
                     # Each request frame is handled on its own task so a slow
                     # handler (a model-options CLI exec, a long git walk) can't
                     # head-of-line block the frames behind it — measured
@@ -4597,8 +4599,12 @@ class HostProcess:
             readiness_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
-            if registration_stamped:
-                self._set_daemon_registered(False)
+            if stamp_write is not None:
+                # Let an in-flight stamp land before clearing it, off the loop.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(stamp_write)
+                with contextlib.suppress(RuntimeError):
+                    await asyncio.to_thread(self._set_daemon_registered, False)
 
     async def _harness_readiness_loop(
         self,

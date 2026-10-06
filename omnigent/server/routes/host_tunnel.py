@@ -1071,6 +1071,7 @@ async def _ping_loop(
         try:
             conn.outbound_queue.put_nowait(encode_frame(PingFrame(ts=int(time.time() * 1000))))
         except Exception:  # noqa: BLE001
+            _logger.warning("Host %s: could not queue the registration ack ping", host_id)
             return
     while True:
         await asyncio.sleep(PING_INTERVAL_S)

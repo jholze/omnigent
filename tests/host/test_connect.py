@@ -7,6 +7,7 @@ import contextlib
 import errno
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -33,6 +34,7 @@ from omnigent.host.connect import (
     _RunnerHandle,
     run_host_process,
 )
+from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, daemon_record_path
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -2141,10 +2143,6 @@ async def test_unreported_exit_flushes_after_reconnect(
 
 def _owned_daemon_record(tmp_path: Path) -> tuple[Path, object]:
     """Write a registry record owned by this process; return (path, lock)."""
-    import os
-
-    from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, daemon_record_path
-
     target = "https://server.example.com"
     record_path = daemon_record_path(target, base_dir=tmp_path)
     record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2190,25 +2188,6 @@ async def test_serve_frames_does_not_stamp_before_server_ack(tmp_path: Path) -> 
     tunnel = _FakeTunnel()
 
     with pytest.raises(ConnectionError, match="test disconnect"):
-        await host._serve_frames(tunnel)  # type: ignore[arg-type] — duck-typed ws
-
-    assert "registered_at" not in json.loads(record_path.read_text())
-
-
-async def test_serve_frames_does_not_stamp_on_connection_error(tmp_path: Path) -> None:
-    """A server that rejects registration post-hello leaves no stamp."""
-    record_path, lock = _owned_daemon_record(tmp_path)
-    host = _make_host_process()
-    host._lifecycle_lock = lock
-    tunnel = _ConnectionErrorTunnel(
-        HostConnectionErrorFrame(
-            stage="registration",
-            error="database unavailable",
-            retryable=False,
-        )
-    )
-
-    with pytest.raises(HostConnectError, match="registration: database unavailable"):
         await host._serve_frames(tunnel)  # type: ignore[arg-type] — duck-typed ws
 
     assert "registered_at" not in json.loads(record_path.read_text())
@@ -6742,9 +6721,15 @@ async def test_inbound_frame_resets_silent_connect_streak(
     assert not [record for record in caplog.records if record.levelno == logging.ERROR]
 
 
-async def test_connection_error_frame_fails_loudly_on_live_receive_path() -> None:
-    """A non-retryable server error escapes the live receive loop."""
+async def test_connection_error_frame_fails_loudly_on_live_receive_path(tmp_path: Path) -> None:
+    """A non-retryable server error escapes the live receive loop without a stamp.
+
+    The rejection raises; it must also leave no registration stamp for the
+    CLI's background-spawn gate to trust.
+    """
+    record_path, lock = _owned_daemon_record(tmp_path)
     host = _host()
+    host._lifecycle_lock = lock
     tunnel = _ConnectionErrorTunnel(
         HostConnectionErrorFrame(
             stage="registration",
@@ -6759,6 +6744,7 @@ async def test_connection_error_frame_fails_loudly_on_live_receive_path() -> Non
     assert len(tunnel.sent) == 1
     assert isinstance(decode_host_frame(tunnel.sent[0]), HostHelloFrame)
     assert host._frame_tasks == set()
+    assert "registered_at" not in json.loads(record_path.read_text())
 
 
 async def test_retryable_connection_error_escapes_live_receive_path() -> None:
