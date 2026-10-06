@@ -177,14 +177,8 @@ _LOGIN_REDIRECT_FATAL_ATTEMPTS = 3
 
 def _iter_body_fragments(chunk: bytes, content_type: str) -> Iterator[bytes]:
     """Split ``chunk`` into slices of at most ``RESPONSE_BODY_FRAME_MAX_BYTES``.
-
-    Framing a large chunk into bounded pieces lets per-request flow control
-    cap server memory by bytes: one send credit per frame times a bounded
-    frame size, independent of how big a single ASGI chunk is. Text bodies
-    are cut only on UTF-8 character boundaries so no multi-byte sequence is
-    torn across frames; binary bodies are base64-encoded per frame and have
-    no such constraint.
-    """
+    Bounding frame size lets per-request flow control cap server memory by
+    bytes; text is cut only on UTF-8 character boundaries so no sequence tears."""
     if len(chunk) <= RESPONSE_BODY_FRAME_MAX_BYTES:
         yield chunk
         return
@@ -216,11 +210,8 @@ async def dispatch_via_asgi(
     :param frame: The incoming ``request`` frame the server sent.
     :param send_text: Async callback that writes a frame onto the
         WebSocket back to the server (typically ``ws.send_text``).
-    :param flow_credits: Per-request send-credit semaphore. Each body
-        frame costs one credit; the dispatch blocks here once the
-        server's unconsumed-frame window is full, bounding the memory
-        the server buffers for a slow consumer. ``None`` disables the
-        bound (callers that stream nothing large).
+    :param flow_credits: Per-request send-credit semaphore; the dispatch
+        blocks once the server's unconsumed-frame window is full. ``None`` disables it.
     """
     body_bytes = decode_body(frame.body, frame.encoding) if frame.body is not None else b""
 
@@ -286,9 +277,7 @@ async def dispatch_via_asgi(
         elif ev_type == "http.response.body":
             chunk = event.get("body", b"")
             if chunk:
-                # Pick body encoding based on the response's
-                # content-type header — utf-8 for text-shaped, base64
-                # otherwise (binary file downloads).
+                # Encoding follows the response content-type (utf-8 for text).
                 content_type = "application/octet-stream"
                 for k, v in response_headers_raw:
                     if k.lower() == b"content-type":
@@ -297,10 +286,9 @@ async def dispatch_via_asgi(
                 # Bounded frames so the send window caps buffering by bytes.
                 for fragment in _iter_body_fragments(chunk, content_type):
                     body_str, encoding = encode_body(fragment, content_type)
-                    # Spend one send credit per body frame. When the server's
-                    # consumer stalls it stops granting credits, so this blocks
-                    # and the runner stops producing instead of letting the
-                    # undelivered body pile up in server memory.
+                    # Spend one send credit per frame; a stalled consumer stops
+                    # granting credits, so this blocks and the runner stops
+                    # producing instead of piling the body up in server memory.
                     if flow_credits is not None:
                         await flow_credits.acquire()
                     await send_text(
@@ -1311,10 +1299,8 @@ async def _handle_tunnel_frame(
     :param dispatch_tasks: Mutable request-id-to-task map.
     :param ws_channels: Mutable channel-id to runner-side WS channel
         state map.
-    :param flow_credits: Mutable request-id-to-send-credit-semaphore
-        map. A fresh request opens a window; ``request.flow`` frames
-        from the server release more credits onto it. ``None`` disables
-        response-body flow control (used by narrow unit tests).
+    :param flow_credits: Mutable request-id-to-send-credit-semaphore map;
+        ``request.flow`` frames release more credits. ``None`` disables it.
     :param on_activity: Optional sync callback fired for non-ping
         frames that represent real runner work.
     :returns: None.
@@ -1612,8 +1598,7 @@ def _forget_dispatch_task(
 
     :param dispatch_tasks: Mutable request-id-to-task map.
     :param flow_credits: Mutable request-id-to-send-credit-semaphore map,
-        cleared alongside the task so credit windows don't leak; ``None``
-        when flow control is disabled.
+        cleared with the task so windows don't leak; ``None`` when disabled.
     :param req_id: Request id to remove, e.g.
         ``"7a0f7f7cb90f4a5fb5a8071fd0b77568"``.
     :returns: Callback suitable for

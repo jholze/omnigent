@@ -1,16 +1,6 @@
 """E2E: a slow browser download must not make the server buffer the whole file.
-
-The server proxies ``?download=true`` from the runner over the WebSocket
-tunnel. When the browser reads slower than the runner streams, the server
-must hold only a bounded number of chunks so its memory stays flat however
-large the file is.
-
-Opening the file viewer first issues a capped (<=10 MiB) preview read whose
-JSON envelope briefly costs the server ~40 MiB. That cost is bounded by the
-preview cap and independent of the streamed download, so the test drains the
-preview and waits for the server to release it before throttling the link and
-measuring, keeping the measurement specific to the download path.
-"""
+The viewer's capped preview read is drained before baselining, so growth is
+measured on the ``?download=true`` streaming path only (see DISPUTE-ANALYSIS.md)."""
 
 from __future__ import annotations
 
@@ -43,10 +33,8 @@ _PREVIEW_SETTLE_TIMEOUT_S = 30.0
 
 class SlowLinkProxy:
     """Loopback TCP proxy that caps server->browser throughput.
-
-    It reads only one rate slice from the server per tick, so TCP
-    backpressure reaches the server exactly as a slow client link would.
-    """
+    It reads one rate slice per tick, so TCP backpressure reaches the server
+    exactly as a slow client link would."""
 
     def __init__(self, upstream_port: int) -> None:
         self._upstream_port = upstream_port
@@ -149,12 +137,8 @@ def _server_rss_kib(pid: int) -> int:
 
 def _await_preview_drained(pid: int, baseline_kib: int, timeout_s: float) -> None:
     """Wait for the preview envelope to allocate (RSS rises) and then free.
-
-    The viewer's capped read briefly lifts server RSS tens of MiB while the
-    JSON envelope is assembled and sent, then releases it. Block until that
-    rise has been observed and RSS has fallen back near ``baseline_kib`` so the
-    download measured afterwards starts clean.
-    """
+    Block until the rise is observed and RSS falls back near ``baseline_kib``
+    so the download measured afterwards starts clean."""
     rise_kib = baseline_kib + 15 * 1024
     settle_kib = baseline_kib + _PREVIEW_SETTLE_MARGIN_MIB * 1024
     deadline = time.monotonic() + timeout_s
@@ -205,10 +189,9 @@ def test_slow_download_keeps_server_memory_flat(
     )
     expect(row).to_be_visible(timeout=30_000)
 
-    # Opening the viewer issues the capped preview read. Its envelope only
-    # releases once the (throttled) response has been sent, so throttle first
-    # and wait for that allocate-then-release before measuring, leaving the
-    # download below a clean baseline.
+    # Opening the viewer issues the capped preview read; its envelope frees
+    # only after the response is sent, so wait for that allocate-then-release
+    # before measuring so the download starts from a clean baseline.
     pre_preview_kib = _server_rss_kib(server_pid)
     row.click()
     expect(rail.get_by_test_id("file-viewer")).to_be_visible()

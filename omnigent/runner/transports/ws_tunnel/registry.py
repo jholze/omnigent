@@ -148,10 +148,8 @@ class RequestState:
     :param end_event: Event set when the response end frame arrives.
     :param aborted_with: Error to raise from the body iterator after
         a tunnel disconnect or registry abort.
-    :param req_id: Tunnel request id, carried so the consumer can
-        address response-flow credit grants back to the runner.
-    :param credits_pending: Consumed-but-not-yet-granted body frames,
-        released to the runner once they reach ``RESPONSE_FLOW_CREDIT_BATCH``.
+    :param req_id: Tunnel request id, used to address flow-credit grants back.
+    :param credits_pending: Drained frames awaiting a batched credit grant.
     """
 
     loop: asyncio.AbstractEventLoop
@@ -768,17 +766,9 @@ class TunnelRegistry:
     async def note_body_consumed(
         self, state: RequestState, item: ResponseBodyFrame | None
     ) -> None:
-        """Account for a body frame the consumer just drained.
-
-        Pulling a frame off ``body_queue`` frees one slot of the server's
-        per-request buffer. We grant that slot back to the runner as a send
-        credit, batched to keep flow frames rare, so a slow consumer bounds
-        how far ahead the runner may stream. The end sentinel grants nothing.
-
-        :param state: Reassembly state whose queue was drained.
-        :param item: The drained queue item.
-        :returns: None.
-        """
+        """Grant a batched send credit back for a drained body frame.
+        Credits bound how far ahead a slow consumer lets the runner stream;
+        the end sentinel grants nothing."""
         if not isinstance(item, ResponseBodyFrame):
             return
         state.credits_pending += 1
@@ -789,12 +779,7 @@ class TunnelRegistry:
         await self._send_response_flow(state, granted)
 
     async def _send_response_flow(self, state: RequestState, credits: int) -> None:
-        """Grant ``credits`` response-body send credits back to the runner.
-
-        :param state: Request whose runner should receive the credits.
-        :param credits: Number of body frames the runner may now send.
-        :returns: None.
-        """
+        """Grant ``credits`` response-body send credits back to the runner."""
         # A replaced tunnel means the request is ending anyway, so the
         # ungranted credits no longer matter.
         with contextlib.suppress(ConnectionError):

@@ -148,21 +148,15 @@ class RequestCancelFrame:
 
 @dataclass
 class RequestFlowFrame:
-    """Server → runner: grant more response-body send credits for a request.
-
-    The runner may keep at most ``RESPONSE_FLOW_WINDOW_FRAMES`` body frames in
-    flight (sent but not yet drained by the server); the server grants more as
-    it forwards them downstream, bounding server memory per in-flight response.
-    """
+    """Server → runner: grant more response-body send credits for a request."""
 
     id: str
     credits: int
 
 
-# Per-request response-body flow control: the runner keeps at most
-# RESPONSE_FLOW_WINDOW_FRAMES body frames in flight, and the server grants more
-# in RESPONSE_FLOW_CREDIT_BATCH batches as it drains them (window > batch so the
-# final partial batch never stalls).
+# Flow control: the runner keeps at most RESPONSE_FLOW_WINDOW_FRAMES frames in
+# flight; the server grants more in RESPONSE_FLOW_CREDIT_BATCH batches as it
+# drains them (window > batch so the final partial batch never stalls).
 RESPONSE_FLOW_WINDOW_FRAMES = 48
 RESPONSE_FLOW_CREDIT_BATCH = 16
 
