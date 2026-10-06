@@ -1,18 +1,10 @@
 // Desktop-shell journey: the composer mic follows the connected server's
-// dictation capability.
+// dictation capability. Electron's SpeechRecognition has no backend, so the
+// desktop app offers a mic only when GET /v1/info advertises server dictation,
+// and clicking it then lands the server's transcript in the composer.
 //
-// Electron's Chromium exposes SpeechRecognition but has no speech backend, so
-// the only working dictation path in the desktop app is the server fallback
-// advertised by GET /v1/info `dictation_available`. Without it the shell offers
-// no mic (one could only dead-end in "Voice input isn't available on this
-// device."); with it, clicking the mic starts a server take whose transcript
-// lands in the composer.
-//
-// Headless CI has no microphone, and Chromium reports a missing audio input as
-// a `not-allowed` speech error even when the permission is granted; a fake audio
-// device stands in for the user's microphone.
-//
-// Run from web/electron after building the SPA:
+// Run from web/electron after building the SPA (a fake audio device stands in
+// for the microphone headless CI lacks):
 //   OMNIGENT_PW_NO_SANDBOX=1 OMNIGENT_PYTHON=../../.venv/bin/python \
 //     xvfb-run -a node --test e2e/desktop_dictation_availability.e2e.js
 

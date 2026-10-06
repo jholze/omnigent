@@ -108,14 +108,11 @@ export const ComposerMicButton = ({
   onVoiceDiscard,
 }: ComposerMicButtonProps) => {
   // Web Speech is primary whenever the browser has the constructor
-  // (Chrome/Safari, unchanged behavior); with no constructor at all
-  // (Firefox) takes use server dictation when GET /v1/info advertises it.
-  // A constructor is no guarantee of a backend — plain Chromium errors at
-  // runtime with "network" — so a failed Web Speech take falls back to the
-  // server per take (see handleError). Per-take, not sticky: a transient
-  // blip in real Chrome must not permanently downgrade the page to the
-  // local model. Electron's constructor never has a backend, so there the
-  // server is the only path: without it no dictation can work.
+  // (Chrome/Safari); with none (Firefox) takes use server dictation when
+  // GET /v1/info advertises it. Plain Chromium has the constructor but no
+  // backend, so a take that dies with "network" falls back to the server for
+  // that take only (see handleError). Electron never has a backend: there the
+  // server is the only path, and without it no dictation can work.
   const [Ctor] = useState(getRecognitionCtor);
   const electron = isElectronShell();
   const serverInfo = useServerInfo();
