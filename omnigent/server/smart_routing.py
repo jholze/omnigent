@@ -624,7 +624,10 @@ class LLMRoutingClient:
             self.last_error = "routing judge returned no model"
             return None
 
-        # Clamp hallucinated models to the cheapest available.
+        # The judge picked a model outside the servable catalog; clamp it to the
+        # cheapest servable one and keep the pick as raw_model, rewriting the
+        # rationale so it names the applied model instead of the dropped one.
+        raw_model: str | None = None
         if model not in flat:
             if flat:
                 _logger.info(
@@ -632,7 +635,12 @@ class LLMRoutingClient:
                     model,
                     flat[0],
                 )
+                raw_model = model
                 model = flat[0]
+                rationale = (
+                    f"The selected model is not available in this session; "
+                    f"using {model}."
+                )
             else:
                 self.last_error = "no candidate models were available"
                 return None
@@ -658,7 +666,12 @@ class LLMRoutingClient:
                 None,
             )
 
-        return RoutingResult(model=model, rationale=str(rationale), harness=chosen_harness)
+        return RoutingResult(
+            model=model,
+            rationale=str(rationale),
+            harness=chosen_harness,
+            raw_model=raw_model,
+        )
 
 
 def _bearer_auth(token: str) -> httpx.Auth:
