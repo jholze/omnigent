@@ -132,16 +132,13 @@ async def test_cancelled_queued_request_does_not_wedge_later_messages() -> None:
                 _message_frame("reqQueued", [{"type": "input_text", "text": "queued"}])
             )
             assert task_queued is not None
-            # Wait until it parks behind A so the cancellation exercises the
-            # "cancelled while queued" path rather than returning before the
-            # request reaches the gate.
+            # Wait until it parks behind A so the cancel hits the queued-at-gate
+            # path, not a cancel before the request reaches the gate. The lock is
+            # observable only on the fixed runner, so the assert below is guarded.
             for _ in range(100):
                 if _queued_behind_holder():
                     break
                 await asyncio.sleep(0.02)
-            # Require the parked waiter so the cancellation hits the queued-at-gate
-            # path, not a cancel before the request reaches the gate. The ingest
-            # lock is observable only when the runner routes intake through it.
             if hasattr(app.state, "ingest_locks"):
                 assert _queued_behind_holder(), (
                     "queued request never parked behind the ingest gate"
