@@ -2968,3 +2968,94 @@ def test_tunnel_renewal_interval_unparseable_warns_and_uses_default(
         "unparseable" in record.getMessage() and record.levelno == logging.WARNING
         for record in caplog.records
     ), "an unparseable interval must log a warning before falling back to the default"
+
+
+@pytest.mark.asyncio
+async def test_serve_tunnel_shutdown_during_renewal_mint_finishes_graceful_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shutdown racing a ready renewal drains the connection, never cancels it.
+
+    Reproduces the race where credential minting finishes just as a graceful
+    shutdown begins: the ready renewal signal must not hand the still-draining
+    connection to cancellation-based cleanup. The connection must complete its
+    own graceful drain instead.
+    """
+    drained = asyncio.Event()
+    cancelled = asyncio.Event()
+    shutdown_event = asyncio.Event()
+
+    async def _serve_once(
+        app: Any,
+        *,
+        renewal_signal: asyncio.Future[str | None] | None = None,
+        on_graceful_shutdown: Any = None,
+        **_kwargs: Any,
+    ) -> None:
+        del app
+        # The renewal mint finished and signalled a cutover while a graceful
+        # shutdown began concurrently.
+        assert renewal_signal is not None
+        renewal_signal.set_result("renewed-token")
+        shutdown_event.set()
+        try:
+            # The connection is mid graceful drain; it must be allowed to finish.
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        if on_graceful_shutdown is not None:
+            on_graceful_shutdown()
+        drained.set()
+
+    monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
+
+    await asyncio.wait_for(
+        serve_tunnel(
+            _noop_app,
+            server_url="http://127.0.0.1:8000",
+            runner_id="runner_shutdown_during_mint",
+            runner_version="0.1.0",
+            shutdown_event=shutdown_event,
+            on_graceful_shutdown=lambda: None,
+        ),
+        timeout=5.0,
+    )
+
+    assert drained.is_set(), "the connection did not finish its graceful drain"
+    assert not cancelled.is_set(), "a shutdown that raced a ready renewal cancelled the drain"
+
+
+@pytest.mark.asyncio
+async def test_await_renewal_skips_cutover_when_shutdown_races_mint() -> None:
+    """A shutdown that begins while the mint is in flight cancels the cutover.
+
+    If shutdown starts after the mint is requested but before it resolves, the
+    watcher must not signal a replacement, so the connection drains gracefully
+    rather than being superseded as it shuts down.
+    """
+    renewal_signal: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+    shutdown_event = asyncio.Event()
+    mint_started = asyncio.Event()
+    release_mint = asyncio.Event()
+
+    async def _prepare() -> str:
+        mint_started.set()
+        await release_mint.wait()
+        return "renewed-token"
+
+    watcher = asyncio.ensure_future(
+        serve_module._await_renewal(
+            0.01, renewal_signal, _prepare, shutdown_event, "runner_shutdown_race"
+        )
+    )
+    try:
+        await asyncio.wait_for(mint_started.wait(), timeout=2)
+        shutdown_event.set()
+        release_mint.set()
+        await asyncio.wait_for(watcher, timeout=2)
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+    assert not renewal_signal.done(), "a shutdown during the mint must not signal a cutover"

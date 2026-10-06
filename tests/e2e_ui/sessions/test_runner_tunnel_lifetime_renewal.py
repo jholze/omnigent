@@ -421,6 +421,13 @@ def test_tunnel_is_renewed_before_the_proxy_lifetime(
         page.wait_for_timeout(3_000)
         page.screenshot(path=str(shots / "01-tool-running.png"))
 
+        # Sample the UI while the renewal cutover is happening, before the
+        # original socket's lifetime boundary, so uninterrupted UI state is
+        # observed during renewal and not only after the turn settles.
+        page.wait_for_timeout(int((_RENEWAL_INTERVAL_S + 3) * 1000))
+        page.screenshot(path=str(shots / "01b-during-renewal.png"))
+        journey.notes["ui_during_renewal"] = _visible_ui_state(page)
+
         abort = _wait_for_proxy_abort(journey.proxy, timeout_s=_PROXY_WS_LIFETIME_S + 15)
         journey.notes["abort"] = abort
         page.wait_for_timeout(4_000)
@@ -495,7 +502,8 @@ def test_tunnel_is_renewed_before_the_proxy_lifetime(
                 f"{_PROXY_WS_LIFETIME_S:.0f}s connection lifetime elapsed"
             )
     ui_states = [
-        journey.notes.get(k) for k in ("ui_after_boundary", "ui_after_boundary_8s", "ui_settled")
+        journey.notes.get(k)
+        for k in ("ui_during_renewal", "ui_after_boundary", "ui_after_boundary_8s", "ui_settled")
     ]
     disabled = [s for s in ui_states if isinstance(s, dict) and s.get("composer_enabled") is False]
     if disabled:
