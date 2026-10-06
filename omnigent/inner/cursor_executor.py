@@ -605,6 +605,12 @@ def _harden_cursor_sdk_callback_tokens() -> None:
             continue
         if callable(getattr(module, _SDK_TOKEN_FACTORY, None)):
             setattr(module, _SDK_TOKEN_FACTORY, _argv_safe_auth_token)
+        else:
+            logger.debug(
+                "CursorExecutor: %s has no %s; assuming the SDK mints argv-safe tokens.",
+                module_name,
+                _SDK_TOKEN_FACTORY,
+            )
 
 
 @dataclass

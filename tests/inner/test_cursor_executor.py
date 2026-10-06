@@ -1946,13 +1946,10 @@ async def test_bridge_launch_hardens_sdk_callback_tokens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """The executor swaps in an argv-safe callback token generator before launch.
+    """The executor swaps both callback factories before launch; they redraw dash-leading tokens.
 
-    cursor-sdk mints ``secrets.token_urlsafe`` tokens and hands them to the
-    bridge as ``--tool-callback-auth-token <token>``; the bridge's flag parser
-    rejects any value starting with ``-`` as a missing value, so the 1-in-64
-    dash-leading draw killed the launch before discovery. The fake SDK here
-    replays that parser rule; the real-bridge test below drives the actual SDK.
+    The fake SDK replays the bridge's leading-dash parser rule; the real-bridge
+    test below drives the actual SDK.
     """
     sdk_state = _install_fake_sdk(monkeypatch, [{"messages": [_assistant("ok")], "result": "ok"}])
     fake_sdk = sys.modules["cursor_sdk"]
@@ -2016,11 +2013,15 @@ async def test_real_bridge_launch_survives_dash_leading_callback_token(
     cursor_sdk = pytest.importorskip("cursor_sdk")
     monkeypatch.delenv("RUNNER_SERVER_URL", raising=False)
     # The executor swaps the SDK's factories in place; restore them on teardown.
+    factories: dict[str, Any] = {}
     for name in ("cursor_sdk._tool_callback", "cursor_sdk._store_callback"):
         module = importlib.import_module(name)
         factory = getattr(module, "_new_auth_token", None)
         if factory is not None:
+            factories[name] = factory
             monkeypatch.setattr(module, "_new_auth_token", factory)
+    if not factories:
+        pytest.skip("installed cursor-sdk mints argv-safe tokens itself; nothing to harden")
 
     real_token_urlsafe = secrets.token_urlsafe
     scripted = iter(["-" + real_token_urlsafe(32)[1:]])
