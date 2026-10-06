@@ -1,17 +1,12 @@
-"""Regression test: ``DELETE /v1/sessions/{id}`` must cancel sub-agent forwarders.
+"""Regression test: ``DELETE /v1/sessions/{id}`` must reap sub-agent forwarders.
 
-A native session's transcript forwarder is a restart-forever task keyed by
-session id in ``orchestration._AUTO_FORWARDER_TASKS``. When a parent native
-session spawns native sub-agents (and those spawn their own native sub-agents),
-the runner registers each child in the spawn-family map
-(``subagent_work._subagent_work_by_parent``) and gives each native child its own
-forwarder.
-
-Deleting the parent tree-deletes the children server-side, but the runner's
-``delete_session`` route cancels only the forwarder for the id it was handed and
-never walks the spawn family. The descendants' forwarders survive, so they keep
-tailing their transcript files and POSTing events to ``/v1/sessions/{child}/events``
-for sessions the server has already deleted (404s).
+Each native sub-agent gets its own restart-forever transcript forwarder keyed by
+session id in ``orchestration._AUTO_FORWARDER_TASKS``. Deleting the parent
+tree-deletes the children server-side, so the runner must walk the whole spawn
+family and reap each native descendant; otherwise their forwarders survive and
+keep POSTing events to sessions the server already deleted (404s). The walk
+spans both ownership maps so a completed child whose dispatch work was already
+drained is still reaped.
 """
 
 from __future__ import annotations
@@ -141,3 +136,65 @@ async def test_delete_parent_cancels_descendant_native_forwarders(
         sw.unregister_child_session(grand)
         sw.unregister_subagent_work(child_session_id=child)
         sw.unregister_subagent_work(child_session_id=grand)
+
+
+async def test_delete_parent_cancels_drained_child_native_forwarder(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+) -> None:
+    parent = f"conv_parent_{uuid.uuid4().hex}"
+    drained = f"conv_drained_{uuid.uuid4().hex}"
+
+    sw.register_subagent_work(
+        parent_session_id=parent,
+        child_session_id=drained,
+        agent="worker",
+        title="worker",
+        wrapper_label="claude-code-native-ui",
+    )
+    sw.register_child_session(
+        drained,
+        parent_session_id=parent,
+        title="worker:auth",
+        tool="worker",
+        session_name="auth",
+    )
+    # The child finished and its result was delivered, so its dispatch work is
+    # drained from the ephemeral registry while the persistent child->parent
+    # map still owns it. Its native session (and forwarder) outlive the drain.
+    sw.unregister_subagent_work(child_session_id=drained)
+    assert sw.get_subagent_work(drained) is None
+    assert sw.list_subagent_work(parent) == []
+
+    parent_task = _register_forwarder(parent)
+    drained_task = _register_forwarder(drained)
+
+    cleaned: list[str] = []
+    registry = app.state.session_resource_registry
+    original_cleanup = registry.cleanup_session
+
+    async def _recording_cleanup(session_id: str) -> None:
+        cleaned.append(session_id)
+        await original_cleanup(session_id)
+
+    registry.cleanup_session = _recording_cleanup  # type: ignore[method-assign]
+
+    try:
+        resp = await client.delete(f"/v1/sessions/{parent}")
+        assert resp.status_code == 200
+
+        assert parent_task.cancelled()
+        # The drained child is invisible to the dispatch registry, so the walk
+        # must discover it through the persistent session-family map.
+        assert drained_task.cancelled(), "drained child forwarder leaked after parent delete"
+        assert drained not in orch._AUTO_FORWARDER_TASKS
+        assert drained in cleaned, "drained child did not get per-session resource cleanup"
+    finally:
+        registry.cleanup_session = original_cleanup  # type: ignore[method-assign]
+        for sid, task in ((parent, parent_task), (drained, drained_task)):
+            orch._AUTO_FORWARDER_TASKS.pop(sid, None)
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        sw.unregister_child_session(drained)

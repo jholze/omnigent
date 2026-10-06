@@ -187,6 +187,7 @@ from omnigent.runner.subagent_work import (
     _truncate_child_preview,
     get_subagent_work,
     is_codex_native_subagent_wrapper,
+    list_child_session_ids,
     list_subagent_work,
     mark_subagent_work_started,
     mark_subagent_work_terminal,
@@ -3232,6 +3233,17 @@ def create_runner_app(
             },
         )
 
+    async def _reap_deleted_session(target_session_id: str) -> None:
+        """Tear a confirmed-deleted session down fully: forwarder and native
+        servers, harness process, panes and envs, and spawn-family state."""
+        await _native_runtime.reap_native_session(target_session_id)
+        if process_manager is not None:
+            await process_manager.release(target_session_id)
+        if resource_registry is not None:
+            await resource_registry.cleanup_session(target_session_id)
+        unregister_child_session(target_session_id)
+        unregister_subagent_work_for_session(target_session_id)
+
     @app.delete("/v1/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
         resource_registry.note_terminal_control_request(session_id, "delete_session")
@@ -3307,19 +3319,13 @@ def create_runner_app(
         family_frontier = [session_id]
         while family_frontier:
             parent_id = family_frontier.pop()
-            for work in list_subagent_work(parent_id):
-                child_id = work.child_session_id
+            for child_id in list_child_session_ids(parent_id):
                 if child_id not in family_seen:
                     family_seen.add(child_id)
                     descendant_ids.append(child_id)
                     family_frontier.append(child_id)
         for descendant_id in descendant_ids:
-            await _native_runtime.reap_native_session(descendant_id)
-            if process_manager is not None:
-                await process_manager.release(descendant_id)
-            await resource_registry.cleanup_session(descendant_id)
-            unregister_child_session(descendant_id)
-            unregister_subagent_work_for_session(descendant_id)
+            await _reap_deleted_session(descendant_id)
 
         if process_manager is not None:
             await process_manager.forward_cancel(session_id)
@@ -7393,11 +7399,11 @@ def create_runner_app(
             if not deleted:
                 continue
             _logger.info(
-                "Cancelling forwarder for session deleted during disconnect: %s",
+                "Reaping session deleted during disconnect: %s",
                 forwarder_session_id,
                 extra={"session_id": forwarder_session_id},
             )
-            await _native_runtime.reap_native_session(forwarder_session_id)
+            await _reap_deleted_session(forwarder_session_id)
 
     app.state.reconcile_forwarders_after_reconnect = _reconcile_forwarders_after_reconnect
 
