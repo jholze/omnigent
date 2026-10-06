@@ -7,7 +7,7 @@ import {
   TerminalFirstContextProvider,
   type TerminalFirstContextValue,
 } from "@/shell/TerminalFirstContext";
-import { BubbleView, WorkingIndicator } from "./ChatPage";
+import { BubbleView, WORKING_MESSAGES, WorkingIndicator } from "./ChatPage";
 import {
   ConnectionIndicator,
   RunnerStartingIndicator,
@@ -184,8 +184,10 @@ describe("WorkingIndicator", () => {
     rerender(<WorkingIndicator />);
     const indicator = screen.getByTestId("working-indicator");
     expect(indicator).toBeInTheDocument();
-    // The rotating label stays decorative; only the live region announces.
-    expect(indicator.querySelector('[aria-hidden="true"]')).toHaveTextContent("Working…");
+    // The rotating label (wall-clock tick) stays decorative; only the stable
+    // live region announces.
+    const decorative = indicator.querySelector('[aria-hidden="true"]');
+    expect(WORKING_MESSAGES).toContain(decorative?.textContent?.trim());
     expect(screen.getByRole("status")).toHaveTextContent("Working…");
   });
 
