@@ -69,6 +69,7 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useResizableColumn } from "@/hooks/useResizableColumn";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
+import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import {
   fetchGithubFileContents,
@@ -803,7 +804,14 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
   const [focusedPrUrl, setFocusedPrUrl] = useState<string>();
   const [linking, setLinking] = useState(false);
   const [url, setUrl] = useState("");
-  const selected = selection?.sessionId === conversationId ? selection.url : undefined;
+  // The picked PR is remembered per session so switching sessions or rail tabs
+  // (which remounts this panel) comes back to it rather than the default.
+  const remembered = useMemo(
+    () => readSessionWorkspaceState(conversationId).selectedPrUrl,
+    [conversationId],
+  );
+  const restored = selection?.sessionId === conversationId ? undefined : remembered;
+  const selected = selection?.sessionId === conversationId ? selection.url : remembered;
   const info = useGithubInfo(conversationId, { poll: true, prUrl: selected });
   const [knownAssociations, setKnownAssociations] = useState<{
     sessionId: string;
@@ -828,7 +836,28 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
       setSelection({ sessionId: conversationId, url: info.data.selected_pr_url });
     }
   }, [conversationId, selected, info.data?.selected_pr_url]);
-  const changeSelection = (next?: string) => setSelection({ sessionId: conversationId, url: next });
+  const changeSelection = (next?: string) => {
+    setSelection({ sessionId: conversationId, url: next });
+    writeSessionWorkspaceState(conversationId, { selectedPrUrl: next });
+  };
+  // Show `fallback` now and follow the session default from here on.
+  const forgetSelection = useCallback(
+    (fallback?: string) => {
+      setSelection({ sessionId: conversationId, url: fallback });
+      writeSessionWorkspaceState(conversationId, { selectedPrUrl: undefined });
+    },
+    [conversationId],
+  );
+  // A remembered PR is tentative until the runner serves it again: the session
+  // may no longer track it (the runner rejects the URL), so fall back then.
+  useEffect(() => {
+    if (!restored) return;
+    if (info.data) {
+      setSelection({ sessionId: conversationId, url: restored });
+    } else if (info.error && !(info.error instanceof RunnerOfflineError)) {
+      forgetSelection();
+    }
+  }, [conversationId, restored, info.data, info.error, forgetSelection]);
   const prs = associations?.prs ?? [];
   const selectedPr = prs.find((pr) => pr.url === (selected ?? associations?.selected_pr_url));
   const linkInEmptyState = prs.length === 0 && deriveGithubPanelState(info).kind === "no-pr";
@@ -983,7 +1012,7 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
                       update.mutate(
                         { url: selected, action: "remove" },
                         {
-                          onSuccess: (data) => changeSelection(data.selected_pr_url),
+                          onSuccess: (data) => forgetSelection(data.selected_pr_url),
                         },
                       )
                     }

@@ -39,6 +39,8 @@ export interface SessionWorkspaceState {
   openSideChats?: string[];
   /** The active side-chat tab (null = a file/scope/other view is active). */
   selectedSideChatId?: string | null;
+  /** The pull request picked in the GitHub tab (absent = the session default). */
+  selectedPrUrl?: string;
 }
 
 const STORAGE_KEY = "omnigent:session-workspace-state";
@@ -118,6 +120,9 @@ function sanitize(entry: unknown): SessionWorkspaceState {
   }
   if (record.selectedSideChatId === null || typeof record.selectedSideChatId === "string") {
     state.selectedSideChatId = record.selectedSideChatId;
+  }
+  if (typeof record.selectedPrUrl === "string" && record.selectedPrUrl) {
+    state.selectedPrUrl = record.selectedPrUrl;
   }
   return state;
 }
