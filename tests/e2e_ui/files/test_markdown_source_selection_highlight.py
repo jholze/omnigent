@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -59,7 +60,8 @@ def seeded_rollback_markdown_session(
     yield (base_url, session_id, _MARKDOWN_FILE_PATH)
 
 
-def _serve_ligature_font(route: Route) -> None:
+def _serve_ligature_font(route: Route, served: list[str]) -> None:
+    served.append(route.request.url)
     route.fulfill(body=_LIGATURE_FONT.read_bytes(), content_type="font/woff2")
 
 
@@ -88,8 +90,11 @@ def test_source_view_selection_wash_covers_heading_markers(
     base_url, session_id, _file_path = seeded_rollback_markdown_session
     # Open the (possibly recorded) page only once the session and file exist.
     page: Page = request.getfixturevalue("page")
+    served_fonts: list[str] = []
     if font_mode == "ligature":
-        page.route(_BUNDLED_MONO_FONT, _serve_ligature_font)
+        page.route(_BUNDLED_MONO_FONT, lambda route: _serve_ligature_font(route, served_fonts))
+    # The wash colour check below assumes the light palette.
+    page.emulate_media(color_scheme="light")
     page.goto(f"{base_url}/c/{session_id}?view=explore")
     open_right_rail(page)
 
@@ -106,6 +111,13 @@ def test_source_view_selection_wash_covers_heading_markers(
     switch_markdown_view_mode(page, file_viewer, "Source")
     heading = file_viewer.locator(f'[data-line="{_HEADING_LINE}"]')
     expect(heading).to_contain_text(_HEADING, timeout=10_000)
+    assert (
+        page.evaluate("() => document.fonts.ready.then(() => document.fonts.status)") == "loaded"
+    )
+    if font_mode == "ligature":
+        assert served_fonts, (
+            "the bundled mono webfont was never requested; ligature copy not served"
+        )
     paragraph = file_viewer.locator(f'[data-line="{_HEADING_LINE + 2}"]')
     expect(paragraph).to_contain_text("Expected flag rollback")
     heading.scroll_into_view_if_needed()
@@ -120,7 +132,12 @@ def test_source_view_selection_wash_covers_heading_markers(
     page.mouse.down()
     page.mouse.move(end["x"] + end["width"] - 1, end["y"] + end["height"] / 2, steps=12)
     page.mouse.up()
-    page.wait_for_timeout(1_500)
+    page.wait_for_function(
+        "heading => window.getSelection().toString().startsWith(heading)", arg=_HEADING
+    )
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        # Hold the selected state on film long enough to read.
+        page.wait_for_timeout(1_500)
 
     geometry = page.evaluate(_GEOMETRY_JS, [_HEADING_LINE, _HEADING_LINE + 2])
     geometry["sessionId"] = session_id
