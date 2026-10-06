@@ -128,6 +128,13 @@ class LifetimeProxy:
         finally:
             server.close()
             loop.run_until_complete(server.wait_closed())
+            # Cancel and reap in-flight handlers so their piped sockets close
+            # before the loop does, rather than leaking when stop() is called.
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
 
     async def _handle_client(
@@ -177,11 +184,16 @@ class LifetimeProxy:
             and self._ws_lifetime_s is not None
             and (self._max_aborts is None or self._aborts < self._max_aborts)
         ):
-            self._aborts += 1
             loop = asyncio.get_running_loop()
             remaining = max(0.0, accepted_at + self._ws_lifetime_s - time.time())
 
             def _abort() -> None:
+                # Spend the budget only when an abort actually fires: a make-
+                # before-break cutover cancels this timer, and a cancelled abort
+                # must not consume a later connection's budget.
+                if self._max_aborts is not None and self._aborts >= self._max_aborts:
+                    return
+                self._aborts += 1
                 self._last_abort_at = time.time()
                 self._record(
                     kind="abort", conn=conn, path=path, age_s=round(time.time() - accepted_at, 3)
@@ -199,7 +211,9 @@ class LifetimeProxy:
                         break
                     dst.write(data)
                     await dst.drain()
-            except (OSError, asyncio.CancelledError):
+            except asyncio.CancelledError:
+                raise
+            except OSError:
                 pass
             finally:
                 if not dst.is_closing():

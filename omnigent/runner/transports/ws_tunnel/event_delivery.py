@@ -44,7 +44,7 @@ class RunnerEventDispatcher:
         self._ever_ready = False
         self._send: Callable[[str], Awaitable[None]] | None = None
         self._generation = 0
-        self._pending: dict[str, asyncio.Future[EventAckFrame]] = {}
+        self._pending: dict[str, tuple[asyncio.Future[EventAckFrame], int]] = {}
         self._queue: asyncio.Queue[
             tuple[str, list[dict[str, Any]], asyncio.Future[EventAckFrame]]
         ] = asyncio.Queue(maxsize=32)
@@ -107,8 +107,15 @@ class RunnerEventDispatcher:
             return True
         return await self._mode(initial_fallback=True)
 
-    def ready(self, send: Callable[[str], Awaitable[None]]) -> None:
-        """Enable delivery only after the current tunnel receives event.ready."""
+    def ready(self, send: Callable[[str], Awaitable[None]], generation: int | None = None) -> None:
+        """Enable delivery only after the current tunnel receives event.ready.
+
+        *generation* is the token from :meth:`connected`; a superseded
+        connection's late ready frame is ignored so it cannot repoint delivery
+        at a socket its replacement already replaced.
+        """
+        if generation is not None and generation != self._generation:
+            return
         self._send = send
         self._ever_ready = True
         self._set_state("ready")
@@ -116,25 +123,33 @@ class RunnerEventDispatcher:
     def disconnected(self, generation: int | None = None) -> None:
         """Wake pending attempts; source events remain queued for replay.
 
-        *generation* is the token from :meth:`connected`. When a newer
-        generation already took over (a make-before-break replacement is live),
-        the superseded connection's close is ignored so it does not null the
-        live socket or fail acks in flight on it.
+        *generation* is the token from :meth:`connected`. A superseded
+        connection (its make-before-break replacement is already live) must not
+        null the live socket or fail acks in flight on the replacement, but its
+        own in-flight acks are failed now so they retransmit on the live socket
+        instead of waiting out the delivery timeout.
         """
         if generation is not None and generation != self._generation:
+            self._fail_pending(generation)
             return
         self._send = None
         self._set_state("disconnected")
-        for future in self._pending.values():
+        self._fail_pending(None)
+
+    def _fail_pending(self, generation: int | None) -> None:
+        """Fail queued acks: all of them, or only one superseded generation's."""
+        for batch_id, (future, gen) in list(self._pending.items()):
+            if generation is not None and gen != generation:
+                continue
             if not future.done():
                 future.set_exception(ConnectionError("runner tunnel disconnected"))
-        self._pending.clear()
+            del self._pending[batch_id]
 
     def acknowledge(self, ack: EventAckFrame) -> None:
         """Resolve only an acknowledgement from the current tunnel generation."""
-        future = self._pending.pop(ack.id, None)
-        if future is not None and not future.done():
-            future.set_result(ack)
+        entry = self._pending.pop(ack.id, None)
+        if entry is not None and not entry[0].done():
+            entry[0].set_result(ack)
 
     async def submit(self, session_id: str, events: list[dict[str, Any]]) -> EventAckFrame:
         """Backpressure the producer until its ordered batch is acknowledged."""
@@ -196,7 +211,7 @@ class RunnerEventDispatcher:
                 continue
             batch_id = uuid.uuid4().hex
             future: asyncio.Future[EventAckFrame] = asyncio.get_running_loop().create_future()
-            self._pending[batch_id] = future
+            self._pending[batch_id] = (future, self._generation)
             try:
                 await send(encode_frame(EventBatchFrame(batch_id, session_id, remaining)))
                 ack = await asyncio.wait_for(future, timeout=30.0)

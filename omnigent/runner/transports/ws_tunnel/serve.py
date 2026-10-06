@@ -471,10 +471,13 @@ async def serve_tunnel(
         draining.discard(task)
         cancelled = task.cancelled()
         error = None if cancelled else task.exception()
+        # A graceful shutdown drains (awaits) superseded connections rather than
+        # cancelling them, so count that drain as a local shutdown too.
+        local_shutdown = cancelled or (shutdown_event is not None and shutdown_event.is_set())
         record_websocket_disconnected(
             "runner",
             error,
-            local_shutdown=cancelled,
+            local_shutdown=local_shutdown,
             resumed_from_suspend=False,
         )
 
@@ -498,325 +501,347 @@ async def serve_tunnel(
             raise RuntimeError("auth token factory returned no credentials")
         return token
 
-    while True:
-        if shutdown_event is not None and shutdown_event.is_set():
-            # A shutdown requested between reconnect attempts (no live
-            # connection to drain): nothing to flush, just stop looping.
-            await _drain_superseded(cancel=False)
-            return
-        connected_this_attempt = False
-        disconnect_error: BaseException | None = None
-        close_details: _CloseDetails | None = None
-        renewed = False
-        if prepared_token is not None:
-            auth_token = prepared_token
-            prepared_token = None
-        else:
-            auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
-        reconnecting = ever_connected and not renewal_cutover
-        renewal_cutover = False
-        retry_reason = "connection closed cleanly"
-        recycle = False
-        # True only for a server-initiated recycle (close code or 502 status);
-        # unlike ``recycle``, the suspend-resume case never sets this, so it
-        # keeps the tight ±50% jitter instead of the wide recycle spread.
-        server_recycle = False
-        attempt += 1
-        connection_id = uuid.uuid4().hex
-        try:
-            activity_kwargs = {"on_activity": on_activity} if on_activity is not None else {}
-            renewal_signal: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
-            conn_task: asyncio.Task[_CloseDetails] = asyncio.ensure_future(
-                _serve_tunnel_once(
-                    app,
-                    tunnel_url=tunnel_url,
-                    server_url=server_url,
-                    runner_id=runner_id,
-                    runner_version=runner_version,
-                    auth_token=auth_token,
-                    tunnel_token=tunnel_token,
-                    shutdown_event=shutdown_event,
-                    on_graceful_shutdown=on_graceful_shutdown,
-                    on_connected=_mark_connected,
-                    on_ready=_notify_reconnected if reconnecting else None,
-                    on_resume_note=_note_resume_from_suspend,
-                    direct_attach_port=direct_attach_port,
-                    direct_attach_token=direct_attach_token,
-                    connection_id=connection_id,
-                    reconnect=reconnecting,
-                    attempt=attempt,
-                    disconnected_monotonic=disconnected_monotonic,
-                    event_dispatcher=event_dispatcher,
-                    renewal_interval_s=renewal_interval_s,
-                    renewal_signal=renewal_signal,
-                    on_prepare_renewal=_prepare_renewal,
-                    **activity_kwargs,
-                )
-            )
-            try:
-                await asyncio.wait(
-                    {conn_task, renewal_signal},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            except asyncio.CancelledError:
-                conn_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await conn_task
-                if not renewal_signal.done():
-                    renewal_signal.cancel()
-                await _drain_superseded(cancel=True)
-                raise
-            shutting_down = shutdown_event is not None and shutdown_event.is_set()
-            if (
-                renewal_signal.done()
-                and not renewal_signal.cancelled()
-                and not conn_task.done()
-                and not shutting_down
-            ):
-                # Make-before-break: a fresh token is ready while this socket
-                # still serves. Drain the old connection while the next iteration
-                # opens the replacement; newest-wins retires it with no gap.
-                prepared_token = renewal_signal.result()
-                renewed = True
-                renewal_cutover = True
-                disconnected_monotonic = None
-                draining.add(conn_task)
-                conn_task.add_done_callback(_reap_drained)
-                delay_s = _INITIAL_RECONNECT_DELAY_S
-                continue
-            if not renewal_signal.done():
-                renewal_signal.cancel()
-            # Let the connection finish before reading its result; a graceful
-            # shutdown that raced a ready renewal signal still drains and closes
-            # cleanly rather than being handed to cancellation.
-            close_details = await conn_task
-            # A graceful shutdown drains and closes the connection cleanly,
-            # then returns here; stop looping instead of reconnecting.
+    try:
+        while True:
             if shutdown_event is not None and shutdown_event.is_set():
+                # A shutdown requested between reconnect attempts (no live
+                # connection to drain): nothing to flush, just stop looping.
                 await _drain_superseded(cancel=False)
                 return
-            delay_s = _INITIAL_RECONNECT_DELAY_S
-        except asyncio.CancelledError as exc:
-            disconnect_error = exc
-            raise
-        except WebSocketException as exc:
-            disconnect_error = exc
-            redirect_url = _websocket_auth_redirect_url(exc)
-            if redirect_url is not None:
-                login_redirect_streak += 1
-                await asyncio.to_thread(_prepare_auth_retry, auth_token_factory)
-                # The websockets library auto-followed a redirect away
-                # from our ws:// endpoint to an http(s):// URL —
-                # typically the Databricks App login page. On a runner
-                # that never authenticated this is a credentials
-                # problem retrying can't fix, so after a short streak
-                # (allowing for a server mid-restart) fail loud with
-                # the actual URL. On a runner that HAS served this
-                # tunnel it usually means the bearer expired
-                # mid-session (Apps signals that as this redirect, not
-                # a 401) — keep retrying: the loop-top refresh mints a
-                # fresh token each attempt, so the session survives
-                # once credentials become valid again.
-                if not ever_connected and login_redirect_streak >= _LOGIN_REDIRECT_FATAL_ATTEMPTS:
-                    # Show the display form (workspace /omnigent URL, ?o=
-                    # when known), not the internal API mount; it round-trips
-                    # through `omnigent login` to the same server.
-                    from omnigent.util.server_url import display_server_url
-
-                    raise RuntimeError(
-                        f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
-                        f"(redirect to non-WebSocket URL {redirect_url} "
-                        f"persisted across {login_redirect_streak} attempts); "
-                        "the server likely requires auth — "
-                        f"run `{cli_invocation()} login {display_server_url(server_url)}` or "
-                        f"`{cli_invocation()} setup` to configure credentials"
-                    ) from exc
-                retry_reason = (
-                    f"login-page redirect during upgrade ({redirect_url}); "
-                    "retrying with refreshed credentials"
-                )
+            connected_this_attempt = False
+            disconnect_error: BaseException | None = None
+            close_details: _CloseDetails | None = None
+            renewed = False
+            if prepared_token is not None:
+                auth_token = prepared_token
+                prepared_token = None
             else:
-                http_status = _websocket_http_status(exc)
-                if http_status is not None and http_status in _REFRESHABLE_HTTP_STATUSES:
-                    http_auth_rejection_streak += 1
+                auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
+            reconnecting = ever_connected and not renewal_cutover
+            renewal_cutover = False
+            retry_reason = "connection closed cleanly"
+            recycle = False
+            # True only for a server-initiated recycle (close code or 502 status);
+            # unlike ``recycle``, the suspend-resume case never sets this, so it
+            # keeps the tight ±50% jitter instead of the wide recycle spread.
+            server_recycle = False
+            attempt += 1
+            connection_id = uuid.uuid4().hex
+            try:
+                activity_kwargs = {"on_activity": on_activity} if on_activity is not None else {}
+                renewal_signal: asyncio.Future[str | None] = (
+                    asyncio.get_running_loop().create_future()
+                )
+                conn_task: asyncio.Task[_CloseDetails] = asyncio.ensure_future(
+                    _serve_tunnel_once(
+                        app,
+                        tunnel_url=tunnel_url,
+                        server_url=server_url,
+                        runner_id=runner_id,
+                        runner_version=runner_version,
+                        auth_token=auth_token,
+                        tunnel_token=tunnel_token,
+                        shutdown_event=shutdown_event,
+                        on_graceful_shutdown=on_graceful_shutdown,
+                        on_connected=_mark_connected,
+                        on_ready=_notify_reconnected if reconnecting else None,
+                        on_resume_note=_note_resume_from_suspend,
+                        direct_attach_port=direct_attach_port,
+                        direct_attach_token=direct_attach_token,
+                        connection_id=connection_id,
+                        reconnect=reconnecting,
+                        attempt=attempt,
+                        disconnected_monotonic=disconnected_monotonic,
+                        event_dispatcher=event_dispatcher,
+                        renewal_interval_s=renewal_interval_s,
+                        renewal_signal=renewal_signal,
+                        on_prepare_renewal=_prepare_renewal,
+                        **activity_kwargs,
+                    )
+                )
+                try:
+                    await asyncio.wait(
+                        {conn_task, renewal_signal},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError:
+                    conn_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await conn_task
+                    if not renewal_signal.done():
+                        renewal_signal.cancel()
+                    await _drain_superseded(cancel=True)
+                    raise
+                shutting_down = shutdown_event is not None and shutdown_event.is_set()
+                if (
+                    renewal_signal.done()
+                    and not renewal_signal.cancelled()
+                    and not conn_task.done()
+                    and not shutting_down
+                ):
+                    # Make-before-break: a fresh token is ready while this socket
+                    # still serves. Drain the old connection while the next iteration
+                    # opens the replacement; newest-wins retires it with no gap.
+                    prepared_token = renewal_signal.result()
+                    renewed = True
+                    renewal_cutover = True
+                    disconnected_monotonic = None
+                    draining.add(conn_task)
+                    conn_task.add_done_callback(_reap_drained)
+                    delay_s = _INITIAL_RECONNECT_DELAY_S
+                    continue
+                if not renewal_signal.done():
+                    renewal_signal.cancel()
+                elif not renewal_signal.cancelled() and not shutting_down:
+                    # The watcher minted a token just as this socket closed; reuse
+                    # it for the reconnect instead of refreshing again.
+                    with contextlib.suppress(Exception):
+                        prepared_token = renewal_signal.result()
+                # Let the connection finish before reading its result so a graceful
+                # shutdown that raced a ready renewal still drains cleanly. If
+                # serve_tunnel is cancelled here, cancel and drain before raising.
+                try:
+                    close_details = await conn_task
+                except asyncio.CancelledError:
+                    conn_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await conn_task
+                    await _drain_superseded(cancel=True)
+                    raise
+                # A graceful shutdown drains and closes the connection cleanly,
+                # then returns here; stop looping instead of reconnecting.
+                if shutdown_event is not None and shutdown_event.is_set():
+                    await _drain_superseded(cancel=False)
+                    return
+                delay_s = _INITIAL_RECONNECT_DELAY_S
+            except asyncio.CancelledError as exc:
+                disconnect_error = exc
+                raise
+            except WebSocketException as exc:
+                disconnect_error = exc
+                redirect_url = _websocket_auth_redirect_url(exc)
+                if redirect_url is not None:
+                    login_redirect_streak += 1
+                    await asyncio.to_thread(_prepare_auth_retry, auth_token_factory)
+                    # The websockets library auto-followed a redirect away
+                    # from our ws:// endpoint to an http(s):// URL —
+                    # typically the Databricks App login page. On a runner
+                    # that never authenticated this is a credentials
+                    # problem retrying can't fix, so after a short streak
+                    # (allowing for a server mid-restart) fail loud with
+                    # the actual URL. On a runner that HAS served this
+                    # tunnel it usually means the bearer expired
+                    # mid-session (Apps signals that as this redirect, not
+                    # a 401) — keep retrying: the loop-top refresh mints a
+                    # fresh token each attempt, so the session survives
+                    # once credentials become valid again.
                     if (
                         not ever_connected
-                        and http_auth_rejection_streak >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
+                        and login_redirect_streak >= _LOGIN_REDIRECT_FATAL_ATTEMPTS
                     ):
-                        if server_url:
-                            # `omnigent login` detects the fronting workspace
-                            # itself — unlike a raw `databricks auth login
-                            # --host`, which would need the workspace host,
-                            # not the server URL (for workspace-hosted
-                            # servers the API mount is the wrong --host).
-                            from omnigent.util.server_url import display_server_url
+                        # Show the display form (workspace /omnigent URL, ?o=
+                        # when known), not the internal API mount; it round-trips
+                        # through `omnigent login` to the same server.
+                        from omnigent.util.server_url import display_server_url
 
-                            login_hint = (
-                                f"run `omnigent login {display_server_url(server_url)}` "
-                                "to re-authenticate"
+                        raise RuntimeError(
+                            f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
+                            f"(redirect to non-WebSocket URL {redirect_url} "
+                            f"persisted across {login_redirect_streak} attempts); "
+                            "the server likely requires auth — "
+                            f"run `{cli_invocation()} login {display_server_url(server_url)}` or "
+                            f"`{cli_invocation()} setup` to configure credentials"
+                        ) from exc
+                    retry_reason = (
+                        f"login-page redirect during upgrade ({redirect_url}); "
+                        "retrying with refreshed credentials"
+                    )
+                else:
+                    http_status = _websocket_http_status(exc)
+                    if http_status is not None and http_status in _REFRESHABLE_HTTP_STATUSES:
+                        http_auth_rejection_streak += 1
+                        if (
+                            not ever_connected
+                            and http_auth_rejection_streak >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
+                        ):
+                            if server_url:
+                                # `omnigent login` detects the fronting workspace
+                                # itself — unlike a raw `databricks auth login
+                                # --host`, which would need the workspace host,
+                                # not the server URL (for workspace-hosted
+                                # servers the API mount is the wrong --host).
+                                from omnigent.util.server_url import display_server_url
+
+                                login_hint = (
+                                    f"run `omnigent login {display_server_url(server_url)}` "
+                                    "to re-authenticate"
+                                )
+                            else:
+                                login_hint = "check remote server authentication"
+                            raise RuntimeError(
+                                f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
+                                f"(HTTP {http_status} persisted across "
+                                f"{http_auth_rejection_streak} attempts); "
+                                f"{login_hint}"
+                            ) from exc
+                        # Invalidate the cached token so the loop-top _refresh_auth_token
+                        # fetches a fresh one on the next attempt. The loop-top call is
+                        # already guarded against transient factory errors (OSError etc.),
+                        # so we don't call the factory directly here. Also clear a
+                        # 5xx-latched mint decline: the rejection proves the server
+                        # requires auth, so the next refresh must re-mint.
+                        await asyncio.to_thread(_prepare_auth_retry, auth_token_factory)
+                        retry_reason = f"HTTP {http_status}; retrying with refreshed token"
+                        if ever_connected:
+                            # Escalate the backoff rather than resetting it: a rejection
+                            # that outlives the token refresh is a network path answering
+                            # the upgrade, and the base delay would retry every ~0.5s for
+                            # the whole outage.
+                            _logger.warning(
+                                "HTTP %d after a successful upgrade; retrying — "
+                                "check VPN/network connectivity",
+                                http_status,
+                                extra={"session_id": runner_primary_session_id()},
                             )
                         else:
-                            login_hint = "check remote server authentication"
-                        raise RuntimeError(
-                            f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
-                            f"(HTTP {http_status} persisted across "
-                            f"{http_auth_rejection_streak} attempts); "
-                            f"{login_hint}"
-                        ) from exc
-                    # Invalidate the cached token so the loop-top _refresh_auth_token
-                    # fetches a fresh one on the next attempt. The loop-top call is
-                    # already guarded against transient factory errors (OSError etc.),
-                    # so we don't call the factory directly here. Also clear a
-                    # 5xx-latched mint decline: the rejection proves the server
-                    # requires auth, so the next refresh must re-mint.
-                    await asyncio.to_thread(_prepare_auth_retry, auth_token_factory)
-                    retry_reason = f"HTTP {http_status}; retrying with refreshed token"
-                    if ever_connected:
-                        # Escalate the backoff rather than resetting it: a rejection
-                        # that outlives the token refresh is a network path answering
-                        # the upgrade, and the base delay would retry every ~0.5s for
-                        # the whole outage.
-                        _logger.warning(
-                            "HTTP %d after a successful upgrade; retrying — "
-                            "check VPN/network connectivity",
-                            http_status,
-                            extra={"session_id": runner_primary_session_id()},
-                        )
+                            _logger.info(
+                                "HTTP %d; invalidated auth token, retrying",
+                                http_status,
+                                extra={"session_id": runner_primary_session_id()},
+                            )
+                            delay_s = _INITIAL_RECONNECT_DELAY_S
                     else:
-                        _logger.info(
-                            "HTTP %d; invalidated auth token, retrying",
-                            http_status,
-                            extra={"session_id": runner_primary_session_id()},
-                        )
-                        delay_s = _INITIAL_RECONNECT_DELAY_S
-                else:
-                    close_code = _websocket_close_code(exc)
-                    if close_code in _FATAL_SERVER_CLOSE_CODES:
-                        raise RuntimeError(
-                            f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
-                            f"(close code {close_code}); check frame protocol compatibility"
-                        ) from exc
-                    if (
-                        close_code in _TUNNEL_RECYCLE_CLOSE_CODES
-                        or http_status in _TUNNEL_RECYCLE_HTTP_STATUSES
-                    ):
-                        # Routine ingress recycle — reconnect promptly, don't
-                        # escalate the backoff (which would leave the runner
-                        # unregistered for seconds each recycle and drop
-                        # in-flight message delivery).
-                        delay_s = _INITIAL_RECONNECT_DELAY_S
-                        recycle = True
-                        server_recycle = True
-                        detail = (
-                            f"close {close_code}" if close_code else f"HTTP {http_status or 0}"
-                        )
-                        retry_reason = (
-                            f"server recycled the tunnel ({detail}); reconnecting promptly"
-                        )
-                    else:
-                        retry_reason = str(exc)
-        except (ConnectionError, OSError, ValueError) as exc:
-            disconnect_error = exc
-            retry_reason = str(exc)
-        except BaseException as exc:
-            # Unexpected post-connect failures (e.g. a raising callback) must
-            # not be recorded as clean peer closes.
-            disconnect_error = exc
-            raise
-        finally:
-            # Classified once, for the counter and the debug-log row alike.
-            local_shutdown = (
-                shutdown_event is not None and shutdown_event.is_set()
-            ) or isinstance(disconnect_error, asyncio.CancelledError)
-            if connected_this_attempt and not renewed:
-                # A renewed (superseded) connection records its disconnect when
-                # it finishes draining, via _reap_drained, not here.
-                record_websocket_disconnected(
-                    "runner",
-                    disconnect_error,
-                    local_shutdown=local_shutdown,
-                    resumed_from_suspend=woke_from_suspend,
-                )
-        resumed_from_suspend = woke_from_suspend
-        if woke_from_suspend:
-            # A wake from system suspend already aborted the live tunnel (see
-            # _serve_tunnel_once's watcher). The abrupt close would otherwise
-            # ride the escalating backoff; force a prompt reconnect at the base
-            # delay, like a server recycle, so the session reattaches at once.
-            woke_from_suspend = False
-            delay_s = _INITIAL_RECONNECT_DELAY_S
-            recycle = True
-            retry_reason = "resumed from system suspend; reconnecting promptly"
-        connection_age_s: float | None = None
-        if connected_this_attempt and connect_monotonic is not None:
-            disconnected_monotonic = time.monotonic()
-            connection_age_s = disconnected_monotonic - connect_monotonic
-        backoff_reset = (
-            connection_age_s is not None and connection_age_s >= _STABLE_CONNECTION_DURATION_S
-        )
-        if backoff_reset:
-            # The tunnel was live long enough to consider it a healthy connection.
-            # Reset the backoff so accumulated failures from previous sessions do
-            # not delay a reconnect after an abrupt drop (e.g. close 1006).
-            delay_s = _INITIAL_RECONNECT_DELAY_S
-        if server_recycle:
-            # A rollout retires many tunnels within the same short window;
-            # spread reconnects uniformly across it instead of the ±50%
-            # jitter, which clusters them into a much narrower band.
-            jittered = random.uniform(_RECYCLE_RECONNECT_MIN_S, _RECYCLE_RECONNECT_MAX_S)
-        else:
-            jittered = delay_s * (
-                1.0 + random.uniform(-_RECONNECT_JITTER_FRACTION, _RECONNECT_JITTER_FRACTION)
+                        close_code = _websocket_close_code(exc)
+                        if close_code in _FATAL_SERVER_CLOSE_CODES:
+                            raise RuntimeError(
+                                f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
+                                f"(close code {close_code}); check frame protocol compatibility"
+                            ) from exc
+                        if (
+                            close_code in _TUNNEL_RECYCLE_CLOSE_CODES
+                            or http_status in _TUNNEL_RECYCLE_HTTP_STATUSES
+                        ):
+                            # Routine ingress recycle — reconnect promptly, don't
+                            # escalate the backoff (which would leave the runner
+                            # unregistered for seconds each recycle and drop
+                            # in-flight message delivery).
+                            delay_s = _INITIAL_RECONNECT_DELAY_S
+                            recycle = True
+                            server_recycle = True
+                            detail = (
+                                f"close {close_code}" if close_code else f"HTTP {http_status or 0}"
+                            )
+                            retry_reason = (
+                                f"server recycled the tunnel ({detail}); reconnecting promptly"
+                            )
+                        else:
+                            retry_reason = str(exc)
+            except (ConnectionError, OSError, ValueError) as exc:
+                disconnect_error = exc
+                retry_reason = str(exc)
+            except BaseException as exc:
+                # Unexpected post-connect failures (e.g. a raising callback) must
+                # not be recorded as clean peer closes.
+                disconnect_error = exc
+                raise
+            finally:
+                # Classified once, for the counter and the debug-log row alike.
+                local_shutdown = (
+                    shutdown_event is not None and shutdown_event.is_set()
+                ) or isinstance(disconnect_error, asyncio.CancelledError)
+                if connected_this_attempt and not renewed:
+                    # A renewed (superseded) connection records its disconnect when
+                    # it finishes draining, via _reap_drained, not here.
+                    record_websocket_disconnected(
+                        "runner",
+                        disconnect_error,
+                        local_shutdown=local_shutdown,
+                        resumed_from_suspend=woke_from_suspend,
+                    )
+            resumed_from_suspend = woke_from_suspend
+            if woke_from_suspend:
+                # A wake from system suspend already aborted the live tunnel (see
+                # _serve_tunnel_once's watcher). The abrupt close would otherwise
+                # ride the escalating backoff; force a prompt reconnect at the base
+                # delay, like a server recycle, so the session reattaches at once.
+                woke_from_suspend = False
+                delay_s = _INITIAL_RECONNECT_DELAY_S
+                recycle = True
+                retry_reason = "resumed from system suspend; reconnecting promptly"
+            connection_age_s: float | None = None
+            if connected_this_attempt and connect_monotonic is not None:
+                disconnected_monotonic = time.monotonic()
+                connection_age_s = disconnected_monotonic - connect_monotonic
+            backoff_reset = (
+                connection_age_s is not None and connection_age_s >= _STABLE_CONNECTION_DURATION_S
             )
-        # A clean 1000/1001 close ends the read loop without an exception, so
-        # its frames come from the connection rather than from an error.
-        close = (
-            _CloseDetails.from_error(disconnect_error)
-            if disconnect_error is not None
-            else (close_details if close_details is not None else _CloseDetails())
-        )
-        # One row per attempt the runner retries: what ended the socket, how
-        # long it lived and how long the runner waits. Fatal exits (persistent
-        # auth or protocol rejection, cancellation) raise above instead.
-        _logger.info(
-            "runner tunnel disconnected: %s; retrying in %.2fs (jittered from %.2fs)",
-            retry_reason,
-            jittered,
-            delay_s,
-            extra=debug_event(
-                "runner_tunnel_disconnected",
-                session_id=runner_primary_session_id(),
-                runner_id=runner_id,
-                connection_id=connection_id,
-                attempt=attempt,
-                connected=connected_this_attempt,
-                connection_age_s=_round_seconds(connection_age_s),
-                disconnect_reason=classify_disconnect_reason(
-                    disconnect_error,
-                    local_shutdown=local_shutdown,
-                    resumed_from_suspend=resumed_from_suspend,
+            if backoff_reset:
+                # The tunnel was live long enough to consider it a healthy connection.
+                # Reset the backoff so accumulated failures from previous sessions do
+                # not delay a reconnect after an abrupt drop (e.g. close 1006).
+                delay_s = _INITIAL_RECONNECT_DELAY_S
+            if server_recycle:
+                # A rollout retires many tunnels within the same short window;
+                # spread reconnects uniformly across it instead of the ±50%
+                # jitter, which clusters them into a much narrower band.
+                jittered = random.uniform(_RECYCLE_RECONNECT_MIN_S, _RECYCLE_RECONNECT_MAX_S)
+            else:
+                jittered = delay_s * (
+                    1.0 + random.uniform(-_RECONNECT_JITTER_FRACTION, _RECONNECT_JITTER_FRACTION)
+                )
+            # A clean 1000/1001 close ends the read loop without an exception, so
+            # its frames come from the connection rather than from an error.
+            close = (
+                _CloseDetails.from_error(disconnect_error)
+                if disconnect_error is not None
+                else (close_details if close_details is not None else _CloseDetails())
+            )
+            # One row per attempt the runner retries: what ended the socket, how
+            # long it lived and how long the runner waits. Fatal exits (persistent
+            # auth or protocol rejection, cancellation) raise above instead.
+            _logger.info(
+                "runner tunnel disconnected: %s; retrying in %.2fs (jittered from %.2fs)",
+                retry_reason,
+                jittered,
+                delay_s,
+                extra=debug_event(
+                    "runner_tunnel_disconnected",
+                    session_id=runner_primary_session_id(),
+                    runner_id=runner_id,
+                    connection_id=connection_id,
+                    attempt=attempt,
+                    connected=connected_this_attempt,
+                    connection_age_s=_round_seconds(connection_age_s),
+                    disconnect_reason=classify_disconnect_reason(
+                        disconnect_error,
+                        local_shutdown=local_shutdown,
+                        resumed_from_suspend=resumed_from_suspend,
+                    ),
+                    error_type=(
+                        type(disconnect_error).__name__ if disconnect_error is not None else None
+                    ),
+                    close_code=close.code,
+                    close_reason=close.reason,
+                    close_rcvd_code=close.rcvd_code,
+                    close_sent_code=close.sent_code,
+                    recycle=recycle,
+                    backoff_reset=backoff_reset,
+                    delay_s=delay_s,
+                    retry_in_s=round(jittered, 3),
                 ),
-                error_type=(
-                    type(disconnect_error).__name__ if disconnect_error is not None else None
-                ),
-                close_code=close.code,
-                close_reason=close.reason,
-                close_rcvd_code=close.rcvd_code,
-                close_sent_code=close.sent_code,
-                recycle=recycle,
-                backoff_reset=backoff_reset,
-                delay_s=delay_s,
-                retry_in_s=round(jittered, 3),
-            ),
-        )
-        if connected_this_attempt:
-            attempt = 0
-        await asyncio.sleep(jittered)
-        # Match the host tunnel (connect.py): escalate the backoff only on
-        # non-recycle failures. A routine ingress recycle keeps reconnecting
-        # promptly at the base delay instead of doubling toward the cap.
-        if not recycle:
-            delay_s = min(delay_s * 2, _MAX_RECONNECT_DELAY_S)
+            )
+            if connected_this_attempt:
+                attempt = 0
+            await asyncio.sleep(jittered)
+            # Match the host tunnel (connect.py): escalate the backoff only on
+            # non-recycle failures. A routine ingress recycle keeps reconnecting
+            # promptly at the base delay instead of doubling toward the cap.
+            if not recycle:
+                delay_s = min(delay_s * 2, _MAX_RECONNECT_DELAY_S)
+    finally:
+        # Reap any superseded connection still draining when the loop
+        # exits, including on a fatal auth or protocol rejection.
+        await _drain_superseded(cancel=True)
 
 
 def _prepare_auth_retry(factory: Callable[[], str | None] | None) -> None:
@@ -1255,6 +1280,7 @@ async def _serve_tunnel_once(
                         ws_channels,
                         on_activity=on_activity,
                         event_dispatcher=event_dispatcher,
+                        event_generation=event_generation,
                     )
             else:
                 # Race reads against the shutdown signal. When it fires,
@@ -1320,6 +1346,7 @@ async def _serve_tunnel_once(
                             ws_channels,
                             on_activity=on_activity,
                             event_dispatcher=event_dispatcher,
+                            event_generation=event_generation,
                         )
                 finally:
                     shutdown_wait.cancel()
@@ -1473,6 +1500,7 @@ async def _handle_tunnel_frame(
     *,
     on_activity: Callable[[], None] | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
+    event_generation: int | None = None,
 ) -> None:
     """Handle one server-to-runner tunnel frame.
 
@@ -1501,7 +1529,7 @@ async def _handle_tunnel_frame(
         return
     if isinstance(frame, EventReadyFrame):
         if event_dispatcher is not None:
-            event_dispatcher.ready(send_text)
+            event_dispatcher.ready(send_text, event_generation)
     elif isinstance(frame, EventAckFrame):
         if event_dispatcher is not None:
             event_dispatcher.acknowledge(frame)

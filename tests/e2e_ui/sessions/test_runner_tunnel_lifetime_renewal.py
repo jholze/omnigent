@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -105,7 +106,10 @@ def _server_log_path() -> Path | None:
     if not env_file.exists():
         return None
     data = json.loads(env_file.read_text())
-    logs = Path(data["database"]).parent / "data" / "logs" / "server"
+    database = data.get("database")
+    if not database:
+        return None
+    logs = Path(database).parent / "data" / "logs" / "server"
     candidates = sorted(logs.glob("server-*.log"), key=lambda p: p.stat().st_mtime)
     return candidates[-1] if candidates else None
 
@@ -312,10 +316,10 @@ def server_url(request: pytest.FixtureRequest) -> str:
 @pytest.fixture
 def journey(server_url: str, mock_llm_server_url: str) -> Iterator[Journey]:
     artifacts = artifacts_dir()
-    host, port = server_url.removeprefix("http://").split(":")
+    parsed = urlsplit(server_url)
     proxy = LifetimeProxy(
-        host,
-        int(port),
+        parsed.hostname or "127.0.0.1",
+        parsed.port or 80,
         ws_lifetime_s=_PROXY_WS_LIFETIME_S,
         max_aborts=1,
         stall_paths={"/oauth/token": _REFRESH_STALL_S},
@@ -323,17 +327,24 @@ def journey(server_url: str, mock_llm_server_url: str) -> Iterator[Journey]:
         event_log=artifacts / "proxy-events.jsonl",
     )
     proxy.start()
-    runner = spawn_proxied_runner(
-        proxy.url,
-        server_url,
-        mock_llm_server_url,
-        artifacts,
-        stored_login_lifetime_s=_STORED_LOGIN_LIFETIME_S,
-    )
-    marker = artifacts / "tool-side-effect.txt"
-    session_id, model, command = create_lifetime_session(
-        server_url, mock_llm_server_url, runner.runner_id, marker
-    )
+    runner: ProxiedRunner | None = None
+    try:
+        runner = spawn_proxied_runner(
+            proxy.url,
+            server_url,
+            mock_llm_server_url,
+            artifacts,
+            stored_login_lifetime_s=_STORED_LOGIN_LIFETIME_S,
+        )
+        marker = artifacts / "tool-side-effect.txt"
+        session_id, model, command = create_lifetime_session(
+            server_url, mock_llm_server_url, runner.runner_id, marker
+        )
+    except BaseException:
+        if runner is not None:
+            runner.stop()
+        proxy.stop()
+        raise
     j = Journey(artifacts, server_url, proxy, runner, session_id, model, command, marker)
     try:
         yield j
@@ -351,12 +362,25 @@ def _send(page: Page, text: str) -> None:
     page.get_by_role("button", name="Send", exact=True).click()
 
 
-def _wait_for_proxy_abort(proxy: LifetimeProxy, timeout_s: float) -> dict[str, object] | None:
+def _wait_past_lifetime_boundary(
+    proxy: LifetimeProxy, lifetime_s: float, timeout_s: float
+) -> list[dict[str, object]] | None:
+    """Wait for a replacement tunnel and for the first tunnel's lifetime to lapse.
+
+    Make-before-break retires the old socket before the proxy can sever it, so a
+    correct fix records no abort. Observe the UI across the cutover by waiting
+    for the second upgrade accept and for the original connection's lifetime
+    boundary to pass, rather than waiting for an abort that should never fire.
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        aborts = [e for e in proxy.snapshot() if e.get("kind") == "abort"]
-        if aborts:
-            return aborts[0]
+        accepts = [
+            e for e in proxy.snapshot() if e.get("kind") == "accept" and e.get("upgrade") is True
+        ]
+        if len(accepts) >= 2:
+            boundary = min(float(e["t"]) for e in accepts) + lifetime_s
+            if time.time() >= boundary:
+                return accepts
         time.sleep(0.25)
     return None
 
@@ -428,8 +452,10 @@ def test_tunnel_is_renewed_before_the_proxy_lifetime(
         page.screenshot(path=str(shots / "01b-during-renewal.png"))
         journey.notes["ui_during_renewal"] = _visible_ui_state(page)
 
-        abort = _wait_for_proxy_abort(journey.proxy, timeout_s=_PROXY_WS_LIFETIME_S + 15)
-        journey.notes["abort"] = abort
+        accepts = _wait_past_lifetime_boundary(
+            journey.proxy, _PROXY_WS_LIFETIME_S, timeout_s=_PROXY_WS_LIFETIME_S + 15
+        )
+        journey.notes["tunnel_accepts"] = accepts
         page.wait_for_timeout(4_000)
         page.screenshot(path=str(shots / "02-after-boundary.png"))
         journey.notes["ui_after_boundary"] = _visible_ui_state(page)

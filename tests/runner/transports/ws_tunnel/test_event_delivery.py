@@ -313,3 +313,46 @@ async def test_current_generation_disconnect_tears_down() -> None:
     dispatcher.disconnected(generation)
     assert dispatcher._state == "disconnected"
     assert dispatcher._send is None
+
+
+async def test_superseded_pending_retransmits_on_live_socket_without_timeout() -> None:
+    """A superseded disconnect retransmits that generation's in-flight batch now.
+
+    Make-before-break sends a batch on the old socket, then the replacement goes
+    live. When the old socket finally closes, its unacknowledged batch must be
+    retransmitted on the live socket at once, not after the 30s delivery timeout.
+    """
+    dispatcher = RunnerEventDispatcher()
+    old_sent: list[EventBatchFrame] = []
+    live_sent: list[EventBatchFrame] = []
+    old_received = asyncio.Event()
+
+    async def old_send(text: str) -> None:
+        frame = decode_frame(text)
+        assert isinstance(frame, EventBatchFrame)
+        old_sent.append(frame)
+        old_received.set()
+        # The old socket is superseded before it acknowledges, then it closes.
+
+    async def live_send(text: str) -> None:
+        frame = decode_frame(text)
+        assert isinstance(frame, EventBatchFrame)
+        live_sent.append(frame)
+        dispatcher.acknowledge(EventAckFrame(frame.id, 1))
+
+    old_generation = dispatcher.connected(old_send)
+    dispatcher.ready(old_send)
+
+    submit = asyncio.create_task(dispatcher.submit("session-a", [_ITEM]))
+    await asyncio.wait_for(old_received.wait(), timeout=1)
+    assert len(old_sent) == 1
+
+    # The replacement supersedes the old generation; then the old socket closes.
+    dispatcher.connected(live_send)
+    dispatcher.ready(live_send)
+    dispatcher.disconnected(old_generation)
+
+    ack = await asyncio.wait_for(submit, timeout=2)
+    assert ack.applied == 1
+    assert len(old_sent) == 1, "the superseded socket must not be reused"
+    assert len(live_sent) >= 1, "the batch was not retransmitted on the live socket"
