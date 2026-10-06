@@ -1064,16 +1064,10 @@ describe("workingIndicatorLabel — parked on a dialog", () => {
     expect(WORKING_MESSAGES).not.toContain(label);
   });
 
-  it("points the user at the terminal for a dialog open", () => {
-    // "dialog open" means the agent is waiting on a dialog that lives only in
-    // its terminal. A bare "Blocked on: dialog open" leaves the user with no
-    // idea where to respond, so the label must guide them to the terminal.
-    expect(workingIndicatorLabel(2, "dialog open")).toMatch(/terminal/i);
-  });
-
-  it("names the Terminal view, not a rail terminal tab, for a dialog open", () => {
-    // "Terminal tabs" are the Workspace rail's user shells, which never show
-    // the dialog; it sits behind the header's "Terminal view" switcher.
+  it("points the user at the Terminal view, not a rail terminal tab, for a dialog open", () => {
+    // A bare "Blocked on: dialog open" leaves the user with no idea where to
+    // respond. "Terminal tabs" are the Workspace rail's user shells, which never
+    // show the dialog; it sits behind the header's "Terminal view" switcher.
     const label = workingIndicatorLabel(2, "dialog open");
     expect(label).toMatch(/terminal view/i);
     expect(label).not.toMatch(/terminal tab/i);

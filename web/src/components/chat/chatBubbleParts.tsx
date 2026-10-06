@@ -413,6 +413,8 @@ function useAgentTurnActive(): boolean {
 // Terminal view — not in a Workspace-rail shell tab.
 const DIALOG_OPEN_LABEL = "Waiting on a dialog in the agent's terminal.";
 const OPEN_TERMINAL_VIEW_LABEL = "Open the Terminal view to respond";
+// A side chat is its own session; this session's Terminal view never shows its dialog.
+const SIDE_CHAT_DIALOG_OPEN_LABEL = "Waiting on a dialog in the side chat's own terminal.";
 
 /**
  * The label shown next to the working shimmer. When the agent is parked on a
@@ -446,21 +448,28 @@ export function WorkingIndicator() {
   // the state and the shimmer stays off (it would misread as the agent still
   // thinking). While the turn is active the shimmer shows, with the pill beside it.
   if (isBackgroundTasksOnly(bgCount, blockedOn, agentWorking)) return null;
-  // Only the root conversation can switch this session to its agent's terminal;
-  // a side chat's dialog belongs to another session, so it keeps the text hint.
+  const dialogOpen = blockedOn === "dialog open";
+  // Only the root conversation can switch this session to its agent's terminal.
   const openTerminalView =
-    blockedOn === "dialog open" && !scopedConversationId && terminalFirst?.isTerminalFirst
+    dialogOpen && !scopedConversationId && terminalFirst?.isTerminalFirst
       ? () => terminalFirst.setView("terminal")
       : null;
-  const label = openTerminalView ? DIALOG_OPEN_LABEL : workingIndicatorLabel(tick, blockedOn);
+  const blockedLabel = !blockedOn
+    ? null
+    : dialogOpen && scopedConversationId
+      ? SIDE_CHAT_DIALOG_OPEN_LABEL
+      : workingIndicatorLabel(tick, blockedOn);
+  const label = openTerminalView
+    ? DIALOG_OPEN_LABEL
+    : (blockedLabel ?? workingIndicatorLabel(tick));
   return (
     <>
-      {/* Sole aria-live region for the working state. A stable "Working…" (not
-          the rotating label) so screen readers announce the turn once, without
-          re-announcing every few seconds; the visible shimmer below stays
-          aria-hidden. */}
+      {/* Sole aria-live region for the working state. The rotating label would
+          re-announce every few seconds, so an unblocked turn reads once as
+          "Working…"; a blocked state is stable and names what needs the user.
+          The visible shimmer below stays aria-hidden. */}
       <span role="status" aria-live="polite" className="sr-only">
-        Working…
+        {blockedLabel ?? "Working…"}
       </span>
       <Message from="assistant" data-testid="working-indicator">
         <MessageContent>

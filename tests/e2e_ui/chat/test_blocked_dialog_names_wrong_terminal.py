@@ -29,8 +29,6 @@ _NAMES_TERMINAL_VIEW = re.compile(r"terminal view", re.IGNORECASE)
 _NAMES_TERMINAL_TAB = re.compile(r"terminal tab", re.IGNORECASE)
 _TERMINAL_READY_TIMEOUT_MS = 180_000
 _DIALOG_TIMEOUT_MS = 120_000
-# Hold each state long enough for a viewer to read it.
-_HOLD_MS = 3_000
 
 
 def _open_rail_shell(page: Page) -> Locator:
@@ -79,7 +77,6 @@ def test_chat_blocked_on_dialog_names_the_terminal_that_holds_it(
 
     working = page.locator(_WORKING)
     expect(working).to_contain_text(_BLOCKED_ON_DIALOG, timeout=_DIALOG_TIMEOUT_MS)
-    page.wait_for_timeout(_HOLD_MS)
     indicator_text = working.inner_text()
     expect(rail_shell).to_be_visible()
     assert _NAMES_TERMINAL_VIEW.search(indicator_text) and not _NAMES_TERMINAL_TAB.search(
@@ -103,4 +100,3 @@ def test_chat_blocked_on_dialog_names_the_terminal_that_holds_it(
         "data-state", "connected", timeout=60_000
     )
     expect(terminal_segment).to_have_attribute("aria-pressed", "true")
-    page.wait_for_timeout(_HOLD_MS)

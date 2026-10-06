@@ -115,7 +115,7 @@ describe("side-chat working indicator", () => {
     expect(screen.getByRole("button", { name: "Interrupt side chat" })).toBeEnabled();
   });
 
-  it("keeps a child's dialog hint textual: the Terminal view shows the parent's terminal", () => {
+  it("names the side chat's own terminal for its dialog, not this session's Terminal view", () => {
     const setView = vi.fn();
     const terminalFirst: TerminalFirstContextValue = {
       isClaudeNative: true,
@@ -142,8 +142,11 @@ describe("side-chat working indicator", () => {
       }),
     );
 
+    // The side chat is its own session: this Terminal view shows the parent's
+    // terminal and never its dialog, so neither the label nor a button may point there.
     const indicator = screen.getByTestId("working-indicator");
-    expect(indicator).toHaveTextContent(/open the terminal view to respond/i);
+    expect(indicator).toHaveTextContent("Waiting on a dialog in the side chat's own terminal.");
+    expect(indicator).not.toHaveTextContent(/terminal view/i);
     expect(screen.queryByRole("button", { name: /terminal view/i })).toBeNull();
     expect(setView).not.toHaveBeenCalled();
   });

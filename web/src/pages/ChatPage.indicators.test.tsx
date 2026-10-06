@@ -183,6 +183,7 @@ describe("WorkingIndicator", () => {
     act(() => useChatStore.setState({ sessionStatus: "running" }));
     rerender(<WorkingIndicator />);
     expect(screen.getByTestId("working-indicator")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Working…");
   });
 
   const terminalFirstCtx = (setView = vi.fn()): TerminalFirstContextValue => ({
@@ -211,20 +212,41 @@ describe("WorkingIndicator", () => {
     const indicator = screen.getByTestId("working-indicator");
     expect(indicator).toHaveTextContent("Waiting on a dialog in the agent's terminal.");
     expect(indicator).not.toHaveTextContent(/terminal tab/i);
+    // The live region names the blocked state, so AT users hear that action is needed.
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Waiting on a dialog in the agent's terminal. Open the Terminal view to respond.",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Open the Terminal view to respond" }));
     expect(setView).toHaveBeenCalledExactlyOnceWith("terminal");
   });
 
-  it("keeps the Terminal view hint as text where no view switch is available", () => {
-    // WHY: outside a terminal-first provider there is nothing to switch, so the
-    // label itself must still say where to respond.
-    useChatStore.setState({ blockedOn: "dialog open", sessionStatus: "running" });
-    render(<WorkingIndicator />);
-    expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.getByTestId("working-indicator")).toHaveTextContent(
-      /open the terminal view to respond/i,
-    );
-  });
+  it.each([
+    { name: "no provider", ctx: null },
+    {
+      name: "a provider that is not terminal-first",
+      ctx: { ...terminalFirstCtx(), isTerminalFirst: false },
+    },
+  ])(
+    "keeps the Terminal view hint as text where no view switch is available ($name)",
+    ({ ctx }) => {
+      // WHY: without a terminal-first view to switch to, the label itself must
+      // still say where to respond.
+      useChatStore.setState({ blockedOn: "dialog open", sessionStatus: "running" });
+      render(
+        ctx ? (
+          <TerminalFirstContextProvider value={ctx}>
+            <WorkingIndicator />
+          </TerminalFirstContextProvider>
+        ) : (
+          <WorkingIndicator />
+        ),
+      );
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(screen.getByTestId("working-indicator")).toHaveTextContent(
+        /open the terminal view to respond/i,
+      );
+    },
+  );
 
   it("offers no view switch for other block reasons", () => {
     // WHY: only a terminal dialog lives behind the Terminal view; a permission
@@ -239,6 +261,7 @@ describe("WorkingIndicator", () => {
     expect(screen.getByTestId("working-indicator")).toHaveTextContent(
       "Blocked on: permission prompt",
     );
+    expect(screen.getByRole("status")).toHaveTextContent("Blocked on: permission prompt");
   });
 });
 
