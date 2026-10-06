@@ -147,15 +147,22 @@ describe("live cross-device merge", () => {
     expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false);
   });
 
-  it("adopts a newer explicit unread flagged on another device", async () => {
+  it("adopts only the baseline live — a cross-device Mark as unread reconciles on the next reload", async () => {
     const mod = await loadFresh();
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000 }]);
 
-    // The other device's Mark as unread pins the baseline under updated_at 5_000.
+    // A live refresh carrying another device's unread flag raises the baseline
+    // but must not flag an already-seeded row unread on its own — a stale
+    // replica serving a cleared flag would otherwise flip it straight back.
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true }]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true); // 5000 > 4999 baseline
 
-    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
-    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
+    // The explicit flag reconciles on the next full seed (a reload re-seeds
+    // every row from scratch).
+    const reloaded = await reloadKeepingStorage();
+    reloaded.seedReadState([{ id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true }]);
+    expect(reloaded.isExplicitlyUnread("conv-1")).toBe(true);
   });
 
   it("ignores older, equal and missing server values — a stale replica can't lower the baseline or re-flag unread", async () => {
@@ -185,11 +192,14 @@ describe("live cross-device merge", () => {
     expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
     expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
 
-    // After the window the server reflects the write: equal baseline, no change.
+    // After the window the merge runs again: a stale replica serving the
+    // pre-mark read (6_000, genuinely above the 4_999 anchor) raises the
+    // activity baseline, but the explicit override is left untouched — only
+    // reopening/reading here clears it.
     vi.setSystemTime(5_010_000);
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true }]);
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_unread: false }]);
     expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
-    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 5_500, "idle")).toBe(false); // baseline raised to 6_000
   });
 });
 

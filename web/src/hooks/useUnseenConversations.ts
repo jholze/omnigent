@@ -7,10 +7,10 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source; the server seed only ever *raises* a baseline (max-merge), and
-// every list refresh re-merges a newer server baseline, so a read on the
-// user's other devices clears the dot here without a reload whenever the
-// serving replica has it. Cross-device unread is best-effort by design.
+// source; the server seed only ever *raises* a baseline (max-merge), and a
+// list refresh re-raises it from a newer server value, so a read on another
+// device clears an activity dot here without a reload. An explicit "Mark as
+// unread" is local and sticky; it reconciles across devices on reload.
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -141,13 +141,13 @@ export interface ReadStateSeed {
 }
 
 /**
- * Live merge for an already-seeded conversation: adopt a strictly-newer server
- * baseline (another device read after this client's last write); older, equal,
- * missing, or in-grace values are ignored so a stale replica or in-flight poll
- * can't undo a local write. The merge may adopt an explicit unread from another
- * device, but never *clears* a local override: a replica that missed the "mark
- * unread" PUT serves the pre-mark baseline, so clearing it would silently revert
- * the user's action. An override stays until the thread is reopened/read here.
+ * Live merge for an already-seeded conversation: raise the seen baseline to a
+ * strictly-newer server value (a read on another device), clearing an activity
+ * dot here without a reload. Older, equal, missing, or in-grace values are
+ * ignored so a stale replica or in-flight poll can't lower it. The merge leaves
+ * the explicit-unread override alone — a replica that missed a read-state PUT
+ * serves pre-write state, so clearing or resurrecting the flag here would revert
+ * a user action; the explicit flag reconciles on the next full seed, not live.
  */
 function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
   if (typeof conv.viewer_last_seen !== "number") return false;
@@ -156,7 +156,6 @@ function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
   const writtenAt = localWriteAt.get(conv.id);
   if (writtenAt !== undefined && now - writtenAt < LOCAL_WRITE_GRACE_MS) return false;
   lastSeenMap[conv.id] = conv.viewer_last_seen;
-  if (conv.viewer_unread) explicitlyUnread.add(conv.id);
   return true;
 }
 
