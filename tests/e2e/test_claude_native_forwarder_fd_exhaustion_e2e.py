@@ -305,6 +305,10 @@ def test_fd_exhaustion_polls_do_not_storm_the_forwarder_error_log(tmp_path: Path
     finally:
         fwd_logger.removeHandler(capture)
 
+    assert any(
+        record.levelno == logging.WARNING and "hit fd exhaustion" in record.getMessage()
+        for record in capture.records
+    ), "the forwarder never observed fd exhaustion; the fault did not reach its poll loop"
     emfile_errors = [
         record
         for record in capture.records

@@ -69,6 +69,13 @@ async def test_fd_exhaustion_warns_once_then_mirroring_resumes(
         return original_read(path)
 
     monkeypatch.setattr(forwarder, "read_active_session_id", exhausted_read)
+    sleeps: list[float] = []
+
+    async def recording_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await asyncio.sleep(seconds)
+
+    monkeypatch.setattr(forwarder, "_poll_sleep", recording_sleep)
     caplog.set_level(logging.DEBUG, logger=forwarder._logger.name)
 
     server, thread, base_url = _start_recording_server()
@@ -109,6 +116,8 @@ async def test_fd_exhaustion_warns_once_then_mirroring_resumes(
     assert "session=conv_abc" in exhausted[0].getMessage()
     recovered = [r for r in caplog.records if "recovered after fd exhaustion" in r.getMessage()]
     assert [r.levelno for r in recovered] == [logging.INFO]
+    # Each failing poll doubled the delay; the first healthy poll reset it.
+    assert sleeps[:6] == pytest.approx([0.02, 0.04, 0.08, 0.16, 0.32, 0.01])
 
 
 @pytest.mark.asyncio

@@ -1995,7 +1995,12 @@ class TerminalInstance:
         return _probe_start_backoff(failures)
 
     def _record_probe_started(self) -> None:
-        """Close a start-failure outage once a probe process starts again."""
+        """Close a start-failure outage once a probe's tmux process has started.
+
+        Called by the last probe of each watcher cycle (has-session or
+        pane-death) on every path where tmux actually spawned, including
+        inconclusive answers, and by one-shot probes such as :meth:`is_alive`.
+        """
         with self._probe_start_lock:
             began = self._probe_start_outage_began
             if began is None:
@@ -2086,10 +2091,7 @@ class TerminalInstance:
                     self._probe_failures.clear()
                     if session_exists is None:
                         await asyncio.sleep(self._probe_start_retry_delay())
-                    else:
-                        self._record_probe_started()
                     continue
-                self._record_probe_started()
                 consecutive_capture_failures += 1
                 if consecutive_capture_failures < _IDLE_EXIT_FAILURE_THRESHOLD:
                     continue
@@ -2108,8 +2110,6 @@ class TerminalInstance:
             if pane_dead is None:
                 await asyncio.sleep(self._probe_start_retry_delay())
                 continue
-            # Every probe in this cycle started, so a start-failure outage is over.
-            self._record_probe_started()
             if pane_dead:
                 await self._capture_exit_snapshot()
                 # Retained dead panes must release attached clients and report
@@ -2287,13 +2287,9 @@ class TerminalInstance:
                 if session_exists is not False:
                     consecutive_capture_failures = 0
                     self._probe_failures.clear()
-                    if session_exists is None:
-                        if stop_event.wait(self._probe_start_retry_delay()):
-                            return
-                    else:
-                        self._record_probe_started()
+                    if session_exists is None and stop_event.wait(self._probe_start_retry_delay()):
+                        return
                     continue
-                self._record_probe_started()
                 consecutive_capture_failures += 1
                 if consecutive_capture_failures < _IDLE_EXIT_FAILURE_THRESHOLD:
                     continue
@@ -2312,8 +2308,6 @@ class TerminalInstance:
                 if stop_event.wait(self._probe_start_retry_delay()):
                     return
                 continue
-            # Every probe in this cycle started, so a start-failure outage is over.
-            self._record_probe_started()
             if pane_dead:
                 self._capture_exit_snapshot_sync()
                 # Retained dead panes must release attached clients and report
@@ -2391,6 +2385,7 @@ class TerminalInstance:
             self._record_probe_start_failure("has-session", exc)
             return None
         except _TmuxCommandFailedError as exc:
+            self._record_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             logger.warning(
@@ -2402,9 +2397,11 @@ class TerminalInstance:
             )
             return None
         except RuntimeError as exc:
+            self._record_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             return False
+        self._record_probe_started()
         return True
 
     def _pane_is_dead(self) -> bool | None:
@@ -2431,7 +2428,9 @@ class TerminalInstance:
             self._record_probe_start_failure("pane-death", exc)
             return None
         except RuntimeError:
+            self._record_probe_started()
             return False
+        self._record_probe_started()
         self._remember_exit_status(out)
         return out.split()[:1] == ["1"]
 
@@ -2589,7 +2588,9 @@ class TerminalInstance:
             self._record_probe_start_failure("pane-death", exc)
             return None
         except RuntimeError:
+            self._record_probe_started()
             return False
+        self._record_probe_started()
         self._remember_exit_status(out)
         return out.split()[:1] == ["1"]
 
@@ -2602,6 +2603,7 @@ class TerminalInstance:
             self._record_probe_start_failure("has-session", exc)
             return None
         except _TmuxCommandFailedError as exc:
+            self._record_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             logger.warning(
@@ -2613,9 +2615,11 @@ class TerminalInstance:
             )
             return None
         except RuntimeError as exc:
+            self._record_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             return False
+        self._record_probe_started()
         return True
 
     async def _tmux(self, *args: str) -> None:

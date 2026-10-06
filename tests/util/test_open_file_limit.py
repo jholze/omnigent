@@ -28,9 +28,17 @@ class _FakeResource:
     RLIMIT_NOFILE = 7
     RLIM_INFINITY = _INFINITY
 
-    def __init__(self, soft: int, hard: int, *, reject: Iterable[int] = ()) -> None:
+    def __init__(
+        self,
+        soft: int,
+        hard: int,
+        *,
+        reject: Iterable[int] = (),
+        reject_with: type[Exception] = ValueError,
+    ) -> None:
         self.limits = (soft, hard)
         self.reject = set(reject)
+        self.reject_with = reject_with
         self.calls: list[tuple[int, int]] = []
 
     def getrlimit(self, which: int) -> tuple[int, int]:
@@ -41,7 +49,7 @@ class _FakeResource:
         assert which == self.RLIMIT_NOFILE
         self.calls.append(limits)
         if limits[0] in self.reject:
-            raise ValueError("current limit exceeds maximum limit")
+            raise self.reject_with("current limit exceeds maximum limit")
         self.limits = limits
 
 
@@ -49,8 +57,14 @@ class _FakeResource:
 def fake_resource(monkeypatch: pytest.MonkeyPatch) -> Callable[..., _FakeResource]:
     """Install a fake ``resource`` module the helper imports lazily."""
 
-    def install(soft: int, hard: int, *, reject: Iterable[int] = ()) -> _FakeResource:
-        fake = _FakeResource(soft, hard, reject=reject)
+    def install(
+        soft: int,
+        hard: int,
+        *,
+        reject: Iterable[int] = (),
+        reject_with: type[Exception] = ValueError,
+    ) -> _FakeResource:
+        fake = _FakeResource(soft, hard, reject=reject, reject_with=reject_with)
         monkeypatch.setitem(sys.modules, "resource", fake)
         return fake
 
@@ -111,31 +125,49 @@ def test_tuned_kernel_below_open_max_settles_on_a_smaller_step(
     assert fake.calls == [(65536, _INFINITY), (10240, _INFINITY), (4096, _INFINITY)]
 
 
-def test_rejected_attempts_warn_and_keep_the_inherited_limit(
-    fake_resource: Callable[..., _FakeResource], caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("reject_with", [ValueError, OSError])
+@pytest.mark.parametrize(
+    ("soft", "rejected", "attempts", "level"),
+    [
+        pytest.param(
+            256,
+            {65536, 10240, 4096, 1024},
+            [65536, 10240, 4096, 1024],
+            logging.WARNING,
+            id="inherited-256-every-step-rejected-warns",
+        ),
+        pytest.param(
+            12000,
+            {65536},
+            [65536],
+            logging.INFO,
+            id="already-above-open-max-is-informational",
+        ),
+    ],
+)
+def test_rejected_raise_keeps_the_inherited_limit_and_logs_by_headroom(
+    fake_resource: Callable[..., _FakeResource],
+    caplog: pytest.LogCaptureFixture,
+    reject_with: type[Exception],
+    soft: int,
+    rejected: set[int],
+    attempts: list[int],
+    level: int,
 ) -> None:
-    fake = fake_resource(256, _INFINITY, reject={65536, 10240, 4096, 1024})
-
-    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
-        result = raise_soft_open_file_limit()
-
-    assert result == OpenFileLimit(256, _INFINITY)
-    assert [wanted for wanted, _ in fake.calls] == [65536, 10240, 4096, 1024]
-    assert "could not raise soft open-file limit from 256 (hard unlimited)" in caplog.text
-
-
-def test_rejected_attempt_above_open_max_is_informational(
-    fake_resource: Callable[..., _FakeResource], caplog: pytest.LogCaptureFixture
-) -> None:
-    """An inherited limit already above OPEN_MAX leaves headroom, so a rejected raise is INFO."""
-    fake = fake_resource(12000, _INFINITY, reject={DEFAULT_SOFT_OPEN_FILE_LIMIT})
+    """A rejected raise keeps the inherited limit; it warns only when headroom is tight."""
+    fake = fake_resource(soft, _INFINITY, reject=rejected, reject_with=reject_with)
 
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         result = raise_soft_open_file_limit()
 
-    assert result == OpenFileLimit(12000, _INFINITY)
-    assert fake.calls == [(65536, _INFINITY)]
-    assert [r.levelno for r in caplog.records if r.name == _LOGGER_NAME] == [logging.INFO]
+    assert result == OpenFileLimit(soft, _INFINITY)
+    assert [wanted for wanted, _ in fake.calls] == attempts
+    records = [r for r in caplog.records if r.name == _LOGGER_NAME]
+    assert [r.levelno for r in records] == [level]
+    assert (
+        f"could not raise soft open-file limit from {soft} (hard unlimited)"
+        in records[0].getMessage()
+    )
 
 
 def test_platform_without_rlimits_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,4 +211,8 @@ def test_real_process_raises_its_own_soft_limit() -> None:
         else {min(hard, DEFAULT_SOFT_OPEN_FILE_LIMIT)}
     )
     assert raised == live
+    if hard_unlimited and soft == 256:
+        pytest.skip(
+            "the kernel rejected every soft-limit candidate; inherited limit kept by design"
+        )
     assert soft in accepted and soft > 256

@@ -541,3 +541,76 @@ async def test_partial_probe_start_failures_keep_backing_off(
         if r.levelno == logging.WARNING and "pane-death probe could not start" in r.getMessage()
     ]
     assert len(could_not_start) == 1
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
+async def test_inconclusive_probe_that_started_closes_the_outage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    threaded: bool,
+) -> None:
+    """A has-session probe that spawns but cannot confirm liveness still ends the outage."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._remember_pane_snapshot("private terminal output")
+    attempts = {"failed": 0, "started": 0}
+    descriptors_available = threading.Event()
+    timed_out = f"error connecting to {instance.socket_path} (Connection timed out)".encode()
+
+    def run(cmd, **kwargs):
+        if not descriptors_available.is_set():
+            attempts["failed"] += 1
+            raise OSError(errno.EMFILE, "Too many open files", "tmux")
+        attempts["started"] += 1
+        return subprocess.CompletedProcess(cmd, 1, b"", timed_out)
+
+    _patch_tmux(monkeypatch, run)
+
+    async def _until(predicate, *, timeout: float = 10.0) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not predicate():
+            assert loop.time() < deadline, f"watcher stalled at {attempts}"
+            await asyncio.sleep(0.005)
+
+    stop = threading.Event()
+    still_running = None
+    with caplog.at_level(logging.INFO, logger=terminal_mod.__name__):
+        if threaded:
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    instance._idle_watch_loop_threaded,
+                    stop,
+                    on_exit=lambda *_: None,
+                    poll_interval_s=0.001,
+                )
+            )
+        else:
+            task = asyncio.create_task(
+                instance._idle_watch_loop(lambda: None, on_exit=lambda *_: None)
+            )
+        try:
+            await _until(lambda: attempts["failed"] >= 5)
+            descriptors_available.set()
+            # Two inconclusive cycles: capture-pane rejected, has-session timed out.
+            await _until(lambda: attempts["started"] >= 4)
+            still_running = instance.running
+        finally:
+            stop.set()
+            instance.running = False
+            await asyncio.wait_for(task, timeout=10)
+
+    assert still_running is True
+    assert instance._probe_start_outage_began is None
+    recovered = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "tmux probes can start again" in r.getMessage()
+    ]
+    assert len(recovered) == 1

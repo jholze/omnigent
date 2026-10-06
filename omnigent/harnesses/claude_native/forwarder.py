@@ -192,6 +192,11 @@ def _fd_exhaustion_poll_delay(previous_delay_s: float, poll_interval_s: float) -
     return min(previous_delay_s * 2, max(poll_interval_s, _FD_EXHAUSTION_MAX_POLL_S))
 
 
+async def _poll_sleep(seconds: float) -> None:
+    """Indirection so tests can observe the forwarder's poll delays."""
+    await asyncio.sleep(seconds)
+
+
 # Claude Code hook event names → Omnigent session-status values
 # published on the per-conversation SSE stream. Unmapped events emit
 # no status.
@@ -1556,7 +1561,7 @@ async def forward_claude_transcript_to_session(
                     if fd_exhaustion_outage_warned:
                         _logger.info(
                             "Claude transcript forwarder recovered after fd exhaustion "
-                            "(%.1fs); session=%s",
+                            "(%.1fs since it began); session=%s",
                             time.monotonic() - fd_exhausted_since,
                             session_id,
                             extra={"session_id": session_id},
@@ -1616,7 +1621,7 @@ async def forward_claude_transcript_to_session(
                     )
                     next_poll_delay = _fd_exhaustion_poll_delay(next_poll_delay, poll_interval_s)
             try:
-                await asyncio.sleep(next_poll_delay)
+                await _poll_sleep(next_poll_delay)
             except asyncio.CancelledError:
                 await _cancel_subagent_forward_task(subagent_task)
                 raise

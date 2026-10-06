@@ -6083,19 +6083,28 @@ def test_run_host_process_raises_the_soft_open_file_limit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``omnigent host`` raises the launchd-inherited soft open-file limit before serving."""
+    from omnigent.host import connect as connect_module
+
     _patch_connect(monkeypatch, _ConnectSpy([asyncio.CancelledError()]))
-    raised: list[bool] = []
+    order: list[str] = []
     monkeypatch.setattr(
         "omnigent.util.open_file_limit.raise_soft_open_file_limit",
-        lambda: raised.append(True),
+        lambda: order.append("raise"),
     )
+    original_serve = connect_module._serve_host_until_exit
+
+    def serve(*args: object, **kwargs: object) -> object:
+        order.append("serve")
+        return original_serve(*args, **kwargs)
+
+    monkeypatch.setattr(connect_module, "_serve_host_until_exit", serve)
 
     run_host_process(
         server_url="https://app.example.databricks.com",
         config_path=tmp_path / "config.yaml",
     )
 
-    assert raised == [True]
+    assert order == ["raise", "serve"]
 
 
 def test_run_host_process_logs_crash_during_setup(
