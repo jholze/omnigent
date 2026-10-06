@@ -27,6 +27,7 @@ import pytest
 from omnigent.inner.cursor_executor import (
     CursorExecutor,
     UnresolvableCursorModelError,
+    _argv_safe_auth_token,
     _build_cursor_prompt,
     _normalize_cursor_usage,
     _resolve_model,
@@ -1995,6 +1996,15 @@ async def test_bridge_launch_hardens_sdk_callback_tokens(
         draws = iter(["-dash-first", "safe-second"])
         monkeypatch.setattr(secrets, "token_urlsafe", lambda nbytes=None, draws=draws: next(draws))
         assert module._new_auth_token(32) == "safe-second", name
+
+
+def test_argv_safe_auth_token_fails_fast_when_every_draw_is_dash_leading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token source that only yields dash-leading values errors out instead of spinning."""
+    monkeypatch.setattr(secrets, "token_urlsafe", lambda nbytes=None: "-stuck")
+    with pytest.raises(RuntimeError, match="argv-safe"):
+        _argv_safe_auth_token()
 
 
 async def test_real_bridge_launch_survives_dash_leading_callback_token(

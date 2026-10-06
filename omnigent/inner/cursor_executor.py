@@ -585,10 +585,11 @@ def _argv_safe_auth_token(*_args: object, **_kwargs: object) -> str:
 
     Ignores any arguments so it can replace the SDK factory whatever its signature.
     """
-    while True:
+    for _ in range(100):
         token = secrets.token_urlsafe(32)
         if not token.startswith("-"):
             return token
+    raise RuntimeError("could not mint an argv-safe cursor-sdk callback token")
 
 
 def _harden_cursor_sdk_callback_tokens() -> None:
