@@ -144,6 +144,7 @@ def _wait_for_model_input(base_url: str, session_id: str, model: str, expected: 
     raise AssertionError(f"server never reported input_tokens={expected} for {model}: {seen!r}")
 
 
+@pytest.mark.min_server_version("0.15.0")
 def test_usage_display_advances_after_native_restart(
     request: pytest.FixtureRequest,
     seeded_session: tuple[str, str],
@@ -189,6 +190,7 @@ def test_usage_display_advances_after_native_restart(
     expect(model_row).to_contain_text("30.3K")
 
 
+@pytest.mark.min_server_version("0.15.0")
 def test_restart_reasserts_persisted_baseline_server_never_recorded(
     seeded_session: tuple[str, str],
     tmp_path: Path,

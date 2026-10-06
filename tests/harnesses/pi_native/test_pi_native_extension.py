@@ -618,6 +618,104 @@ def test_agent_end_dedupes_real_shaped_messages_by_timestamp(
     _run_extension_script(node, extension_path, script)
 
 
+def test_restore_ignores_malformed_persisted_state(tmp_path: Path) -> None:
+    """A corrupt ``cumulative_usage.json`` (e.g. a crash mid-write) is ignored on
+    restore: the counters start fresh, session_start re-asserts nothing, and the
+    first real turn posts only its own total with no crash.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+    extension_path = (
+        Path(__file__).resolve().parents[3]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-malformed-"));
+const bridgeDir = path.join(root, "bridge");
+const inboxDir = path.join(root, "inbox");
+fs.mkdirSync(bridgeDir, { recursive: true });
+fs.mkdirSync(inboxDir, { recursive: true });
+// A truncated/garbage state file left by a crash mid-write.
+fs.writeFileSync(path.join(bridgeDir, "cumulative_usage.json"), "{not-json");
+
+const configPath = path.join(root, "config.json");
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "session-1",
+    inboxDir,
+    bridgeDir,
+    authHeaders: { authorization: "Bearer test" },
+  }),
+);
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const postedEvents = [];
+global.fetch = async (_url, request) => {
+  postedEvents.push(JSON.parse(request.body));
+  return { ok: true };
+};
+global.setInterval = () => ({ fakeInterval: true });
+
+const handlers = {};
+const pi = {
+  registerCommand() {},
+  on(eventName, handler) {
+    handlers[eventName] = handler;
+  },
+};
+require(extensionPath)(pi);
+
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
+};
+
+function usageEvents() {
+  return postedEvents.filter((e) => e.type === "external_session_usage");
+}
+
+(async () => {
+  // Restore must swallow the parse error and start the counters at 0, so
+  // session_start has no baseline to re-assert (no usage POST yet).
+  await handlers.session_start({}, ctx);
+  assert.equal(usageEvents().length, 0, JSON.stringify(postedEvents));
+
+  // The next turn posts only its own total, uncontaminated by the bad file.
+  await handlers.message_end(
+    {
+      message: {
+        role: "assistant",
+        model: "databricks-claude-sonnet-4-6",
+        timestamp: 1,
+        usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 600 },
+      },
+    },
+    ctx,
+  );
+  const usage = usageEvents();
+  assert.equal(usage.length, 1, JSON.stringify(postedEvents));
+  assert.equal(usage[0].data.cumulative_input_tokens, 500, JSON.stringify(usage[0].data));
+  assert.equal(usage[0].data.cumulative_output_tokens, 100, JSON.stringify(usage[0].data));
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});"""
+    _run_extension_script(node, extension_path, script)
+
+
 def _extension_path() -> Path:
     return (
         Path(__file__).resolve().parents[3]
