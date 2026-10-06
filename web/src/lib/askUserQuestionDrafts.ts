@@ -23,6 +23,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// A parsed key that would pollute the plain-object maps below; treat the whole
+// stored draft as corrupt rather than assigning onto the prototype chain.
+function isUnsafeKey(key: string): boolean {
+  return key === "__proto__" || key === "constructor";
+}
+
 function readDraft(value: unknown): AskUserQuestionDraft | undefined {
   if (!isRecord(value)) return undefined;
   const { currentIndex, selections, customSelected, customInputs } = value;
@@ -39,6 +45,7 @@ function readDraft(value: unknown): AskUserQuestionDraft | undefined {
     customInputs: {},
   };
   for (const [key, selection] of Object.entries(selections)) {
+    if (isUnsafeKey(key)) return undefined;
     if (typeof selection === "string") {
       draft.selections[key] = selection;
     } else if (
@@ -51,10 +58,12 @@ function readDraft(value: unknown): AskUserQuestionDraft | undefined {
     }
   }
   for (const [key, selected] of Object.entries(customSelected)) {
+    if (isUnsafeKey(key)) return undefined;
     if (typeof selected !== "boolean") return undefined;
     draft.customSelected[key] = selected;
   }
   for (const [key, text] of Object.entries(customInputs)) {
+    if (isUnsafeKey(key)) return undefined;
     if (typeof text !== "string") return undefined;
     draft.customInputs[key] = text;
   }

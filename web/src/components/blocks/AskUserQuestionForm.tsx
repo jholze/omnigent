@@ -109,13 +109,11 @@ export function AskUserQuestionForm({
     for (const q of questions) {
       const key = questionKey(q);
       const selection = saved?.selections[key];
-      initial[key] = q.multiSelect
-        ? Array.isArray(selection)
-          ? selection
-          : []
-        : typeof selection === "string"
-          ? selection
-          : "";
+      if (q.multiSelect) {
+        initial[key] = Array.isArray(selection) ? selection : [];
+      } else {
+        initial[key] = typeof selection === "string" ? selection : "";
+      }
     }
     return initial;
   });

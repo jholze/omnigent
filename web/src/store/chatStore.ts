@@ -1840,6 +1840,15 @@ export function consumePendingInitialPrompt(conversationId: string): PendingInit
   return prompt;
 }
 
+// Elicitation ids whose approval POST has not settled. The optimistic flip to
+// "responded" remounts a transcript card as fresh before the server confirms;
+// this lets that remount tell the unconfirmed flip from a committed answer.
+const inFlightApprovals = new Set<string>();
+
+export function isApprovalInFlight(elicitationId: string): boolean {
+  return inFlightApprovals.has(elicitationId);
+}
+
 export const useChatStore = create<ChatState>((_rootSet, get) => ({
   conversationId: null,
   redirectToConversationId: null,
@@ -2974,6 +2983,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       ...(content === undefined ? {} : { content }),
       ...(meta === undefined ? {} : { _meta: meta }),
     };
+    // Mark the resolution unconfirmed before the flip remounts the card, so the
+    // remounted "responded" card does not mistake the optimistic state for a
+    // server-confirmed answer and clear the draft.
+    inFlightApprovals.add(elicitationId);
     write((s) => ({
       blocks: s.blocks.map((b) =>
         b.type === "elicitation" && b.elicitationId === elicitationId
@@ -3014,6 +3027,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
             : b,
         ),
       }));
+    } finally {
+      inFlightApprovals.delete(elicitationId);
     }
   },
 

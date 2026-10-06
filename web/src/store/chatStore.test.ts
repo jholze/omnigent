@@ -76,6 +76,7 @@ import {
   consumePendingInitialPrompt,
   handleSessionEvent,
   hydrateLocalConversation,
+  isApprovalInFlight,
   isStaleCompletedResponse,
   isStaleTempConvId,
   isTempConvId,
@@ -9143,6 +9144,37 @@ describe("chatStore — submitApproval", () => {
     expect(block?.type).toBe("elicitation");
     if (block?.type === "elicitation") expect(block.status).toBe("pending");
     expect(getAskUserQuestionDraft("elic_draft_fail")).toBeDefined();
+  });
+
+  it("marks an approval in flight only until the resolve POST settles", async () => {
+    // ApprovalCard reads this to tell an optimistic (unconfirmed) resolution
+    // apart from a server-confirmed one, so the card keeps the draft across the
+    // float→inline remount instead of clearing it on the optimistic flip.
+    let releaseResolve: (() => void) | null = null;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.match(/\/v1\/sessions\/[^/]+\/elicitations\/[^/]+\/resolve$/)) {
+        return new Promise((resolve) => {
+          releaseResolve = () => resolve(mockResponse({ queued: true }));
+        });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      blocks: [elicitationBlock("elic_inflight")],
+    });
+
+    expect(isApprovalInFlight("elic_inflight")).toBe(false);
+    const pending = useChatStore.getState().submitApproval("elic_inflight", "accept");
+    // The optimistic flip ran synchronously; the POST is still open.
+    expect(isApprovalInFlight("elic_inflight")).toBe(true);
+
+    await vi.waitFor(() => expect(releaseResolve).not.toBeNull());
+    releaseResolve!();
+    await pending;
+    // Cleared once the POST settles, whether it succeeds or rolls back.
+    expect(isApprovalInFlight("elic_inflight")).toBe(false);
   });
 
   it("preserves Codex MCP persistence metadata in the resolve payload", async () => {

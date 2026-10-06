@@ -81,6 +81,7 @@ import {
   writeInboxFilter,
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
+import { clearAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import { latestOutputPreview } from "@/lib/lastAssistantText";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link } from "@/lib/routing";
@@ -303,6 +304,9 @@ export function InboxPage() {
         ...(meta === undefined ? {} : { _meta: meta }),
       }).then(
         () => {
+          // Only a confirmed resolve retires the draft; the rollback below
+          // keeps it so the restored card can retry with the same answers.
+          clearAskUserQuestionDraft(elicitationId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
         },
         () => {

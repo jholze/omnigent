@@ -58,7 +58,7 @@ import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
 import type { CodexPersistMode, RememberScope } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { useChatStore } from "@/store/chatStore";
+import { isApprovalInFlight, useChatStore } from "@/store/chatStore";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { AskUserQuestionForm, type AskUserQuestionAnswers } from "./AskUserQuestionForm";
 import {
@@ -301,10 +301,10 @@ export function ApprovalCard({
   const isExitPlanMode = planMarkdown !== null;
   const optionLabels = askPayload === null ? extractOptionLabels(requestedSchema) : [];
   const isAskUserQuestion = askPayload !== null;
-  // Drop a leftover draft only when the card mounts already resolved (answered
-  // elsewhere, or reloaded after answering). Not keyed on later status: the
-  // optimistic submit flip can roll back and must keep the draft.
-  const resolvedOnMount = useRef(status === "responded");
+  // Drop a leftover draft only when the card mounts already resolved by the
+  // server. An in-flight optimistic flip also shows "responded" but can roll
+  // back, so exclude it. Checked once: isApprovalInFlight is not reactive.
+  const resolvedOnMount = useRef(status === "responded" && !isApprovalInFlight(elicitationId));
   useEffect(() => {
     if (isAskUserQuestion && resolvedOnMount.current) clearAskUserQuestionDraft(elicitationId);
   }, [isAskUserQuestion, elicitationId]);
@@ -683,6 +683,7 @@ export function ApprovalCard({
           </>
         ) : isAskUserQuestion ? (
           <AskUserQuestionForm
+            key={elicitationId}
             elicitationId={elicitationId}
             questions={askPayload.questions}
             onSubmit={submitAnswers}

@@ -147,7 +147,7 @@ def test_partial_answers_survive_leaving_and_returning(
     _log.info("seeded session ready: base_url=%s session_id=%s", base_url, session_id)
 
     result_holder: dict = {}
-    _post_ask_user_question(base_url, session_id, result_holder)
+    post_thread = _post_ask_user_question(base_url, session_id, result_holder)
 
     def _question_posted() -> bool:
         # Fail fast on a hook POST error instead of waiting out the full
@@ -181,7 +181,7 @@ def test_partial_answers_survive_leaving_and_returning(
     page.wait_for_url(re.compile(r"/inbox/?$"), timeout=_LOAD_TIMEOUT_MS)
     expect(page.locator(_FORM).first).to_be_visible(timeout=_RENDER_TIMEOUT_MS)
     page.locator(f'a[href$="/c/{session_id}"]').first.click()
-    page.wait_for_url(re.compile(rf"/c/{session_id}/?$"), timeout=_LOAD_TIMEOUT_MS)
+    page.wait_for_url(re.compile(rf"/c/{re.escape(session_id)}/?$"), timeout=_LOAD_TIMEOUT_MS)
 
     form = _pending_form(page)
     expect(form).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
@@ -216,3 +216,9 @@ def test_partial_answers_survive_leaving_and_returning(
         "draft_text": _DRAFT_TEXT,
     }
     assert observed == expected, f"draft lost after leaving and returning: {observed}"
+
+    # The hook POST is still parked server-side (no verdict was ever sent), so
+    # the thread stays alive until teardown deletes the session. A late request
+    # error would otherwise be swallowed, so surface it before finishing.
+    assert post_thread.is_alive(), "the hook POST returned before any verdict"
+    assert "error" not in result_holder, f"hook POST errored: {result_holder.get('error')}"

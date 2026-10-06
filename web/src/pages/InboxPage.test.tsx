@@ -25,6 +25,11 @@ import * as commentInboxHook from "@/hooks/useCommentInbox";
 import * as sessionsApi from "@/lib/sessionsApi";
 import type { CommentInbox } from "@/hooks/useCommentInbox";
 import {
+  clearAskUserQuestionDrafts,
+  getAskUserQuestionDraft,
+  setAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
+import {
   isExplicitlyUnread,
   resetReadStateForTests,
   seedReadState,
@@ -154,6 +159,7 @@ afterEach(() => {
   vi.clearAllMocks();
   resetReadStateForTests();
   localStorage.clear();
+  clearAskUserQuestionDrafts();
 });
 
 /** A finished session whose latest turn the viewer hasn't opened yet. */
@@ -338,6 +344,50 @@ describe("InboxPage approval items", () => {
     await waitFor(() =>
       expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "pending"),
     );
+  });
+
+  it("clears an AskUserQuestion draft once the Inbox resolve POST succeeds", async () => {
+    // WHY: answering from the Inbox retires the saved draft only on a
+    // confirmed resolve, matching the chat store's POST-success cleanup.
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    setAskUserQuestionDraft("eli_1", {
+      currentIndex: 0,
+      selections: { Q: "A" },
+      customSelected: {},
+      customInputs: {},
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
+    await waitFor(() => expect(getAskUserQuestionDraft("eli_1")).toBeUndefined());
+  });
+
+  it("keeps an AskUserQuestion draft when the Inbox resolve POST rejects", async () => {
+    // WHY: the rollback must leave the draft so the restored card can retry
+    // with the same answers.
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    vi.mocked(sessionsApi.approve).mockRejectedValue(new Error("nope"));
+    setAskUserQuestionDraft("eli_1", {
+      currentIndex: 0,
+      selections: { Q: "A" },
+      customSelected: {},
+      customInputs: {},
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "pending"),
+    );
+    expect(getAskUserQuestionDraft("eli_1")).toBeDefined();
   });
 
   it("clears a stale verdict when a snapshot refresh still shows the elicitation as pending", async () => {
