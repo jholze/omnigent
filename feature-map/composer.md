@@ -160,6 +160,22 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   `.tar.gz` of an agent directory. Expect the dialog to close with the agent
   selected, and the agent still listed after a reload. A bundle named like a
   server agent keeps the dialog open with the server's reason.
+- **`voice-dictation`, browser (server path):**
+  `tests/e2e_ui/chat/test_dictation.py::test_dictation_streams_transcript_into_composer`,
+  `tests/e2e_ui/chat/test_dictation.py::test_hotkey_toggles_dictation`
+  (fake engine). The Web Speech path needs a real Chrome; its rules are pinned
+  by `web/src/components/ComposerMicButton.test.tsx`.
+- **`voice-dictation`, desktop (either composer):**
+  `web/electron/e2e/desktop_dictation_availability.e2e.js`, run from
+  `web/electron` after building the SPA (`OMNIGENT_PW_NO_SANDBOX=1
+  OMNIGENT_PYTHON=../../.venv/bin/python xvfb-run -a node --test
+  e2e/desktop_dictation_availability.e2e.js`): no mic against a server without
+  dictation, then the mic dictating through a fake-engine server. Manually:
+  connect the desktop app to a default `omnigent server` (`/v1/info` reports
+  `dictation_available: false`) and expect no mic in either composer and
+  ⌘/Ctrl+Alt+V to do nothing; restart the server with
+  `OMNIGENT_DICTATION_ENGINE=fake`, reconnect, and expect the mic, the listening
+  state on click, and the fake transcript in the message box.
 - **`mobile-labels`, new-session composer:**
   `tests/e2e_ui/mobile/test_composer_model_label_stop_overlap.py::test_new_session_composer_collapses_labels_to_icons_on_mobile`
 

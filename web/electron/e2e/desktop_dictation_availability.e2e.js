@@ -1,9 +1,6 @@
-// Desktop mic follows the server's dictation capability (GET /v1/info): no mic
-// without it, and with it a server take must land its transcript in the composer.
-// Run from web/electron after building the SPA (a fake audio device stands in
-// for the microphone headless CI lacks):
-//   OMNIGENT_PW_NO_SANDBOX=1 OMNIGENT_PYTHON=../../.venv/bin/python \
-//     xvfb-run -a node --test e2e/desktop_dictation_availability.e2e.js
+// The desktop mic follows the server's dictation capability (GET /v1/info).
+// Run from web/electron after building the SPA (see e2e/README.md):
+//   OMNIGENT_PW_NO_SANDBOX=1 OMNIGENT_PYTHON=../../.venv/bin/python xvfb-run -a node --test e2e/desktop_dictation_availability.e2e.js
 
 "use strict";
 
@@ -49,7 +46,9 @@ function fakeScript() {
 }
 
 async function serverInfo(serverUrl) {
-  return (await fetch(`${serverUrl}/v1/info`)).json();
+  const response = await fetch(`${serverUrl}/v1/info`);
+  assert.ok(response.ok, `GET /v1/info failed: ${response.status}`);
+  return response.json();
 }
 
 /** Poll `probe` until it is truthy or the deadline passes; returns the last result. */
@@ -84,7 +83,7 @@ async function teardownDesktop({ electronApp, stopDisplayCapture, userDataDir },
 }
 
 /** Boot the shell straight into the connected home composer. */
-async function openHomeComposer(serverUrl, fakeMicPreload) {
+async function openHomeComposer(serverUrl, fakeMicPreload, clipName) {
   const launched = await launchDesktop({
     recordDir: RECORD_DIR,
     serverUrl,
@@ -95,7 +94,7 @@ async function openHomeComposer(serverUrl, fakeMicPreload) {
     await composer.waitFor({ state: "visible", timeout: 45_000 });
     return { ...launched, composer };
   } catch (err) {
-    await teardownDesktop(launched, "launch-failed");
+    await teardownDesktop(launched, `${clipName}-launch-failed`);
     throw err;
   }
 }
@@ -121,7 +120,8 @@ describe(
     });
 
     it("offers no mic when the server has no dictation", async () => {
-      const server = await spawnServer(tmpDir, {
+      const clipName = "mic-hidden-without-server-dictation";
+      const server = await spawnServer(fs.mkdtempSync(path.join(tmpDir, "no-dictation-")), {
         env: () => ({ OMNIGENT_DICTATION_ENGINE: UNAVAILABLE_ENGINE }),
       });
       let saved;
@@ -129,19 +129,18 @@ describe(
         const info = await serverInfo(server.serverUrl);
         assert.equal(info.dictation_available, false, "precondition: server offers no dictation");
 
-        const desktop = await openHomeComposer(server.serverUrl, fakeMicPreload);
+        const desktop = await openHomeComposer(server.serverUrl, fakeMicPreload, clipName);
         try {
           const { window } = desktop;
           // The mic could only appear once the capability probe has resolved.
           const probed = await pollUntil(window, () => capabilityProbeDone(window), 15_000);
           assert.ok(probed, "the SPA never completed its GET /v1/info capability probe");
-          await window.waitForTimeout(1000);
-          const micCount = await window.getByRole("button", { name: MIC_NAME }).count();
-          assert.equal(micCount, 0, "a mic was offered although no dictation path can work");
-          // Hold the state so the clip shows it.
-          await window.waitForTimeout(2000);
+          // Watch for a mic through the whole hold that the clip shows, not at one instant.
+          const mic = window.getByRole("button", { name: MIC_NAME });
+          const appeared = await pollUntil(window, async () => (await mic.count()) > 0, 3000);
+          assert.equal(appeared, false, "a mic was offered although no dictation path can work");
         } finally {
-          saved = await teardownDesktop(desktop, "mic-hidden-without-server-dictation");
+          saved = await teardownDesktop(desktop, clipName);
         }
       } finally {
         await server.close();
@@ -150,8 +149,9 @@ describe(
     });
 
     it("dictates through the server when it advertises dictation", async () => {
+      const clipName = "mic-dictates-through-server";
       const script = fakeScript();
-      const server = await spawnServer(tmpDir, {
+      const server = await spawnServer(fs.mkdtempSync(path.join(tmpDir, "fake-engine-")), {
         env: () => ({ OMNIGENT_DICTATION_ENGINE: "fake" }),
       });
       let saved;
@@ -159,7 +159,7 @@ describe(
         const info = await serverInfo(server.serverUrl);
         assert.equal(info.dictation_available, true, "precondition: server offers dictation");
 
-        const desktop = await openHomeComposer(server.serverUrl, fakeMicPreload);
+        const desktop = await openHomeComposer(server.serverUrl, fakeMicPreload, clipName);
         try {
           const { window, composer } = desktop;
           const mic = window.getByRole("button", { name: MIC_NAME }).first();
@@ -197,7 +197,7 @@ describe(
           assert.ok((await composer.inputValue()).includes(script), "stopping clobbered the text");
           await window.waitForTimeout(2000);
         } finally {
-          saved = await teardownDesktop(desktop, "mic-dictates-through-server");
+          saved = await teardownDesktop(desktop, clipName);
         }
       } finally {
         await server.close();

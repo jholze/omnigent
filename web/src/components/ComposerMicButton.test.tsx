@@ -4,12 +4,9 @@
 // Web Speech mode: the button toggles a SpeechRecognition session; final
 // transcripts are emitted via onTranscript. It renders nothing when the
 // browser has no SpeechRecognition constructor AND the server offers no
-// dictation (in Electron, Web Speech has no backend, so the server fallback
-// is the only path). Native Web Speech events need a stubbed SpeechRecognition
-// constructor in CI (no real mic / engine), so they're pinned here with a fake
-// whose addEventListener captures the handlers the test then fires.
-// getUserMedia (used only for the visualizer) is stubbed to reject so no
-// AudioContext is constructed in jsdom.
+// dictation (Electron's Web Speech has no backend, so the server fallback is
+// the only path there). CI has no real mic/engine, so SpeechRecognition is
+// stubbed and getUserMedia rejects to keep jsdom free of AudioContext.
 //
 // Server mode: when there is no SpeechRecognition constructor but the
 // /v1/info capability probe reports dictation_available, the button drives a
@@ -375,11 +372,14 @@ async function clickMic() {
 
 /** Run `body` with the Electron preload bridge present, as the desktop shell exposes it. */
 async function inElectronShell(body: () => Promise<void> | void) {
-  (window as unknown as Record<string, unknown>).omnigentDesktop = { kind: "electron" };
+  const w = window as unknown as Record<string, unknown>;
+  const previous = w.omnigentDesktop;
+  w.omnigentDesktop = { kind: "electron" };
   try {
     await body();
   } finally {
-    delete (window as unknown as Record<string, unknown>).omnigentDesktop;
+    if (previous === undefined) delete w.omnigentDesktop;
+    else w.omnigentDesktop = previous;
   }
 }
 
