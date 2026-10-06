@@ -120,6 +120,135 @@ describe("getCurrentUserId", () => {
   });
 });
 
+describe("resolveIdentity after a failed probe", () => {
+  it("re-probes instead of caching an edge denial", async () => {
+    // An edge in front of the server denied the probe (e.g. a workspace
+    // entitlement blip): the viewer is unknown, not absent.
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({ error_code: "PERMISSION_DENIED" }, { ok: false, status: 403 }),
+    );
+    const { resolveIdentity, getCurrentUserId } = await import("./identity");
+
+    expect(await resolveIdentity()).toBeNull();
+
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ user_id: "alice" }));
+    expect(await resolveIdentity()).toBe("alice");
+    expect(getCurrentUserId()).toBe("alice");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-probes after a network error", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("network"));
+    const { resolveIdentity } = await import("./identity");
+
+    expect(await resolveIdentity()).toBeNull();
+
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ user_id: "alice" }));
+    expect(await resolveIdentity()).toBe("alice");
+  });
+
+  it("keeps a 401 as the final answer", async () => {
+    fetchMock.mockResolvedValue(mockJsonResponse({ user_id: null }, { ok: false, status: 401 }));
+    const { resolveIdentity } = await import("./identity");
+
+    expect(await resolveIdentity()).toBeNull();
+    expect(await resolveIdentity()).toBeNull();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("notifies subscribers only when the viewer changes", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 503 }));
+    const { resolveIdentity, subscribeIdentity } = await import("./identity");
+    const listener = vi.fn();
+    const unsubscribe = subscribeIdentity(listener);
+
+    await resolveIdentity();
+    expect(listener).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ user_id: "alice", is_admin: true }));
+    await resolveIdentity();
+    expect(listener).toHaveBeenCalledOnce();
+
+    unsubscribe();
+  });
+});
+
+describe("authenticatedFetch identity recovery", () => {
+  const urls = () => fetchMock.mock.calls.map((call) => call[0]);
+
+  it("re-runs the failed probe at the first successful response", async () => {
+    const me = [
+      mockJsonResponse({}, { ok: false, status: 403 }),
+      mockJsonResponse({ user_id: "alice" }),
+    ];
+    fetchMock.mockImplementation(async (url: string) =>
+      url.includes("/v1/me") ? me.shift() : mockJsonResponse({ data: [] }),
+    );
+    const { resolveIdentity, authenticatedFetch, getCurrentUserId } = await import("./identity");
+    await resolveIdentity();
+    expect(getCurrentUserId()).toBeNull();
+
+    const res = await authenticatedFetch("/v1/sessions?visibility=mine");
+
+    expect(res.ok).toBe(true);
+    // Settled before the caller sees the rows, so ownership-scoped views never
+    // render them against a null viewer.
+    expect(getCurrentUserId()).toBe("alice");
+    expect(urls()).toEqual(["/v1/me", "/v1/sessions?visibility=mine", "/v1/me"]);
+  });
+
+  it("leaves the probe alone while responses keep failing", async () => {
+    fetchMock.mockImplementation(async () => mockJsonResponse({}, { ok: false, status: 403 }));
+    const { resolveIdentity, authenticatedFetch } = await import("./identity");
+    await resolveIdentity();
+
+    await authenticatedFetch("/v1/sessions");
+
+    expect(urls()).toEqual(["/v1/me", "/v1/sessions"]);
+  });
+
+  it("does not re-probe once the server answered definitively", async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url.includes("/v1/me") ? mockJsonResponse({ user_id: null }) : mockJsonResponse({}),
+    );
+    const { resolveIdentity, authenticatedFetch } = await import("./identity");
+    await resolveIdentity();
+
+    await authenticatedFetch("/v1/sessions");
+
+    expect(urls()).toEqual(["/v1/me", "/v1/sessions"]);
+  });
+
+  it("backs off when a retried probe fails again", async () => {
+    vi.useFakeTimers();
+    try {
+      const me = [
+        mockJsonResponse({}, { ok: false, status: 403 }),
+        mockJsonResponse({}, { ok: false, status: 500 }),
+        mockJsonResponse({ user_id: "alice" }),
+      ];
+      fetchMock.mockImplementation(async (url: string) =>
+        url.includes("/v1/me") ? me.shift() : mockJsonResponse({}),
+      );
+      const { resolveIdentity, authenticatedFetch, getCurrentUserId } = await import("./identity");
+      await resolveIdentity();
+
+      await authenticatedFetch("/v1/a");
+      expect(urls()).toEqual(["/v1/me", "/v1/a", "/v1/me"]);
+
+      await authenticatedFetch("/v1/b");
+      expect(urls()).toEqual(["/v1/me", "/v1/a", "/v1/me", "/v1/b"]);
+
+      vi.advanceTimersByTime(1_000);
+      await authenticatedFetch("/v1/c");
+      expect(urls()).toEqual(["/v1/me", "/v1/a", "/v1/me", "/v1/b", "/v1/c", "/v1/me"]);
+      expect(getCurrentUserId()).toBe("alice");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("resolveIdentity base-path login redirect", () => {
   let originalLocation: Location;
 

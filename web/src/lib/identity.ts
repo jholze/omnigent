@@ -263,6 +263,33 @@ function isBodyHostKeyedRequest(url: string, body: BodyInit | null | undefined):
 let currentIsAdmin = false;
 let identityResolved = false;
 let identityPromise: Promise<string | null> | null = null;
+// Consecutive probes that ended without a definitive answer (an edge 403, a 5xx,
+// no network). The viewer stays unknown until `authenticatedFetch` sees API
+// responses succeed again and re-runs the probe, no earlier than this time.
+let failedIdentityProbes = 0;
+let identityRetryAfter = 0;
+const identityListeners = new Set<() => void>();
+
+/** Subscribe to identity changes; returns the unsubscribe function. */
+export function subscribeIdentity(listener: () => void): () => void {
+  identityListeners.add(listener);
+  return () => {
+    identityListeners.delete(listener);
+  };
+}
+
+function setIdentity(userId: string | null, isAdmin: boolean): void {
+  if (userId === currentUserId && isAdmin === currentIsAdmin) return;
+  currentUserId = userId;
+  currentIsAdmin = isAdmin;
+  for (const listener of identityListeners) listener();
+}
+
+/** Whether a failed probe is due for another attempt (see `resolveIdentity`). */
+function identityRetryDue(): boolean {
+  if (identityResolved || failedIdentityProbes === 0) return false;
+  return identityPromise !== null || Date.now() >= identityRetryAfter;
+}
 // Cache the server-provided login URL on the first /v1/me probe so
 // later session-expiry redirects in authenticatedFetch hit the right
 // path per provider — "/login" for accounts, "/auth/login" for OIDC.
@@ -327,7 +354,9 @@ function isOnLoginPath(): boolean {
 
 /**
  * Fetch the current user identity from the server.
- * Called once on app load; subsequent calls return the cached value.
+ * Called once on app load; a definitive answer (a user, or 401) is cached for
+ * later calls. Any other failure — an edge 403, a 5xx, no network — resolves
+ * null without caching, so a later call probes again.
  *
  * When the server returns 401 with a ``login_url`` (OIDC mode),
  * redirects the browser to the login page.
@@ -336,9 +365,11 @@ export async function resolveIdentity(): Promise<string | null> {
   if (identityResolved) return currentUserId;
   if (identityPromise) return identityPromise;
   identityPromise = (async () => {
+    let definitive = false;
     try {
       const res = await hostFetch("/v1/me");
       if (res.status === 401) {
+        definitive = true;
         // OIDC / accounts mode: server requires authentication.
         // Redirect to the login URL provided in the response body —
         // unless we're already there (avoid an infinite reload loop
@@ -350,27 +381,35 @@ export async function resolveIdentity(): Promise<string | null> {
           };
           if (data.login_url) {
             serverLoginUrl = data.login_url;
-            if (!isOnLoginPath()) {
-              redirectToLogin(data.login_url);
-              return null;
-            }
+            if (!isOnLoginPath()) redirectToLogin(data.login_url);
           }
         } catch {
           // Response body was not JSON — fall through.
         }
-      }
-      if (res.ok) {
+      } else if (res.ok) {
+        definitive = true;
         const data = (await res.json()) as {
           user_id: string | null;
           is_admin?: boolean;
         };
-        currentUserId = data.user_id;
-        currentIsAdmin = data.is_admin ?? false;
+        setIdentity(data.user_id, data.is_admin ?? false);
       }
     } catch {
       // Server unreachable — leave as null.
     }
-    identityResolved = true;
+    if (definitive) {
+      identityResolved = true;
+      failedIdentityProbes = 0;
+    } else {
+      failedIdentityProbes += 1;
+      // Retry at the first successful API response, then back off (1s, 2s, …
+      // 60s) so a server whose /v1/me is broken outright isn't probed per request.
+      identityRetryAfter =
+        failedIdentityProbes === 1
+          ? 0
+          : Date.now() + Math.min(1_000 * 2 ** (failedIdentityProbes - 2), 60_000);
+    }
+    identityPromise = null;
     return currentUserId;
   })();
   return identityPromise;
@@ -535,6 +574,11 @@ export async function authenticatedFetch(
     // re-evaluates by trying keyed again.
     clearHostKeyless(derivedHostId);
   }
+
+  // A transiently failed probe left the viewer unknown; the first successful
+  // response shows the path is open again. Settle identity before handing the
+  // data back so ownership-scoped views never see rows against a null viewer.
+  if (res.ok && identityRetryDue()) await resolveIdentity();
 
   if (
     // When embedded, the host owns auth (e.g. cookie/session via
