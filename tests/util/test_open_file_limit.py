@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 import pytest
 
 from omnigent.util.open_file_limit import (
-    _MACOS_OPEN_MAX,
+    _FALLBACK_SOFT_LIMITS,
     DEFAULT_SOFT_OPEN_FILE_LIMIT,
     OpenFileLimit,
     raise_soft_open_file_limit,
@@ -101,16 +101,26 @@ def test_sufficient_soft_limit_is_left_alone(
     assert fake.calls == []
 
 
+def test_tuned_kernel_below_open_max_settles_on_a_smaller_step(
+    fake_resource: Callable[..., _FakeResource],
+) -> None:
+    """A host with kern.maxfilesperproc below OPEN_MAX still gets headroom."""
+    fake = fake_resource(256, _INFINITY, reject={65536, 10240})
+
+    assert raise_soft_open_file_limit() == OpenFileLimit(4096, _INFINITY)
+    assert fake.calls == [(65536, _INFINITY), (10240, _INFINITY), (4096, _INFINITY)]
+
+
 def test_rejected_attempts_warn_and_keep_the_inherited_limit(
     fake_resource: Callable[..., _FakeResource], caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake = fake_resource(256, _INFINITY, reject={65536, 10240})
+    fake = fake_resource(256, _INFINITY, reject={65536, 10240, 4096, 1024})
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
         result = raise_soft_open_file_limit()
 
     assert result == OpenFileLimit(256, _INFINITY)
-    assert fake.calls == [(65536, _INFINITY), (10240, _INFINITY)]
+    assert [wanted for wanted, _ in fake.calls] == [65536, 10240, 4096, 1024]
     assert "could not raise soft open-file limit from 256 (hard unlimited)" in caplog.text
 
 
@@ -160,9 +170,9 @@ def test_real_process_raises_its_own_soft_limit() -> None:
     )
     raised, live, hard_unlimited = json.loads(child.stdout)
     soft, hard = live
-    # macOS may reject 65536 under an unlimited hard limit and settle on OPEN_MAX.
+    # macOS may reject 65536 under an unlimited hard limit and settle on a fallback.
     accepted = (
-        {DEFAULT_SOFT_OPEN_FILE_LIMIT, _MACOS_OPEN_MAX}
+        {DEFAULT_SOFT_OPEN_FILE_LIMIT, *_FALLBACK_SOFT_LIMITS}
         if hard_unlimited
         else {min(hard, DEFAULT_SOFT_OPEN_FILE_LIMIT)}
     )

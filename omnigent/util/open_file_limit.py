@@ -17,6 +17,9 @@ DEFAULT_SOFT_OPEN_FILE_LIMIT = 65536
 # macOS OPEN_MAX: the largest soft limit the kernel accepts when the hard limit is
 # unlimited but ``kern.maxfilesperproc`` is below the requested value.
 _MACOS_OPEN_MAX = 10240
+# Tried in order when the kernel rejects the target; the smaller steps cover
+# hosts whose ``kern.maxfilesperproc`` is tuned below OPEN_MAX.
+_FALLBACK_SOFT_LIMITS = (_MACOS_OPEN_MAX, 4096, 1024)
 
 
 class OpenFileLimit(NamedTuple):
@@ -49,9 +52,7 @@ def raise_soft_open_file_limit(target: int = DEFAULT_SOFT_OPEN_FILE_LIMIT) -> Op
     ceiling = target if hard == infinity else min(hard, target)
     if soft == infinity or soft >= ceiling:
         return OpenFileLimit(soft, hard)
-    candidates = [ceiling]
-    if ceiling > _MACOS_OPEN_MAX:
-        candidates.append(_MACOS_OPEN_MAX)
+    candidates = [ceiling, *(limit for limit in _FALLBACK_SOFT_LIMITS if limit < ceiling)]
     failures: list[str] = []
     for wanted in candidates:
         if wanted <= soft:

@@ -372,6 +372,12 @@ def _is_transient_tmux_process_start_error(exc: OSError) -> bool:
     return exc.errno in _TRANSIENT_TMUX_PROCESS_START_ERRNOS
 
 
+def _probe_start_backoff(failures: int) -> float:
+    """Wait before the next probe after *failures* consecutive start failures."""
+    doublings = min(max(failures - 1, 0), _TMUX_PROBE_START_FAILURE_MAX_DOUBLINGS)
+    return _TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS * 2**doublings
+
+
 def _tmux_process_start_error(cmd: list[str], exc: OSError) -> RuntimeError:
     """Classify a tmux launch failure without masking permanent errors."""
     detail = f"tmux command could not start: {' '.join(cmd)}: {exc}"
@@ -1968,7 +1974,7 @@ class TerminalInstance:
                 self._probe_start_last_warned = now
                 self._probe_start_outage_warned = True
             failures = self._probe_start_failures
-            delay = self._probe_start_retry_delay()
+            delay = _probe_start_backoff(failures)
         logger.log(
             logging.WARNING if warn else logging.DEBUG,
             "tmux %s probe could not start for terminal %s:%s; liveness remains unknown "
@@ -1984,10 +1990,9 @@ class TerminalInstance:
 
     def _probe_start_retry_delay(self) -> float:
         """Seconds to wait before the next probe during a start-failure outage."""
-        doublings = min(
-            max(self._probe_start_failures - 1, 0), _TMUX_PROBE_START_FAILURE_MAX_DOUBLINGS
-        )
-        return _TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS * 2**doublings
+        with self._probe_start_lock:
+            failures = self._probe_start_failures
+        return _probe_start_backoff(failures)
 
     def _record_probe_started(self) -> None:
         """Close a start-failure outage once a probe process starts again."""

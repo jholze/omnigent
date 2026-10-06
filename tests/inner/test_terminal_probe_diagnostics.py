@@ -345,6 +345,7 @@ async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
             await asyncio.sleep(0.005)
 
     stop = threading.Event()
+    still_running = None
     with caplog.at_level(logging.INFO, logger=terminal_mod.__name__):
         if threaded:
             task = asyncio.create_task(
@@ -363,6 +364,7 @@ async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
             await _until(lambda: attempts["failed"] >= 40)
             descriptors_available.set()
             await _until(lambda: attempts["started"] >= 2)
+            still_running = instance.running
         finally:
             stop.set()
             instance.running = False
@@ -384,6 +386,7 @@ async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
     assert len(recovered) == 1
     assert f"after {attempts['failed']} failed attempt(s)" in recovered[0].getMessage()
     assert instance._probe_start_outage_began is None
+    assert still_running is True
 
 
 def test_probe_start_retry_delay_doubles_to_a_cap_and_resets_on_recovery(tmp_path: Path) -> None:
@@ -438,7 +441,7 @@ def test_probe_start_bookkeeping_survives_concurrent_failures_and_recoveries(
     """The threaded watcher and async probes update the outage state concurrently.
 
     A recovery clearing the outage between a failure's None-check and its
-    duration arithmetic used to raise TypeError and kill the watcher thread.
+    duration arithmetic must not raise TypeError and kill the watcher thread.
     """
     instance = TerminalInstance(
         name="runtime",

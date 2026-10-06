@@ -1578,7 +1578,8 @@ async def forward_claude_transcript_to_session(
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
-                next_poll_delay = poll_interval_s
+                if fd_exhausted_since is None:
+                    next_poll_delay = poll_interval_s
             except Exception as exc:
                 fd_errno = fd_exhaustion_errno(exc)
                 if fd_errno is None:
@@ -1587,7 +1588,9 @@ async def forward_claude_transcript_to_session(
                         session_id,
                         extra={"session_id": session_id},
                     )
-                    next_poll_delay = poll_interval_s
+                    # Keep backing off while the fd table is still full.
+                    if fd_exhausted_since is None:
+                        next_poll_delay = poll_interval_s
                 else:
                     now = time.monotonic()
                     if fd_exhausted_since is None:

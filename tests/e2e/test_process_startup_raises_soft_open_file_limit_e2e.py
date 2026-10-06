@@ -80,18 +80,31 @@ def test_host_daemon_raises_inherited_soft_open_file_limit(tmp_path: Path) -> No
     """A daemon that inherits a soft fd limit of 256 raises it during startup and stays up."""
     with server_runner(tmp_path) as stack:
         stack.start_host(bootstrap=_bootstrap("omnigent.host._daemon_entry"))
-        assert stack.host is not None
+        host = stack.host
+        assert host is not None
+
+        def read_soft() -> int:
+            try:
+                return _soft_nofile(host.pid)
+            except OSError:
+                # /proc/<pid> vanishes once an exited daemon is reaped.
+                assert host.poll() is None, (
+                    f"host daemon exited with {host.returncode} before raising its "
+                    f"soft open-file limit\n{stack.log_tail()}"
+                )
+                raise
+
         deadline = time.monotonic() + _DAEMON_RAISE_DEADLINE_S
-        soft = _soft_nofile(stack.host.pid)
+        soft = read_soft()
         while soft <= _INHERITED_SOFT_LIMIT and time.monotonic() < deadline:
-            assert stack.host.poll() is None, (
-                f"host daemon exited with {stack.host.returncode} before raising its "
+            assert host.poll() is None, (
+                f"host daemon exited with {host.returncode} before raising its "
                 f"soft open-file limit\n{stack.log_tail()}"
             )
             time.sleep(0.2)
-            soft = _soft_nofile(stack.host.pid)
-        assert stack.host.poll() is None, (
-            f"host daemon exited with {stack.host.returncode}\n{stack.log_tail()}"
+            soft = read_soft()
+        assert host.poll() is None, (
+            f"host daemon exited with {host.returncode}\n{stack.log_tail()}"
         )
 
     assert soft > _INHERITED_SOFT_LIMIT, (

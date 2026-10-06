@@ -47,7 +47,7 @@ from tests._helpers.native_session import create_native_session
 _INHERITED_SOFT_LIMIT = 256
 #: Fast poll so the exhaustion window covers many poll iterations.
 _POLL_INTERVAL_S = 0.05
-#: How long the fd table is kept pinned full (~ 30 poll iterations).
+#: How long the fd table is kept pinned full; spans several backed-off polls.
 _EXHAUSTION_WINDOW_S = 1.5
 #: Deadline for a seeded transcript turn to appear as a mirrored conversation item.
 _MIRROR_DEADLINE_S = 30.0

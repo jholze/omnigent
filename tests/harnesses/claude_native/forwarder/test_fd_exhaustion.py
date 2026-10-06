@@ -109,3 +109,91 @@ async def test_fd_exhaustion_warns_once_then_mirroring_resumes(
     assert "session=conv_abc" in exhausted[0].getMessage()
     recovered = [r for r in caplog.records if "recovered after fd exhaustion" in r.getMessage()]
     assert [r.levelno for r in recovered] == [logging.INFO]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rewarn_s", "expected_warnings", "expected_recoveries"),
+    [
+        pytest.param(60.0, 1, 1, id="second-outage-inside-window-stays-quiet"),
+        pytest.param(0.0, 5, 2, id="outage-past-window-rewarns-and-logs-recovery"),
+    ],
+)
+async def test_rewarn_window_spans_outages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    rewarn_s: float,
+    expected_warnings: int,
+    expected_recoveries: int,
+) -> None:
+    """The last-warned stamp survives recovery: flapping stays within one WARNING per window."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "Stop",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+        },
+    )
+    monkeypatch.setattr(forwarder, "_FD_EXHAUSTION_REWARN_S", rewarn_s)
+    original_read = forwarder.read_active_session_id
+    # Two outages separated by one healthy poll, then steady recovery.
+    script = iter(["fail", "fail", "fail", "ok", "fail", "fail", "ok", "ok"])
+    settled = asyncio.Event()
+
+    def scripted_read(path: Path) -> str | None:
+        step = next(script, None)
+        if step is None:
+            settled.set()
+        elif step == "fail":
+            raise OSError(errno.EMFILE, "Too many open files", str(path / "bridge.json"))
+        return original_read(path)
+
+    monkeypatch.setattr(forwarder, "read_active_session_id", scripted_read)
+    caplog.set_level(logging.DEBUG, logger=forwarder._logger.name)
+
+    server, thread, base_url = _start_recording_server()
+    task = asyncio.create_task(
+        forwarder.forward_claude_transcript_to_session(
+            base_url=base_url,
+            headers={},
+            session_id="conv_abc",
+            bridge_dir=bridge_dir,
+            agent_name="claude-native-ui",
+            start_at_end=False,
+            poll_interval_s=0.01,
+        )
+    )
+    try:
+        await _get_recorded_item_request(server)
+        await asyncio.wait_for(settled.wait(), timeout=10)
+        # Let the poll that drained the script finish its recovery bookkeeping.
+        await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    exhausted = [r for r in caplog.records if "hit fd exhaustion" in r.getMessage()]
+    assert len(exhausted) == 5
+    assert sum(r.levelno == logging.WARNING for r in exhausted) == expected_warnings
+    recovered = [r for r in caplog.records if "recovered after fd exhaustion" in r.getMessage()]
+    assert len(recovered) == expected_recoveries
