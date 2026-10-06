@@ -70,6 +70,8 @@ class _Link:
                     await to_server
                 except Exception:
                     _logger.exception("zombie host leg pump failed; closing the host leg")
+                    with contextlib.suppress(Exception):
+                        await self.host_side.close()
         finally:
             for task in (to_server, to_host):
                 task.cancel()
@@ -145,24 +147,23 @@ class ZombieTunnelProxy:
             raise
 
     def stop(self) -> None:
+        if self._loop.is_closed():
+            return
         if self._server is not None:
             with contextlib.suppress(Exception):
                 self._run(self._stop())
             self._server = None
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=10)
         if self._thread.is_alive():
-            raise RuntimeError("zombie tunnel proxy loop thread did not stop within 10s")
+            self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                raise RuntimeError("zombie tunnel proxy loop thread did not stop within 10s")
         self._loop.close()
 
     def wait_for_tunnel(self, timeout: float = 60.0) -> None:
         """Block until at least one host tunnel has been forwarded upstream."""
         if not self._tunnel_open.wait(timeout):
             raise AssertionError(f"no host tunnel was forwarded through the proxy in {timeout}s")
-
-    def tunnel_count(self) -> int:
-        with self._lock:
-            return len(self._links)
 
     def sever(self, *, zombie: bool) -> int:
         """End the server-side leg of every forwarded tunnel.

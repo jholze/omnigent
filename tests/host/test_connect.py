@@ -20,6 +20,7 @@ import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus, InvalidURI
 from websockets.http11 import Response
+from websockets.protocol import State
 
 from omnigent import debug_logging
 from omnigent.host import HOST_FATAL_EXIT_CODE
@@ -5065,8 +5066,10 @@ class _AbortableTransport:
 
     def __init__(self) -> None:
         self.aborted = asyncio.Event()
+        self.calls = 0
 
     def abort(self) -> None:
+        self.calls += 1
         self.aborted.set()
 
 
@@ -6825,6 +6828,41 @@ async def test_silence_watchdog_closes_tunnel_when_abort_is_unavailable(
     assert tunnel.closed
     assert host._server_silent is True
     assert any(m.startswith("No frame from the server for") for m in caplog.messages)
+
+
+async def test_silence_watchdog_stands_down_when_connection_is_closing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A connection already closing for another reason keeps that reason.
+
+    The watchdog expires while the close handshake is in flight, so it must
+    neither abort, nor fall back to ``close()``, nor claim the server went
+    silent; the closing path ends the connection and classifies the drop.
+    """
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    tunnel = _SilentPeerTunnel()
+    tunnel.state = State.CLOSING
+    host = _host()
+
+    async def finish_closing() -> None:
+        await asyncio.sleep(0.4)
+        tunnel.transport.abort()
+
+    closer = asyncio.create_task(finish_closing())
+    with (
+        caplog.at_level(logging.WARNING, logger="omnigent.host.connect"),
+        pytest.raises(ConnectionClosedError),
+    ):
+        await host._serve_frames(tunnel)  # type: ignore[arg-type]
+    await closer
+
+    assert tunnel.transport.calls == 1
+    assert not tunnel.closed
+    assert host._server_silent is False
+    assert not [m for m in caplog.messages if m.startswith("No frame from the server")]
 
 
 async def test_server_application_pings_keep_the_tunnel_open(

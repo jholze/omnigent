@@ -65,7 +65,6 @@ class SpawnedHost:
     name: str
     console_log: Path
     process_log: Path
-    env: dict[str, str]
 
     def console(self) -> str:
         return self.console_log.read_text(errors="replace") if self.console_log.exists() else ""
@@ -130,7 +129,7 @@ def spawn_host(tmp_path: Path, server_url: str) -> SpawnedHost:
             stdout=out,
             stderr=subprocess.STDOUT,
         )
-    return SpawnedHost(proc, host_id, name, console_log, process_log, env)
+    return SpawnedHost(proc, host_id, name, console_log, process_log)
 
 
 def host_status(client: httpx.Client, host_id: str) -> str | None:
