@@ -414,10 +414,9 @@ async def test_clamped_pick_does_not_advertise_the_dropped_most_capable_model() 
 
 
 @pytest.mark.asyncio
-async def test_clamped_pick_keeps_the_dropped_model_as_raw() -> None:
-    # The clamped-away pick is retained as raw_model so the decision can show the
-    # model the router wanted next to the servable one that actually ran, the way
-    # the external router already surfaces its substitutions.
+async def test_clamped_pick_does_not_resurface_the_dropped_model_as_raw() -> None:
+    # The dropped pick is unservable; keeping it as raw_model would feed it back
+    # into substitute_model downstream and could re-run the clamped-away model.
     dropped = "databricks-gpt-5-6-sol"
     verdict = {
         "harness": "codex",
@@ -429,7 +428,7 @@ async def test_clamped_pick_keeps_the_dropped_model_as_raw() -> None:
     result = await client.route("hard task", catalog)
     assert result is not None
     assert result.model == "databricks-gpt-5-4-nano"
-    assert result.raw_model == dropped
+    assert result.raw_model is None
 
 
 @pytest.mark.asyncio

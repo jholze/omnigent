@@ -625,9 +625,7 @@ class LLMRoutingClient:
             return None
 
         # The judge picked a model outside the servable catalog; clamp it to the
-        # cheapest servable one and keep the pick as raw_model, rewriting the
-        # rationale so it names the applied model instead of the dropped one.
-        raw_model: str | None = None
+        # cheapest servable one and rewrite the rationale to name the applied model.
         if model not in flat:
             if flat:
                 _logger.info(
@@ -635,7 +633,6 @@ class LLMRoutingClient:
                     model,
                     flat[0],
                 )
-                raw_model = model
                 model = flat[0]
                 rationale = f"The selected model is not available in this session; using {model}."
             else:
@@ -667,7 +664,6 @@ class LLMRoutingClient:
             model=model,
             rationale=str(rationale),
             harness=chosen_harness,
-            raw_model=raw_model,
         )
 
 
