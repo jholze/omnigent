@@ -108,3 +108,58 @@ def test_snapshot_idle_clears_working_on_heartbeat_only_stream(
     expect(working).to_have_count(0, timeout=15_000)
     assert page.evaluate("window.__statusGapStreamOpens") == 1
     assert page.evaluate("window.__statusGapHeartbeats") >= 6
+
+
+def _rewrite_snapshot_idle(route) -> None:
+    """Make the slim session snapshot report ``idle`` while leaving the body."""
+    # Guard the teardown race: when the browser closes while a polled snapshot
+    # is still in flight, fetching or fulfilling the now-disposed response
+    # raises. That must not fail the already-finished test, so swallow it — the
+    # dropped request dies with the context.
+    try:
+        resp = route.fetch()
+        try:
+            body = resp.json()
+        except Exception:
+            route.fulfill(response=resp)
+            return
+        if isinstance(body, dict) and body.get("status"):
+            body["status"] = "idle"
+            body["active_response_id"] = None
+            body["background_task_count"] = 0
+            body["background_tasks"] = []
+        route.fulfill(response=resp, json=body)
+    except Exception:
+        return
+
+
+def test_running_turn_relights_working_after_reconnect_from_stale_snapshot(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """A chat that binds mid-turn must still show the working indicator.
+
+    The SSE stream is snapshot + live tail with no replay of the turn-start
+    ``running`` edge, so a client (re)connecting mid-turn depends on the
+    ``getSession`` snapshot carrying ``running``. The persisted row lags the
+    live push, so a bind landing in that window reads ``idle`` and never shows
+    the indicator for the rest of the turn. The stale snapshot is injected as a
+    deterministic stand-in for the production row-lag/reconnect race.
+    """
+    base_url, session_id = seeded_session
+    _publish_status(base_url, session_id, "running")
+    assert _snapshot_status(base_url, session_id) == "running"
+
+    page.goto(f"{base_url}/c/{session_id}")
+    expect(page.locator(_WORKING)).to_be_visible(timeout=15_000)
+
+    page.route(f"**/v1/sessions/{session_id}", _rewrite_snapshot_idle)
+    page.route(f"**/v1/sessions/{session_id}?*", _rewrite_snapshot_idle)
+    assert _snapshot_status(base_url, session_id) == "running"
+
+    page.reload()
+    expect(page.locator(_WORKING)).to_be_visible(timeout=20_000)
+    # Stop intercepting before teardown so a background poll in flight when the
+    # browser closes can't fail the finished test on a disposed response.
+    page.unroute(f"**/v1/sessions/{session_id}")
+    page.unroute(f"**/v1/sessions/{session_id}?*")

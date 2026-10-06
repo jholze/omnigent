@@ -1260,6 +1260,60 @@ describe("chatStore — switchTo", () => {
     expect(useChatStore.getState().blocks.map((block) => block.ctx.itemId)).toEqual([completed.id]);
   });
 
+  it("keeps the working indicator lit when a mid-turn reconnect's stream status outruns a stale snapshot", async () => {
+    // The /stream endpoint is live-tail only, so a mid-turn (re)connect learns
+    // a running turn from the stream's snapshot-on-connect status replay, not
+    // the getSession snapshot — which can read a stale `idle` when the
+    // persisted row lags the live push on a replica-routed deployment. The
+    // cold-bind patch must not let that stale snapshot downgrade the indicator
+    // the stream just relit.
+    const sink = pushableStream();
+    seedSession("conv_relight", []);
+    const base = fetchMock.getMockImplementation()!;
+    let releaseSnapshot: (() => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/v1/sessions/conv_relight/stream") {
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      // Hold the cold-bind snapshot (always `idle` from the default handler)
+      // until the stream's running edge has been applied, placing this read in
+      // the lag window the ticket describes.
+      if (
+        /^\/v1\/sessions\/conv_relight(\?|$)/.test(url) &&
+        (init?.method ?? "GET") === "GET" &&
+        releaseSnapshot === null
+      ) {
+        return new Promise<Response>((resolve) => {
+          releaseSnapshot = () => resolve(base(input, init) as Promise<Response>);
+        });
+      }
+      return base(input, init);
+    });
+
+    const switched = useChatStore.getState().switchTo("conv_relight");
+    // The stream is open and the bind is parked on the held snapshot; replay the
+    // running edge the server now emits on connect.
+    await vi.waitFor(() => expect(releaseSnapshot).not.toBeNull());
+    sink.push(
+      sse("session.status", {
+        conversation_id: "conv_relight",
+        status: "running",
+        response_id: "resp_relight",
+      }),
+    );
+    await tick();
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+
+    // The lagging snapshot now resolves `idle`; it must NOT clear the indicator
+    // the live edge relit, and the reopened streaming bubble must survive.
+    releaseSnapshot!();
+    await switched;
+    await tick();
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+    expect(useChatStore.getState().activeResponse?.responseId).toBe("resp_relight");
+  });
+
   it("commits a message sent in a backgrounded conversation, in transcript order", async () => {
     // End-to-end version of the interleaving regression, through the real pump.
     //

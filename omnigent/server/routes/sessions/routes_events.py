@@ -213,6 +213,7 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_runner_client,
     reconcile_orphaned_running_status,
     require_filesystem_attachment_runtime,
+    session_status_snapshot_event,
 )
 from omnigent.server.routes._sessions.orchestration import (
     _best_effort_stop,
@@ -2869,6 +2870,13 @@ def register_events_routes(
             stay in this async hook.
             """
             events: list[dict[str, Any]] = []
+            # Replay the current live status first so a mid-turn (re)connect
+            # relights the chat working indicator straight from the stream, even
+            # when the getSession snapshot lags the live push. The live tail
+            # never re-sends the turn-start ``running`` edge.
+            status_event = session_status_snapshot_event(session_id)
+            if status_event is not None:
+                events.append(status_event)
             try:
                 page = await asyncio.to_thread(
                     conversation_store.list_conversations,

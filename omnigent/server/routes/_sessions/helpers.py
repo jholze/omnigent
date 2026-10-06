@@ -5047,6 +5047,49 @@ def _publish_status(
     session_stream.publish(session_id, payload)
 
 
+def session_status_snapshot_event(session_id: str) -> dict[str, Any] | None:
+    """Replay the current live status as a snapshot-on-connect ``session.status``.
+
+    The ``/stream`` endpoint is live-tail only — it never replays the
+    turn-start ``running`` edge — so a client binding or reconnecting mid-turn
+    relies on the getSession snapshot carrying ``running``. On a replica-routed
+    deployment the persisted ``live_status`` row lags the live push, so a bind
+    landing in that window reads ``idle`` and the chat working indicator never
+    relights for the rest of the turn (while the terminal pane, which tails its
+    own channel, keeps its spinner). The stream always connects to the replica
+    holding the runner tunnel, whose ``_session_status_cache`` is authoritative,
+    so re-emitting the cached status here closes the gap directly.
+
+    Only an actively-working turn needs the replay: ``idle`` / ``failed`` are
+    durable on the snapshot (``last_task_error`` and the sticky background
+    tally), so emitting them on connect would add nothing. Returns ``None`` when
+    there is nothing to replay.
+    """
+    status = _session_status_cache.get(session_id)
+    if status not in ("running", "waiting"):
+        return None
+    event = SessionStatusEvent(
+        type="session.status",
+        conversation_id=session_id,
+        status=status,  # type: ignore[arg-type]
+        response_id=_session_active_response_cache.get(session_id),
+        background_task_count=_session_background_task_count_cache.get(session_id),
+        background_tasks=_session_background_tasks_cache.get(session_id),
+    )
+    payload = event.model_dump()
+    if payload.get("response_id") is None:
+        payload.pop("response_id", None)
+    if payload.get("background_task_count") is None:
+        payload.pop("background_task_count", None)
+    if not payload.get("background_tasks"):
+        payload.pop("background_tasks", None)
+    # blocked_on and error are per-edge, not sticky; omit them so a stale value
+    # can't ride the replay. The next live edge carries the current reason.
+    payload.pop("blocked_on", None)
+    payload.pop("error", None)
+    return payload
+
+
 def reconcile_orphaned_running_status(
     session_id: str,
     conversation_store: ConversationStore,
@@ -11872,4 +11915,5 @@ __all__ = [
     "announce_hosts_changed",
     "cancel_managed_launch_tasks",
     "prefetch_session_routing_catalogs",
+    "session_status_snapshot_event",
 ]

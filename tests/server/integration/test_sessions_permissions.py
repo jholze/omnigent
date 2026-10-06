@@ -3195,6 +3195,75 @@ async def test_stream_presence_join_broadcast_and_snapshot(
         await collector.stop()
 
 
+def _sse_status_events(body: str) -> list[dict[str, Any]]:
+    """
+    Parse ``session.status`` frames out of a raw SSE body.
+
+    :param body: The buffered ``text/event-stream`` payload.
+    :returns: Decoded status event dicts, in wire order.
+    """
+    events: list[dict[str, Any]] = []
+    for line in body.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        payload = json.loads(line[len("data: ") :])
+        if payload.get("type") == "session.status":
+            events.append(payload)
+    return events
+
+
+async def test_stream_replays_running_status_on_connect(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    """A bind landing mid-turn relights the chat working indicator from the
+    stream itself: the stream's snapshot-on-connect re-emits the cached live
+    ``running`` status.
+
+    ``/stream`` is live-tail only, so the turn-start ``running`` edge posted
+    before this connect is never re-seen, and a replica-lagged getSession
+    snapshot can read ``idle``. Without the ``_resource_snapshot`` replay this
+    body carries no ``session.status`` frame and the indicator stays dark for
+    the rest of the turn (while the terminal pane, tailing its own channel,
+    keeps its spinner).
+    """
+    agent = await create_test_agent(auth_client, user="alice@example.com")
+    session_id = (await _create_session_as(auth_client, agent["id"], "alice@example.com"))["id"]
+
+    # A running turn's status edge, as the native forwarder posts it. This
+    # populates the authoritative per-replica status cache and is published to
+    # the live stream now — before this test subscribes — so only the
+    # snapshot-on-connect can carry it to a later bind.
+    ack = await auth_client.post(
+        f"/v1/sessions/{session_id}/events",
+        headers={"X-Forwarded-Email": "alice@example.com"},
+        json={
+            "type": "external_session_status",
+            "data": {"status": "running", "response_id": "resp_relight"},
+        },
+    )
+    assert ack.status_code == 202, ack.text
+
+    task = asyncio.create_task(
+        auth_client.get(
+            f"/v1/sessions/{session_id}/stream",
+            headers={"X-Forwarded-Email": "alice@example.com"},
+        )
+    )
+    try:
+        resp = await _end_stream_via_close(session_id, task)
+        assert resp.status_code == 200
+        # An empty list here means the ``_resource_snapshot`` status replay is
+        # missing — a mid-turn bind would never relight.
+        statuses = _sse_status_events(resp.text)
+        assert statuses, f"no session.status frame in stream body: {resp.text[:500]}"
+        assert statuses[0]["status"] == "running"
+        assert statuses[0]["conversation_id"] == session_id
+        assert statuses[0]["response_id"] == "resp_relight"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_stream_disconnect_broadcasts_leave_after_grace(
     auth_client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -514,6 +514,64 @@ def test_publish_session_status_rejects_unknown_status() -> None:
         _publish_session_status("conv_abc", "bogus")
 
 
+def test_session_status_snapshot_event_replays_active_turn() -> None:
+    """``session_status_snapshot_event`` replays the cached live status.
+
+    The ``/stream`` endpoint is live-tail only, so a bind landing mid-turn never
+    re-sees the turn-start ``running`` edge. The snapshot-on-connect re-emits the
+    cached live status (the replica holding the runner tunnel owns the
+    authoritative cache) so the chat working indicator relights even when the
+    getSession snapshot still reads ``idle``. The replayed dict must be the same
+    flat ``session.status`` wire shape a live edge carries, and only an actively
+    working turn is replayed — ``idle``/``failed`` are durable on the snapshot.
+    """
+    from omnigent.runtime import session_stream as cs
+    from omnigent.server.routes._sessions.helpers import session_status_snapshot_event
+    from omnigent.server.routes.sessions import _publish_status as _publish_session_status
+
+    real_publish = cs.publish
+    cs.publish = lambda *_a, **_k: None  # type: ignore[assignment]
+    try:
+        _publish_session_status(
+            "conv_relight_running",
+            "running",
+            response_id="resp_relight",
+            background_task_count=2,
+            background_tasks=[],
+            persist_live_status=False,
+        )
+        event = session_status_snapshot_event("conv_relight_running")
+        assert event is not None
+        assert event["type"] == "session.status"
+        assert event["conversation_id"] == "conv_relight_running"
+        assert event["status"] == "running"
+        assert event["response_id"] == "resp_relight"
+        assert event["background_task_count"] == 2
+        # Per-edge fields never ride a replay: a stale blocked_on/error would
+        # outlive the edge that set it. The next live edge carries the current reason.
+        assert "blocked_on" not in event
+        assert "error" not in event
+        # The replay must validate through the SSE union, like every live edge.
+        assert isinstance(_ADAPTER.validate_python(event), SessionStatusEvent)
+
+        _publish_session_status("conv_relight_waiting", "waiting", persist_live_status=False)
+        waiting = session_status_snapshot_event("conv_relight_waiting")
+        assert waiting is not None
+        assert waiting["status"] == "waiting"
+        assert "response_id" not in waiting
+
+        # A completed/failed turn is durable on the snapshot, so there is
+        # nothing to replay on connect.
+        _publish_session_status("conv_relight_idle", "idle", persist_live_status=False)
+        assert session_status_snapshot_event("conv_relight_idle") is None
+        _publish_session_status("conv_relight_failed", "failed", persist_live_status=False)
+        assert session_status_snapshot_event("conv_relight_failed") is None
+        # An unknown session has no cached status to replay.
+        assert session_status_snapshot_event("conv_relight_never_seen") is None
+    finally:
+        cs.publish = real_publish  # type: ignore[assignment]
+
+
 def test_session_created_event_payload_shape() -> None:
     """``SessionCreatedEvent`` validates the payload shape the runner publishes.
 
