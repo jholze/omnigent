@@ -16,6 +16,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
     RESPONSE_FLOW_CREDIT_BATCH,
     RESPONSE_FLOW_WINDOW_FRAMES,
     HelloFrame,
+    RequestCancelFrame,
     RequestFlowFrame,
     RequestFrame,
     ResponseBodyFrame,
@@ -246,6 +247,42 @@ async def test_tunneled_byte_stream_aclose_cleans_up() -> None:
     await stream.aclose()
 
     assert "req1" not in session.in_flight
+
+
+@pytest.mark.asyncio
+async def test_cancelled_body_wait_sends_request_cancel_before_forgetting_request() -> None:
+    """A disconnect mid-read must cancel the runner before forgetting the request.
+
+    The iterator's teardown runs before the response's ``aclose``; if it forgets
+    the request without cancelling, a flow-controlled runner parked on exhausted
+    credit never learns the consumer left and blocks forever, stranding its open
+    upstream body. The cancel must go out first, exactly once across both paths.
+    """
+    reg = TunnelRegistry()
+    session = reg.register("r1", _NoopWS(), _hello())
+    state = reg.open_request("r1", "req1")
+
+    stream = _TunneledByteStream(reg, "r1", "req1", state)
+    body = stream.__aiter__()
+    # Park the read on an empty queue, then cancel it like a client disconnect.
+    pull = asyncio.ensure_future(anext(body))
+    await asyncio.sleep(0)
+    assert not pull.done()
+    pull.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pull
+    # httpx closes the response stream after the iterator unwinds.
+    await stream.aclose()
+    await asyncio.sleep(0)
+
+    assert "req1" not in session.in_flight
+    cancels: list[RequestCancelFrame] = []
+    while not session.outbound_queue.empty():
+        frame = decode_frame(session.outbound_queue.get_nowait())
+        if isinstance(frame, RequestCancelFrame):
+            cancels.append(frame)
+    assert len(cancels) == 1
+    assert cancels[0].id == "req1"
 
 
 # ── WSTunnelTransport.aclose ────────────────────────────

@@ -16,10 +16,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from omnigent.runner.transports.ws_tunnel.frames import (
-    RESPONSE_FLOW_CREDIT_BATCH,
-    RESPONSE_FLOW_WINDOW_FRAMES,
-)
+from omnigent.runner.transports.ws_tunnel.frames import RESPONSE_FLOW_WINDOW_FRAMES
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runner.transports.ws_tunnel.serve import serve_tunnel
 from omnigent.runner.transports.ws_tunnel.transport import WSTunnelTransport
@@ -30,10 +27,10 @@ _RUNNER_ID = "runner-backpressure-test"
 _CHUNK = 64 * 1024
 # 64 MiB: far more than loopback socket buffers can absorb on the runner's behalf.
 _CHUNKS = 1024
-# Frames the server may hold for one request while its consumer is stalled: at
-# most the send window plus one in-flight credit batch of slack. Derived from
-# the protocol constants so the bound tracks what it is testing.
-_MAX_QUEUED_FRAMES = RESPONSE_FLOW_WINDOW_FRAMES + RESPONSE_FLOW_CREDIT_BATCH
+# Frames the server may hold for one request while its consumer is stalled.
+# The consumer here drains only one frame (< a credit batch), so no credit is
+# returned and the runner cannot send past its initial send window.
+_MAX_QUEUED_FRAMES = RESPONSE_FLOW_WINDOW_FRAMES
 
 
 async def _start_tunnel_server(
@@ -91,6 +88,9 @@ async def _settle(
             last, changed_at = current, time.monotonic()
         elif time.monotonic() - changed_at >= quiet_s:
             return
+    # Still changing at the deadline: fail loudly rather than let the caller
+    # sample a growing queue and conclude production had stopped.
+    raise AssertionError(f"sample did not settle within {timeout_s}s (last={last})")
 
 
 @pytest.mark.asyncio
