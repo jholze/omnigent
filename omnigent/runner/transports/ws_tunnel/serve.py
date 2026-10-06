@@ -171,6 +171,21 @@ _AUTH_REDIRECT_SCHEMES = {"http", "https"}
 _LOGIN_REDIRECT_FATAL_ATTEMPTS = 3
 
 
+# Proactive tunnel renewal (make-before-break). An ingress that caps a
+# WebSocket's absolute lifetime (Databricks Apps severs one after ~24h) would
+# otherwise drop a long-lived tunnel mid-turn when the cap elapses. Renewing
+# ahead of the boundary opens the replacement while the current socket still
+# serves, so the server never sees the runner offline. The default sits just
+# under a 24h cap; the env var below lowers it and a non-positive value disables
+# renewal.
+_RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV = "OMNIGENT_RUNNER_TUNNEL_RENEWAL_INTERVAL_S"
+_DEFAULT_TUNNEL_RENEWAL_INTERVAL_S = 23 * 3600 + 50 * 60
+# Jitter the renewal moment below its interval so a fleet started together does
+# not renew in lockstep and re-synchronise the accept spikes renewal exists to
+# spread. Capped so a long interval still renews within minutes of its target.
+_TUNNEL_RENEWAL_JITTER_CAP_S = 300.0
+
+
 async def dispatch_via_asgi(
     app: _ASGIApp,
     frame: RequestFrame,
@@ -438,15 +453,58 @@ async def serve_tunnel(
                 ),
             )
 
+    renewal_interval_s = _tunnel_renewal_interval_s()
+    # Token the renewal watcher already minted, carried into the next iteration
+    # so the make-before-break replacement reuses it instead of refreshing again.
+    prepared_token: str | None = None
+    # Superseded connections still draining an in-flight turn after a cutover.
+    # Each is reaped — and its disconnect recorded — once its old socket closes.
+    draining: set[asyncio.Task[_CloseDetails]] = set()
+
+    def _reap_drained(task: asyncio.Task[_CloseDetails]) -> None:
+        draining.discard(task)
+        cancelled = task.cancelled()
+        error = None if cancelled else task.exception()
+        record_websocket_disconnected(
+            "runner",
+            error,
+            local_shutdown=cancelled,
+            resumed_from_suspend=False,
+        )
+
+    async def _drain_superseded() -> None:
+        if not draining:
+            return
+        for task in list(draining):
+            task.cancel()
+        await asyncio.gather(*draining, return_exceptions=True)
+        draining.clear()
+
+    async def _prepare_renewal() -> str | None:
+        if auth_token_factory is None:
+            return auth_token
+        token = await asyncio.to_thread(auth_token_factory)
+        if token is None:
+            raise RuntimeError("auth token factory returned no credentials")
+        return token
+
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
             # A shutdown requested between reconnect attempts (no live
             # connection to drain): nothing to flush, just stop looping.
+            await _drain_superseded()
             return
         connected_this_attempt = False
         disconnect_error: BaseException | None = None
         close_details: _CloseDetails | None = None
-        auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
+        renewed = False
+        if prepared_token is not None:
+            # Reuse the token the renewal watcher minted for this cutover
+            # instead of refreshing again at loop top.
+            auth_token = prepared_token
+            prepared_token = None
+        else:
+            auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
         reconnecting = ever_connected
         retry_reason = "connection closed cleanly"
         recycle = False
@@ -458,31 +516,65 @@ async def serve_tunnel(
         connection_id = uuid.uuid4().hex
         try:
             activity_kwargs = {"on_activity": on_activity} if on_activity is not None else {}
-            close_details = await _serve_tunnel_once(
-                app,
-                tunnel_url=tunnel_url,
-                server_url=server_url,
-                runner_id=runner_id,
-                runner_version=runner_version,
-                auth_token=auth_token,
-                tunnel_token=tunnel_token,
-                shutdown_event=shutdown_event,
-                on_graceful_shutdown=on_graceful_shutdown,
-                on_connected=_mark_connected,
-                on_ready=_notify_reconnected if reconnecting else None,
-                on_resume_note=_note_resume_from_suspend,
-                direct_attach_port=direct_attach_port,
-                direct_attach_token=direct_attach_token,
-                connection_id=connection_id,
-                reconnect=reconnecting,
-                attempt=attempt,
-                disconnected_monotonic=disconnected_monotonic,
-                event_dispatcher=event_dispatcher,
-                **activity_kwargs,
+            renewal_signal: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+            conn_task: asyncio.Task[_CloseDetails] = asyncio.ensure_future(
+                _serve_tunnel_once(
+                    app,
+                    tunnel_url=tunnel_url,
+                    server_url=server_url,
+                    runner_id=runner_id,
+                    runner_version=runner_version,
+                    auth_token=auth_token,
+                    tunnel_token=tunnel_token,
+                    shutdown_event=shutdown_event,
+                    on_graceful_shutdown=on_graceful_shutdown,
+                    on_connected=_mark_connected,
+                    on_ready=_notify_reconnected if reconnecting else None,
+                    on_resume_note=_note_resume_from_suspend,
+                    direct_attach_port=direct_attach_port,
+                    direct_attach_token=direct_attach_token,
+                    connection_id=connection_id,
+                    reconnect=reconnecting,
+                    attempt=attempt,
+                    disconnected_monotonic=disconnected_monotonic,
+                    event_dispatcher=event_dispatcher,
+                    renewal_interval_s=renewal_interval_s,
+                    renewal_signal=renewal_signal,
+                    on_prepare_renewal=_prepare_renewal,
+                    **activity_kwargs,
+                )
             )
+            try:
+                await asyncio.wait(
+                    {conn_task, renewal_signal},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except asyncio.CancelledError:
+                conn_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await conn_task
+                if not renewal_signal.done():
+                    renewal_signal.cancel()
+                await _drain_superseded()
+                raise
+            if renewal_signal.done() and not renewal_signal.cancelled() and not conn_task.done():
+                # Make-before-break: a fresh token is ready while this socket
+                # still serves. Drain the old connection while the next iteration
+                # opens the replacement; newest-wins retires it with no gap.
+                prepared_token = renewal_signal.result()
+                renewed = True
+                disconnected_monotonic = None
+                draining.add(conn_task)
+                conn_task.add_done_callback(_reap_drained)
+                delay_s = _INITIAL_RECONNECT_DELAY_S
+                continue
+            if not renewal_signal.done():
+                renewal_signal.cancel()
+            close_details = conn_task.result()
             # A graceful shutdown drains and closes the connection cleanly,
             # then returns here; stop looping instead of reconnecting.
             if shutdown_event is not None and shutdown_event.is_set():
+                await _drain_superseded()
                 return
             delay_s = _INITIAL_RECONNECT_DELAY_S
         except asyncio.CancelledError as exc:
@@ -617,7 +709,9 @@ async def serve_tunnel(
             local_shutdown = (
                 shutdown_event is not None and shutdown_event.is_set()
             ) or isinstance(disconnect_error, asyncio.CancelledError)
-            if connected_this_attempt:
+            if connected_this_attempt and not renewed:
+                # A renewed (superseded) connection records its disconnect when
+                # it finishes draining, via _reap_drained, not here.
                 record_websocket_disconnected(
                     "runner",
                     disconnect_error,
@@ -782,6 +876,81 @@ async def _refresh_auth_token(
     return current_token
 
 
+def _tunnel_renewal_interval_s() -> float | None:
+    """Seconds between proactive make-before-break tunnel renewals.
+
+    Reads ``OMNIGENT_RUNNER_TUNNEL_RENEWAL_INTERVAL_S``; an unset value uses the
+    default (just under a 24h ingress cap) and a non-positive or unparseable
+    value disables proactive renewal.
+
+    :returns: The renewal interval in seconds, or ``None`` when disabled.
+    """
+    raw = os.environ.get(_RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV)
+    if raw is None:
+        return _DEFAULT_TUNNEL_RENEWAL_INTERVAL_S
+    try:
+        interval_s = float(raw)
+    except ValueError:
+        return _DEFAULT_TUNNEL_RENEWAL_INTERVAL_S
+    return interval_s if interval_s > 0 else None
+
+
+def _tunnel_renewal_delay_s(interval_s: float) -> float:
+    """Jittered delay before the next renewal, kept just under *interval_s*.
+
+    :param interval_s: Target renewal interval in seconds.
+    :returns: A delay in ``[interval_s - jitter, interval_s]``.
+    """
+    jitter = min(_TUNNEL_RENEWAL_JITTER_CAP_S, interval_s * 0.01)
+    return random.uniform(interval_s - jitter, interval_s)
+
+
+async def _await_renewal(
+    interval_s: float,
+    renewal_signal: asyncio.Future[str | None],
+    on_prepare_renewal: Callable[[], Awaitable[str | None]],
+    shutdown_event: asyncio.Event | None,
+    runner_id: str,
+) -> None:
+    """Resolve fresh credentials and signal a make-before-break renewal.
+
+    Waits roughly *interval_s* (jittered) after the connection opened, then
+    resolves credentials off the event loop. On success it hands the token to
+    ``serve_tunnel`` through *renewal_signal* so the replacement opens while the
+    current socket still serves. A failed or unavailable refresh keeps the
+    current tunnel and retries on the next interval: a renewal must never tear
+    down a healthy connection it cannot immediately replace.
+
+    :param interval_s: Target renewal interval in seconds.
+    :param renewal_signal: Future resolved with the token for the replacement.
+    :param on_prepare_renewal: Async callable returning the fresh token; raising
+        means credentials are unavailable this round.
+    :param shutdown_event: Graceful-shutdown event; renewal stands down when set.
+    :param runner_id: Runner id for log correlation.
+    :returns: None.
+    """
+    while not renewal_signal.done():
+        await asyncio.sleep(_tunnel_renewal_delay_s(interval_s))
+        if shutdown_event is not None and shutdown_event.is_set():
+            return
+        if renewal_signal.done():
+            return
+        try:
+            token = await on_prepare_renewal()
+        except Exception:  # noqa: BLE001 -- any factory failure keeps the current tunnel
+            _logger.warning(
+                "runner %s tunnel renewal could not resolve credentials; "
+                "keeping the current tunnel and retrying",
+                runner_id,
+                exc_info=True,
+                extra={"session_id": runner_primary_session_id()},
+            )
+            continue
+        if not renewal_signal.done():
+            renewal_signal.set_result(token)
+        return
+
+
 def _websocket_http_status(exc: BaseException) -> int | None:
     """Extract an HTTP response status from a WebSocket handshake error.
 
@@ -851,6 +1020,9 @@ async def _serve_tunnel_once(
     attempt: int = 1,
     disconnected_monotonic: float | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
+    renewal_interval_s: float | None = None,
+    renewal_signal: asyncio.Future[str | None] | None = None,
+    on_prepare_renewal: Callable[[], Awaitable[str | None]] | None = None,
 ) -> _CloseDetails:
     """Serve one WebSocket connection until it closes.
 
@@ -1014,6 +1186,22 @@ async def _serve_tunnel_once(
             watch_for_resume(_on_resume_from_suspend),
             name=f"runner-suspend-watch:{runner_id}",
         )
+        renewal_task: asyncio.Task[None] | None = None
+        if (
+            renewal_interval_s is not None
+            and renewal_signal is not None
+            and on_prepare_renewal is not None
+        ):
+            renewal_task = asyncio.create_task(
+                _await_renewal(
+                    renewal_interval_s,
+                    renewal_signal,
+                    on_prepare_renewal,
+                    shutdown_event,
+                    runner_id,
+                ),
+                name=f"runner-tunnel-renewal:{runner_id}",
+            )
         try:
             if shutdown_event is None:
                 while True:
@@ -1115,6 +1303,10 @@ async def _serve_tunnel_once(
             suspend_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await suspend_task
+            if renewal_task is not None:
+                renewal_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await renewal_task
             await _cancel_dispatch_tasks(dispatch_tasks)
             await _cancel_ws_channels(ws_channels)
     # Read after the context closed the socket: a clean 1000/1001 close ends

@@ -2689,18 +2689,15 @@ async def test_serve_tunnel_resets_backoff_after_stable_connection_drops(
     outcomes = iter(["error", "error", "stable_drop", "stop"])
     sleeps: list[float] = []
     handshakes: list[tuple[int, bool, float | None]] = []
-    # Provide controlled start/end times for the connected attempt and fall
-    # back to the real clock for all other callers (e.g. the asyncio loop).
-    _real_monotonic = serve_module.time.monotonic
-    controlled = [0.0, 6.0]
-    controlled_idx = [0]
+    # Drive the stable attempt's connection age off a semantic flag rather than
+    # a fixed call count: the reconnect loop and the asyncio loop both read the
+    # clock, so a count-based stub is sensitive to incidental loop cycling.
+    connected_flag = [False]
 
     def _fake_monotonic() -> float:
-        if controlled_idx[0] < len(controlled):
-            val = controlled[controlled_idx[0]]
-            controlled_idx[0] += 1
-            return val
-        return _real_monotonic()
+        # 0 before the stable connection is marked, 6 s after, so its drop lands
+        # past the 5 s stability window regardless of other clock reads.
+        return 6.0 if connected_flag[0] else 0.0
 
     async def _serve_once(
         app: Any,
@@ -2738,6 +2735,7 @@ async def test_serve_tunnel_resets_backoff_after_stable_connection_drops(
         if outcome == "stable_drop":
             if on_connected is not None:
                 on_connected()
+            connected_flag[0] = True
             raise ConnectionError("1006 abrupt close")
         raise asyncio.CancelledError
 
