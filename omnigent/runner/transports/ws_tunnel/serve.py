@@ -83,6 +83,13 @@ _logger = logging.getLogger(__name__)
 
 _ASGIApp: TypeAlias = ASGIApp
 
+
+class _UnsetToken:
+    """Marker for 'no renewal-minted token waiting', distinct from a prepared None."""
+
+
+_UNSET = _UnsetToken()
+
 # Reconnect backoff: 0.5 s initial, 10 s cap, ±50% jitter. The
 # jitter spreads simultaneous reconnects from many runners across
 # each backoff window so a server restart doesn't see a synchronised
@@ -456,9 +463,10 @@ async def serve_tunnel(
             )
 
     renewal_interval_s = _tunnel_renewal_interval_s()
-    # Token the renewal watcher already minted, carried into the next iteration
-    # so the make-before-break replacement reuses it instead of refreshing again.
-    prepared_token: str | None = None
+    # Token the renewal watcher minted, carried to the next iteration so the
+    # make-before-break replacement reuses it. The _UNSET sentinel keeps a
+    # prepared no-auth None distinct from "nothing prepared" to avoid re-minting.
+    prepared_token: str | None | _UnsetToken = _UNSET
     # The iteration right after a cutover opens a planned replacement, not a
     # reconnect: suppress the catch-up scan and reconnect telemetry so a renewal
     # is not recorded as a server-seen outage.
@@ -476,6 +484,13 @@ async def serve_tunnel(
         # the main path also treats as a local shutdown; keep the two aligned so
         # a teardown is not logged as an unexpected server-seen drop.
         local_shutdown = cancelled or (shutdown_event is not None and shutdown_event.is_set())
+        if error is not None:
+            _logger.info(
+                "superseded runner tunnel ended with %s during drain: %s",
+                type(error).__name__,
+                error,
+                extra={"session_id": runner_primary_session_id()},
+            )
         record_websocket_disconnected(
             "runner",
             error,
@@ -530,9 +545,9 @@ async def serve_tunnel(
             disconnect_error: BaseException | None = None
             close_details: _CloseDetails | None = None
             renewed = False
-            if prepared_token is not None:
+            if not isinstance(prepared_token, _UnsetToken):
                 auth_token = prepared_token
-                prepared_token = None
+                prepared_token = _UNSET
             else:
                 auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
             reconnecting = ever_connected and not renewal_cutover
