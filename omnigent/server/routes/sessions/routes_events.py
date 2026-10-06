@@ -230,6 +230,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _mark_dispatch_in_flight,
     _maybe_relaunch_managed_sandbox,
     _maybe_wake_stale_resumable_managed_sandbox,
+    _native_mirror_lock,
     _persist_external_antigravity_subagent_start,
     _persist_external_codex_subagent_start,
     _persist_external_conversation_item,
@@ -257,6 +258,7 @@ from omnigent.server.schemas import (
 from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.subagent_activity import (
+    CLAUDE_SUBAGENT_OUTCOME_LABEL,
     native_subagent_terminal_status,
     record_subagent_activity,
 )
@@ -1761,6 +1763,17 @@ def register_events_routes(
                     f"{body.type} data.response_id must be a string",
                     code=ErrorCode.INVALID_INPUT,
                 )
+            if body.type == _SUBAGENT_STATUS_TYPE:
+                # A quiet transcript can belong to a running tool; only a result ends the task.
+                return {"queued": False}
+            if (
+                status == "running"
+                and conv.labels.get("omnigent.wrapper") == "claude-code-native-ui-subagent"
+                and conv.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL)
+                in {"completed", "failed", "cancelled"}
+            ):
+                # Final child transcript chunks can arrive after the parent received its result.
+                return {"queued": False}
             # ``None`` (field absent) = no information; leave the sticky
             # tally untouched (the PTY-activity ``idle`` carries none). An
             # explicit ``0`` from a ``Stop`` hook is authoritative and clears
@@ -1785,18 +1798,6 @@ def register_events_routes(
             blocked_on = (
                 raw_blocked_on if isinstance(raw_blocked_on, str) and raw_blocked_on else None
             )
-            if body.type == _SUBAGENT_STATUS_TYPE:
-                # A transcript lull publishes idle but is not a runner completion.
-                _publish_status(
-                    session_id,
-                    "idle",
-                    None,
-                    response_id=response_id,
-                    background_task_count=bg_count,
-                    background_tasks=bg_tasks,
-                    blocked_on=blocked_on,
-                )
-                return {"queued": False}
             assert isinstance(status, str)
             # A background-task ``waiting`` marks an ended turn, so deliver it
             # as ``idle``: the session takes a new message now, and for a
@@ -2081,12 +2082,14 @@ def register_events_routes(
             await _handle_external_session_todos(session_id, body, conversation_store)
             return {"queued": False}
         if body.type == _EXTERNAL_SUBAGENT_START_TYPE:
-            child_id = await _persist_external_subagent_start(
-                session_id,
-                conv,
-                body,
-                conversation_store,
-            )
+            # Child discovery and parent results must agree on the initial task state.
+            async with _native_mirror_lock(session_id):
+                child_id = await _persist_external_subagent_start(
+                    session_id,
+                    conv,
+                    body,
+                    conversation_store,
+                )
             # Returned to the claude-native forwarder so it can address
             # subsequent ``external_conversation_item`` /
             # ``external_session_status`` events to the child id.

@@ -637,6 +637,9 @@ class SessionResourceRegistry:
         """Adopt an externally-published *status* as the dedup baseline."""
         with self._lock:
             self._published_session_status[session_id] = (status, None)
+            poller = self._status_pollers.get(session_id)
+            if poller is not None:
+                poller.note_external_status(status)
 
     def resync_session_statuses(self) -> None:
         """Re-arm every status source so it republishes what it already sent.

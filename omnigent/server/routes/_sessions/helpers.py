@@ -291,6 +291,7 @@ from omnigent.server.schemas import (
     ToolOutputDeltaEvent,
 )
 from omnigent.server.session_metadata_logging import harness_attributes
+from omnigent.server.subagent_activity import CLAUDE_SUBAGENT_OUTCOME_LABEL
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -10730,6 +10731,14 @@ def _child_session_summary_from_conversation(
         busy = False
     last_task_error = _last_task_error_from_labels(labels)
     current_task_status = _child_session_current_task_status_from_cached_status(cached_status)
+    if _is_claude_native_subagent(conv):
+        outcome = labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL)
+        if outcome in {"completed", "failed", "cancelled"}:
+            busy = False
+            current_task_status = outcome
+        elif cached_status == "idle":
+            # Older runners may still report transcript inactivity as idle.
+            current_task_status = None
     if last_task_error is not None:
         current_task_status = "failed"
 

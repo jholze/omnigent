@@ -9,6 +9,7 @@ falls back to the PTY watcher when the file never appears or vanishes.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -43,6 +44,7 @@ def _write_session_file(
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{pid}.json"
+    previous_mtime = path.stat().st_mtime if path.exists() else 0
     path.write_text(
         json.dumps(
             {
@@ -58,6 +60,8 @@ def _write_session_file(
         ),
         encoding="utf-8",
     )
+    mtime = max(path.stat().st_mtime, previous_mtime + 1)
+    os.utime(path, (mtime, mtime))
     return path
 
 
@@ -108,8 +112,6 @@ def test_resolve_scan_skips_stale_files(tmp_path: Path) -> None:
     sessions = tmp_path / "sessions"
     stale = _write_session_file(sessions, pid=5, session_id="sid", status="idle")
     old = time.time() - 10_000
-    import os
-
     os.utime(stale, (old, old))
     # pid unknown, so only the scan runs — the stale file is filtered out.
     path = resolve_status_file(pane_pid=None, expected_session_id="sid", config_dir=tmp_path)

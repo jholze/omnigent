@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -223,6 +224,38 @@ def _find_false_notice(items: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _assert_child_working(page: Page, base_url: str, parent_id: str, child_id: str) -> None:
+    """Check the child status through each desktop entry point and the API."""
+    children = httpx.get(
+        f"{base_url}/v1/sessions/{parent_id}/child_sessions", timeout=15.0
+    ).json()["data"]
+    child = next(child for child in children if child["id"] == child_id)
+    assert child["busy"] and child["current_task_status"] == "in_progress", child
+
+    rail = page.get_by_role("complementary", name="Workspace")
+    rail.get_by_role("tab", name=re.compile("^Agents")).click()
+    row = rail.locator(f'[data-child-session-id="{child_id}"]')
+    expect(row.get_by_test_id("subagent-status-avatar")).to_have_attribute(
+        "aria-label", "Working", timeout=30_000
+    )
+    rail.get_by_test_id("view-mode-graph").click()
+    expect(rail.locator(f'.react-flow__node[data-id="{child_id}"]')).to_contain_text(
+        "Working", timeout=30_000
+    )
+    rail.get_by_test_id("view-mode-list").click()
+
+    pill = page.get_by_test_id("subagent-task-pill")
+    expect(pill).to_have_attribute("aria-label", "1 sub-agent: 1 active")
+    pill.click()
+    expect(page.get_by_role("status").filter(has_text="Working")).to_be_visible()
+    page.keyboard.press("Escape")
+
+    row.click()
+    expect(page.get_by_test_id("working-indicator")).to_be_visible(timeout=30_000)
+    page.get_by_role("link", name="Back to parent session").click()
+    expect(page).to_have_url(re.compile(re.escape(f"/c/{parent_id}") + "$"))
+
+
 def test_midtask_lull_must_not_deliver_false_completion(
     page: Page,
     seeded_session: tuple[str, str],
@@ -311,6 +344,7 @@ def test_midtask_lull_must_not_deliver_false_completion(
     # Show the sub-agent in the rail so the recording carries the live
     # "sub-agent exists and is running" state alongside the chat.
     open_right_rail(page)
+    _assert_child_working(page, base_url, session_id, child_id)
 
     # 5. No new transcript records or completion record: the child is still
     # in a long tool call. Tick past five seconds to publish its idle observation.
@@ -329,6 +363,38 @@ def test_midtask_lull_must_not_deliver_false_completion(
         "forwarder did not report idle over the lull; "
         f"last_status={idle_entry.last_status if idle_entry else None!r}"
     )
+    _assert_child_working(page, base_url, session_id, child_id)
+
+    # A new transcript record after the lull remains visible and working.
+    child_transcript = (
+        transcript_path.parent / transcript_path.stem / "subagents" / f"agent-{_SUBAGENT_ID}.jsonl"
+    )
+    resumed_text = "The repository is cloned; continuing the research."
+    with child_transcript.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "isSidechain": True,
+                    "type": "assistant",
+                    "uuid": "sa-assistant-2",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": resumed_text}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    state = _run_forwarder_tick(
+        base_url=base_url,
+        parent_session_id=session_id,
+        bridge_dir=bridge_dir,
+        transcript_path=transcript_path,
+        state=state,
+        trackers=trackers,
+    )
+    assert any(resumed_text in _item_text(item) for item in _session_items(base_url, child_id))
+    _assert_child_working(page, base_url, session_id, child_id)
 
     # 6. Keep the parent working, exactly as the reported orchestrators were:
     # drive a follow-up turn through the composer. The runner delivers a
@@ -359,22 +425,21 @@ def test_midtask_lull_must_not_deliver_false_completion(
     if notice is not None:
         # Reproduced. Let the false notice render on the open session page so
         # the failure footage ends on the user-visible outcome, then fail
-        # with the live evidence. The promised "result" does not exist: the
-        # child transcript still holds only its first intermediate message.
+        # with the evidence: the child still has no completion record.
         with __import__("contextlib").suppress(AssertionError):
             expect(page.get_by_text(_FALSE_NOTICE_MARKER, exact=False).first).to_be_visible(
                 timeout=45_000
             )
             page.wait_for_timeout(3_000)
         child_texts = [_item_text(item) for item in _session_items(base_url, child_id)]
-        has_only_intermediate = any(_INTERMEDIATE_TEXT in text for text in child_texts)
+        has_intermediate = any(_INTERMEDIATE_TEXT in text for text in child_texts)
         raise AssertionError(
             "A bare mid-task transcript lull (sub-agent still running, no "
             "done record) was promoted to a terminal 'completed' delivery: "
             f"the parent received the false notice {notice!r} while the child "
             f"sub-agent {child_id!r} was still mid-task "
-            f"(its transcript holds only the intermediate message="
-            f"{has_only_intermediate}, no completion). This is the false "
+            f"(its transcript holds the intermediate message="
+            f"{has_intermediate}, no completion). This is the false "
             "'sub-agent finished (completed)' notification bug."
         )
 
@@ -386,3 +451,35 @@ def test_midtask_lull_must_not_deliver_false_completion(
     assert any(_INTERMEDIATE_TEXT in _item_text(item) for item in child_items), (
         "sub-agent child conversation lost its mirrored transcript items"
     )
+
+    # Claude's parent receives an explicit Agent result only once the work is done.
+    completed = httpx.post(
+        f"{base_url}/v1/sessions/{session_id}/events",
+        json={
+            "type": "external_conversation_item",
+            "data": {
+                "source_id": "agent-return",
+                "item_type": "function_call_output",
+                "item_data": {"call_id": _TOOL_USE_ID, "output": "Research complete."},
+                "subagent_return_id": _SUBAGENT_ID,
+            },
+        },
+        timeout=30.0,
+    )
+    completed.raise_for_status()
+    children = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}/child_sessions", timeout=15.0
+    ).json()["data"]
+    child = next(child for child in children if child["id"] == child_id)
+    assert not child["busy"] and child["current_task_status"] == "completed", child
+    rail = page.get_by_role("complementary", name="Workspace")
+    row = rail.locator(f'[data-child-session-id="{child_id}"]')
+    expect(row.get_by_test_id("subagent-status-avatar")).to_have_attribute(
+        "aria-label", "Done", timeout=30_000
+    )
+    expect(page.get_by_test_id("subagent-task-pill")).to_have_count(0)
+    rail.get_by_test_id("view-mode-graph").click()
+    expect(rail.locator(f'.react-flow__node[data-id="{child_id}"]')).not_to_contain_text("Working")
+    rail.get_by_test_id("view-mode-list").click()
+    row.click()
+    expect(page.get_by_test_id("working-indicator")).to_have_count(0)

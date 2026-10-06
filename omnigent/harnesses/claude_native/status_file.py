@@ -417,6 +417,10 @@ class SessionStatusPoller:
         self._last_mtime = None
         self._last_edge = None
 
+    def note_external_status(self, status: str) -> None:
+        """Adopt a hook's status without replaying the file's older contents."""
+        self._last_edge = (status, None)
+
     @property
     def blocked_on(self) -> str | None:
         """Why Claude is parked, when it is parked on a dialog.

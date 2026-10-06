@@ -8,12 +8,16 @@ run instead of once per item.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import uuid as _uuid_mod
+from contextlib import asynccontextmanager
 from itertools import count
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -681,3 +685,93 @@ def test_items_without_source_id_have_no_stable_id() -> None:
     assert appended[0].stable_id is None
     assert appended[1].stable_id == _stable_id("has_src")
     assert appended[2].stable_id is None
+
+
+async def test_parent_result_waits_for_child_registration(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent registration cannot reopen a child after its parent received the result."""
+    from omnigent.server import subagent_activity
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation(agent_id=_uuid_mod.uuid4().hex)
+    published = MagicMock()
+    monkeypatch.setattr("omnigent.server.routes._sessions.helpers._publish_status", published)
+    registration_paused = asyncio.Event()
+    release_registration = asyncio.Event()
+    result_waiting = asyncio.Event()
+    read_completion = subagent_activity._recorded_completion_status
+    mirror_lock = orchestration_mod._native_mirror_lock
+
+    async def pause_after_completion_lookup(*args: Any) -> str | None:
+        outcome = await read_completion(*args)
+        registration_paused.set()
+        await release_registration.wait()
+        return outcome
+
+    @asynccontextmanager
+    async def observe_result_lock(session_id: str):
+        result_waiting.set()
+        async with mirror_lock(session_id):
+            yield
+
+    monkeypatch.setattr(
+        subagent_activity, "_recorded_completion_status", pause_after_completion_lookup
+    )
+    monkeypatch.setattr(orchestration_mod, "_native_mirror_lock", observe_result_lock)
+    app = _make_client(store).app  # type: ignore[arg-type]
+    async with (
+        asyncio.timeout(10),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client,
+        asyncio.TaskGroup() as requests,
+    ):
+        registration = requests.create_task(
+            client.post(
+                f"/sessions/{parent.id}/events",
+                json={
+                    "type": "external_subagent_start",
+                    "data": {
+                        "subagent_id": "agent-1",
+                        "agent_type": "Explore",
+                        "description": "Inspect authentication",
+                        "tool_use_id": "tool-1",
+                    },
+                },
+            )
+        )
+        await registration_paused.wait()
+        assert mirror_lock(parent.id).locked()
+        result = requests.create_task(
+            client.post(
+                f"/sessions/{parent.id}/events",
+                json=[
+                    {
+                        "type": "external_conversation_item",
+                        "data": {
+                            "source_id": "child-result",
+                            "response_id": "parent-turn",
+                            "item_type": "function_call_output",
+                            "item_data": {"call_id": "tool-1", "output": "Done"},
+                            "subagent_return_id": "agent-1",
+                        },
+                    }
+                ],
+            )
+        )
+        await result_waiting.wait()
+        assert not result.done()
+        release_registration.set()
+
+    assert registration.result().status_code == 202, registration.result().text
+    assert result.result().status_code == 202, result.result().text
+    child_id = registration.result().json()["child_session_id"]
+    child = store.get_conversation(child_id)
+    assert child is not None
+    assert child.labels[subagent_activity.CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+    assert [call.args for call in published.call_args_list] == [
+        (child_id, "running"),
+        (child_id, "idle"),
+    ]

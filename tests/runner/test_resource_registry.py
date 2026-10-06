@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Sequence
@@ -529,6 +530,9 @@ class _FakeStatusPoller:
     def resync(self) -> None:
         self.resyncs += 1
 
+    def note_external_status(self, status: str) -> None:
+        pass
+
     def emit(self, status: str, blocked_on: str | None = None) -> None:
         """Simulate the file reporting a new status."""
         self._on_status(status, blocked_on)
@@ -708,6 +712,42 @@ async def test_hook_status_resyncs_watcher_dedup(tmp_path: Path) -> None:
     await asyncio.sleep(0)
     assert statuses == ["running", "running"]
     del callbacks
+
+
+def test_hook_idle_preserves_the_next_busy_file_edge(tmp_path: Path) -> None:
+    """A missed file idle must not hide the next turn or replay stale busy."""
+    from omnigent.harnesses.claude_native.status_file import SessionStatusPoller
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    path = sessions / "1.json"
+    path.write_text(json.dumps({"kind": "interactive", "sessionId": "s", "status": "busy"}))
+    registry = SessionResourceRegistry()
+    published: list[str] = []
+
+    def publish(status: str, blocked_on: str | None) -> None:
+        if registry._claim_status_edge("s", status, blocked_on):
+            published.append(status)
+
+    poller = SessionStatusPoller(
+        on_status=publish,
+        pane_pid_getter=lambda: 1,
+        session_id_getter=lambda: "s",
+        config_dir=tmp_path,
+    )
+    registry._status_pollers["s"] = poller
+    poller.tick()
+    assert published == ["running"]
+
+    registry.note_external_session_status("s", "idle")
+    poller.tick()
+    assert published == ["running"]
+
+    # Claude rewrites busy after an idle interval between polls.
+    changed_at = path.stat().st_mtime + 1
+    os.utime(path, (changed_at, changed_at))
+    poller.tick()
+    assert published == ["running", "running"]
 
 
 @pytest.mark.asyncio

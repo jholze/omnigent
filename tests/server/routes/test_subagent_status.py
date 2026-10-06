@@ -1,4 +1,4 @@
-"""Subagent inactivity publishes idle status without delivering runner completion."""
+"""Subagent inactivity preserves work until an authoritative terminal outcome."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from omnigent.server.routes import sessions
 from omnigent.server.routes._sessions import common
 from omnigent.server.routes.sessions import routes_events
 from omnigent.server.schemas import BackgroundTaskInfo, ErrorDetail
+from omnigent.server.subagent_activity import CLAUDE_SUBAGENT_OUTCOME_LABEL
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
@@ -147,49 +148,21 @@ async def status_route(
 
 @pytest.mark.parametrize("is_child", [True, False], ids=["child", "top-level"])
 @pytest.mark.parametrize(
-    ("optional", "wire_fields", "count", "tasks"),
+    "optional",
     [
-        pytest.param({}, {}, 2, [_BACKGROUND_TASK], id="bare"),
-        pytest.param(
-            {
-                "response_id": "resp_turn",
-                "background_task_count": 1,
-                "background_tasks": [_BACKGROUND_TASK.model_dump()],
-                "blocked_on": "permission",
-            },
-            {
-                "response_id": "resp_turn",
-                "background_task_count": 1,
-                "background_tasks": [_BACKGROUND_TASK.model_dump()],
-                "blocked_on": "permission",
-            },
-            1,
-            [_BACKGROUND_TASK],
-            id="optional-fields",
-        ),
-        pytest.param(
-            {"response_id": None, "background_task_count": 0},
-            {"background_task_count": 0},
-            None,
-            None,
-            id="clear-background",
-        ),
-        pytest.param(
-            {"background_task_count": True, "background_tasks": "invalid", "blocked_on": 1},
-            {},
-            2,
-            [_BACKGROUND_TASK],
-            id="best-effort-fields",
-        ),
+        {},
+        {
+            "response_id": "resp_turn",
+            "background_task_count": 1,
+            "background_tasks": [_BACKGROUND_TASK.model_dump()],
+            "blocked_on": "permission",
+        },
+        {"response_id": None, "background_task_count": 0},
+        {"background_task_count": True, "background_tasks": "invalid", "blocked_on": 1},
     ],
 )
-async def test_subagent_idle_publishes_status_without_completion(
-    status_route: _StatusRoute,
-    is_child: bool,
-    optional: dict[str, Any],
-    wire_fields: dict[str, Any],
-    count: int | None,
-    tasks: list[BackgroundTaskInfo] | None,
+async def test_subagent_idle_does_not_complete_active_work(
+    status_route: _StatusRoute, is_child: bool, optional: dict[str, Any]
 ) -> None:
     route = status_route
     sid = route.child_id if is_child else route.parent_id
@@ -201,103 +174,53 @@ async def test_subagent_idle_publishes_status_without_completion(
     assert response.json() == {"queued": False}
     await _flush_live_state()
 
-    assert common._session_status_cache[sid] == "idle"
-    assert sid not in common._session_active_response_cache
-    assert common._session_background_task_count_cache.get(sid) == count
-    assert common._session_background_tasks_cache.get(sid) == tasks
+    assert common._session_status_cache[sid] == "running"
+    assert common._session_active_response_cache[sid] == "resp_active"
+    assert common._session_background_task_count_cache[sid] == 2
+    assert common._session_background_tasks_cache[sid] == [_BACKGROUND_TASK]
     conv = route.store.get_conversation(sid)
-    assert conv is not None and conv.live_status == "idle"
+    assert conv is not None and conv.live_status == "running"
     assert route.store.list_items(sid).data == []
-    runs, _ = route.scheduled.list_runs(route.task_id)
-    run = next(run for run in runs if run.conversation_id == sid)
-    assert run.status == "succeeded"
-    assert run.finished_at is not None
-
-    events = [(call.args[0], call.args[1]) for call in route.published.call_args_list]
-    assert [event for target, event in events if target == sid] == [
-        {
-            "sequence_number": None,
-            "type": "session.status",
-            "conversation_id": sid,
-            "status": "idle",
-            "error": None,
-            **wire_fields,
-        }
-    ]
-    if is_child:
-        parent_events = [event for target, event in events if target == route.parent_id]
-        assert len(parent_events) == 1
-        assert parent_events[0]["type"] == "session.child_session.updated"
-        assert parent_events[0]["child_session_id"] == sid
-        assert parent_events[0]["child"]["busy"] is False
-        assert common._session_status_cache[route.parent_id] == "running"
-        assert common._session_active_response_cache[route.parent_id] == "resp_active"
-        assert (
-            next(run for run in runs if run.conversation_id == route.parent_id).status == "running"
-        )
-    else:
-        assert len(events) == 1
-    assert route.forwarded == []
+    assert route.scheduled.get_running_run_by_conversation(sid) is not None
+    route.published.assert_not_called()
     route.telemetry.assert_not_called()
+    assert route.forwarded == []
 
 
 @pytest.mark.parametrize("fail_idle_top_level", [False, True])
-async def test_offline_sweep_refreshes_child_status_after_idle_observation(
+async def test_subagent_lull_does_not_hide_a_later_disconnect(
     status_route: _StatusRoute, fail_idle_top_level: bool
 ) -> None:
     route = status_route
     snapshot = route.store.get_conversation(route.child_id)
     assert snapshot is not None and snapshot.live_status == "running"
-
     response = await route.client.post(
         f"/v1/sessions/{route.child_id}/events",
         json={"type": "subagent.status", "data": {"idle": True}},
     )
     assert response.status_code == 202, response.text
     await _flush_live_state()
-    # Another replica's sweep has an older row and no local turn edges.
     common._session_status_cache.pop(route.child_id)
-    route.published.reset_mock()
 
-    with capture_debug_rows("server") as rows:
-        await sessions._mark_runner_sessions_offline(
-            [snapshot],
-            ErrorDetail(code="runner_disconnected", message="Runner disconnected unexpectedly."),
-            route.store,
-            fail_idle_top_level=fail_idle_top_level,
-        )
-        await _flush_live_state()
-
-    child = route.store.get_conversation(route.child_id)
-    assert child is not None and child.live_status == "idle"
-    assert sessions._last_task_error_from_labels(child.labels) is None
-    assert route.store.list_items(route.parent_id).data == []
-    route.published.assert_not_called()
-    assert route.forwarded == []
-
-    decision = next(row for row in rows if row["event_name"] == "runner_disconnect_decision")
-    assert decision["session_id"] == route.child_id
-    assert decision["level"] == "WARNING"
-    assert not any(row["event_name"] == "session_turn_failed" for row in rows)
-    assert (
-        decision["attributes"].items()
-        >= {
-            "origin": "runner_offline_sweep",
-            "decision": "idle_no_failure",
-            "status_source": "persisted",
-            "persisted_session_status": "idle",
-            "snapshot_session_status": "running",
-            "parent_session_id": route.parent_id,
-            "session_kind": "sub_agent",
-            "status_lookup": "found",
-        }.items()
+    await sessions._mark_runner_sessions_offline(
+        [snapshot],
+        ErrorDetail(code="runner_disconnected", message="Runner disconnected unexpectedly."),
+        route.store,
+        fail_idle_top_level=fail_idle_top_level,
     )
+    await _flush_live_state()
+    child = route.store.get_conversation(route.child_id)
+    assert child is not None and child.live_status == "failed"
+    error = sessions._last_task_error_from_labels(child.labels)
+    assert error is not None and error["code"] == "runner_disconnected"
+    assert route.scheduled.get_running_run_by_conversation(route.child_id) is None
 
 
 async def test_subagent_idle_preserves_failed_status(status_route: _StatusRoute) -> None:
     route = status_route
     sid = route.child_id
     common._session_status_cache[sid] = "failed"
+    common._session_active_response_cache.pop(sid)
     route.store.set_session_live_status(sid, "failed")
     response = await route.client.post(
         f"/v1/sessions/{sid}/events", json={"type": "subagent.status", "data": {"idle": True}}
@@ -311,6 +234,38 @@ async def test_subagent_idle_preserves_failed_status(status_route: _StatusRoute)
     assert route.scheduled.get_running_run_by_conversation(sid) is not None
     route.published.assert_not_called()
     route.telemetry.assert_not_called()
+    assert route.forwarded == []
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+async def test_child_result_survives_late_transcript_status(
+    status_route: _StatusRoute, outcome: str
+) -> None:
+    route = status_route
+    sid = route.child_id
+    status = "failed" if outcome == "failed" else "idle"
+    route.store.set_labels(
+        sid,
+        {
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            CLAUDE_SUBAGENT_OUTCOME_LABEL: outcome,
+        },
+    )
+    route.store.set_session_live_status(sid, status)
+    common._session_status_cache[sid] = status
+    for body in (
+        {"type": "external_session_status", "data": {"status": "running"}},
+        {"type": "subagent.status", "data": {"idle": True}},
+    ):
+        response = await route.client.post(f"/v1/sessions/{sid}/events", json=body)
+        assert response.status_code == 202, response.text
+    await _flush_live_state()
+    child = route.store.get_conversation(sid)
+    assert child is not None and child.live_status == status
+    summary = sessions._child_session_summary_from_conversation(child, route.parent_id, None)
+    assert summary.busy is False
+    assert summary.current_task_status == outcome
+    route.published.assert_not_called()
     assert route.forwarded == []
 
 

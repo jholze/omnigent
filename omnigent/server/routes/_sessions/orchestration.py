@@ -3100,18 +3100,19 @@ async def _persist_external_conversation_items(
         except Exception as exc:  # noqa: BLE001 — re-raised once the valid prefix is applied
             error = exc
             break
-    markers = [marker for item in items for marker in claude_subagent_completion_markers(item)]
-    persisted_items = (
-        (await asyncio.to_thread(conversation_store.append, session_id, [*items, *markers]))[
-            : len(items)
-        ]
-        if items
-        else []
-    )
-    for body, persisted in zip(bodies[: len(items)], persisted_items, strict=True):
-        if not persisted.deduplicated:
-            _publish_persisted_external_item(session_id, body, persisted)
-        await record_claude_subagent_return(session_id, persisted, conversation_store)
+    async with _native_mirror_lock(session_id):
+        markers = [marker for item in items for marker in claude_subagent_completion_markers(item)]
+        persisted_items = (
+            (await asyncio.to_thread(conversation_store.append, session_id, [*items, *markers]))[
+                : len(items)
+            ]
+            if items
+            else []
+        )
+        for body, persisted in zip(bodies[: len(items)], persisted_items, strict=True):
+            if not persisted.deduplicated:
+                _publish_persisted_external_item(session_id, body, persisted)
+            await record_claude_subagent_return(session_id, persisted, conversation_store)
     if error is not None:
         raise error
     return [persisted.id for persisted in persisted_items]

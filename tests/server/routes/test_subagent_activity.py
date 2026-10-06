@@ -12,7 +12,10 @@ from omnigent.server.routes._sessions.orchestration import (
     _persist_external_conversation_items,
 )
 from omnigent.server.schemas import SessionEventInput
-from omnigent.server.subagent_activity import record_subagent_activity
+from omnigent.server.subagent_activity import (
+    CLAUDE_SUBAGENT_OUTCOME_LABEL,
+    record_subagent_activity,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
 
@@ -112,6 +115,14 @@ def _message(text: str) -> dict[str, Any]:
             "failed",
         ),
         (
+            _message(
+                "<task-notification><task-id>agent-1</task-id><status>killed</status>"
+                "</task-notification>"
+            ),
+            None,
+            "cancelled",
+        ),
+        (
             {"call_id": "tool-1", "output": "Async agent launched successfully. agentId: agent-1"},
             None,
             None,
@@ -119,7 +130,16 @@ def _message(text: str) -> dict[str, Any]:
         ({"call_id": "tool-1", "output": '{"status":"failed","agentId":"agent-1"}'}, None, None),
         (_message('<teammate-message teammate_id="reviewer">Hi</teammate-message>'), None, None),
     ],
-    ids=["tool", "handback", "notification", "failure", "launch", "unconfirmed", "chatter"],
+    ids=[
+        "tool",
+        "handback",
+        "notification",
+        "failure",
+        "cancelled",
+        "launch",
+        "unconfirmed",
+        "chatter",
+    ],
 )
 @pytest.mark.asyncio
 async def test_claude_completion_survives_retries_and_late_child_discovery(
@@ -129,9 +149,12 @@ async def test_claude_completion_survives_retries_and_late_child_discovery(
     expected: str | None,
     late: bool,
     batched: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     parent = store.create_conversation()
+    publish_status = Mock()
+    monkeypatch.setattr("omnigent.server.routes._sessions.helpers._publish_status", publish_status)
 
     async def register_child() -> str:
         child = store.create_conversation(
@@ -140,6 +163,7 @@ async def test_claude_completion_survives_retries_and_late_child_discovery(
         store.set_labels(
             child.id,
             {
+                "omnigent.wrapper": "claude-code-native-ui-subagent",
                 "omnigent.claude_native.subagent_id": "agent-1",
                 "omnigent.claude_native.tool_use_id": "tool-1",
                 "omnigent.claude_native.description": "Inspect authentication",
@@ -219,3 +243,156 @@ async def test_claude_completion_survives_retries_and_late_child_discovery(
         "title": "Inspect authentication",
         **({"status": expected} if expected else {}),
     }
+    child = store.get_conversation(child_id)
+    assert child is not None
+    assert child.labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == (expected or "")
+    assert publish_status.call_args.args == (
+        child_id,
+        "running" if expected is None else "failed" if expected == "failed" else "idle",
+    )
+    if late and expected:
+        assert all(call.args[1] != "running" for call in publish_status.call_args_list)
+
+
+@pytest.mark.parametrize("tool_name", ["Agent", "Task"])
+@pytest.mark.asyncio
+async def test_claude_resume_rejects_previous_invocation_completion(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tool_name: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation()
+    child = store.create_conversation(
+        kind="sub_agent",
+        parent_conversation_id=parent.id,
+        labels={
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            "omnigent.claude_native.subagent_id": "agent-1",
+            "omnigent.claude_native.tool_use_id": "tool-1",
+        },
+    )
+    publish_status = Mock()
+    monkeypatch.setattr("omnigent.server.routes._sessions.helpers._publish_status", publish_status)
+
+    async def deliver(source: str, data: dict[str, Any], item_type: str) -> None:
+        await _persist_external_conversation_items(
+            parent.id,
+            [
+                SessionEventInput(
+                    type="external_conversation_item",
+                    data={
+                        "source_id": source,
+                        "response_id": "parent-turn",
+                        "item_type": item_type,
+                        "item_data": data,
+                        "subagent_return_id": "agent-1"
+                        if item_type == "function_call_output" or source == "old-handback"
+                        else None,
+                    },
+                )
+            ],
+            store,
+        )
+
+    async def complete(call_id: str) -> None:
+        await deliver(
+            call_id + "-result", {"call_id": call_id, "output": "Done"}, "function_call_output"
+        )
+
+    await record_subagent_activity(child.id, "delegated", store)
+    await complete("tool-1")
+    old_handback = _message('<agent-message from="reviewer">Done</agent-message>')
+    old_notification = _message(
+        "<task-notification><task-id>agent-1</task-id>"
+        "<status>completed</status></task-notification>"
+    )
+    await deliver("old-handback", old_handback, "message")
+    await deliver("old-task-notification", old_notification, "message")
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+    publish_status.reset_mock()
+    await _persist_external_conversation_items(
+        child.id,
+        [
+            SessionEventInput(
+                type="external_conversation_item",
+                data={
+                    "source_id": "delayed-child-output",
+                    "response_id": "child-turn",
+                    "item_type": "message",
+                    "item_data": {
+                        "role": "assistant",
+                        "agent": "Claude",
+                        "content": [{"type": "output_text", "text": "Final result"}],
+                    },
+                },
+            )
+        ],
+        store,
+    )
+    publish_status.assert_not_called()
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+
+    resume = {
+        "agent": "Claude",
+        "name": tool_name,
+        "call_id": "tool-2",
+        "arguments": '{"resume":"agent-1","prompt":"Continue"}',
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "set_labels", Mock(side_effect=RuntimeError("write failed")))
+        await deliver("resume", resume, "function_call")
+    publish_status.assert_not_called()
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+    await deliver("resume", resume, "function_call")
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == ""
+    publish_status.assert_called_once_with(child.id, "running")
+    publish_status.reset_mock()
+    await record_subagent_activity(child.id, "delegated", store)
+    await complete("tool-1")
+    await deliver("old-handback", old_handback, "message")
+    await deliver("old-task-notification", old_notification, "message")
+    await deliver(
+        "old-notification",
+        _message(
+            "<task-notification><task-id>agent-1</task-id>"
+            "<tool-use-id>tool-1</tool-use-id><status>completed</status></task-notification>"
+        ),
+        "message",
+    )
+    publish_status.assert_not_called()
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == ""
+    await complete("tool-2")
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+    publish_status.reset_mock()
+    await deliver("resume", resume, "function_call")
+    publish_status.assert_not_called()
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_only_confirmed_results_latch_claude_outcome(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.server.routes._sessions import common, helpers
+
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation()
+    child = store.create_conversation(
+        parent_conversation_id=parent.id,
+        labels={"omnigent.wrapper": "claude-code-native-ui-subagent"},
+    )
+    publish_parent = Mock()
+    monkeypatch.setattr(helpers, "_publish_child_status_to_parent", publish_parent)
+    monkeypatch.setitem(common._session_status_cache, child.id, "failed")
+    await record_subagent_activity(child.id, "returned", store, status="failed")
+    assert CLAUDE_SUBAGENT_OUTCOME_LABEL not in store.get_conversation(child.id).labels
+    helpers._publish_status(child.id, "running")
+    assert common._session_status_cache[child.id] == "running"
+    assert helpers._child_session_summary_from_conversation(child, parent.id, None).busy
+
+    common._session_status_cache[child.id] = "idle"
+    publish_parent.reset_mock()
+    await record_subagent_activity(
+        child.id, "returned", store, status="completed", turn_id="native-call", confirmed=True
+    )
+    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+    publish_parent.assert_called_once_with(child.id, "idle")
