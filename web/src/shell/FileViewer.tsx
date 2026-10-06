@@ -697,10 +697,12 @@ function FileViewerBody({
     !isModel &&
     !isBinary &&
     (changedFiles.data?.data.some((f) => f.path === path) ?? false);
-  // Prefetch the diff so the Δ view opens instantly, but only when it can be
-  // shown: the runner would otherwise read and serialize whole media/binary
-  // files for a view that never renders.
-  const diffQuery = useFileDiff(conversationId, path, { enabled: isDiffAvailable });
+  // Prefetch the diff only once the metadata resolves and confirms the file is
+  // diffable. Until then the checks above fall back to the extension, so a
+  // media/binary file typed only by its encoding would fetch a diff never shown.
+  const diffQuery = useFileDiff(conversationId, path, {
+    enabled: isDiffAvailable && fileQuery.data !== undefined,
+  });
   const isDeletedFile =
     changedFiles.data?.data.some((f) => f.path === path && f.status === "deleted") ?? false;
   const revealTarget = useRevealTarget(path);

@@ -180,6 +180,7 @@ vi.mock("@/store/chatStore", () => ({
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
 import { useComments } from "@/hooks/useComments";
+import { useFileContent } from "@/hooks/useFileContent";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useOptionalCommentSender } from "@/hooks/CommentSenderContext";
 import { useFileDiff } from "@/hooks/useFileDiff";
@@ -1944,6 +1945,44 @@ describe("FileViewer binary files", () => {
       expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
     },
   );
+});
+
+describe("FileViewer binary files identified by content metadata", () => {
+  // Some binary files carry no extension the classifier recognizes and are
+  // identified only once the server reports base64 content. The diff toggle
+  // must still be suppressed once that metadata resolves.
+  beforeEach(() => {
+    useCommentsMock.mockReturnValue(makeCommentsQuery([]));
+    vi.mocked(useFileContent).mockReturnValue({
+      data: {
+        object: "session.environment.filesystem.file_content",
+        path: "datablob",
+        content_type: null,
+        encoding: "base64",
+        content: "AAAA",
+        bytes: 4,
+      },
+    } as unknown as ReturnType<typeof useFileContent>);
+    vi.mocked(useWorkspaceChangedFiles).mockReturnValue({
+      data: {
+        available: true,
+        data: [
+          { path: "datablob", bytes: 4, modified_at: null, name: "datablob", status: "modified" },
+        ],
+      },
+    } as ReturnType<typeof useWorkspaceChangedFiles>);
+  });
+
+  afterEach(() => {
+    vi.mocked(useFileContent).mockReturnValue({
+      data: { content: "", path: "file1.py" },
+    } as unknown as ReturnType<typeof useFileContent>);
+  });
+
+  it("suppresses the diff toggle for base64 content with an unrecognized extension", () => {
+    renderViewer({ open: true, path: "datablob" });
+    expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
+  });
 });
 
 describe("FileViewer 3D model files", () => {
