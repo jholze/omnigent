@@ -769,6 +769,7 @@ def _get_head_db_revision(db_uri: str) -> str:
         is declared by more than one migration file.
     """
     from alembic.script import ScriptDirectory
+    from alembic.script.revision import MultipleHeads
     from alembic.util import CommandError
 
     config = _build_alembic_config(db_uri)
@@ -778,7 +779,11 @@ def _get_head_db_revision(db_uri: str) -> str:
     except CommandError as exc:
         # Alembic keeps a shadowed duplicate revision as an extra head and
         # reports "multiple heads"; name the offending files instead.
-        duplicates = _find_duplicate_migration_files(Path(script.versions))
+        duplicates = (
+            _find_duplicate_migration_files(Path(script.versions))
+            if isinstance(exc.__cause__, MultipleHeads)
+            else {}
+        )
         if not duplicates:
             raise
         listing = "\n".join(

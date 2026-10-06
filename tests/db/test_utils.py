@@ -859,15 +859,9 @@ def _stage_migrations_with_extra_copy(
     monkeypatch: pytest.MonkeyPatch,
     **header: str,
 ) -> tuple[Path, Path]:
-    """
-    Copy the shipped Alembic config + migrations into *tmp_path* and add a
-    second copy of the ``z7a2b3c4d5e6`` migration file — the state an
-    in-place upgrade leaves behind when an old migration file is not
-    removed. *header* rewrites module-level assignments in the copy
-    (``revision``, ``down_revision``) to shape which edition it mimics.
-
-    :returns: ``(shipped, copy)`` paths of the original and the extra file.
-    """
+    """Stage the shipped migrations plus a second copy of the ``z7a2b3c4d5e6`` file
+    (a stale upgrade leftover) and return ``(shipped, copy)``; *header* rewrites
+    assignments such as ``down_revision`` in the copy."""
     db_src = Path(db_utils.__file__).parent
     staged = tmp_path / "db"
     staged.mkdir()
@@ -899,12 +893,8 @@ def test_initialize_or_verify_schema_reports_stale_duplicate_migration_file(
     monkeypatch: pytest.MonkeyPatch,
     stale_header: dict[str, str],
 ) -> None:
-    """
-    A leftover second copy of a shipped migration file (same ``revision``)
-    must not abort startup with Alembic's raw multiple-heads ``CommandError``:
-    the error names the duplicated revision and both files, and the fresh
-    database is left untouched.
-    """
+    """A stale copy of a shipped migration file must fail startup with a first-party
+    error naming the revision, both files, and the remedy, leaving the database untouched."""
     uri = f"sqlite:///{tmp_path / 'fresh.db'}"
     shipped, stale = _stage_migrations_with_extra_copy(tmp_path, monkeypatch, **stale_header)
 
@@ -921,6 +911,7 @@ def test_initialize_or_verify_schema_reports_stale_duplicate_migration_file(
     msg = str(exc_info.value)
     assert "z7a2b3c4d5e6" in msg
     assert str(shipped) in msg and str(stale) in msg
+    assert "Delete the stale copy" in msg and "reinstall Omnigent" in msg
     assert "multiple heads" not in msg
 
 
