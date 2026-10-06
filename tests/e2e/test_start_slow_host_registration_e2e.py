@@ -68,6 +68,8 @@ class StallingTunnelProxy:
 
     def __init__(self, upstream_url: str, *, stall_s: float, port: int = 0) -> None:
         parts = urlsplit(upstream_url)
+        if parts.scheme != "http":
+            raise ValueError(f"StallingTunnelProxy forwards plain http only, got {upstream_url!r}")
         self._upstream = (parts.hostname or "127.0.0.1", parts.port or 80)
         self.stall_s = stall_s
         self.upgrade_attempts: list[float] = []
@@ -142,6 +144,8 @@ class StallingTunnelProxy:
                 try:
                     if client.recv(1, socket.MSG_PEEK) == b"":
                         return False
+                    # Peeked bytes stay buffered; do not spin on them.
+                    time.sleep(0.2)
                 except BlockingIOError:
                     continue
                 except OSError:
@@ -416,16 +420,16 @@ def test_start_brings_late_registering_host_online(
             f"output:\n{run.output}"
         )
         online_after = _wait_host_online(
-            upstream_server_url, host_id, deadline=launched + _ONLINE_DEADLINE_S
+            upstream_server_url, host_id, deadline=time.monotonic() + _ONLINE_DEADLINE_S
         )
         daemons = {pid: ("alive" if _pid_alive(pid) else "gone") for pid in run.daemon_pids}
         assert online_after is not None, (
-            f"host {host_id} never came online within {_ONLINE_DEADLINE_S:.0f}s of "
-            f"`omnigent start`, although its tunnel handshake was only held for "
-            f"{TUNNEL_STALL_S:.0f}s (handshake attempts at "
-            f"{[round(t, 1) for t in proxy.upgrade_attempts]}s). `start` exited "
-            f"{run.returncode} after {run.elapsed_s:.1f}s; spawned daemon(s): {daemons}; "
-            f"server now reports: {_host_status(upstream_server_url, host_id)}.\n"
+            f"host {host_id} never came online within {_ONLINE_DEADLINE_S:.0f}s after "
+            f"`omnigent start` returned ({time.monotonic() - launched:.0f}s after launch), "
+            f"although its tunnel handshake was only held for {TUNNEL_STALL_S:.0f}s "
+            f"(handshake attempts at {[round(t, 1) for t in proxy.upgrade_attempts]}s). "
+            f"`start` exited {run.returncode} after {run.elapsed_s:.1f}s; spawned daemon(s): "
+            f"{daemons}; server now reports: {_host_status(upstream_server_url, host_id)}.\n"
             f"`omnigent start` output:\n{run.output}"
         )
     finally:
