@@ -94,6 +94,32 @@ describe("AskUserQuestion drafts", () => {
     }
   });
 
+  it("drops a draft whose inner map carries a prototype-polluting key", async () => {
+    // JSON.parse keeps __proto__/constructor as own keys; copying them onto a
+    // plain-object map would taint its prototype, so the draft counts as corrupt.
+    sessionStorage.setItem(
+      key,
+      '{"pollutedProto":{"currentIndex":0,"selections":{"__proto__":["A"]},"customSelected":{},"customInputs":{}},' +
+        '"pollutedCtor":{"currentIndex":0,"selections":{},"customSelected":{"constructor":true},"customInputs":{}},' +
+        '"good":{"currentIndex":0,"selections":{"first":"A"},"customSelected":{},"customInputs":{}}}',
+    );
+    const { getAskUserQuestionDraft } = await import("./askUserQuestionDrafts");
+    expect(getAskUserQuestionDraft("pollutedProto")).toBeUndefined();
+    expect(getAskUserQuestionDraft("pollutedCtor")).toBeUndefined();
+    expect(getAskUserQuestionDraft("good")).toBeDefined();
+  });
+
+  it("writes a top-level __proto__ id without polluting the prototype", async () => {
+    const { getAskUserQuestionDraft, setAskUserQuestionDraft } =
+      await import("./askUserQuestionDrafts");
+    setAskUserQuestionDraft("__proto__", draft());
+    expect(getAskUserQuestionDraft("__proto__")).toEqual(draft());
+    // The serialized root must keep the id as an own key, not a prototype.
+    const stored = JSON.parse(sessionStorage.getItem(key)!) as Record<string, unknown>;
+    expect(Object.hasOwn(stored, "__proto__")).toBe(true);
+    expect(({} as Record<string, unknown>).currentIndex).toBeUndefined();
+  });
+
   it.each(["not json", "null", "[]", "42"])("ignores an invalid storage root: %s", async (raw) => {
     sessionStorage.setItem(key, raw);
     const { getAskUserQuestionDraft } = await import("./askUserQuestionDrafts");

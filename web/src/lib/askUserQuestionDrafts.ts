@@ -104,7 +104,7 @@ function saveDraftsToStorage(): void {
       window.sessionStorage.removeItem(STORAGE_KEY);
       return;
     }
-    const entries: Record<string, AskUserQuestionDraft> = {};
+    const entries: Record<string, AskUserQuestionDraft> = Object.create(null);
     for (const [id, entry] of drafts) entries[id] = storableDraft(entry);
     window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
   } catch {
@@ -153,8 +153,32 @@ export function clearAskUserQuestionDraft(elicitationId: string): void {
   saveDraftsToStorage();
 }
 
-/** Clear all drafts, primarily for logout/reset flows and isolated tests. */
+/** Clear every draft at once; used to reset module state between tests. */
 export function clearAskUserQuestionDrafts(): void {
   drafts.clear();
   saveDraftsToStorage();
+}
+
+// Elicitation ids whose approval POST has not settled. The optimistic flip to
+// "responded" remounts a card as fresh before the server confirms; this lets
+// the remount tell an unconfirmed flip from a committed answer. Reference
+// counted so overlapping Chat and Inbox submits of one id stay balanced.
+const inFlightApprovals = new Map<string, number>();
+
+export function markApprovalInFlight(elicitationId: string): void {
+  inFlightApprovals.set(elicitationId, (inFlightApprovals.get(elicitationId) ?? 0) + 1);
+}
+
+export function clearApprovalInFlight(elicitationId: string): void {
+  const count = inFlightApprovals.get(elicitationId);
+  if (count === undefined) return;
+  if (count > 1) {
+    inFlightApprovals.set(elicitationId, count - 1);
+  } else {
+    inFlightApprovals.delete(elicitationId);
+  }
+}
+
+export function isApprovalInFlight(elicitationId: string): boolean {
+  return inFlightApprovals.has(elicitationId);
 }

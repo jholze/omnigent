@@ -1,7 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { clearAskUserQuestionDrafts, getAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
+import {
+  clearApprovalInFlight,
+  clearAskUserQuestionDrafts,
+  getAskUserQuestionDraft,
+  markApprovalInFlight,
+} from "@/lib/askUserQuestionDrafts";
 import type { ElicitationBlock } from "@/lib/blocks";
 import { BlockStream } from "@/lib/blockStream";
 import { buildBubbles } from "@/lib/renderItems";
@@ -1111,7 +1116,9 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     const { rerender } = render(<ApprovalCard {...props} status="pending" response={null} />);
     fireEvent.click(screen.getByLabelText("A"));
 
-    // Optimistic flip: the form unmounts but the draft stays put.
+    // Optimistic flip while the resolve POST is in flight: the form unmounts but
+    // the draft stays put because the resolution is not yet server-confirmed.
+    markApprovalInFlight("elic_draft_rollback");
     rerender(
       <ApprovalCard
         {...props}
@@ -1123,7 +1130,9 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       "elic_draft_rollback",
     );
 
-    // Rollback: the form comes back with the user's selection intact.
+    // Rollback: the POST failed, the mark clears, and the form returns with the
+    // user's selection intact.
+    clearApprovalInFlight("elic_draft_rollback");
     rerender(<ApprovalCard {...props} status="pending" response={null} />);
     expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(true);
   });
@@ -1157,6 +1166,34 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       />,
     );
     expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toBeNull();
+  });
+
+  it("drops the draft when a mounted card resolves pending→responded off-screen", async () => {
+    // The question is answered elsewhere (Inbox, another tab) while this card
+    // stays mounted: no in-flight mark, so the committed flip clears the draft.
+    const props = {
+      elicitationId: "elic_draft_external",
+      message: "Claude wants to call AskUserQuestion",
+      phase: "pre_tool_use",
+      policyName: "claude_native_permission",
+      contentPreview: "",
+      requestedSchema: {},
+      askUserQuestion: {
+        questions: [{ question: "Only?", header: "", options: [{ label: "A", description: "" }] }],
+      },
+    } as const;
+    const { rerender } = render(<ApprovalCard {...props} status="pending" response={null} />);
+    fireEvent.click(screen.getByLabelText("A"));
+    expect(getAskUserQuestionDraft("elic_draft_external")).toBeDefined();
+
+    rerender(
+      <ApprovalCard
+        {...props}
+        status="responded"
+        response={{ action: "accept", content: { "Only?": "A" } }}
+      />,
+    );
+    await waitFor(() => expect(getAskUserQuestionDraft("elic_draft_external")).toBeUndefined());
   });
 
   it("restores a secret answer on remount without writing it to sessionStorage", () => {
@@ -1473,9 +1510,8 @@ describe("ApprovalCard — transcript float→inline remount under optimistic su
   }
 
   // Mirror the transcript: a pending card floats in its own subtree while a
-  // responded one renders inline, so flipping status moves the card to a new
-  // position and remounts it as a fresh instance — the condition the draft
-  // cleanup must survive, which an in-place rerender does not exercise.
+  // responded one renders inline, so flipping status remounts the card as a
+  // fresh instance — the condition the draft cleanup must survive, not a rerender.
   function TranscriptLike() {
     const block = useChatStore((s) => s.blocks[0]);
     if (!block || block.type !== "elicitation") return null;
@@ -1529,9 +1565,8 @@ describe("ApprovalCard — transcript float→inline remount under optimistic su
     vi.stubGlobal("fetch", fetchMock);
 
     // Bind an active entry so the optimistic flip, which writes through the
-    // conversation entry, actually reaches the root store the view subscribes
-    // to — a bare state seed leaves no entry when a prior test already set this
-    // id, and the flip would be dropped.
+    // conversation entry, reaches the root store the view subscribes to; a bare
+    // state seed can leave no entry when a prior test set this id, dropping the flip.
     bindConversationForTest("conv_transcript", { blocks: [pendingBlock()] });
     render(<TranscriptLike />);
 

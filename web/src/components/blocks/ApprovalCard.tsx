@@ -32,7 +32,7 @@
 //      on `POST /v1/sessions/{id}/elicitations/{eid}/resolve`,
 //   3. rolls back to "pending" on network error.
 
-import { useContext, useEffect, useMemo, useRef } from "react";
+import { useContext, useEffect, useMemo } from "react";
 import {
   CheckIcon,
   ClipboardListIcon,
@@ -52,13 +52,13 @@ import {
   exitPlanModePlan,
   parseAskUserQuestionPreview,
 } from "@/lib/askUserQuestion";
-import { clearAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
+import { clearAskUserQuestionDraft, isApprovalInFlight } from "@/lib/askUserQuestionDrafts";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
 import type { CodexPersistMode, RememberScope } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { isApprovalInFlight, useChatStore } from "@/store/chatStore";
+import { useChatStore } from "@/store/chatStore";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { AskUserQuestionForm, type AskUserQuestionAnswers } from "./AskUserQuestionForm";
 import {
@@ -301,13 +301,14 @@ export function ApprovalCard({
   const isExitPlanMode = planMarkdown !== null;
   const optionLabels = askPayload === null ? extractOptionLabels(requestedSchema) : [];
   const isAskUserQuestion = askPayload !== null;
-  // Drop a leftover draft only when the card mounts already resolved by the
-  // server. An in-flight optimistic flip also shows "responded" but can roll
-  // back, so exclude it. Checked once: isApprovalInFlight is not reactive.
-  const resolvedOnMount = useRef(status === "responded" && !isApprovalInFlight(elicitationId));
+  // Retire a leftover draft when the server resolves the card, including a
+  // pending→responded resolve while mounted. An optimistic in-flight flip also
+  // shows "responded" but can roll back, so skip it; its committed resolve clears it.
   useEffect(() => {
-    if (isAskUserQuestion && resolvedOnMount.current) clearAskUserQuestionDraft(elicitationId);
-  }, [isAskUserQuestion, elicitationId]);
+    if (isAskUserQuestion && status === "responded" && !isApprovalInFlight(elicitationId)) {
+      clearAskUserQuestionDraft(elicitationId);
+    }
+  }, [isAskUserQuestion, elicitationId, status]);
   const isMultiChoice = optionLabels.length > 0;
   // Any other schema that names fields: a free-form string, several
   // properties, an enum under a name other than ``answer``. These used to

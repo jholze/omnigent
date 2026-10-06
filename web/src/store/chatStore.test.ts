@@ -35,6 +35,7 @@ import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import {
   clearAskUserQuestionDrafts,
   getAskUserQuestionDraft,
+  isApprovalInFlight,
   setAskUserQuestionDraft,
 } from "@/lib/askUserQuestionDrafts";
 import { buildBubbles } from "@/lib/renderItems";
@@ -76,7 +77,6 @@ import {
   consumePendingInitialPrompt,
   handleSessionEvent,
   hydrateLocalConversation,
-  isApprovalInFlight,
   isStaleCompletedResponse,
   isStaleTempConvId,
   isTempConvId,
@@ -9050,6 +9050,10 @@ function elicitationBlock(id: string): ElicitationBlock {
 }
 
 describe("chatStore — submitApproval", () => {
+  afterEach(() => {
+    clearAskUserQuestionDrafts();
+  });
+
   it("posts the verdict to the elicitation resolve URL and optimistically marks responded", async () => {
     useChatStore.setState({
       conversationId: "conv_abc",
@@ -9175,6 +9179,41 @@ describe("chatStore — submitApproval", () => {
     await pending;
     // Cleared once the POST settles, whether it succeeds or rolls back.
     expect(isApprovalInFlight("elic_inflight")).toBe(false);
+  });
+
+  it("clears the in-flight mark once the resolve POST rejects and rolls back", async () => {
+    let releaseResolve: (() => void) | null = null;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.match(/\/v1\/sessions\/[^/]+\/elicitations\/[^/]+\/resolve$/)) {
+        return new Promise((resolve) => {
+          releaseResolve = () =>
+            resolve(
+              mockResponse(
+                { error: { code: "boom", message: "resolve failed" } },
+                { ok: false, status: 500 },
+              ),
+            );
+        });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      blocks: [elicitationBlock("elic_inflight_fail")],
+    });
+
+    const pending = useChatStore.getState().submitApproval("elic_inflight_fail", "accept");
+    // The optimistic flip ran synchronously; the POST is still open.
+    expect(isApprovalInFlight("elic_inflight_fail")).toBe(true);
+
+    await vi.waitFor(() => expect(releaseResolve).not.toBeNull());
+    releaseResolve!();
+    await pending;
+    // The finally clears the mark even though the POST failed and rolled back.
+    expect(isApprovalInFlight("elic_inflight_fail")).toBe(false);
+    const block = useChatStore.getState().blocks[0];
+    if (block?.type === "elicitation") expect(block.status).toBe("pending");
   });
 
   it("preserves Codex MCP persistence metadata in the resolve payload", async () => {

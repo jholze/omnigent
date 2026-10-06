@@ -109,10 +109,13 @@ export function AskUserQuestionForm({
     for (const q of questions) {
       const key = questionKey(q);
       const selection = saved?.selections[key];
+      // A restored label may name an option the question no longer offers; keep
+      // only labels still present so a stale draft cannot preselect a gone option.
+      const labels = new Set(q.options.map((o) => o.label));
       if (q.multiSelect) {
-        initial[key] = Array.isArray(selection) ? selection : [];
+        initial[key] = Array.isArray(selection) ? selection.filter((l) => labels.has(l)) : [];
       } else {
-        initial[key] = typeof selection === "string" ? selection : "";
+        initial[key] = typeof selection === "string" && labels.has(selection) ? selection : "";
       }
     }
     return initial;

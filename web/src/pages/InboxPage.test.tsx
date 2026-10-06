@@ -15,7 +15,7 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // component that just exposes an Accept button wired to its `onSubmit`, which
 // lets us drive the approve/rollback path without the real card's internals.
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { InboxPage } from "./InboxPage";
@@ -27,6 +27,7 @@ import type { CommentInbox } from "@/hooks/useCommentInbox";
 import {
   clearAskUserQuestionDrafts,
   getAskUserQuestionDraft,
+  isApprovalInFlight,
   setAskUserQuestionDraft,
 } from "@/lib/askUserQuestionDrafts";
 import {
@@ -388,6 +389,58 @@ describe("InboxPage approval items", () => {
       expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "pending"),
     );
     expect(getAskUserQuestionDraft("eli_1")).toBeDefined();
+  });
+
+  it("marks the elicitation in flight only until the Inbox resolve POST settles", async () => {
+    // WHY: the shared in-flight guard must cover the Inbox optimistic flip too,
+    // so a restored transcript card keeps its draft until this POST confirms.
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    let releaseApprove: (() => void) | null = null;
+    vi.mocked(sessionsApi.approve).mockReturnValue(
+      new Promise<Awaited<ReturnType<typeof sessionsApi.approve>>>((resolve) => {
+        releaseApprove = () => resolve({} as Awaited<ReturnType<typeof sessionsApi.approve>>);
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
+    // The optimistic flip registered the id; the POST is still open.
+    await waitFor(() => expect(isApprovalInFlight("eli_1")).toBe(true));
+    expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded");
+
+    await act(async () => {
+      releaseApprove?.();
+    });
+    await waitFor(() => expect(isApprovalInFlight("eli_1")).toBe(false));
+  });
+
+  it("clears the in-flight mark when the Inbox resolve POST rejects", async () => {
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    let rejectApprove: (() => void) | null = null;
+    vi.mocked(sessionsApi.approve).mockReturnValue(
+      new Promise<Awaited<ReturnType<typeof sessionsApi.approve>>>((_resolve, reject) => {
+        rejectApprove = () => reject(new Error("nope"));
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
+    await waitFor(() => expect(isApprovalInFlight("eli_1")).toBe(true));
+
+    await act(async () => {
+      rejectApprove?.();
+    });
+    // The finally-equivalent clear runs on the rejection path too.
+    await waitFor(() => expect(isApprovalInFlight("eli_1")).toBe(false));
+    expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "pending");
   });
 
   it("clears a stale verdict when a snapshot refresh still shows the elicitation as pending", async () => {
