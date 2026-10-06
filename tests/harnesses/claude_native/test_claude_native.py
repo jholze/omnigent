@@ -941,6 +941,39 @@ def test_launch_model_pin_marks_a_bare_matching_custom_slot() -> None:
     )
 
 
+def test_launch_model_pins_the_slot_when_only_a_bare_alias_names_it() -> None:
+    """A marked launch model whose family alias is pinned bare still gets a slot.
+
+    The family alias is pinned to this very model, so it names the model — but
+    only by its bare 200K spelling, since alias matching strips ``[1m]``.
+    Treating that as "already speakable" would skip the slot and ``/model`` on
+    the alias row would re-select the bare id at 200K. The slot must carry the
+    marked id so a return keeps the 1M window.
+    """
+    from omnigent.models.claude_model_vocabulary import claude_model_command_arg
+
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5",
+        },
+        model="databricks-claude-opus-5",
+    )
+
+    pinned = claude_native.claude_config_with_launch_model_pinned(
+        config, "databricks-claude-opus-5[1m]"
+    )
+
+    assert pinned is not None
+    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "databricks-claude-opus-5[1m]"
+    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] == "Opus 5"
+    assert config.env.get("ANTHROPIC_CUSTOM_MODEL_OPTION") is None
+    assert (
+        claude_model_command_arg("databricks-claude-opus-5[1m]", pinned.env)
+        == "databricks-claude-opus-5[1m]"
+    )
+
+
 @pytest.mark.parametrize(
     "launch_model",
     ["opus", "databricks-claude-opus-5", None, ""],

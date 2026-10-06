@@ -4316,11 +4316,10 @@ async def test_a_routed_launch_remarks_a_bare_matching_custom_slot(
 ) -> None:
     """A custom slot already holding the launch id bare is rewritten with [1m].
 
-    A re-selected session re-enters with its own id already parked in the
-    custom slot, but bare — an earlier launch recorded it before the window
-    marker existed. Reading the normalized match as "already pinned" would
-    leave the slot bare and ``/model`` would re-select it at 200K, so the
-    routed launch must rewrite the slot to the marked id to keep the 1M window.
+    A resumed session may re-enter with its own id already parked in the custom
+    slot but bare. Reading the normalized match as "already pinned" would leave
+    the slot bare and ``/model`` would re-select it at 200K, so the routed
+    launch must rewrite the slot to the marked id to keep the 1M window.
     """
     from omnigent.models.claude_model_vocabulary import claude_model_command_arg
 

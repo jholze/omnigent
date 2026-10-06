@@ -137,12 +137,15 @@ def _rig_env(work: Path) -> dict[str, str]:
         env[var] = ",".join(filter(None, [env.get(var, ""), "127.0.0.1,localhost"]))
     env.update(
         PYTHONPATH=os.pathsep.join(
-            [
-                str(_REPO_ROOT),
-                str(_REPO_ROOT / "sdks" / "python-client"),
-                str(_REPO_ROOT / "sdks" / "ui"),
-                os.environ.get("PYTHONPATH", ""),
-            ]
+            filter(
+                None,
+                [
+                    str(_REPO_ROOT),
+                    str(_REPO_ROOT / "sdks" / "python-client"),
+                    str(_REPO_ROOT / "sdks" / "ui"),
+                    os.environ.get("PYTHONPATH", ""),
+                ],
+            )
         ),
         OMNIGENT_CONFIG_HOME=str(work / "config-home"),
         OMNIGENT_DATA_DIR=str(work / "data"),
@@ -168,7 +171,7 @@ def _wait_online(
         except httpx.HTTPError:
             pass
         time.sleep(0.5)
-    tails = "\n".join(f"{log.name}:\n{log.read_text()[-3000:]}" for log in logs)
+    tails = "\n".join(f"{log.name}:\n{log.read_text(errors='replace')[-3000:]}" for log in logs)
     crashed = [proc for proc in procs if proc.poll() is not None]
     reason = (
         f"a process exited early with codes {[proc.poll() for proc in crashed]}"
