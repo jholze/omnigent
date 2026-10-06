@@ -4551,6 +4551,7 @@ class HostProcess:
         self._ensure_model_options_prewarm()
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
+        registration_stamped = False
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -4569,7 +4570,6 @@ class HostProcess:
             # status``) must not delay ``ws.recv()`` or the inline keepalive pong
             # the server's watchdog counts as liveness, or it closes the tunnel
             # with ``4003 ping timeout``.
-            registration_stamped = False
             while True:
                 raw = await ws.recv()
                 self._conn_frame_received = True
@@ -4581,7 +4581,7 @@ class HostProcess:
                     self._raise_connection_error_from_raw(raw)
                     if not registration_stamped:
                         registration_stamped = True
-                        self._stamp_daemon_registered()
+                        self._set_daemon_registered(True)
                     # Each request frame is handled on its own task so a slow
                     # handler (a model-options CLI exec, a long git walk) can't
                     # head-of-line block the frames behind it — measured
@@ -4595,6 +4595,8 @@ class HostProcess:
             readiness_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
+            if registration_stamped:
+                self._set_daemon_registered(False)
 
     async def _harness_readiness_loop(
         self,
@@ -4664,23 +4666,26 @@ class HostProcess:
         if isinstance(frame, HostConnectionErrorFrame):
             self._raise_connection_error(frame)
 
-    def _stamp_daemon_registered(self) -> None:
-        """Stamp the daemon's registry record with a server-confirmed registration.
+    def _set_daemon_registered(self, registered: bool) -> None:
+        """Record in the daemon's registry record whether this tunnel is registered.
 
-        Called on the first frame received after ``host.hello`` that is not a
+        Stamped on the first frame received after ``host.hello`` that is not a
         fatal ``host.connection_error``: the server sends nothing else before
-        it completes registration (it starts its send loops — including an
-        immediate keepalive ping — only once the host is persisted and
-        registered), so that frame is the server's acknowledgement. The stamp
-        gives the CLI's background-spawn readiness gate ground truth even when
-        its secondary ``GET /v1/hosts/{id}`` status read diverges from the
-        tunnel (stale, cached, or differently-routed read).
+        it completes registration (it starts its send loops — including the
+        immediate keepalive ping this host asks for — only once the host is
+        persisted and registered), so that frame is the server's
+        acknowledgement. Cleared when the tunnel drops, so a reconnecting
+        daemon is not mistaken for a registered one. The stamp gives the CLI's
+        background-spawn readiness gate ground truth even when its secondary
+        ``GET /v1/hosts/{id}`` status read diverges from the tunnel.
+
+        :param registered: Whether the server has acknowledged this tunnel.
         """
         if self._lifecycle_lock is None:
             return
         from omnigent.host.daemon_lifecycle import mark_daemon_registered
 
-        mark_daemon_registered(self._lifecycle_lock.record_path)
+        mark_daemon_registered(self._lifecycle_lock.record_path, registered=registered)
 
     def _start_frame_task(self, ws: websockets.asyncio.client.ClientConnection, raw: str) -> None:
         """Handle one inbound frame on its own task, off the receive loop.

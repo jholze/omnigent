@@ -230,6 +230,19 @@ def test_mark_daemon_registered_stamps_owner_record_in_place(tmp_path: Path) -> 
     assert record.stat().st_ino == inode_before
 
 
+def test_mark_daemon_registered_clears_stamp_on_request(tmp_path: Path) -> None:
+    """``registered=False`` drops the stamp while keeping the record intact."""
+    record = daemon_record_path("local", base_dir=tmp_path)
+    _write_record(record, os.getpid())
+    assert mark_daemon_registered(record) is True
+
+    assert mark_daemon_registered(record, registered=False) is True
+
+    payload = json.loads(record.read_text())
+    assert payload["registered_at"] is None
+    assert payload["pid"] == os.getpid()
+
+
 def test_mark_daemon_registered_refuses_foreign_or_missing_record(tmp_path: Path) -> None:
     """A record owned by another pid — or absent — is never stamped."""
     record = daemon_record_path("local", base_dir=tmp_path)

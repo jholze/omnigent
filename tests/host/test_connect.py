@@ -1278,10 +1278,16 @@ class _ConnectionErrorTunnel:
 
 
 class _AckThenDisconnectTunnel:
-    """Tunnel that delivers the server's first keepalive ping, then drops."""
+    """Tunnel that delivers the server's first keepalive ping, then drops.
 
-    def __init__(self) -> None:
+    ``record_after_ack`` captures the daemon record as it stood while the
+    tunnel was still up, after the host had processed the acknowledgement.
+    """
+
+    def __init__(self, record_path: Path | None = None) -> None:
         self.sent: list[str] = []
+        self.record_after_ack: dict[str, object] | None = None
+        self._record_path = record_path
         self._acked = False
 
     async def send(self, data: str) -> None:
@@ -1291,6 +1297,8 @@ class _AckThenDisconnectTunnel:
         if not self._acked:
             self._acked = True
             return encode_frame(PingFrame(ts=1))
+        if self._record_path is not None:
+            self.record_after_ack = json.loads(self._record_path.read_text())
         raise ConnectionError("test disconnect")
 
 
@@ -2151,19 +2159,22 @@ async def test_serve_frames_stamps_registration_on_first_server_frame(tmp_path: 
     registration, so its first ordinary frame (the immediate keepalive ping)
     confirms registration. The CLI's background-spawn readiness gate trusts
     this stamp when its secondary server status read diverges, so a daemon
-    that registered is never torn down as "never registered".
+    that registered is never torn down as "never registered". Once the tunnel
+    drops the stamp is cleared again: a daemon mid-reconnect must not read as
+    registered to a later ``host --background`` that reuses it.
     """
     record_path, lock = _owned_daemon_record(tmp_path)
     host = _make_host_process()
     host._lifecycle_lock = lock
-    tunnel = _AckThenDisconnectTunnel()
+    tunnel = _AckThenDisconnectTunnel(record_path)
 
     with pytest.raises(ConnectionError, match="test disconnect"):
         await host._serve_frames(tunnel)  # type: ignore[arg-type] — duck-typed ws
     await asyncio.gather(*host._frame_tasks, return_exceptions=True)
 
-    payload = json.loads(record_path.read_text())
-    assert isinstance(payload["registered_at"], int)
+    assert tunnel.record_after_ack is not None
+    assert isinstance(tunnel.record_after_ack["registered_at"], int)
+    assert json.loads(record_path.read_text())["registered_at"] is None
 
 
 async def test_serve_frames_does_not_stamp_before_server_ack(tmp_path: Path) -> None:

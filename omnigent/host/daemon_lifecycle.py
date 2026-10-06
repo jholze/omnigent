@@ -143,18 +143,23 @@ def write_daemon_record(
         (root / "host.pid").write_text(f"{record.pid}\n{record.target}\n")
 
 
-def mark_daemon_registered(record_path: Path, *, pid: int | None = None) -> bool:
-    """Stamp the owning daemon's record with a completed registration.
+def mark_daemon_registered(
+    record_path: Path, *, pid: int | None = None, registered: bool = True
+) -> bool:
+    """Record whether the owning daemon currently holds a server registration.
 
-    The daemon calls this once the server has confirmed registration on the
-    tunnel itself (its first post-hello frame), giving the CLI's
-    background-spawn readiness gate ground truth even when the secondary
-    ``GET /v1/hosts/{id}`` status read diverges. Rewrites the record in place
-    (same inode) so the daemon's lifecycle flock survives.
+    The daemon stamps ``registered_at`` once the server has confirmed
+    registration on the tunnel itself (its first post-hello frame) and clears
+    it when that tunnel drops, so the CLI's background-spawn readiness gate
+    has ground truth even when the secondary ``GET /v1/hosts/{id}`` status
+    read diverges. Rewrites the record in place (same inode) so the daemon's
+    lifecycle flock survives.
 
     :param record_path: The daemon's ``<hash>.json`` registry record.
     :param pid: Owning pid to verify; defaults to the current process.
-    :returns: ``True`` when the record was stamped; ``False`` when it is
+    :param registered: ``True`` stamps the current time; ``False`` clears the
+        stamp.
+    :returns: ``True`` when the record was rewritten; ``False`` when it is
         missing, malformed, unwritable, or owned by another pid — best-effort,
         never raises.
     """
@@ -165,7 +170,7 @@ def mark_daemon_registered(record_path: Path, *, pid: int | None = None) -> bool
         return False
     if not isinstance(data, dict) or data.get("pid") != owner:
         return False
-    data["registered_at"] = int(time.time())
+    data["registered_at"] = int(time.time()) if registered else None
     try:
         record_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     except OSError:

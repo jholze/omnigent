@@ -124,8 +124,9 @@ class _StaleStatusProxy:
         self._thread = threading.Thread(target=self._run, args=(ready,), daemon=True)
         self._thread.start()
         assert ready.wait(30), "stale-status proxy did not start within 30s"
-        if self._start_error is not None:
-            raise self._start_error
+        start_error = self._start_error
+        if start_error is not None:
+            raise start_error
 
     @property
     def url(self) -> str:
@@ -135,7 +136,7 @@ class _StaleStatusProxy:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._start())
-        except BaseException as exc:  # pragma: no cover - startup failure path
+        except Exception as exc:  # pragma: no cover - startup failure path
             self._start_error = exc
             ready.set()
             return
