@@ -61,7 +61,9 @@ and steers messages while the agent is busy.
   dropping them on the transcript.
 - Send while the agent is working to queue a message, then steer it.
 - Click the mic (or press ⌘/Ctrl+Alt+V) to dictate; in the desktop app the
-  mic appears only when the connected server has dictation enabled.
+  mic appears only when the connected server has dictation enabled. A side
+  chat's composer ("Ask a side question...") shows the same mic under the same
+  rule; the shortcut belongs to the main composer.
 
 **Desktop browser pointer** (open a session in the desktop app):
 
@@ -171,9 +173,10 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   (`OMNIGENT_PW_NO_SANDBOX=1 OMNIGENT_PYTHON=../../.venv/bin/python xvfb-run -a
   node --test e2e/desktop_dictation_availability.e2e.js`): no mic against a
   server without dictation, then the mic dictating through a fake-engine
-  server. Manually, for both composers: connect the desktop app to a default
-  `omnigent server` (`/v1/info` reports `dictation_available: false`) and expect
-  no mic and ⌘/Ctrl+Alt+V to do nothing; restart the server with
+  server. Manually, for the in-session, new-session and side-chat composers:
+  connect the desktop app to a default `omnigent server` (`/v1/info` reports
+  `dictation_available: false`) and expect no mic and ⌘/Ctrl+Alt+V to do
+  nothing; restart the server with
   `OMNIGENT_DICTATION_ENGINE=fake`, reconnect, and expect the mic, the listening
   state on click, and the fake transcript in the message box.
 - **`mobile-labels`, new-session composer:**

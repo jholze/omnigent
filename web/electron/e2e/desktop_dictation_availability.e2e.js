@@ -73,8 +73,8 @@ function capabilityProbeDone(window) {
 /** Tear the shell down; every step runs even when an earlier one throws. */
 async function teardownDesktop({ electronApp, stopDisplayCapture, userDataDir }, clipName) {
   // Stop filming first so the clip ends on the asserted state, not on teardown.
-  await stopDisplayCapture().catch(() => {});
-  await electronApp.close().catch(() => {});
+  await stopDisplayCapture().catch((err) => console.warn("stopDisplayCapture failed:", err));
+  await electronApp.close().catch((err) => console.warn("electronApp.close failed:", err));
   try {
     return saveRecording(RECORD_DIR, clipName);
   } finally {
@@ -94,7 +94,10 @@ async function openHomeComposer(serverUrl, fakeMicPreload, clipName) {
     await composer.waitFor({ state: "visible", timeout: 45_000 });
     return { ...launched, composer };
   } catch (err) {
-    await teardownDesktop(launched, `${clipName}-launch-failed`);
+    // Keep the launch error visible even if the teardown fails too.
+    await teardownDesktop(launched, `${clipName}-launch-failed`).catch((teardownErr) =>
+      console.warn("teardown after the failed launch also failed:", teardownErr),
+    );
     throw err;
   }
 }

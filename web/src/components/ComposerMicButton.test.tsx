@@ -723,7 +723,6 @@ describe("ComposerMicButton (server dictation)", () => {
       });
       expect(chord.defaultPrevented).toBe(true);
       expect(sessionStartMock).toHaveBeenCalledTimes(1);
-      // Electron never builds a Web Speech recognizer, let alone starts one.
       expect(constructSpy).not.toHaveBeenCalled();
       expect(startSpy).not.toHaveBeenCalled();
     });
