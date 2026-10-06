@@ -32,6 +32,7 @@ from omnigent.runner.transports.ws_tunnel import serve as serve_module
 from omnigent.runner.transports.ws_tunnel.frames import (
     RESPONSE_BODY_FRAME_MAX_BYTES,
     RESPONSE_FLOW_CAPABILITY,
+    RESPONSE_FLOW_WINDOW_FRAMES,
     PingFrame,
     RequestCancelFrame,
     RequestFlowFrame,
@@ -3083,3 +3084,57 @@ async def test_graceful_drain_releases_credit_starved_dispatch() -> None:
 
     assert finished.is_set()
     assert task.done() and not task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_send_window_release_clamped_caps_available_credit() -> None:
+    """Repeated or oversized credit grants never inflate the window past its bound."""
+    window = _SendWindow(2)
+    await window.acquire()
+    await window.acquire()  # window exhausted
+
+    window.release_clamped(100)  # a malformed server over-granting
+
+    # Only one window of credit is restored, not 100.
+    await asyncio.wait_for(window.acquire(), timeout=1)
+    await asyncio.wait_for(window.acquire(), timeout=1)
+    parked = asyncio.create_task(window.acquire())
+    await asyncio.sleep(0)
+    assert not parked.done()
+    parked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parked
+
+
+@pytest.mark.asyncio
+async def test_request_dispatch_caps_oversized_flow_window() -> None:
+    """A server advertising a window beyond the runner's bound is capped on dispatch."""
+
+    async def _send_text(text: str) -> None:
+        del text
+
+    dispatch_tasks: dict[str, asyncio.Task[None]] = {}
+    flow_credits: dict[str, _SendWindow] = {}
+    raw = encode_frame(
+        RequestFrame(
+            id="req-big-window",
+            method="GET",
+            path="/health",
+            flow_window=RESPONSE_FLOW_WINDOW_FRAMES * 1000,
+        )
+    )
+
+    await _handle_tunnel_frame(
+        _noop_app,
+        raw,
+        _send_text,
+        dispatch_tasks,
+        {},
+        flow_credits=flow_credits,
+    )
+
+    window = flow_credits["req-big-window"]
+    assert window._window == RESPONSE_FLOW_WINDOW_FRAMES
+    task = dispatch_tasks.get("req-big-window")
+    assert task is not None
+    await asyncio.gather(task, return_exceptions=True)

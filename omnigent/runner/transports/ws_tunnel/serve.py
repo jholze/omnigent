@@ -203,32 +203,43 @@ class _SendWindow:
     """Per-request response send-credit window.
 
     Wraps a semaphore so a graceful drain can unblock a credit-starved stream:
-    ``grant_drain_allowance`` releases one extra window so the dispatch can flush
-    its remaining frames and end sentinel instead of parking on an exhausted
-    window until the drain times out, while still bounding how much a stalled
-    bulk response buffers during the drain.
+    ``grant_drain_allowance`` releases one window so the dispatch can flush its
+    remaining frames and end sentinel instead of parking on an exhausted window
+    until the drain times out, while still bounding how much a stalled bulk
+    response buffers during the drain.
+
+    Grants are clamped to one window of unspent credit, so repeated or oversized
+    ``request.flow`` frames from a malformed or hostile server cannot inflate the
+    credit past the memory bound. A well-behaved server never grants that much.
     """
 
     def __init__(self, window: int) -> None:
-        self._sem = asyncio.Semaphore(window)
         self._window = window
+        self._available = window
+        self._sem = asyncio.Semaphore(window)
 
     async def acquire(self) -> None:
         """Spend one send credit, blocking while the window is exhausted."""
         await self._sem.acquire()
+        self._available -= 1
 
-    def release(self) -> None:
-        """Return one send credit granted by a ``request.flow`` frame."""
-        self._sem.release()
+    def release_clamped(self, credits: int) -> None:
+        """Return up to ``credits`` send credits, never exceeding one window."""
+        self._grant(credits)
 
     def grant_drain_allowance(self) -> None:
-        """Release one extra window so a parked dispatch can flush its tail.
+        """Release one window so a parked dispatch can flush its tail.
 
         Bounds drain-time buffering: a stalled bulk response flushes at most one
         more window of frames before re-parking, rather than draining its whole
         upstream unbounded.
         """
-        for _ in range(self._window):
+        self._grant(self._window)
+
+    def _grant(self, credits: int) -> None:
+        grant = min(max(credits, 0), self._window - self._available)
+        self._available += grant
+        for _ in range(grant):
             self._sem.release()
 
 
@@ -1375,7 +1386,9 @@ async def _handle_tunnel_frame(
             on_activity()
         request_credits: _SendWindow | None = None
         if flow_credits is not None and frame.flow_window is not None:
-            request_credits = _SendWindow(frame.flow_window)
+            # Never honor a larger window than this runner is willing to buffer,
+            # even if a server advertises one.
+            request_credits = _SendWindow(min(frame.flow_window, RESPONSE_FLOW_WINDOW_FRAMES))
             flow_credits[frame.id] = request_credits
         task = asyncio.create_task(
             dispatch_via_asgi(app, frame, send_text, request_credits),
@@ -1389,10 +1402,9 @@ async def _handle_tunnel_frame(
         if flow_credits is not None:
             request_credits = flow_credits.get(frame.id)
             if request_credits is not None:
-                # Cap a single grant at one window so a malformed or hostile
-                # server can't inflate the credit count past the memory bound.
-                for _ in range(min(frame.credits, RESPONSE_FLOW_WINDOW_FRAMES)):
-                    request_credits.release()
+                # Clamp cumulative credit to one window so repeated or oversized
+                # grants can't inflate it past the memory bound.
+                request_credits.release_clamped(frame.credits)
     elif isinstance(frame, RequestCancelFrame):
         if on_activity is not None:
             on_activity()

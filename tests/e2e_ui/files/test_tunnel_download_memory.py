@@ -142,7 +142,10 @@ def _server_rss_kib(pid: int) -> int:
 
 def _settled_server_rss_kib(pid: int) -> int:
     """Return the server RSS once it has held still for a short window.
-    Best-effort: after the timeout the latest reading is returned."""
+
+    Fails loudly if RSS never settles, so a drifting baseline can't quietly
+    skew the absolute-growth assertion into a flaky pass or fail.
+    """
     deadline = time.monotonic() + _RSS_SETTLE_TIMEOUT_S
     last = _server_rss_kib(pid)
     still_since = time.monotonic()
@@ -153,8 +156,11 @@ def _settled_server_rss_kib(pid: int) -> int:
             still_since = time.monotonic()
         last = current
         if time.monotonic() - still_since >= _RSS_SETTLE_WINDOW_S:
-            break
-    return last
+            return last
+    raise AssertionError(
+        f"server RSS never settled within {_RSS_SETTLE_TIMEOUT_S:.0f}s "
+        f"(last {last} KiB); baseline unreliable"
+    )
 
 
 def _is_preview_read(file_name: str) -> Callable[[Response], bool]:
