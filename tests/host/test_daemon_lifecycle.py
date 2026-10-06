@@ -359,6 +359,57 @@ def test_background_daemon_claims_record_before_connecting(
     assert record_flock_is_held(daemon_record_path(target, base_dir=tmp_path)) is False
 
 
+def test_adopting_local_daemon_records_the_server_url_it_serves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon spawned for an explicit loopback URL adopts the server and publishes its URL.
+
+    The published URL is what keeps the record reachable by
+    ``host stop --server <url>`` once the server pidfile is gone.
+    """
+    from omnigent import cli
+    from omnigent.host import _daemon_entry, local_server
+    from omnigent.host import identity as identity_module
+    from omnigent.process_logging import DATA_DIR_ENV_VAR
+
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr(sys, "argv", ["omnigent.host._daemon_entry", "--local", "--adopt-server"])
+    monkeypatch.setattr(
+        "omnigent.process_logging.configure_process_logging",
+        lambda *_a, **_kw: tmp_path / "host.log",
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "load_or_create_host_identity",
+        lambda: HostIdentity(host_id="host_adopt", name="adopt"),
+    )
+    ensure_calls: list[dict[str, object]] = []
+
+    def _ensure(**kwargs: object) -> local_server.LocalServerStartup:
+        ensure_calls.append(kwargs)
+        return local_server.LocalServerStartup(
+            url="http://127.0.0.1:6767", spawned=False, log_path=None
+        )
+
+    monkeypatch.setattr(local_server, "ensure_local_omnigent_server", _ensure)
+    monkeypatch.setattr("omnigent.host.connect.run_host_process", lambda **_kw: None)
+
+    _daemon_entry.main()
+
+    assert ensure_calls == [{"replace_on_config_drift": False}]
+    payload = json.loads(daemon_record_path("local", base_dir=tmp_path).read_text())
+    assert payload["mode"] == "local"
+    assert payload["resolved_server_url"] == "http://127.0.0.1:6767"
+    # No local_server.pid exists here, so the URL keys on itself — and the
+    # published URL is what still leads the lookup to the local record.
+    target = cli._normalize_daemon_target("http://localhost:6767")
+    assert target == "http://localhost:6767"
+    found = cli._find_daemon_record(target)
+    assert found is not None
+    assert found.target == "local"
+
+
 def test_background_daemon_loser_exits_before_connecting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

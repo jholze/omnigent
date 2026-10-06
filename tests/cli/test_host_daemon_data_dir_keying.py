@@ -114,15 +114,17 @@ def test_find_daemon_record_matches_local_record_by_server_url_without_pidfile(
 def test_collapsed_spawn_runs_the_daemon_in_local_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A ``--server`` spelling of the tracked server spawns the local daemon.
+    """A ``--server`` spelling of the tracked server spawns the local daemon in adopt mode.
 
-    A collapsed target must take the full local path: local-mode args, the
-    local config signature, and the local daemon env allowlist — otherwise the
-    record under the ``local`` key would carry server-mode metadata and the
-    reuse gate would tear it down as config drift on every invocation.
+    A collapsed target must take the local path (local-mode args and the local
+    daemon env allowlist) so the record under the ``local`` key never carries
+    server-mode metadata, but it adopts the running server: ``--adopt-server``
+    is passed and the record is stamped with the running server's signature,
+    so neither this invocation's config nor a later one restarts that server.
     """
     _track_local_server(tmp_path, 6767)
     monkeypatch.setattr(cli, "_load_existing_host_id", lambda: "host_abc")
+    monkeypatch.setattr(cli, "_read_local_server_sig", lambda: "sig-of-the-running-server")
 
     sig_calls: list[bool] = []
 
@@ -141,10 +143,12 @@ def test_collapsed_spawn_runs_the_daemon_in_local_mode(
     monkeypatch.setattr(cli, "_build_host_daemon_env", _fake_env)
 
     captured_args: list[str] = []
+    captured_env: dict[str, str] = {}
     spawned = cli._SpawnedDaemonProcess(pid=4321, log_path=str(tmp_path / "daemon.log"))
 
     def _capture_spawn(*, args: list[str], env: dict[str, str]) -> cli._SpawnedDaemonProcess:
         captured_args.extend(args)
+        captured_env.update(env)
         return spawned
 
     monkeypatch.setattr(cli, "_spawn_host_daemon_process", _capture_spawn)
@@ -162,6 +166,8 @@ def test_collapsed_spawn_runs_the_daemon_in_local_mode(
     assert cli._ensure_host_daemon("http://localhost:6767") is False
 
     assert "--local" in captured_args
+    assert "--adopt-server" in captured_args
     assert "http://localhost:6767" not in captured_args
-    assert sig_calls == [True]
+    assert captured_env[cli.DAEMON_CONFIG_SIG_ENV_VAR] == "sig-of-the-running-server"
+    assert sig_calls == []
     assert env_urls == [None]

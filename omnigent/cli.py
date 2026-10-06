@@ -85,6 +85,7 @@ from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
     _pid_alive,
+    _read_local_server_sig,
     consume_failed_server_log_tail,
     ensure_local_omnigent_server,
     local_server_status,
@@ -3104,7 +3105,9 @@ def _daemon_owner_is_live(record: _HostDaemonRecord) -> bool:
     return _pid_is_recorded_daemon(record)
 
 
-def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
+def _reuse_existing_daemon_record(
+    target: str, *, adopt_server: bool = False
+) -> _DaemonReuseDecision:
     """
     Decide whether an existing daemon for *target* can be reused.
 
@@ -3128,6 +3131,9 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     one whose config we can't verify.
 
     :param target: Normalized daemon target, e.g. ``"local"``.
+    :param adopt_server: The invocation named the running local server by an
+        explicit loopback URL, so it connects to that server as-is and config
+        drift is not its call.
     :returns: A :class:`_DaemonReuseDecision`.
     """
     existing = _find_daemon_record(target)
@@ -3159,7 +3165,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
 
     # Config drift → the running server has the wrong auth source.
     desired_sig = server_config_signature()
-    if existing.config_sig is not None and existing.config_sig != desired_sig:
+    if not adopt_server and existing.config_sig is not None and existing.config_sig != desired_sig:
         _terminate_host_unit(existing, reason="config changed (auth)")
         return _DaemonReuseDecision(reuse=False, config_changed=True)
 
@@ -3522,9 +3528,11 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     """
     ensure_started_at = time.monotonic()
     target = _normalize_daemon_target(server_url)
-    if target == _LOCAL_DAEMON_MARKER:
-        # A loopback spelling of the tracked local server addresses this data
-        # dir's own instance, so run it as the single local-mode daemon.
+    # A loopback spelling of the live tracked server addresses this data dir's
+    # own instance: run the single local-mode daemon, but have it adopt the
+    # running server as-is rather than restart it on config drift.
+    adopt_server = target == _LOCAL_DAEMON_MARKER and bool(server_url)
+    if adopt_server:
         server_url = None
     existing_before = _find_daemon_record(target)
     process_was_running = existing_before is not None and _daemon_owner_is_live(existing_before)
@@ -3540,7 +3548,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             },
         )
 
-    decision = _reuse_existing_daemon_record(target)
+    decision = _reuse_existing_daemon_record(target, adopt_server=adopt_server)
     if decision.reuse:
         _record_host_state("reused")
         return False
@@ -3550,10 +3558,16 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
+    if adopt_server:
+        mode_args.append("--adopt-server")
     # Match runner/zygote startup: keep workspace code out of runtime imports
     # without changing the caller's working directory or agent workspace.
     args = [sys.executable, "-P", "-m", "omnigent.host._daemon_entry", *mode_args]
-    config_sig = server_config_signature(include_features=not server_url)
+    # An adopting daemon serves whatever config the running server has, so its
+    # record carries that signature instead of this invocation's.
+    config_sig = _read_local_server_sig() if adopt_server else None
+    if config_sig is None:
+        config_sig = server_config_signature(include_features=not server_url)
     daemon_env = _build_host_daemon_env(server_url=server_url)
     daemon_env[DAEMON_CONFIG_SIG_ENV_VAR] = config_sig
     expected_host_id = _load_existing_host_id()
@@ -3582,7 +3596,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         raise click.ClickException(
             f"Host daemon for {target!r} registered as {actual_host_id!r}, but this "
             f"invocation requested {expected_host_id!r}. The spawned daemon was stopped. "
-            "Check OMNIGENT_HOST_ID, OMNIGENT_HOST_NAME, and OMNIGENT_CONFIG_HOME. "
+            "Check OMNIGENT_HOST_ID, OMNIGENT_HOST_NAME, OMNIGENT_DATA_DIR (the identity lives in "
+            "that data dir's config.yaml when set), and OMNIGENT_CONFIG_HOME. "
             f"See {spawned.log_path}."
         )
     if claimed.pid != spawned.pid:

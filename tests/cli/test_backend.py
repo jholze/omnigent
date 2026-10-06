@@ -492,6 +492,49 @@ def test_ensure_host_daemon_reuses_live_daemon_for_other_loopback_spelling(
     assert len(calls) == 1, "the localhost spelling spawned a second daemon for the same server"
 
 
+def test_reuse_adopting_local_daemon_ignores_config_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit loopback URL adopts the running server, so config drift is not its call.
+
+    The same drift still tears the daemon down for a local-mode invocation,
+    which owns the server and may restart it.
+    """
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    cli._write_daemon_record(
+        cli._HostDaemonRecord(
+            pid=4242,
+            target="local",
+            mode="local",
+            server_url=None,
+            log_path=str(tmp_path / "daemon.log"),
+            started_at=100,
+            host_id="host_abc",
+            config_sig="sig-of-the-running-server",
+        )
+    )
+    monkeypatch.setattr(cli, "_daemon_owner_is_live", lambda record: True)
+    monkeypatch.setattr(cli, "_daemon_host_identity_changed", lambda record: False)
+    monkeypatch.setattr(cli, "server_config_signature", lambda **_kw: "sig-of-this-shell")
+    monkeypatch.setattr(cli, "_daemon_tunnel_recovers", lambda record: True)
+    terminated: list[str] = []
+    monkeypatch.setattr(
+        cli, "_terminate_host_unit", lambda record, *, reason: terminated.append(reason)
+    )
+
+    adopting = cli._reuse_existing_daemon_record("local", adopt_server=True)
+
+    assert adopting.reuse is True
+    assert adopting.config_changed is False
+    assert terminated == []
+
+    owning = cli._reuse_existing_daemon_record("local")
+
+    assert owning.reuse is False
+    assert owning.config_changed is True
+    assert terminated == ["config changed (auth)"]
+
+
 def test_ensure_host_daemon_reuses_healthy_background_daemon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
