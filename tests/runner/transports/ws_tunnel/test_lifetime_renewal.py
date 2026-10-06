@@ -7,9 +7,6 @@ tunnel before that boundary — resolving credentials and opening the
 replacement connection while the current socket still serves — so the server
 never observes the runner offline and a slow credential refresh never
 lengthens an outage.
-
-The fix must expose a renewal interval shorter than ``_PEER_LIFETIME_S``;
-``_configure_short_renewal`` is the single place to wire that knob.
 """
 
 from __future__ import annotations

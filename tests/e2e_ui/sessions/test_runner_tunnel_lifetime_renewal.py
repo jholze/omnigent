@@ -10,9 +10,6 @@ it briefly after the severance to model a slow identity provider.
 
 Expected: the runner renews its tunnel before the boundary, so the in-flight
 turn, the server and the session page never see the runner offline.
-
-The fix must expose a renewal interval shorter than ``_PROXY_WS_LIFETIME_S``;
-``_renewal_env`` is the single place to wire that knob.
 """
 
 from __future__ import annotations

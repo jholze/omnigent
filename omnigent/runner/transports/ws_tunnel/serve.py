@@ -599,7 +599,7 @@ async def serve_tunnel(
                     )
                 except asyncio.CancelledError:
                     conn_task.cancel()
-                    with contextlib.suppress(BaseException):
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await conn_task
                     if not renewal_signal.done():
                         renewal_signal.cancel()
@@ -640,7 +640,7 @@ async def serve_tunnel(
                     close_details = await conn_task
                 except asyncio.CancelledError:
                     conn_task.cancel()
-                    with contextlib.suppress(BaseException):
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await conn_task
                     await _drain_superseded(cancel=True)
                     raise
