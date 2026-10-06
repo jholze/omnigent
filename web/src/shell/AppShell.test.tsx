@@ -25,7 +25,7 @@ import { useFileViewer } from "./FileViewerContext";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ServerInfo } from "@/lib/capabilities";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
-import { AGENT_BROWSER_TAB_ID } from "@/hooks/useBrowserTabs";
+import { AGENT_BROWSER_TAB_ID, browserViewId } from "@/hooks/useBrowserTabs";
 import { clearOptimisticTitles, recordOptimisticTitle } from "@/lib/optimisticTitles";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { writeWorkspacePanelDefault } from "@/lib/workspacePanelPreferences";
@@ -4498,8 +4498,8 @@ describe("AppShell design-mode submission", () => {
   });
 
   // The agent/link tab's native view is keyed by the session id; a tab opened
-  // via "Open new" -> "Browser" is keyed by tab id (useBrowserTabs.browserViewId).
-  const userTabViewId = "browser-tab:conv_design:4c1d6a1e-9d2b-4f84-8c2e-0f1b7a3c9d55";
+  // via "Open new" -> "Browser" is keyed by tab id.
+  const userTabViewId = browserViewId("conv_design", "4c1d6a1e-9d2b-4f84-8c2e-0f1b7a3c9d55");
   const viewIdFor = (tab: "agent" | "user") => (tab === "agent" ? "conv_design" : userTabViewId);
 
   function submitInstruction(prompt = "Use a week picker.", viewId = "conv_design") {
@@ -4598,17 +4598,23 @@ describe("AppShell design-mode submission", () => {
       });
     }
     chat.conversationId = "conv_design";
-    act(() => {
-      submit({
-        conversationId: "conv_design",
-        id: 2,
-        element: { tag: "input", id: "#period" },
-        prompt: "A later instruction without a new screenshot",
+    for (const [id, viewId] of [
+      [2, "conv_design"],
+      [3, userTabViewId],
+    ] as const) {
+      act(() => {
+        submit({
+          conversationId: viewId,
+          id,
+          element: { tag: "input", id: "#period" },
+          prompt: "A later instruction without a new screenshot",
+        });
       });
-    });
-    expect(enqueueMessage).toHaveBeenCalledWith(
-      expect.stringContaining("A later instruction without a new screenshot"),
-      undefined,
-    );
+      expect(enqueueMessage).toHaveBeenLastCalledWith(
+        expect.stringContaining("A later instruction without a new screenshot"),
+        undefined,
+      );
+      expect(signal).toHaveBeenCalledWith(viewId, { id, ok: true, message: "Queued for agent." });
+    }
   });
 });
