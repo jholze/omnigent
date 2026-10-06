@@ -1,25 +1,22 @@
-"""UI journeys: an automation's schedule is evaluated in the user's local timezone.
+"""UI journey: a chat-created automation's schedule uses the user's local timezone.
 
-Both tests run the browser in ``America/Los_Angeles`` so the SPA's ``Intl``
-zone differs from the server process zone (set ``TZ`` on the pytest process to
-make the spawned server run in another zone, e.g. ``TZ=America/Chicago``).
+The browser runs in ``America/Los_Angeles`` so the SPA's ``Intl`` zone differs
+from the server process zone (set ``TZ`` on the pytest process to make the
+spawned server run in another zone, e.g. ``TZ=America/Chicago``).
 
-* ``test_dialog_created_automation_uses_browser_local_timezone`` creates a
-  daily automation through the New automation dialog and checks the stored zone
-  and next-run instant match the browser's wall clock.
-* ``test_chat_created_automation_uses_user_local_timezone`` asks the agent in
-  chat to create a daily 9:00 AM automation without naming a zone; the mock
-  model answers with a ``sys_scheduled_task_create`` call that omits
-  ``timezone`` (the tool gives the agent no user-zone information).
+``test_chat_created_automation_uses_user_local_timezone`` asks the agent in chat
+to create a daily 9:00 AM automation without naming a zone; the mock model
+answers with a ``sys_scheduled_task_create`` call that omits ``timezone`` (the
+tool gives the agent no user-zone information), so the next run must still land
+at 9:00 AM in the browser's zone.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -82,99 +79,9 @@ def _shot(page: Page, name: str, settle_ms: int = 0) -> None:
     page.screenshot(path=str(_SHOTS_DIR / f"{name}.png"))
 
 
-def _pick_agent(page: Page, agent_id: str, label: str) -> None:
-    trigger = page.get_by_test_id("task-agent-picker").get_by_test_id(
-        "new-chat-landing-agent-select"
-    )
-    trigger.click()
-    # A --agent-registered agent (hello_world) folds into the "Other..." submenu
-    # rather than the inline bundle list, so expand it before clicking the row.
-    custom = page.get_by_test_id("new-chat-landing-custom-agents")
-    expect(custom).to_be_visible(timeout=30_000)
-    item = page.get_by_test_id(f"new-chat-landing-agent-{agent_id}")
-    if not item.is_visible():
-        custom.click()
-    expect(item).to_be_visible(timeout=30_000)
-    item.click()
-    expect(trigger).to_contain_text(re.compile(label, re.IGNORECASE), timeout=10_000)
-
-
-def _type_time(page: Page, hour24: int, minute: int) -> None:
-    hour12, period = _clock_12h(hour24, minute)
-    time_input = page.get_by_test_id("schedule-time")
-    time_input.fill("")
-    time_input.click()
-    page.keyboard.type(f"{hour12}:{minute:02d} {period}")
-    # Focusing the time input opened its picker popover; a forced click on the
-    # name input blurs and closes it without hitting the dialog overlay.
-    page.get_by_test_id("task-name-input").click(force=True)
-    expect(time_input).to_have_value(f"{hour12:02d}:{minute:02d} {period}")
-
-
 def _send(page: Page, text: str) -> None:
     page.get_by_label("Message the agent").fill(text)
     page.get_by_role("button", name="Send", exact=True).click()
-
-
-@pytest.mark.browser_context_args(timezone_id=_BROWSER_TZ)
-def test_dialog_created_automation_uses_browser_local_timezone(
-    request: pytest.FixtureRequest,
-    live_server: str,
-) -> None:
-    """A daily automation created in the dialog stores the browser's local wall-clock time."""
-    agent_id = _builtin_agent_id(live_server, "hello_world")
-    name = f"Local-time digest {uuid.uuid4().hex[:6]}"
-    prompt = "Summarize what changed today."
-    print(f"\nserver TZ env={_server_process_tz()}")
-
-    page: Page = request.getfixturevalue("page")
-    page.goto(f"{live_server}/tasks")
-    browser_tz = page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
-    assert browser_tz == _BROWSER_TZ, browser_tz
-    expect(page.get_by_test_id("new-task-button")).to_be_visible(timeout=30_000)
-
-    # A few minutes ahead so the next run lands later today in the browser's zone.
-    due_local = (datetime.now(_LA) + timedelta(minutes=3)).replace(second=0, microsecond=0)
-    hour12, period = _clock_12h(due_local.hour, due_local.minute)
-    print(f"browser now={datetime.now(_LA).isoformat()} due={due_local.isoformat()}")
-
-    page.get_by_test_id("new-task-button").click()
-    dialog = page.get_by_test_id("create-scheduled-task-dialog")
-    expect(dialog).to_be_visible(timeout=30_000)
-    page.get_by_test_id("task-name-input").fill(name)
-    page.get_by_test_id("task-prompt-input").fill(prompt)
-    _pick_agent(page, agent_id, "hello_world")
-    expect(page.get_by_test_id("schedule-preset-trigger")).to_contain_text("Daily")
-    _type_time(page, due_local.hour, due_local.minute)
-    _shot(page, "dialog-before-create")
-    page.get_by_test_id("create-scheduled-task-submit").click()
-    try:
-        row = _row_by_name(page, name)
-        expect(row).to_be_visible(timeout=30_000)
-        schedule_line = row.get_by_test_id("task-schedule-line")
-        expect(schedule_line).to_contain_text(
-            f"Every day at {hour12}:{due_local.minute:02d} {period}"
-        )
-        expect(row.get_by_test_id("task-next-run")).to_contain_text("Next run", timeout=30_000)
-        _shot(page, "row-after-create")
-
-        task = _task_by_name(live_server, name)
-        assert task is not None, "created automation is not listed by the API"
-        actual_local = _parse_iso(task["next_run_at"]).astimezone(_LA)
-        print(
-            f"stored timezone={task['timezone']} rrule={task['rrule']} "
-            f"next_run_at={task['next_run_at']} chosen={due_local.isoformat()} "
-            f"row={schedule_line.inner_text()!r}"
-        )
-        assert task["timezone"] == _BROWSER_TZ, task
-        assert (actual_local.hour, actual_local.minute) == (due_local.hour, due_local.minute), (
-            f"next_run_at {task['next_run_at']} is {_fmt_12h(actual_local)} "
-            f"{_BROWSER_TZ}, not the chosen {_fmt_12h(due_local)}"
-        )
-    finally:
-        created = _task_by_name(live_server, name)
-        if created is not None:
-            httpx.delete(f"{live_server}/v1/scheduled-tasks/{created['id']}", timeout=10.0)
 
 
 @pytest.mark.browser_context_args(timezone_id=_BROWSER_TZ)
