@@ -1,8 +1,5 @@
-// Desktop-shell journey: the composer mic follows the connected server's
-// dictation capability. Electron's SpeechRecognition has no backend, so the
-// desktop app offers a mic only when GET /v1/info advertises server dictation,
-// and clicking it then lands the server's transcript in the composer.
-//
+// Desktop mic follows the server's dictation capability (GET /v1/info): no mic
+// without it, and with it a server take must land its transcript in the composer.
 // Run from web/electron after building the SPA (a fake audio device stands in
 // for the microphone headless CI lacks):
 //   OMNIGENT_PW_NO_SANDBOX=1 OMNIGENT_PYTHON=../../.venv/bin/python \
@@ -33,6 +30,9 @@ const PYTHON = process.env.OMNIGENT_PYTHON || "python3";
 
 const COMPOSER_LABEL = "Describe a task to start a new session…";
 const MIC_NAME = "Voice dictation";
+// An engine name the server does not know always reports dictation_available:
+// false; the empty default selects sherpa, which is available where its models are.
+const UNAVAILABLE_ENGINE = "unavailable-for-test";
 // Same handshake budget the button gives a server take (a cold model load).
 const TAKE_TIMEOUT_MS = 40_000;
 const TRANSCRIPT_TIMEOUT_MS = 15_000;
@@ -64,6 +64,25 @@ async function pollUntil(window, probe, timeoutMs) {
   }
 }
 
+/** True once the SPA's capability probe (GET /v1/info) has completed in this window. */
+function capabilityProbeDone(window) {
+  return window.evaluate(() =>
+    performance.getEntriesByType("resource").some((entry) => /\/v1\/info(?:\?|$)/.test(entry.name)),
+  );
+}
+
+/** Tear the shell down; every step runs even when an earlier one throws. */
+async function teardownDesktop({ electronApp, stopDisplayCapture, userDataDir }, clipName) {
+  // Stop filming first so the clip ends on the asserted state, not on teardown.
+  await stopDisplayCapture().catch(() => {});
+  await electronApp.close().catch(() => {});
+  try {
+    return saveRecording(RECORD_DIR, clipName);
+  } finally {
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+}
+
 /** Boot the shell straight into the connected home composer. */
 async function openHomeComposer(serverUrl, fakeMicPreload) {
   const launched = await launchDesktop({
@@ -71,20 +90,14 @@ async function openHomeComposer(serverUrl, fakeMicPreload) {
     serverUrl,
     preload: [fakeMicPreload],
   });
-  const composer = launched.window.getByLabel(COMPOSER_LABEL).first();
-  await composer.waitFor({ state: "visible", timeout: 45_000 });
-  return { ...launched, composer };
-}
-
-/** Name the clips once the shell closes (per-page video is only flushed then). */
-async function closeDesktop({ electronApp, stopDisplayCapture, userDataDir }, clipName) {
-  // Stop filming the display first so the clip ends on the asserted state
-  // rather than on the window tearing down.
-  await stopDisplayCapture();
-  await electronApp.close();
-  const saved = saveRecording(RECORD_DIR, clipName);
-  fs.rmSync(userDataDir, { recursive: true, force: true });
-  return saved;
+  try {
+    const composer = launched.window.getByLabel(COMPOSER_LABEL).first();
+    await composer.waitFor({ state: "visible", timeout: 45_000 });
+    return { ...launched, composer };
+  } catch (err) {
+    await teardownDesktop(launched, "launch-failed");
+    throw err;
+  }
 }
 
 describe(
@@ -108,8 +121,9 @@ describe(
     });
 
     it("offers no mic when the server has no dictation", async () => {
-      // Default dictation config: no omnigent[dictation] extra, no engine override.
-      const server = await spawnServer(tmpDir, { env: () => ({ OMNIGENT_DICTATION_ENGINE: "" }) });
+      const server = await spawnServer(tmpDir, {
+        env: () => ({ OMNIGENT_DICTATION_ENGINE: UNAVAILABLE_ENGINE }),
+      });
       let saved;
       try {
         const info = await serverInfo(server.serverUrl);
@@ -118,13 +132,16 @@ describe(
         const desktop = await openHomeComposer(server.serverUrl, fakeMicPreload);
         try {
           const { window } = desktop;
-          // Let the capability probe settle, then hold the state for the clip.
-          await window.waitForTimeout(3000);
+          // The mic could only appear once the capability probe has resolved.
+          const probed = await pollUntil(window, () => capabilityProbeDone(window), 15_000);
+          assert.ok(probed, "the SPA never completed its GET /v1/info capability probe");
+          await window.waitForTimeout(1000);
           const micCount = await window.getByRole("button", { name: MIC_NAME }).count();
           assert.equal(micCount, 0, "a mic was offered although no dictation path can work");
+          // Hold the state so the clip shows it.
           await window.waitForTimeout(2000);
         } finally {
-          saved = await closeDesktop(desktop, "mic-hidden-without-server-dictation");
+          saved = await teardownDesktop(desktop, "mic-hidden-without-server-dictation");
         }
       } finally {
         await server.close();
@@ -180,7 +197,7 @@ describe(
           assert.ok((await composer.inputValue()).includes(script), "stopping clobbered the text");
           await window.waitForTimeout(2000);
         } finally {
-          saved = await closeDesktop(desktop, "mic-dictates-through-server");
+          saved = await teardownDesktop(desktop, "mic-dictates-through-server");
         }
       } finally {
         await server.close();

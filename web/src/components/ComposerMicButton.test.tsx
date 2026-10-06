@@ -4,12 +4,12 @@
 // Web Speech mode: the button toggles a SpeechRecognition session; final
 // transcripts are emitted via onTranscript. It renders nothing when the
 // browser has no SpeechRecognition constructor AND the server offers no
-// dictation — likewise in the Electron shell, whose constructor has no
-// backend, whenever the server offers none. None of this is e2e-testable (CI has no real mic / Web Speech
-// engine), so it's pinned here by stubbing the global SpeechRecognition
-// constructor with a fake whose addEventListener captures the handlers the
-// test then fires. getUserMedia (used only for the visualizer) is stubbed to
-// reject so no AudioContext is constructed in jsdom.
+// dictation (in Electron, Web Speech has no backend, so the server fallback
+// is the only path). Native Web Speech events need a stubbed SpeechRecognition
+// constructor in CI (no real mic / engine), so they're pinned here with a fake
+// whose addEventListener captures the handlers the test then fires.
+// getUserMedia (used only for the visualizer) is stubbed to reject so no
+// AudioContext is constructed in jsdom.
 //
 // Server mode: when there is no SpeechRecognition constructor but the
 // /v1/info capability probe reports dictation_available, the button drives a
@@ -660,9 +660,13 @@ describe("ComposerMicButton (server dictation)", () => {
           <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
         </CapabilitiesContext.Provider>,
       );
+      const chord = dictationChord();
       await act(async () => {
-        window.dispatchEvent(dictationChord());
+        window.dispatchEvent(chord);
       });
+      // The hook preventDefaults a chord it handles, so an unbound hotkey
+      // leaves the event untouched.
+      expect(chord.defaultPrevented).toBe(false);
       expect(startSpy).not.toHaveBeenCalled();
       expect(sessionStartMock).not.toHaveBeenCalled();
       expect(showToastMock).not.toHaveBeenCalled();
@@ -676,9 +680,11 @@ describe("ComposerMicButton (server dictation)", () => {
           <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
         </CapabilitiesContext.Provider>,
       );
+      const chord = dictationChord();
       await act(async () => {
-        window.dispatchEvent(dictationChord());
+        window.dispatchEvent(chord);
       });
+      expect(chord.defaultPrevented).toBe(true);
       expect(sessionStartMock).toHaveBeenCalledTimes(1);
       expect(startSpy).not.toHaveBeenCalled();
     });

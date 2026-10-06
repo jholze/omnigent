@@ -107,12 +107,9 @@ export const ComposerMicButton = ({
   onVoiceStart,
   onVoiceDiscard,
 }: ComposerMicButtonProps) => {
-  // Web Speech is primary whenever the browser has the constructor
-  // (Chrome/Safari); with none (Firefox) takes use server dictation when
-  // GET /v1/info advertises it. Plain Chromium has the constructor but no
-  // backend, so a take that dies with "network" falls back to the server for
-  // that take only (see handleError). Electron never has a backend: there the
-  // server is the only path, and without it no dictation can work.
+  // Web Speech is primary wherever its constructor exists; a take that dies with
+  // "network" falls back to the server for that take only (see handleError).
+  // Electron has the constructor but never a backend, so there only the server can serve.
   const [Ctor] = useState(getRecognitionCtor);
   const electron = isElectronShell();
   const serverInfo = useServerInfo();
@@ -176,7 +173,8 @@ export const ComposerMicButton = ({
   const barRefs = useRef<(HTMLSpanElement | null)[]>(BAR_BINS.map(() => null));
 
   useEffect(() => {
-    if (!Ctor) return;
+    // Electron never starts a Web Speech take, so skip the dead recognizer.
+    if (!Ctor || electron) return;
 
     const recognition = new Ctor();
     // Keep listening until the user clicks stop — no auto-stop on silence.
@@ -254,7 +252,7 @@ export const ComposerMicButton = ({
       recognition.stop();
       recognitionRef.current = null;
     };
-  }, [Ctor, lang, reportError]);
+  }, [Ctor, electron, lang, reportError]);
 
   // Auto-stop if the composer goes disabled mid-dictation. Stops the
   // recognizer; the disabledRef guard in handleResult catches any final
@@ -440,10 +438,8 @@ export const ComposerMicButton = ({
       void toggleServer();
       return;
     }
-    // In Electron the SpeechRecognition constructor exists but has no backend,
-    // so a Web Speech take always fails; go straight to the server instead of
-    // the doomed attempt. (Real browsers keep Web Speech primary; it genuinely
-    // works there.)
+    // Electron's SpeechRecognition has no backend, so a Web Speech take there
+    // always fails: go straight to the server instead.
     if (!Ctor || electron) {
       if (serverAvailable) void toggleServer();
       return;

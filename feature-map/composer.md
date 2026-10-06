@@ -41,6 +41,10 @@ and steers messages while the agent is busy.
   bundle and selects it. States: import in flight (Cancel and Create locked),
   rejected bundle, imported agent missing from the refreshed list, and hidden on
   a server without agent install.
+- `voice-dictation`: the mic button (and ⌘/Ctrl+Alt+V) dictates into the
+  message box through Web Speech in Chrome/Safari, or through the server when
+  `/v1/info` advertises dictation. The desktop app offers the mic only when the
+  server does. States: listening, connecting, error toast, mic hidden.
 - `mobile-labels`: on narrow screens labels collapse to icons without
   overlapping the stop button.
 
@@ -56,6 +60,8 @@ and steers messages while the agent is busy.
 - Type `/` in the message box; attach files with the button, by paste, or by
   dropping them on the transcript.
 - Send while the agent is working to queue a message, then steer it.
+- Click the mic (or press ⌘/Ctrl+Alt+V) to dictate; in the desktop app the
+  mic appears only when the connected server has dictation enabled.
 
 **Desktop browser pointer** (open a session in the desktop app):
 
@@ -73,6 +79,7 @@ and steers messages while the agent is busy.
 - Pick a harness, then open its configuration for model, effort (Codex, Claude,
   Pi), and permission mode before the session exists.
 - Attach files or type `/` before the first send.
+- Dictate with the mic or ⌘/Ctrl+Alt+V, under the same desktop rule as above.
 - Open the agent picker's custom agents, then Create custom agent → Import
   bundle: pick a `.tar.gz` agent bundle. It installs, closes the dialog, and
   selects the agent, which stays listed after a reload. A rejected bundle (for
