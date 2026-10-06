@@ -1,0 +1,153 @@
+"""A stalled server-side consumer must bound how much tunnel body the server buffers.
+
+Real sockets end to end: uvicorn hosts the server's tunnel route, the runner
+dials in with ``serve_tunnel``, and the consumer reads through
+``WSTunnelTransport``. Only TCP and the protocol can hold the runner back, so
+this is where flow control for a slow download has to show up.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import time
+from collections.abc import AsyncIterator, Callable
+
+import httpx
+import pytest
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
+from omnigent.runner.transports.ws_tunnel.serve import serve_tunnel
+from omnigent.runner.transports.ws_tunnel.transport import WSTunnelTransport
+from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
+from omnigent.util.tunnel_limits import uvicorn_tunnel_kwargs
+
+_RUNNER_ID = "runner-backpressure-test"
+_CHUNK = 64 * 1024
+# 64 MiB: far more than loopback socket buffers can absorb on the runner's behalf.
+_CHUNKS = 1024
+# Frames the server may hold for one request while its consumer is stalled.
+_MAX_QUEUED_FRAMES = _CHUNKS // 8
+
+
+async def _start_tunnel_server(
+    registry: TunnelRegistry,
+) -> tuple[uvicorn.Server, asyncio.Task[None], int]:
+    app = FastAPI()
+    app.state.tunnel_registry = registry
+    app.include_router(create_runner_tunnel_router(registry), prefix="/v1")
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=0, log_level="warning", **uvicorn_tunnel_kwargs()
+    )
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve(), name="tunnel-uvicorn")
+    while not server.started:
+        if task.done():
+            task.result()
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    return server, task, port
+
+
+def _runner_app(produced: list[int]) -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/stream")
+    async def stream() -> StreamingResponse:
+        async def chunks() -> AsyncIterator[bytes]:
+            for _ in range(_CHUNKS):
+                yield os.urandom(_CHUNK)
+                produced[0] += 1
+
+        return StreamingResponse(chunks(), media_type="application/octet-stream")
+
+    return app
+
+
+async def _wait_until(predicate: Callable[[], bool], timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out waiting for the tunnel"
+        await asyncio.sleep(0.02)
+
+
+async def _settle(
+    sample: Callable[[], tuple[int, int]], *, quiet_s: float, timeout_s: float
+) -> None:
+    """Return once ``sample`` has stopped changing for ``quiet_s`` seconds."""
+    deadline = time.monotonic() + timeout_s
+    last = sample()
+    changed_at = time.monotonic()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+        current = sample()
+        if current != last:
+            last, changed_at = current, time.monotonic()
+        elif time.monotonic() - changed_at >= quiet_s:
+            return
+
+
+@pytest.mark.asyncio
+async def test_stalled_consumer_bounds_tunnel_body_buffering() -> None:
+    """While the consumer stalls, the server buffers a bounded tail and the runner waits."""
+    registry = TunnelRegistry()
+    server, server_task, port = await _start_tunnel_server(registry)
+    produced = [0]
+    shutdown = asyncio.Event()
+    runner_task = asyncio.create_task(
+        serve_tunnel(
+            _runner_app(produced),
+            server_url=f"http://127.0.0.1:{port}",
+            runner_id=_RUNNER_ID,
+            runner_version="0.1.0-test",
+            shutdown_event=shutdown,
+        ),
+        name="tunnel-runner",
+    )
+    try:
+        await _wait_until(lambda: registry.get(_RUNNER_ID) is not None, timeout_s=10)
+        client = httpx.AsyncClient(
+            transport=WSTunnelTransport(registry, _RUNNER_ID), base_url="http://runner"
+        )
+        async with client, client.stream("GET", "/stream") as response:
+            assert response.status_code == 200
+            body = response.aiter_raw()
+            first = await anext(body)
+            assert len(first) == _CHUNK
+
+            session = registry.get(_RUNNER_ID)
+            assert session is not None
+            (state,) = session.in_flight.values()
+            # The consumer now stalls; give the runner time to stream everything
+            # it is allowed to.
+            await _settle(
+                lambda: (state.body_queue.qsize(), produced[0]), quiet_s=1.5, timeout_s=30
+            )
+            queued = state.body_queue.qsize()
+            produced_while_stalled = produced[0]
+
+            assert queued <= _MAX_QUEUED_FRAMES, (
+                f"server queued {queued} of {_CHUNKS} body frames for one request while its "
+                f"consumer was stalled (runner had produced {produced_while_stalled})"
+            )
+            assert produced_while_stalled < _CHUNKS, (
+                "runner streamed the entire body while the consumer was stalled: nothing paused it"
+            )
+
+            total = len(first)
+            async for chunk in body:
+                total += len(chunk)
+            assert total == _CHUNK * _CHUNKS
+    finally:
+        shutdown.set()
+        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(runner_task, timeout=10)
+        if not runner_task.done():
+            runner_task.cancel()
+        server.should_exit = True
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(server_task, timeout=10)
