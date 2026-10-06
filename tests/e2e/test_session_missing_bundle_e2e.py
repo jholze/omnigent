@@ -1,27 +1,8 @@
 """E2E regression: a session whose agent bundle blob is missing from the
-artifact store (while the agent row survives) must surface a client-safe
-409, not an unhandled 500.
+artifact store (while the agent row survives) answers a client-safe 409, not
+an unhandled 500, for both agent-contents reads and runner launches.
 
-On a container deployment the session and agent rows live in a durable
-database, but the session-scoped agent bundle is written to an ephemeral local
-artifact store (default ``/data/artifacts``). When the instance is replaced the
-rows survive and the bundle does not. Resuming such a session, or serving its
-agent contents, then dereferences the lost bundle:
-
-* ``GET /v1/sessions/{id}/agent/contents`` reads
-  ``artifact_store.get(agent.bundle_location)`` directly
-  (``routes_agent.py``), and
-* ``POST /v1/hosts/{host_id}/runners`` resolves the agent spec server-side via
-  ``_resolve_agent_spec_cwd`` -> ``AgentCache.load`` ->
-  ``artifact_store.get(bundle_location)`` (``hosts.py``).
-
-``ArtifactStore.get`` raises ``KeyError`` for a missing blob; both call sites
-must turn that into ``agent_bundle_missing`` (409) rather than let it escape as
-a 500. The complementary condition, a deleted agent row, is covered by
-``test_claude_native_terminal_missing_agent_e2e`` (404 / 410).
-
-Runs against a real ``omnigent server`` subprocess over the mock LLM; no real
-credentials needed::
+Runs against a real ``omnigent server`` subprocess over the mock LLM::
 
     .venv/bin/python -m pytest tests/e2e/test_session_missing_bundle_e2e.py -v
 """
@@ -33,6 +14,7 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests._helpers.server_runner import ServerRunner, server_runner
@@ -40,6 +22,13 @@ from tests._helpers.session import bundle_files, post_session_bundle
 
 # CI shells can carry an egress proxy; every call targets 127.0.0.1.
 _http = httpx.Client(trust_env=False)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_http_client():
+    yield
+    _http.close()
+
 
 _HOST_ONLINE_TIMEOUT_S = 30.0
 _POLL_S = 0.5

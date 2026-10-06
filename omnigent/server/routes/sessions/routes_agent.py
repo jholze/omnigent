@@ -15,6 +15,7 @@ from fastapi import (
 )
 from fastapi.responses import Response
 
+from omnigent.debug_logging import debug_event
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCode, OmnigentError
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
@@ -345,18 +346,27 @@ def register_agent_routes(
 
         new_loc = bundle_location(agent.id, bundle_bytes)
 
-        # Idempotency: same bundle content = no-op, unless the artifact store
-        # lost the blob the row still names; re-uploading it is the restore path.
-        if new_loc == agent.bundle_location:
-            if artifact_store is not None and not artifact_store.exists(new_loc):
-                artifact_store.put(new_loc, bundle_bytes)
-            return _to_agent_object(agent, agent_cache, mcp_servers_editable=True)
-
         if artifact_store is None:
             raise OmnigentError(
                 "Artifact store not configured",
                 code=ErrorCode.INTERNAL_ERROR,
             )
+
+        # Idempotency: same bundle content = no-op, unless the artifact store
+        # lost the blob the row still names; re-uploading it is the restore path.
+        if new_loc == agent.bundle_location:
+            if not artifact_store.exists(new_loc):
+                _logger.warning(
+                    "Restoring an agent bundle lost from the artifact store",
+                    extra=debug_event(
+                        "agent_bundle_restored",
+                        agent_id=agent.id,
+                        bundle_location=new_loc,
+                    ),
+                )
+                artifact_store.put(new_loc, bundle_bytes)
+            return _to_agent_object(agent, agent_cache, mcp_servers_editable=True)
+
         artifact_store.put(new_loc, bundle_bytes)
         updated = await asyncio.to_thread(agent_store.update, agent.id, new_loc, user_id)
         if updated is None:

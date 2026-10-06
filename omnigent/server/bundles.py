@@ -385,6 +385,14 @@ def uploaded_agent_for(
             # The row can outlive its blob on an ephemeral artifact store; this
             # upload holds the same content, so it restores the blob.
             if not artifact_store.exists(location):
+                _logger.warning(
+                    "Restoring an agent bundle lost from the artifact store",
+                    extra=debug_event(
+                        "agent_bundle_restored",
+                        agent_id=agent.id,
+                        bundle_location=location,
+                    ),
+                )
                 artifact_store.put(location, bundle_bytes)
             return agent
     return None

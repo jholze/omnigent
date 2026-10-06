@@ -1,10 +1,9 @@
 """Launch-time spec lookups report ``agent_bundle_missing`` for a lost bundle.
 
-``POST /v1/hosts/{host_id}/runners`` reads the bound agent's spec twice before
-binding (workspace boundary, then harness). When the agent row survives but the
-artifact store no longer holds its bundle, both lookups must raise the
-structured 409 instead of letting the store's ``KeyError`` escape as a 500 —
-and must not fall back to ``None``, which would skip the boundary check.
+A runner launch reads the bound agent's spec twice (workspace boundary, then
+harness). When the row survives but its bundle blob is gone, both lookups must
+raise the structured 409 rather than fall back to ``None`` and skip the
+boundary check.
 """
 
 from __future__ import annotations

@@ -777,9 +777,26 @@ async def test_update_agent_restores_a_lost_bundle_blob(
     lost = await client.get(f"/v1/sessions/{session_id}/agent/contents")
     assert lost.status_code == 409, lost.text
 
+    store = SqlAlchemyAgentStore(db_uri)
+    before = store.get(session["agent_id"])
+    assert before is not None
+
     again = await client.put(f"/v1/sessions/{session_id}/agent", files=files)
     assert again.status_code == 200, again.text
     assert LocalArtifactStore(str(tmp_path / "artifacts")).exists(location)
+
+    # The restore repairs the blob in place; it must not rebind or re-version
+    # the surviving agent row.
+    after = store.get(session["agent_id"])
+    assert after is not None
+    assert after.id == before.id
+    assert after.name == before.name
+    assert after.bundle_location == before.bundle_location == location
+    assert after.version == before.version
+    assert after.session_id == before.session_id
+    assert after.created_by == before.created_by
+    assert after.kind == before.kind
+
     restored = await client.get(f"/v1/sessions/{session_id}/agent/contents")
     assert restored.status_code == 200, restored.text
     assert restored.content == replacement
