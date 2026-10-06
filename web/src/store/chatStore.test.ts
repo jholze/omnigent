@@ -12727,6 +12727,76 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
+  it("retries the backfill on the next tick after a transient items fetch fails", async () => {
+    seedSession("conv_items_retry", []);
+    const sink = pushableStream();
+    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0, failItemFetches: 0 };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/v1/sessions/conv_items_retry/stream") {
+        clock.streamOpens += 1;
+        init?.signal?.addEventListener("abort", () =>
+          sink.error(new DOMException("aborted", "AbortError")),
+        );
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      if (url.startsWith("/v1/sessions/conv_items_retry?") && (init?.method ?? "GET") === "GET") {
+        return mockResponse({
+          id: "conv_items_retry",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          updated_at: clock.updatedAt,
+          items: [],
+          labels: {},
+        });
+      }
+      if (url.startsWith("/v1/sessions/conv_items_retry/items")) {
+        clock.itemFetches += 1;
+        if (clock.failItemFetches > 0) {
+          clock.failItemFetches -= 1;
+          return Promise.reject(new TypeError("network error"));
+        }
+      }
+      return defaultFetchHandler(input, init);
+    });
+    const controller = new AbortController();
+    const bound = bindConversationForTest("conv_items_retry", { abortController: controller });
+    const loop = startStreamPump("conv_items_retry", controller, bound.set, bound.get);
+    await drainAsync();
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(clock.itemFetches).toBe(0);
+
+    // A turn lands on the server, but this backfill's items fetch fails once.
+    clock.updatedAt = 160;
+    clock.failItemFetches = 1;
+    seedSessionItems("conv_items_retry", [
+      { ...userMessage("resp_tui", "typed in the TUI"), created_at: 160 },
+      { ...assistantMessage("resp_tui", "reply printed in the TUI"), created_at: 160 },
+    ]);
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync(2);
+
+    // The failed fetch leaves the transcript empty but must not record the
+    // snapshot, or the gap would be masked and never retried.
+    expect(clock.itemFetches).toBe(1);
+    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual([]);
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync(2);
+    expect(clock.itemFetches).toBe(2);
+    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual([
+      "msg_resp_tui_user",
+      "msg_resp_tui_asst",
+    ]);
+
+    controller.abort();
+    await drainAsync(2);
+    await loop;
+  });
+
   it("keeps a live status event that arrives during snapshot reconciliation", async () => {
     seedSession("conv_status_race", []);
     const sink = pushableStream();

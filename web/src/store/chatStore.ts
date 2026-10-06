@@ -1350,6 +1350,10 @@ function noteSnapshot(id: string, session: Session, items: ConversationItem[] = 
  * Whether the server persisted transcript activity after the last snapshot
  * that no item this tab has seen accounts for: a live stream that stopped
  * carrying events. A bare metadata edit can trigger one redundant backfill.
+ * Second-granularity stamps leave a blind spot: an item persisted in the same
+ * second as the newest seen item (or the prior snapshot) is not detected until
+ * later activity bumps the clock; closing it fully needs a server-side
+ * monotonic revision.
  */
 function transcriptAdvancedUnseen(id: string, session: Session): boolean {
   const updatedAt = session.updatedAt;
@@ -4790,7 +4794,10 @@ async function reconcileActiveSessionStatus(
   set((s) => reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch));
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
   const missedItems = transcriptAdvancedUnseen(id, session);
-  noteSnapshot(id, session);
+  // On a miss, let reconcileOnReconnect record the snapshot on its own success
+  // path so a failed or stale backfill is retried on the next reconcile tick
+  // rather than being masked by an already-advanced snapshot clock.
+  if (!missedItems) noteSnapshot(id, session);
   const ignored = nativePreviewTombstonesByController.get(controller);
   const previewInterrupted =
     ignored !== undefined &&

@@ -155,12 +155,19 @@ def test_snapshot_reconcile_backfills_messages_missed_on_heartbeat_only_stream(
     _publish_message(
         base_url, session_id, role="assistant", text=reply_text, response_id="resp_tui"
     )
-    items = httpx.get(
+    items_response = httpx.get(
         f"{base_url}/v1/sessions/{session_id}/items",
         params={"order": "asc", "limit": 100},
         timeout=10.0,
-    ).json()["data"]
-    assert any(reply_text in json.dumps(item) for item in items)
+    )
+    items_response.raise_for_status()
+    items = items_response.json()["data"]
+    assert any(
+        part.get("text") == reply_text
+        for item in items
+        if item.get("role") == "assistant"
+        for part in item.get("content", [])
+    )
 
     page.clock.run_for("01:10")
 

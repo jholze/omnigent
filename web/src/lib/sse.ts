@@ -1171,6 +1171,7 @@ function parseSessionResource(raw: unknown): SessionResource | null {
 function parseOutputItem(data: Record<string, unknown>): OutputItemEvent | null {
   const event = parseOutputItemFields(data);
   if (event === null) return null;
+  // Non-null only when parseOutputItemFields validated `data.item` as an object.
   const createdAt = (data.item as Record<string, unknown>).created_at;
   return typeof createdAt === "number" && createdAt > 0 ? { ...event, createdAt } : event;
 }
