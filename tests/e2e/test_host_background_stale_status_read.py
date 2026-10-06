@@ -1,35 +1,15 @@
-"""E2E regression: ``omnigent host --background`` tears down a daemon that
-had already registered.
+"""E2E regression: ``omnigent host --background`` must not tear down a daemon
+that already registered.
 
-Reproduces the reported failure. ``omnigent host --background`` (and its
-``omnigent start`` alias) spawns a detached host daemon and then, before
-reporting success, polls a *secondary* readiness endpoint,
-``GET /v1/hosts/{host_id}``, until it reports ``online`` (see
-``_confirm_background_host_registered`` in ``omnigent/cli.py``). The daemon's
-actual registration happens over a **different** transport: an authenticated
-WebSocket tunnel. When the two diverge -- the tunnel registers fine but the
-CLI's status read is stale/blocked/routed differently and keeps answering
-"offline" -- the CLI hits its fixed 30s grace, declares the daemon never
-registered, and force-terminates a daemon that is genuinely online, killing a
-healthy host the user asked to start.
-
-The test stands up a transparent reverse proxy in front of the e2e
-``live_server``. The proxy forwards the WebSocket tunnel and every other HTTP
-call straight through -- so the daemon registers on the real server for real --
-but rewrites the single-host readiness read ``GET /v1/hosts/{host_id}`` to
-report ``offline``, modeling the divergent/stale status read from the report.
-It then runs the real ``omnigent host --server <proxy> --background`` command.
-The test encodes the *correct* behavior, so it FAILS while the bug is present
-and PASSES once the daemon that registered is no longer torn down:
-
-- the daemon genuinely reaches ``online`` on the REAL server (bypassing the
-  proxy, via the direct ``http_client``) -- i.e. it *did* register; then
-- ``omnigent host --background`` must succeed (exit 0, no "did not register
-  within 30s") and leave that healthy, registered daemon running (its pid
-  stays alive and its registry record survives).
-
-With the bug present, the CLI instead reports the 30s registration timeout and
-force-terminates the online daemon, so those assertions fail.
+``omnigent host --background`` (and ``omnigent start``) spawns a detached host
+daemon and, before reporting success, polls ``GET /v1/hosts/{host_id}`` until
+it reports ``online``, while the daemon registers over a different transport,
+the WebSocket tunnel. The test stands up a transparent reverse proxy in front
+of the e2e ``live_server`` that forwards everything, including the tunnel, but
+rewrites that single status read to ``offline``. It then runs the real
+``omnigent host --server <proxy> --background`` command: the daemon genuinely
+reaches ``online`` on the real server, so the command must exit 0 and leave the
+daemon running (pid alive, registry record intact).
 
 Run with::
 
@@ -63,11 +43,9 @@ from tests.e2e.conftest import POLL_INTERVAL_S, find_free_port
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The CLI's background-registration grace is a fixed 30s constant with no env
-# override (``_BACKGROUND_HOST_REGISTRATION_GRACE_S`` in ``omnigent/cli.py``),
-# so the command runs for ~30s before it gives up and tears the daemon down.
-# The overall cap is generous enough for that plus daemon spawn + teardown on a
-# loaded CI box.
+# The CLI's 30s registration grace (``_BACKGROUND_HOST_REGISTRATION_GRACE_S``)
+# has no env override; allow for it plus daemon spawn and teardown on a loaded
+# CI box.
 _CLI_TIMEOUT_S = 90.0
 
 # Exactly ``/v1/hosts/<one-segment>`` (the single-host readiness read the CLI
@@ -194,15 +172,17 @@ class _StaleStatusProxy:
 
     async def _proxy_ws(self, request: web.Request) -> web.StreamResponse:
         assert self._session is not None
-        server_ws = web.WebSocketResponse(max_msg_size=0, heartbeat=None)
-        await server_ws.prepare(request)
         target = f"ws://{self._backend_host}:{self._backend_port}{request.rel_url}"
+        # Dial the backend before completing the daemon's upgrade so a rejected
+        # handshake surfaces as an HTTP error instead of an abrupt socket drop.
         async with self._session.ws_connect(
             target,
             headers=self._fwd_headers(request),
             max_msg_size=0,
             autoping=True,
         ) as client_ws:
+            server_ws = web.WebSocketResponse(max_msg_size=0, heartbeat=None)
+            await server_ws.prepare(request)
 
             async def upstream_to_downstream() -> None:
                 async for msg in client_ws:
@@ -226,7 +206,9 @@ class _StaleStatusProxy:
                 if not client_ws.closed:
                     await client_ws.close()
 
-            await asyncio.gather(upstream_to_downstream(), downstream_to_upstream())
+            await asyncio.gather(
+                upstream_to_downstream(), downstream_to_upstream(), return_exceptions=True
+            )
         return server_ws
 
     def close(self) -> None:
@@ -338,10 +320,9 @@ def test_host_background_tears_down_registered_daemon_on_stale_status_read(
                 sort_keys=True,
             )
         )
-        # Hermetic subprocess env: drop inherited ``OMNIGENT_``/``DATABRICKS_``
-        # vars so the daemon reads a pristine config under our isolated HOME
-        # (its registry lands under ``tmp_path/.omnigent/daemons``) instead of
-        # a leaked provider config that would crash harness readiness.
+        # Drop inherited ``OMNIGENT_``/``DATABRICKS_`` vars so the daemon reads a
+        # pristine config under the isolated HOME (registry under
+        # ``tmp_path/.omnigent/daemons``) rather than a leaked provider config.
         env = {
             k: v for k, v in os.environ.items() if not k.startswith(("OMNIGENT_", "DATABRICKS_"))
         }
@@ -351,10 +332,8 @@ def test_host_background_tears_down_registered_daemon_on_stale_status_read(
         env["OPENAI_BASE_URL"] = f"{mock_llm_server_url}/v1"
         env["OPENAI_API_KEY"] = "mock-key"
         env = apply_runner_env(env)
-        # The daemon spawns with ``python -P`` (cwd off sys.path) and
-        # apply_runner_env only neutralizes the environment, so point PYTHONPATH
-        # at this worktree or the daemon imports the ambient checkout instead of
-        # the code under test.
+        # The daemon spawns with ``python -P`` (cwd off sys.path), so point
+        # PYTHONPATH at this worktree or it imports the ambient checkout.
         env["PYTHONPATH"] = f"{_REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}"
 
         # Run the real user command. It blocks for the full 30s grace before
@@ -421,11 +400,9 @@ def test_host_background_tears_down_registered_daemon_on_stale_status_read(
             f"Daemon log tail:\n{_host_log_tail(tmp_path)}"
         )
 
-        # Correct behavior: a daemon that already registered must NOT be torn
-        # down. These fail while the bug is present -- the CLI reports the 30s
-        # timeout and force-kills the healthy daemon. ``proxy.stale_reads``
-        # (the divergent readiness reads that trigger the bug) is surfaced for
-        # diagnosis, not asserted: a fix may stop polling that endpoint.
+        # A daemon that already registered must not be torn down; with the bug
+        # the CLI reports the 30s timeout and force-kills it. ``proxy.stale_reads``
+        # is surfaced for diagnosis only: a fix may stop polling that endpoint.
         assert proc.returncode == 0, (
             "omnigent host --background exited non-zero for a daemon that had "
             f"already registered online (divergent readiness reads="
@@ -433,7 +410,7 @@ def test_host_background_tears_down_registered_daemon_on_stale_status_read(
             f"instead of recognizing the registration.\nstdout:\n{out}\n"
             f"stderr:\n{err}\ndaemon log tail:\n{_host_log_tail(tmp_path)}"
         )
-        assert "did not register with the server within 30s" not in err, (
+        assert "did not register with the server" not in err, (
             "CLI declared the daemon never registered even though it was online "
             f"on the server (divergent readiness reads={proxy.stale_reads}).\n"
             f"stderr:\n{err}"

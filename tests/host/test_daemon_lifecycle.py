@@ -19,6 +19,7 @@ from omnigent.host.daemon_lifecycle import (
     mark_daemon_registered,
     normalize_daemon_target,
     record_flock_is_held,
+    record_update_lock_path,
 )
 from omnigent.host.identity import HostIdentity
 
@@ -241,6 +242,31 @@ def test_mark_daemon_registered_clears_stamp_on_request(tmp_path: Path) -> None:
     payload = json.loads(record.read_text())
     assert payload["registered_at"] is None
     assert payload["pid"] == os.getpid()
+
+
+def test_mark_daemon_registered_waits_for_concurrent_record_writer(tmp_path: Path) -> None:
+    """A stamp blocks while another writer holds the record's sidecar lock."""
+    fcntl = pytest.importorskip("fcntl")
+    import threading
+
+    record = daemon_record_path("local", base_dir=tmp_path)
+    _write_record(record, os.getpid())
+    lock_fd = os.open(record_update_lock_path(record), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    stamped = threading.Event()
+    worker = threading.Thread(
+        target=lambda: (mark_daemon_registered(record), stamped.set()), daemon=True
+    )
+    try:
+        worker.start()
+        assert not stamped.wait(0.3), "stamp did not wait for the writer lock"
+        assert "registered_at" not in json.loads(record.read_text())
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert stamped.wait(5.0)
+    worker.join(5.0)
+    assert isinstance(json.loads(record.read_text())["registered_at"], int)
 
 
 def test_mark_daemon_registered_refuses_foreign_or_missing_record(tmp_path: Path) -> None:

@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from importlib import import_module, resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast
@@ -76,6 +76,12 @@ from omnigent.host.daemon_lifecycle import (
 )
 from omnigent.host.daemon_lifecycle import (
     record_flock_is_held as _record_flock_is_held,
+)
+from omnigent.host.daemon_lifecycle import (
+    record_update_lock_path as _record_update_lock_path,
+)
+from omnigent.host.daemon_lifecycle import (
+    update_daemon_record_fields as _update_daemon_record_fields,
 )
 from omnigent.host.daemon_lifecycle import write_daemon_record as _write_daemon_record_impl
 from omnigent.host.local_server import (
@@ -2770,11 +2776,8 @@ def _daemon_reports_registered(record: _HostDaemonRecord) -> bool:
     """
     Whether the daemon's own registry record shows a completed registration.
 
-    The daemon stamps ``registered_at`` once the server confirms registration
-    on the tunnel itself (the first frame the server sends after the hello).
-    That is ground truth even when the secondary ``GET /v1/hosts/{id}`` status
-    read diverges (stale/cached read, proxy-split transports), so a healthy,
-    registered daemon is never mistaken for one that failed to register.
+    The daemon stamps ``registered_at`` when the server acknowledges its tunnel
+    registration, which holds even when ``GET /v1/hosts/{id}`` lags behind.
 
     :param record: Daemon record whose target registry entry to re-read.
     :returns: ``True`` when the current record still belongs to the same
@@ -2898,8 +2901,10 @@ def _delete_daemon_record(record: _HostDaemonRecord) -> None:
 
     :param record: Record whose target path should be removed.
     """
-    with contextlib.suppress(OSError):
-        _daemon_record_path(record.target).unlink()
+    record_path = _daemon_record_path(record.target)
+    for path in (record_path, _record_update_lock_path(record_path)):
+        with contextlib.suppress(OSError):
+            path.unlink()
     legacy = _read_host_pid_file()
     if legacy is not None and legacy[1] == record.target:
         with contextlib.suppress(OSError):
@@ -2973,20 +2978,15 @@ def _update_daemon_resolved_server_url(target: str, server_url: str) -> None:
     """
     Record the concrete Omnigent server URL served by a daemon target.
 
+    Rewrites only that field, under the record's writer lock, so a registration
+    stamp the daemon writes at the same time is never lost.
+
     :param target: Normalized target, e.g. ``"local"``.
     :param server_url: Concrete server URL, e.g.
         ``"http://127.0.0.1:8123"``.
     """
-    record = _find_daemon_record(target)
-    if record is None:
-        return
-    _write_daemon_record(
-        _HostDaemonRecord(
-            **{
-                **asdict(record),
-                "resolved_server_url": server_url.rstrip("/"),
-            }
-        )
+    _update_daemon_record_fields(
+        _daemon_record_path(target), resolved_server_url=server_url.rstrip("/")
     )
 
 
@@ -8970,10 +8970,8 @@ def _confirm_background_host_registered(record: _HostDaemonRecord) -> None:
                 "The host daemon exited before registering with the server."
                 f"{_background_host_log_detail(record.log_path)}"
             )
-        # Primary: the daemon's own registration stamp, server-acknowledged on
-        # the tunnel itself. The secondary server status read below can diverge
-        # from it, so it must never be the sole reason to declare failure and
-        # tear down a daemon that did register.
+        # The daemon's server-acknowledged stamp is ground truth; the status
+        # probe below can lag it and must never alone trigger a teardown.
         if _daemon_reports_registered(record):
             return
         result = _daemon_host_status_probe(record, timeout_s=1.0)

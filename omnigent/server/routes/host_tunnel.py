@@ -1064,10 +1064,9 @@ async def _ping_loop(
     :param host_id: Host id for logging.
     :param heartbeat_requested: Event consumed by the heartbeat writer.
     """
-    # These loops only start once the host is persisted and registered, so a
-    # host that asked for it gets the first ping at once and treats it as the
-    # server's registration acknowledgement. Hosts that did not ask keep the
-    # historical first-frame timing.
+    # The loop starts only after registration, so an opted-in host treats the
+    # immediate first ping as the registration acknowledgement; hosts without
+    # the capability keep the historical first-frame timing.
     if CAP_REGISTRATION_ACK in conn.hello.capabilities:
         try:
             conn.outbound_queue.put_nowait(encode_frame(PingFrame(ts=int(time.time() * 1000))))

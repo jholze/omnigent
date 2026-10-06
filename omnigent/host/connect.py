@@ -57,7 +57,7 @@ from omnigent.gateway_inference import gateway_inference_map
 from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness_name
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
-from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
+from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, mark_daemon_registered
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
@@ -4581,7 +4581,9 @@ class HostProcess:
                     self._raise_connection_error_from_raw(raw)
                     if not registration_stamped:
                         registration_stamped = True
-                        self._set_daemon_registered(True)
+                        # Off the receive loop: a slow filesystem must not stall
+                        # the keepalive pong the server counts as liveness.
+                        await asyncio.to_thread(self._set_daemon_registered, True)
                     # Each request frame is handled on its own task so a slow
                     # handler (a model-options CLI exec, a long git walk) can't
                     # head-of-line block the frames behind it — measured
@@ -4669,22 +4671,16 @@ class HostProcess:
     def _set_daemon_registered(self, registered: bool) -> None:
         """Record in the daemon's registry record whether this tunnel is registered.
 
-        Stamped on the first frame received after ``host.hello`` that is not a
-        fatal ``host.connection_error``: the server sends nothing else before
-        it completes registration (it starts its send loops — including the
-        immediate keepalive ping this host asks for — only once the host is
-        persisted and registered), so that frame is the server's
-        acknowledgement. Cleared when the tunnel drops, so a reconnecting
-        daemon is not mistaken for a registered one. The stamp gives the CLI's
-        background-spawn readiness gate ground truth even when its secondary
-        ``GET /v1/hosts/{id}`` status read diverges from the tunnel.
+        The server sends nothing but connection errors before it completes
+        registration, so the first other frame after ``host.hello`` (the
+        immediate keepalive ping this host asks for) is its acknowledgement.
+        Cleared when the tunnel drops so a reconnecting daemon is not mistaken
+        for a registered one.
 
         :param registered: Whether the server has acknowledged this tunnel.
         """
         if self._lifecycle_lock is None:
             return
-        from omnigent.host.daemon_lifecycle import mark_daemon_registered
-
         mark_daemon_registered(self._lifecycle_lock.record_path, registered=registered)
 
     def _start_frame_task(self, ws: websockets.asyncio.client.ClientConnection, raw: str) -> None:

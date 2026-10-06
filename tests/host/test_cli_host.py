@@ -1009,6 +1009,63 @@ def test_daemon_record_rewrite_preserves_registration_stamp(
     assert again is not None and again.registered_at == 123456789
 
 
+def test_daemon_record_rewrite_waits_for_daemon_stamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's resolved-URL rewrite reads the record only once it holds the lock.
+
+    The daemon stamps ``registered_at`` while local startup rewrites
+    ``resolved_server_url``; without the writer lock the CLI could read before
+    the stamp and write afterwards, erasing it.
+    """
+    fcntl = pytest.importorskip("fcntl")
+    import threading
+
+    from omnigent.host.daemon_lifecycle import record_update_lock_path
+
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    target = "local"
+    cli_module._write_daemon_record(
+        cli_module._HostDaemonRecord(
+            pid=4242,
+            target=target,
+            mode="local",
+            server_url=None,
+            log_path=None,
+            started_at=int(time.time()),
+        )
+    )
+    record_path = cli_module._daemon_record_path(target)
+    lock_fd = os.open(record_update_lock_path(record_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    rewritten = threading.Event()
+    worker = threading.Thread(
+        target=lambda: (
+            cli_module._update_daemon_resolved_server_url(target, "http://127.0.0.1:6767"),
+            rewritten.set(),
+        ),
+        daemon=True,
+    )
+    try:
+        worker.start()
+        assert not rewritten.wait(0.3), "CLI rewrite did not wait for the writer lock"
+        # The daemon's stamp lands while the CLI rewrite is held back.
+        data = json.loads(record_path.read_text())
+        data["registered_at"] = 123456789
+        record_path.write_text(json.dumps(data))
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert rewritten.wait(5.0)
+    worker.join(5.0)
+
+    again = cli_module._find_daemon_record(target)
+    assert again is not None
+    assert again.registered_at == 123456789
+    assert again.resolved_server_url == "http://127.0.0.1:6767"
+
+
 def test_host_background_does_not_block(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

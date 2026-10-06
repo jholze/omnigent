@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -143,39 +144,88 @@ def write_daemon_record(
         (root / "host.pid").write_text(f"{record.pid}\n{record.target}\n")
 
 
+def record_update_lock_path(record_path: Path) -> Path:
+    """Return the sidecar lock that serializes rewrites of *record_path*."""
+    return record_path.with_name(record_path.name + ".lock")
+
+
+@contextlib.contextmanager
+def _record_update_lock(record_path: Path) -> Iterator[None]:
+    """Serialize whole-record rewrites across the daemon and CLI processes.
+
+    The record's own flock marks the daemon's lifetime, so writers coordinate
+    on a sidecar lock instead.
+    """
+    if fcntl is None:
+        yield
+        return
+    fd = os.open(
+        record_update_lock_path(record_path),
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def update_daemon_record_fields(
+    record_path: Path, *, pid: int | None = None, **fields: object
+) -> bool:
+    """Rewrite *fields* of an existing record in place, under the writer lock.
+
+    :param record_path: The daemon's ``<hash>.json`` registry record.
+    :param pid: When given, only a record owned by this pid is rewritten.
+    :param fields: Record fields to replace, e.g. ``registered_at=1700000000``.
+    :returns: ``True`` when the record was rewritten; ``False`` when it is
+        missing, malformed, unwritable, or owned by another pid.
+    """
+    try:
+        with _record_update_lock(record_path):
+            try:
+                data = json.loads(record_path.read_text())
+            except (OSError, ValueError):
+                return False
+            if not isinstance(data, dict) or (pid is not None and data.get("pid") != pid):
+                return False
+            data.update(fields)
+            payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
+            # ``r+`` keeps the inode (the daemon's flock) and fails on a record
+            # that ``host stop`` removed meanwhile instead of resurrecting it.
+            with record_path.open("r+", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.truncate()
+    except OSError:
+        _logger.debug("daemon record update failed for %s", record_path, exc_info=True)
+        return False
+    return True
+
+
 def mark_daemon_registered(
     record_path: Path, *, pid: int | None = None, registered: bool = True
 ) -> bool:
     """Record whether the owning daemon currently holds a server registration.
 
-    The daemon stamps ``registered_at`` once the server has confirmed
-    registration on the tunnel itself (its first post-hello frame) and clears
-    it when that tunnel drops, so the CLI's background-spawn readiness gate
-    has ground truth even when the secondary ``GET /v1/hosts/{id}`` status
-    read diverges. Rewrites the record in place (same inode) so the daemon's
-    lifecycle flock survives.
+    Stamped on the server's first post-hello frame and cleared when the tunnel
+    drops, so the CLI's background-spawn gate has ground truth even when the
+    ``GET /v1/hosts/{id}`` status read diverges.
 
     :param record_path: The daemon's ``<hash>.json`` registry record.
     :param pid: Owning pid to verify; defaults to the current process.
-    :param registered: ``True`` stamps the current time; ``False`` clears the
-        stamp.
+    :param registered: ``True`` stamps the current time; ``False`` clears it.
     :returns: ``True`` when the record was rewritten; ``False`` when it is
-        missing, malformed, unwritable, or owned by another pid — best-effort,
-        never raises.
+        missing, malformed, unwritable, or owned by another pid.
     """
-    owner = os.getpid() if pid is None else pid
-    try:
-        data = json.loads(record_path.read_text())
-    except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict) or data.get("pid") != owner:
-        return False
-    data["registered_at"] = int(time.time()) if registered else None
-    try:
-        record_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    except OSError:
-        return False
-    return True
+    return update_daemon_record_fields(
+        record_path,
+        pid=os.getpid() if pid is None else pid,
+        registered_at=int(time.time()) if registered else None,
+    )
 
 
 def record_flock_is_held(record_path: Path) -> bool | None:
