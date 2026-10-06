@@ -1,18 +1,12 @@
 """E2E: the landing composer must settle while a host's Claude catalog probe hangs.
 
-Journey from the report: open the new-session landing in the web UI, have
-Claude Code selected on an online host, type a message. While the host's
-``claude`` model-catalog probe never answers, every
-``GET /v1/hosts/{id}/harnesses/claude-native/model-options`` fails (504 after
-the server's 15 s budget, or 502 once the host's own 20 s probe gives up) and
-the composer keeps reporting "Loading session configuration…" with Send
-disabled. The composer must leave that state promptly instead of holding the
-user for minutes.
-
 A real ``omnigent host`` daemon registers on the live server with a scripted
-``claude`` double first on PATH (pattern from ``test_native_picker_cli_parity``):
-it answers ``--version`` / ``auth status`` so claude-native reads ready, and
-sleeps on the stream-json catalog probe. No browser request is intercepted.
+``claude`` first on PATH: it answers ``--version`` / ``auth status`` so
+claude-native reads ready, and sleeps on the catalog probe, so every
+``GET /v1/hosts/{id}/harnesses/claude-native/model-options`` fails (504 at the
+server's 15 s budget, or 502 once the host's 20 s probe gives up). The composer
+must still leave "Loading session configuration…" promptly, on a cold landing
+and on a cached-pill landing alike. No browser request is intercepted.
 """
 
 from __future__ import annotations

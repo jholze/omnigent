@@ -1298,13 +1298,9 @@ export function ComposerAgentIcon({ agent }: { agent: Pick<AvailableAgent, "name
 }
 
 /**
- * Whether a host catalog query is still waiting for its first answer.
- *
- * `isLoading` holds through the whole retry sequence, and a stuck host makes
- * every attempt run to the server's timeout, so gating on it alone holds the
- * composer for minutes. The first failure is what the user needs to see; the
- * retries keep running in the background and swap the catalog in if the host
- * recovers.
+ * Whether a host catalog query still awaits its first answer. `isLoading` holds
+ * through the whole retry sequence and each attempt can run to the server's
+ * host timeout; later retries keep running in the background instead.
  */
 export function awaitingHostModelOptions(
   query: Pick<UseQueryResult<NativeModelOption[]>, "isLoading" | "failureCount">,
