@@ -3782,6 +3782,8 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
         "DATABRICKS_AUTH_STORAGE": "plaintext",
         "ANTHROPIC_API_KEY": "sk-harness",
         "IS_SANDBOX": "1",
+        "HTTPS_PROXY": "http://egress.sandbox.test:3128",
+        "no_proxy": "localhost,127.0.0.1,::1",
         "DATABRICKS_TOKEN": "dapi-secret",
         "AWS_SECRET_ACCESS_KEY": "aws-secret",
         "SOME_RANDOM_VAR": "x",
@@ -3834,6 +3836,10 @@ def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path)
     # needs it to allow --dangerously-skip-permissions under root in
     # sandbox containers. Only the baked host image ever sets it.
     assert env["IS_SANDBOX"] == "1"
+    # Egress proxy settings forward in either spelling: a proxy-mandatory
+    # sandbox's runner tunnels and harness calls need the same route out.
+    assert env["HTTPS_PROXY"] == "http://egress.sandbox.test:3128"
+    assert env["no_proxy"] == "localhost,127.0.0.1,::1"
     # The claude-sdk sandbox bypass flag forwards — it is read inside the
     # harness, so a bare ``OMNIGENT_CLAUDE_SDK_NO_SANDBOX=1 omnigent run …``
     # must reach the runner without also forcing

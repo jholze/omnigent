@@ -521,6 +521,17 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS",
+        # Egress proxy settings a proxy-mandatory sandbox injects (the CLI
+        # forwards the same set to the daemon): the runner's tunnel and its
+        # harness HTTP clients need the same route out as the host.
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
         # Force UTF-8 I/O on Windows. Without this, Python on Windows defaults
         # to the system ANSI code page (e.g. cp1252), causing UnicodeEncodeError
         # when the host daemon / runner prints Unicode characters such as "✓" or
