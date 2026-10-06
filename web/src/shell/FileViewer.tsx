@@ -697,14 +697,17 @@ function FileViewerBody({
     !isModel &&
     !isBinary &&
     (changedFiles.data?.data.some((f) => f.path === path) ?? false);
-  // Prefetch the diff only once the metadata resolves and confirms the file is
-  // diffable. Until then the checks above fall back to the extension, so a
-  // media/binary file typed only by its encoding would fetch a diff never shown.
-  const diffQuery = useFileDiff(conversationId, path, {
-    enabled: isDiffAvailable && fileQuery.data !== undefined,
-  });
   const isDeletedFile =
     changedFiles.data?.data.some((f) => f.path === path && f.status === "deleted") ?? false;
+  // Prefetch the diff only once file classification settles. While the content
+  // request is still pending the checks above fall back to the extension, so a
+  // media/binary file typed only by its encoding would fetch a diff never shown;
+  // wait for its metadata to resolve (or fail) first. Deleted files have no
+  // readable content but still diff against their previous contents, so keep
+  // their diff enabled regardless.
+  const diffQuery = useFileDiff(conversationId, path, {
+    enabled: isDiffAvailable && (!fileQuery.isPending || isDeletedFile),
+  });
   const revealTarget = useRevealTarget(path);
 
   // Diff is a global toggle — turning it on/off on any file carries over as you

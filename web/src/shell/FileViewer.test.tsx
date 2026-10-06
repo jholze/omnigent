@@ -131,8 +131,14 @@ vi.mock("@/hooks/useComments", () => ({
   useDeleteComment: vi.fn(() => ({ mutate: vi.fn() })),
 }));
 
+// Default content the viewer sees unless a test overrides it. Hoisted so the
+// mock factory and the per-suite teardown share one source of truth.
+const { defaultFileContent } = vi.hoisted(() => ({
+  defaultFileContent: { data: { content: "", path: "file1.py" } },
+}));
+
 vi.mock("@/hooks/useFileContent", () => ({
-  useFileContent: vi.fn(() => ({ data: { content: "", path: "file1.py" } })),
+  useFileContent: vi.fn(() => defaultFileContent),
 }));
 
 vi.mock("@/hooks/useFileDiff", () => ({
@@ -1974,9 +1980,9 @@ describe("FileViewer binary files identified by content metadata", () => {
   });
 
   afterEach(() => {
-    vi.mocked(useFileContent).mockReturnValue({
-      data: { content: "", path: "file1.py" },
-    } as unknown as ReturnType<typeof useFileContent>);
+    vi.mocked(useFileContent).mockReturnValue(
+      defaultFileContent as unknown as ReturnType<typeof useFileContent>,
+    );
   });
 
   it("suppresses the diff toggle for base64 content with an unrecognized extension", () => {

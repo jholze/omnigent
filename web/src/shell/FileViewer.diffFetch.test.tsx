@@ -1,8 +1,10 @@
-// Opening a changed image, PDF, 3D model or binary file must not request its diff:
-// the viewer never renders one for those types. The real useFileDiff runs against
-// a stubbed fetch so the assertion holds whichever layer gates the query.
+// Opening a changed image, PDF, 3D model or binary file must not request its
+// diff: the viewer never renders one for those types. A deleted file, or one
+// whose content request fails, must still request its diff rather than hang on a
+// permanently disabled query. The real useFileDiff runs against a stubbed fetch
+// so the assertion holds whichever layer gates the query.
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -86,49 +88,82 @@ const fetchMock = vi.fn<typeof fetch>(
     }) as unknown as Response,
 );
 
+type ChangedStatus = "created" | "modified" | "deleted";
+
 interface OpenedFile {
   kind: string;
   path: string;
   content_type: string | null;
   encoding: "utf-8" | "base64";
+  status?: ChangedStatus;
 }
 
-function openChangedFile(file: OpenedFile | { path: string; loading: true }): QueryClient {
-  vi.mocked(useFileContent).mockReturnValue(
-    ("loading" in file
-      ? { data: undefined }
+// How the file-content metadata request has settled, mirrored through the
+// TanStack query shape FileViewer reads: "loading" is still pending (no data,
+// no error), "error" has settled without data (e.g. a deleted file's 404).
+type ContentPhase = "loading" | "error";
+
+type OpenSpec = OpenedFile | { path: string; status?: ChangedStatus; phase: ContentPhase };
+
+function setFileContent(spec: OpenSpec): void {
+  const result =
+    "phase" in spec
+      ? { data: undefined, isPending: spec.phase === "loading" }
       : {
           data: {
             object: "session.environment.filesystem.file_content",
-            path: file.path,
-            content_type: file.content_type,
-            encoding: file.encoding,
+            path: spec.path,
+            content_type: spec.content_type,
+            encoding: spec.encoding,
             content: "AAAA",
             bytes: 4,
           },
-        }) as unknown as ReturnType<typeof useFileContent>,
-  );
+          isPending: false,
+        };
+  vi.mocked(useFileContent).mockReturnValue(result as unknown as ReturnType<typeof useFileContent>);
+}
+
+function setChangedFile(path: string, status: ChangedStatus): void {
   vi.mocked(useWorkspaceChangedFiles).mockReturnValue({
     data: {
       available: true,
-      data: [{ path: file.path, name: file.path, status: "created", bytes: 4, modified_at: null }],
+      data: [{ path, name: path, status, bytes: 4, modified_at: null }],
     },
   } as unknown as ReturnType<typeof useWorkspaceChangedFiles>);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <FileViewer open conversationId="conv_1" path={file.path} onClose={() => {}} />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
-  return queryClient;
 }
 
-// The viewer dispatches an enabled diff query synchronously on mount, so once
-// no query is in flight the recorded requests are final — no fixed-delay window
-// that a slow machine could outrun.
+function renderViewer(path: string): { queryClient: QueryClient; rerender: () => void } {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // Build a fresh element each render: React bails out of re-rendering an element
+  // passed by the same reference, which would hide the mocked content update.
+  const ui = () => (
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <FileViewer open conversationId="conv_1" path={path} onClose={() => {}} />
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+  const result = render(ui());
+  return { queryClient, rerender: () => result.rerender(ui()) };
+}
+
+function openChangedFile(spec: OpenSpec): QueryClient {
+  setFileContent(spec);
+  setChangedFile(spec.path, spec.status ?? "created");
+  return renderViewer(spec.path).queryClient;
+}
+
+function diffUrl(path: string): string {
+  return `/v1/sessions/conv_1/resources/environments/default/diff/${path}`;
+}
+
+// Flush a render/microtask cycle so any mount effect that enables the diff query
+// has run before we treat an empty in-flight set as final; otherwise a disabled
+// query reads as "done" immediately and a regressing enable could slip past.
 async function diffRequests(queryClient: QueryClient): Promise<string[]> {
+  await act(async () => {
+    await Promise.resolve();
+  });
   await waitFor(() => expect(queryClient.isFetching()).toBe(0));
   return fetchMock.mock.calls
     .map(([input]) => String(input))
@@ -170,7 +205,26 @@ describe("FileViewer — diff fetch for files it never diffs", () => {
   it("does not request a diff while a changed file's metadata is still loading", async () => {
     // A text-like extension would classify as diffable, but the file could still
     // resolve to media/binary content; wait for the metadata before fetching.
-    expect(await diffRequests(openChangedFile({ path: "notes.txt", loading: true }))).toEqual([]);
+    expect(await diffRequests(openChangedFile({ path: "notes.txt", phase: "loading" }))).toEqual(
+      [],
+    );
+  });
+
+  it("requests the diff only once a changed text file's metadata resolves", async () => {
+    setChangedFile("notes.txt", "created");
+    setFileContent({ path: "notes.txt", phase: "loading" });
+    const { queryClient, rerender } = renderViewer("notes.txt");
+    // Pending metadata: the extension alone must not trigger the fetch early.
+    expect(await diffRequests(queryClient)).toEqual([]);
+
+    setFileContent({
+      kind: "text",
+      path: "notes.txt",
+      content_type: "text/plain",
+      encoding: "utf-8",
+    });
+    rerender();
+    expect(await diffRequests(queryClient)).toEqual([diffUrl("notes.txt")]);
   });
 
   it("still requests the diff for a changed text file", async () => {
@@ -180,8 +234,29 @@ describe("FileViewer — diff fetch for files it never diffs", () => {
       content_type: "text/plain",
       encoding: "utf-8",
     });
-    expect(await diffRequests(queryClient)).toEqual([
-      "/v1/sessions/conv_1/resources/environments/default/diff/notes.txt",
-    ]);
+    expect(await diffRequests(queryClient)).toEqual([diffUrl("notes.txt")]);
+  });
+
+  it("still requests the diff for a deleted changed text file", async () => {
+    // A deleted file has no readable content, so its metadata request fails, but
+    // it still diffs against its previous contents — the diff must be fetched
+    // rather than left disabled behind the pending-metadata gate.
+    const queryClient = openChangedFile({
+      path: "removed.txt",
+      status: "deleted",
+      phase: "error",
+    });
+    expect(await diffRequests(queryClient)).toEqual([diffUrl("removed.txt")]);
+  });
+
+  it("still requests the diff when a changed text file's content request fails", async () => {
+    // A failed content request must not leave the diff view permanently loading:
+    // once the metadata settles, even as an error, the diffable file fetches its diff.
+    const queryClient = openChangedFile({
+      path: "notes.txt",
+      status: "created",
+      phase: "error",
+    });
+    expect(await diffRequests(queryClient)).toEqual([diffUrl("notes.txt")]);
   });
 });
