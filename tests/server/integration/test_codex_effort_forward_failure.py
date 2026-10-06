@@ -202,7 +202,8 @@ async def test_combined_model_and_effort_uses_target_model_capabilities(
         body = dict(kwargs["json"])
         forwarded.append(body)
         if runner_ignores_combined_effort and body.get("type") == "model_change":
-            # Covers the server's split fallback; its effort step still runs this runner.
+            # Split-protocol compatibility: the effort step still runs this runner's
+            # resolver, so this does not show an old runner resolving a raw null.
             body.pop("effort", None)
         return await original_post(url, **{**kwargs, "json": body})
 
@@ -516,6 +517,49 @@ async def test_rejected_change_restores_an_effort_the_terminal_reported_before_s
     saved = session.store.get_conversation(session.session_id)
     assert saved is not None
     assert saved.reasoning_effort == "xhigh"
+
+
+async def test_refusal_after_the_runner_re_tunnelled_keeps_the_new_replicas_selection(
+    client: httpx.AsyncClient,
+    native_session: _NativeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale replica re-addresses its refusal instead of undoing a newer confirmed pick."""
+    import time
+
+    from omnigent.server.routes import sessions as sessions_module
+
+    session = native_session
+    session.codex.failure = "update_refused"
+    assert session.store.set_runner_id(session.session_id, "runner_sibling")
+    real_forward = sessions_module._forward_session_change_to_runner
+    refused = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def pause_after_refusal(*args: Any, **kwargs: Any) -> Any:
+        result = await real_forward(*args, **kwargs)
+        refused.set()
+        await resume.wait()
+        return result
+
+    monkeypatch.setattr(sessions_module, "_forward_session_change_to_runner", pause_after_refusal)
+    url = f"/v1/sessions/{session.session_id}"
+    pending = asyncio.create_task(client.patch(url, json={"reasoning_effort": "high"}))
+    try:
+        await asyncio.wait_for(refused.wait(), timeout=5.0)
+        # The runner reconnects to another replica, which confirms two newer picks.
+        session.store.touch_runner_liveness(["runner_sibling"], int(time.time()))
+        session.store.update_conversation(session.session_id, reasoning_effort="medium")
+        session.store.update_conversation(session.session_id, reasoning_effort="high")
+    finally:
+        resume.set()
+    response = await asyncio.wait_for(pending, timeout=5.0)
+
+    assert response.status_code == 400, response.text
+    assert "wrong_replica" in response.text
+    saved = session.store.get_conversation(session.session_id)
+    assert saved is not None
+    assert saved.reasoning_effort == "high"
 
 
 async def test_overlapping_refused_changes_restore_the_applied_effort(

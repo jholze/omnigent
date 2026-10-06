@@ -143,6 +143,7 @@ Cross-harness journeys:
   `tests/server/integration/test_codex_effort_forward_failure.py::test_rejected_change_preserves_concurrent_selection_and_sibling_settings`,
   `tests/server/integration/test_codex_effort_forward_failure.py::test_rejected_change_keeps_an_effort_the_terminal_reported_meanwhile`,
   `tests/server/integration/test_codex_effort_forward_failure.py::test_rejected_change_restores_an_effort_the_terminal_reported_before_saving`,
+  `tests/server/integration/test_codex_effort_forward_failure.py::test_refusal_after_the_runner_re_tunnelled_keeps_the_new_replicas_selection`,
   `tests/runner/test_app_sessions_native_events_lifecycle.py::test_codex_native_reset_without_a_current_model_is_rejected_before_connecting`,
   `tests/server/integration/test_codex_effort_forward_failure.py::test_successful_update_mirrors_unchanged_native_effort_without_notification`,
   `tests/server/integration/test_codex_effort_forward_failure.py::test_combined_model_and_effort_uses_target_model_capabilities`,
@@ -160,6 +161,7 @@ Cross-harness journeys:
   Codex RPC failures inject missing defaults and discovery timeouts. A refused
   reset returns an error and preserves applied settings and concurrent edits:
   a save or terminal report after the change stays, and one before it is restored;
+  a replica the runner has re-tunnelled away from re-addresses instead of rolling back;
   overlapping refused changes end on the last applied setting. Offline and
   silent explicit efforts are applied on resume; a saved Default is stored, but
   resume keeps the private config's effort.

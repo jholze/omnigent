@@ -1050,6 +1050,7 @@ def test_mirror_applied_codex_settings_records_failed_writes_until_the_config_ch
     assert codex_native_bridge.read_unmirrored_codex_settings(bridge_dir) == {}
 
 
+@pytest.mark.posix_only
 def test_mirror_applied_codex_settings_holds_its_lock_while_writing(
     bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

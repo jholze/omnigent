@@ -344,6 +344,15 @@ async def _restore_refused_settings(
     saved: int,
 ) -> None:
     """Undo a refused live change, keeping newer writes and restoring what it replaced."""
+    from omnigent.server.routes.sessions.routes_events import (
+        _raise_if_runner_re_tunnelled_to_another_replica,
+    )
+
+    # A runner that re-tunnelled is ordered by its new replica, which may have applied
+    # a newer selection; re-address the request there instead of undoing it here.
+    await _raise_if_runner_re_tunnelled_to_another_replica(
+        session_id, attempted.runner_id, conversation_store
+    )
     restore = {"reasoning_effort": True, "model_override": restore_model}
     replaced = {
         "reasoning_effort": previous.reasoning_effort,
