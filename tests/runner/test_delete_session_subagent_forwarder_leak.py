@@ -173,3 +173,59 @@ async def test_delete_parent_cancels_drained_child_native_forwarder(
         await drain_forwarder(parent, parent_task)
         await drain_forwarder(drained, drained_task)
         sw.unregister_child_session(drained)
+
+
+async def test_delete_parent_continues_after_descendant_reap_raises(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+) -> None:
+    parent = f"conv_parent_{uuid.uuid4().hex}"
+    failing = f"conv_failing_{uuid.uuid4().hex}"
+    sibling = f"conv_sibling_{uuid.uuid4().hex}"
+
+    for child in (failing, sibling):
+        sw.register_subagent_work(
+            parent_session_id=parent,
+            child_session_id=child,
+            agent="worker",
+            title="worker",
+            wrapper_label="claude-code-native-ui",
+        )
+
+    parent_task = register_forwarder(parent)
+    failing_task = register_forwarder(failing)
+    sibling_task = register_forwarder(sibling)
+
+    cleaned: list[str] = []
+    registry = app.state.session_resource_registry
+    original_cleanup = registry.cleanup_session
+
+    async def _cleanup_raising_for_failing(session_id: str) -> None:
+        cleaned.append(session_id)
+        if session_id == failing:
+            raise RuntimeError("descendant resource cleanup blew up")
+        await original_cleanup(session_id)
+
+    registry.cleanup_session = _cleanup_raising_for_failing  # type: ignore[method-assign]
+
+    try:
+        resp = await client.delete(f"/v1/sessions/{parent}")
+        # One descendant whose reap raises must not abort the delete: the server
+        # already tree-deleted the session, so a 500 here would be spurious.
+        assert resp.status_code == 200
+
+        # The sibling is still reaped and the parent's own post-loop cleanup
+        # still runs, so a single failing reap can't strand the rest.
+        assert sibling_task.cancelled(), "a failing sibling reap stranded the other descendant"
+        assert sibling in cleaned, "a failing sibling reap skipped the other descendant's cleanup"
+        assert failing_task.cancelled()
+        assert parent in cleaned, "a failing descendant reap aborted the parent's own cleanup"
+    finally:
+        registry.cleanup_session = original_cleanup  # type: ignore[method-assign]
+        await drain_forwarder(parent, parent_task)
+        await drain_forwarder(failing, failing_task)
+        await drain_forwarder(sibling, sibling_task)
+        sw.unregister_child_session(failing)
+        sw.unregister_child_session(sibling)
+        sw.unregister_subagent_work(child_session_id=failing)
+        sw.unregister_subagent_work(child_session_id=sibling)
