@@ -1552,6 +1552,7 @@ describe("continueFailedTurn", () => {
           },
         ],
       },
+      client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
   });
 

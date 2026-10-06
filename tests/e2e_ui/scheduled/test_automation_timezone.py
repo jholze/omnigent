@@ -68,6 +68,11 @@ def _clock_12h(hour24: int, minute: int) -> tuple[int, str]:
     return hour12, period
 
 
+def _fmt_12h(dt: datetime) -> str:
+    hour12, period = _clock_12h(dt.hour, dt.minute)
+    return f"{hour12}:{dt.minute:02d} {period}"
+
+
 def _shot(page: Page, name: str) -> None:
     if _SHOTS_DIR is None:
         return
@@ -141,13 +146,9 @@ def test_dialog_created_automation_uses_browser_local_timezone(
     _type_time(page, due_local.hour, due_local.minute)
     _shot(page, "dialog-before-create")
     page.get_by_test_id("create-scheduled-task-submit").click()
-
-    row = _row_by_name(page, name)
-    expect(row).to_be_visible(timeout=30_000)
-    task = _task_by_name(live_server, name)
-    assert task is not None, "created automation is not listed by the API"
-    task_id = task["id"]
     try:
+        row = _row_by_name(page, name)
+        expect(row).to_be_visible(timeout=30_000)
         schedule_line = row.get_by_test_id("task-schedule-line")
         expect(schedule_line).to_contain_text(
             f"Every day at {hour12}:{due_local.minute:02d} {period}"
@@ -156,7 +157,7 @@ def test_dialog_created_automation_uses_browser_local_timezone(
         _shot(page, "row-after-create")
 
         task = _task_by_name(live_server, name)
-        assert task is not None
+        assert task is not None, "created automation is not listed by the API"
         actual_local = _parse_iso(task["next_run_at"]).astimezone(_LA)
         print(
             f"stored timezone={task['timezone']} rrule={task['rrule']} "
@@ -165,11 +166,13 @@ def test_dialog_created_automation_uses_browser_local_timezone(
         )
         assert task["timezone"] == _BROWSER_TZ, task
         assert (actual_local.hour, actual_local.minute) == (due_local.hour, due_local.minute), (
-            f"next_run_at {task['next_run_at']} is {actual_local.strftime('%-I:%M %p')} "
-            f"{_BROWSER_TZ}, not the chosen {due_local.strftime('%-I:%M %p')}"
+            f"next_run_at {task['next_run_at']} is {_fmt_12h(actual_local)} "
+            f"{_BROWSER_TZ}, not the chosen {_fmt_12h(due_local)}"
         )
     finally:
-        httpx.delete(f"{live_server}/v1/scheduled-tasks/{task_id}", timeout=10.0)
+        created = _task_by_name(live_server, name)
+        if created is not None:
+            httpx.delete(f"{live_server}/v1/scheduled-tasks/{created['id']}", timeout=10.0)
 
 
 @pytest.mark.browser_context_args(timezone_id=_BROWSER_TZ)
@@ -240,11 +243,18 @@ def test_chat_created_automation_uses_user_local_timezone(
             _SHOTS_DIR.mkdir(parents=True, exist_ok=True)
             (_SHOTS_DIR / "mock-requests.json").write_text(json.dumps(captured, indent=2))
         print(f"mock captured {len(captured.get('requests', []))} request(s)")
+        # The zone rides the framework instructions, not the tool call the model
+        # made (it omitted one), so this proves the prompt path carried it rather
+        # than only the tool-dispatch fallback that also fills the stored task.
+        assert any(
+            _BROWSER_TZ in json.dumps(req.get("instructions", ""))
+            for req in captured.get("requests", [])
+        ), f"framework instructions did not carry {_BROWSER_TZ} to the model"
         actual_instant = _parse_iso(task["next_run_at"])
         actual_local = actual_instant.astimezone(_LA)
         print(
             f"stored timezone={task['timezone']} next_run_at={task['next_run_at']} "
-            f"(= {actual_local.strftime('%-I:%M %p')} {_BROWSER_TZ}) row={line_text!r}"
+            f"(= {_fmt_12h(actual_local)} {_BROWSER_TZ}) row={line_text!r}"
         )
         # The next 9:00 AM in the browser's zone, regardless of which calendar day
         # it falls on; a UTC-evaluated schedule would read 1:00/2:00 AM here.
@@ -254,7 +264,7 @@ def test_chat_created_automation_uses_user_local_timezone(
         ), (
             f"chat-created automation is evaluated in {task['timezone']!r} "
             f"(next_run_at {actual_instant.isoformat()}, i.e. "
-            f"{actual_local.strftime('%-I:%M %p')} {_BROWSER_TZ}) while the row reads "
+            f"{_fmt_12h(actual_local)} {_BROWSER_TZ}) while the row reads "
             f"{line_text!r}; expected 9:00 AM {_BROWSER_TZ}"
         )
     finally:

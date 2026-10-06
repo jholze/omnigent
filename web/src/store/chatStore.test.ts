@@ -15186,6 +15186,7 @@ describe("chatStore — client-side message queue", () => {
       await tick();
       expect(posts().map((p) => p.type)).toEqual(["compact", "message"]);
       expect(posts()[1].data.content).toEqual([{ type: "input_text", text: "after compact" }]);
+      expect(posts()[1].client_timezone).toEqual(Intl.DateTimeFormat().resolvedOptions().timeZone);
       expect(useChatStore.getState().queuedMessages).toEqual([]);
     },
   );

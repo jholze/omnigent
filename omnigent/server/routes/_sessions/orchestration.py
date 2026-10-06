@@ -6656,10 +6656,8 @@ async def _forward_event_to_runner(
     # raw dict (extra keys ignored) and the value never changes after create.
     if conv.reasoning_effort is not None:
         runner_body["reasoning"] = {"effort": conv.reasoning_effort}
-    # The sending client's local zone, so the agent reads unqualified times in
-    # the user's wall clock. A zone this host's tz database cannot resolve is
-    # dropped rather than failing the send; the runner keeps the last zone it
-    # accepted for the session, or UTC when it has none.
+    # Forward the client's local zone so the agent reads unqualified times in the
+    # user's wall clock; an unresolvable zone is dropped rather than failing the send.
     if body.client_timezone is not None:
         if is_valid_timezone(body.client_timezone):
             runner_body["client_timezone"] = body.client_timezone
