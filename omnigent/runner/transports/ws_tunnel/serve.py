@@ -189,10 +189,9 @@ def _iter_body_fragments(chunk: bytes, content_type: str) -> Iterator[bytes]:
     while start < size:
         end = min(start + RESPONSE_BODY_FRAME_MAX_BYTES, size)
         if text and end < size:
-            # Back off at most the 3 continuation bytes (0b10xxxxxx) a UTF-8
-            # character can have so the cut lands on a character boundary;
-            # invalid UTF-8 is cut within 3 bytes of the cap, never walked back
-            # forever.
+            # Back off up to 3 UTF-8 continuation bytes so the cut lands on a
+            # character boundary; invalid UTF-8 is cut within 3 bytes of the
+            # cap, never walked back forever.
             floor = max(start, end - 3)
             while end > floor and (chunk[end] & 0xC0) == 0x80:
                 end -= 1

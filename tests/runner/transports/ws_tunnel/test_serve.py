@@ -3149,6 +3149,39 @@ async def test_send_window_release_clamped_caps_available_credit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_flow_grant_only_releases_the_named_request() -> None:
+    """A credit grant resumes only its own request, never another request's window."""
+
+    async def _send_text(text: str) -> None:
+        del text
+
+    granted = _SendWindow(1)
+    other = _SendWindow(1)
+    await granted.acquire()
+    await other.acquire()
+    flow_credits = {"req-granted": granted, "req-other": other}
+
+    await _handle_tunnel_frame(
+        _noop_app,
+        encode_frame(RequestFlowFrame(id="req-granted", credits=1)),
+        _send_text,
+        {},
+        {},
+        flow_credits=flow_credits,
+    )
+
+    # The grant resumes only its own request...
+    await asyncio.wait_for(granted.acquire(), timeout=1)
+    # ...while an unrelated request's exhausted window stays parked.
+    parked = asyncio.create_task(other.acquire())
+    await asyncio.sleep(0)
+    assert not parked.done()
+    parked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parked
+
+
+@pytest.mark.asyncio
 async def test_request_dispatch_caps_oversized_flow_window() -> None:
     """A server advertising a window beyond the runner's bound is capped on dispatch."""
 

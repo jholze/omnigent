@@ -167,7 +167,9 @@ RESPONSE_FLOW_CAPABILITY = "response-flow-control-v1"
 RESPONSE_FLOW_WINDOW_FRAMES = 48
 RESPONSE_FLOW_CREDIT_BATCH = 16
 if RESPONSE_FLOW_WINDOW_FRAMES <= RESPONSE_FLOW_CREDIT_BATCH:
-    # Not an assert: this invariant must hold under ``python -O`` too.
+    # Not an assert: this invariant must hold under ``python -O`` too. The batch
+    # must also stay <= the smallest window any supported runner caps to, or a
+    # mixed-version stream stalls waiting for a grant that never fires.
     raise RuntimeError(
         "send window must exceed the credit batch or the final partial batch stalls"
     )
