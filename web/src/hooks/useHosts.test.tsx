@@ -710,6 +710,45 @@ describe("useHostModelOptions", () => {
     },
   );
 
+  it("reports the first failed attempt while retries continue", async () => {
+    let finishRequest!: (response: Response) => void;
+    fetchMock
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          finishRequest = resolve;
+        }),
+      )
+      .mockResolvedValue(mockResponse({ models: [{ id: "opus" }] }));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper,
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      expect(result.current.isLoading).toBe(true);
+      expect(result.current.failureCount).toBe(0);
+
+      finishRequest(
+        mockResponse({ detail: "host 'host_1' did not resolve model options within 15s" }, 504),
+      );
+      // The picker reads the failure here; `isLoading` alone would hide it.
+      await waitFor(() => expect(result.current.failureCount).toBe(1));
+      expect(result.current.isLoading).toBe(true);
+      expect(result.current.isError).toBe(false);
+      expect(result.current.failureReason?.message).toBe(
+        "host 'host_1' did not resolve model options within 15s",
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.current.data).toEqual([{ id: "opus" }]);
+      expect(result.current.failureCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ends a retry sequence when deselected during backoff", async () => {
     fetchMock.mockResolvedValue(mockResponse({ detail: "CLI unavailable" }, 502));
     vi.useFakeTimers({ shouldAdvanceTime: true });

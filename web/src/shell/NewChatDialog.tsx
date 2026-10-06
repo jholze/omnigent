@@ -37,7 +37,7 @@ import {
   ComposerSendButton,
 } from "@/components/composer/ChatComposer";
 import { ComposerMentionChips } from "@/components/composer/ComposerMentionChips";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import {
   MonitorCloudIcon,
   CircleHelpIcon,
@@ -1295,6 +1295,21 @@ export function ComposerAgentIcon({ agent }: { agent: Pick<AvailableAgent, "name
   ) : (
     <FallbackIcon className="size-4 shrink-0" aria-hidden="true" />
   );
+}
+
+/**
+ * Whether a host catalog query is still waiting for its first answer.
+ *
+ * `isLoading` holds through the whole retry sequence, and a stuck host makes
+ * every attempt run to the server's timeout, so gating on it alone holds the
+ * composer for minutes. The first failure is what the user needs to see; the
+ * retries keep running in the background and swap the catalog in if the host
+ * recovers.
+ */
+export function awaitingHostModelOptions(
+  query: Pick<UseQueryResult<NativeModelOption[]>, "isLoading" | "failureCount">,
+): boolean {
+  return query.isLoading && !query.failureCount;
 }
 
 function visibleModelLabel(label: string): string {
@@ -3063,26 +3078,34 @@ export function NewChatLandingScreen() {
     hostSelected &&
     selectedHost?.status === "online" &&
     !harnessUnconfiguredOnHost(harness, selectedHost);
-  const {
-    data: hostClaudeModelOptions,
-    isLoading: hostClaudeModelsLoading,
-    error: hostClaudeModelsError,
-  } = useHostModelOptions(selectedHostId, "claude-native", canLoadHostModels("claude-native"), {
-    poll: selectedNativeHarness === "claude-native",
-  });
-  const {
-    data: hostCodexModelOptions,
-    isLoading: hostCodexModelsLoading,
-    error: hostCodexModelsError,
-  } = useHostModelOptions(selectedHostId, "codex-native", canLoadHostModels("codex-native"), {
-    poll: selectedNativeHarness === "codex-native",
-  });
-  const { data: hostPiModelOptions, isLoading: hostPiModelsLoading } = useHostModelOptions(
+  // Gate on the first catalog answer only: a failed attempt keeps retrying in
+  // the background and must not hold the composer.
+  const claudeCatalog = useHostModelOptions(
+    selectedHostId,
+    "claude-native",
+    canLoadHostModels("claude-native"),
+    { poll: selectedNativeHarness === "claude-native" },
+  );
+  const hostClaudeModelOptions = claudeCatalog.data;
+  const hostClaudeModelsLoading = awaitingHostModelOptions(claudeCatalog);
+  const hostClaudeModelsError = claudeCatalog.error ?? claudeCatalog.failureReason;
+  const codexCatalog = useHostModelOptions(
+    selectedHostId,
+    "codex-native",
+    canLoadHostModels("codex-native"),
+    { poll: selectedNativeHarness === "codex-native" },
+  );
+  const hostCodexModelOptions = codexCatalog.data;
+  const hostCodexModelsLoading = awaitingHostModelOptions(codexCatalog);
+  const hostCodexModelsError = codexCatalog.error ?? codexCatalog.failureReason;
+  const piCatalog = useHostModelOptions(
     selectedHostId,
     "pi-native",
     canLoadHostModels("pi-native"),
     { poll: selectedNativeHarness === "pi-native" },
   );
+  const hostPiModelOptions = piCatalog.data;
+  const hostPiModelsLoading = awaitingHostModelOptions(piCatalog);
   // Keep this host's cached choices while requests wait for readiness.
   // A fetched catalog, including an empty one, takes precedence.
   const cachedHostModels =
@@ -3127,13 +3150,15 @@ export function NewChatLandingScreen() {
     hostPiModelsLoading,
     cachedHostModels?.pi,
   );
-  const {
-    data: hostDevinModelOptions,
-    isLoading: hostDevinModelsLoading,
-    error: hostDevinModelsError,
-  } = useHostModelOptions(selectedHostId, "devin-native", canLoadHostModels("devin-native"), {
-    poll: selectedNativeHarness === "devin-native",
-  });
+  const devinCatalog = useHostModelOptions(
+    selectedHostId,
+    "devin-native",
+    canLoadHostModels("devin-native"),
+    { poll: selectedNativeHarness === "devin-native" },
+  );
+  const hostDevinModelOptions = devinCatalog.data;
+  const hostDevinModelsLoading = awaitingHostModelOptions(devinCatalog);
+  const hostDevinModelsError = devinCatalog.error ?? devinCatalog.failureReason;
   const previewHarness = selectedNativeHarness ?? pickedHarness ?? selectedAgent?.harness ?? null;
   const previewSandboxProvider =
     sandboxProvider ?? (info !== "loading" ? info.sandbox_provider : null);

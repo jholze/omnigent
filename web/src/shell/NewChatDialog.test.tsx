@@ -37,6 +37,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
+  awaitingHostModelOptions,
   composeSandboxWorkspace,
   composeSandboxWorkspaces,
   composerWorktreeHeaderState,
@@ -1003,6 +1004,15 @@ describe("describeCreateError", () => {
   });
 });
 
+describe("awaitingHostModelOptions", () => {
+  it("waits only until the first catalog answer", () => {
+    expect(awaitingHostModelOptions({ isLoading: true, failureCount: 0 })).toBe(true);
+    expect(awaitingHostModelOptions({ isLoading: true, failureCount: 1 })).toBe(false);
+    expect(awaitingHostModelOptions({ isLoading: false, failureCount: 0 })).toBe(false);
+    expect(awaitingHostModelOptions({ isLoading: false, failureCount: 2 })).toBe(false);
+  });
+});
+
 describe("harnessUnconfiguredOnHost", () => {
   const hostWith = (configured: Record<string, boolean | string> | null | undefined): Host =>
     ({
@@ -1656,6 +1666,30 @@ describe("NewChatLandingScreen initial picker loading", () => {
       expect(text).toContain("Fable 5.1");
       expect(text).toContain("Max");
     }
+  });
+
+  it("releases the composer after the first failed catalog attempt while retries continue", () => {
+    mockModelQueries(() => pendingModels);
+    renderLanding();
+    expectLoading();
+    editDraft("Start while the host catalog keeps timing out");
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
+
+    const retryingModels = {
+      ...pendingModels,
+      failureCount: 1,
+      failureReason: new Error("host 'host_1' did not resolve model options within 15s"),
+    };
+    mockModelQueries(() => retryingModels);
+    editDraft("Start while the host catalog keeps timing out.");
+
+    const picker = expectReadyPicker();
+    expect(picker).toBeEnabled();
+    expect(picker).not.toHaveAttribute("aria-busy", "true");
+    expect(within(picker).getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
+      "Models unavailable",
+    );
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled();
   });
 
   it("keeps ready cached selections visible during background refetches", () => {
@@ -2557,6 +2591,29 @@ describe("NewChatLandingScreen cached picker preview", () => {
       expect(readNewChatPickerCache(snapshot.key)).toBeNull();
     },
   );
+
+  it("drops the cached display and releases Send after the first failed live catalog attempt", () => {
+    const snapshot = seedResolvedPicker();
+    mockModelQueries(() => pendingModels);
+    renderLanding();
+    expectCachedPicker(snapshot);
+    const input = screen.getByTestId("new-chat-landing-input");
+    fireEvent.change(input, { target: { value: "Draft while the live catalog is pending" } });
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
+
+    mockModelQueries(() => ({
+      ...pendingModels,
+      failureCount: 1,
+      failureReason: new Error("host 'host_1' did not resolve model options within 15s"),
+    }));
+    fireEvent.change(input, { target: { value: "The first live catalog attempt has failed" } });
+
+    const picker = screen.getByTestId("new-chat-landing-agent-select");
+    expect(picker).not.toHaveAttribute("aria-busy", "true");
+    expect(picker).not.toHaveTextContent("Sonnet 4.6");
+    expect(screen.queryByTestId("new-chat-landing-picker-loading")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled();
+  });
 
   it.each(["agents", "models"] as const)(
     "removes the cached display when the live %s list resolves empty",

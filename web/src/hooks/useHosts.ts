@@ -155,8 +155,9 @@ export function useHostModelOptions(
     staleTime: 15_000,
     refetchInterval: canRefresh ? 15_000 : false,
     ...(!poll && { refetchOnWindowFocus: false, refetchOnReconnect: false }),
-    // Retry boot-probe races while any picker uses this catalog. Persistent
-    // failures surface after bounded backoff (~22 s).
+    // Retry boot-probe races while any picker uses this catalog. The backoff is
+    // bounded (~22 s) but each attempt can run to the server's host timeout, so
+    // pickers gate on the first answer (`failureCount`), not on `isLoading` alone.
     retry: (failureCount) =>
       (modelCatalogPollers.get(queryClient)?.get(pollerKey) ?? 0) > 0 && failureCount < 6,
     retryDelay: (attempt) => Math.min(5_000, 1_000 * 2 ** attempt),
