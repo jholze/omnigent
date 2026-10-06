@@ -501,6 +501,41 @@ describe("useAvailableAgents", () => {
     expect(rows).toContainEqual(["ag_legacy_kiro", "Kiro"]);
   });
 
+  it.each([true, false])(
+    "folds a builtin=%s stock wrapper clone into the single vendor row",
+    async (builtin) => {
+      routeFetch({
+        [BUILTINS_URL]: mockResponse({
+          object: "list",
+          data: [
+            { id: "ag_native", name: "claude-native-ui", harness: "claude-native", builtin: true },
+            // A fork clone carries the stock wrapper's name, so it folds into
+            // the vendor row even when the server flags it: stock-name
+            // recognition precedes the explicit-flag exemption.
+            {
+              id: "ag_clone",
+              name: "claude-native-ui (fork conv_7)",
+              harness: "claude-native",
+              builtin,
+            },
+          ],
+          has_more: false,
+        }),
+        [MINE_URL]: EMPTY_MINE,
+      });
+
+      const { result } = renderHook(() => ({ ...useAvailableAgents() }), { wrapper });
+      await waitFor(() => {
+        expect(result.current.isSuccess).toBe(true);
+        expect(result.current.isPlaceholderData).toBe(false);
+      });
+
+      expect((result.current.data ?? []).map((a) => [a.id, a.display_name])).toEqual([
+        ["ag_native", "Claude Code"],
+      ]);
+    },
+  );
+
   it("defaults a missing harness to null", async () => {
     routeFetch({
       [BUILTINS_URL]: mockResponse({

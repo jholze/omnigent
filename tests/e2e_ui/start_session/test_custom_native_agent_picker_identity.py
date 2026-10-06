@@ -138,14 +138,16 @@ def spawn_host(base_url: str, host_tmp: Path) -> HostRig:
         "CLAUDE_CONFIG_DIR": str(claude_dir),
         # A gateway-style token makes the host report claude-native as configured;
         # no session is ever launched.
-        "ANTHROPIC_AUTH_TOKEN": os.environ.get("ANTHROPIC_AUTH_TOKEN") or "mock-token",
+        "ANTHROPIC_AUTH_TOKEN": "mock-token",
         "PYTHONPATH": os.pathsep.join(
-            [
+            p
+            for p in [
                 str(_REPO_ROOT),
                 str(_REPO_ROOT / "sdks" / "python-client"),
                 str(_REPO_ROOT / "sdks" / "ui"),
                 os.environ.get("PYTHONPATH", ""),
             ]
+            if p
         ),
     }
     log_path = host_tmp / "host.log"
