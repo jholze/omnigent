@@ -279,6 +279,12 @@ def test_databricks_cli_version_none_for_missing_binary(tmp_path: Path) -> None:
 
 def test_oauth_callback_port_holder_finds_own_process(busy_port: int) -> None:
     """psutil identifies the listener (this test process)."""
+    import psutil
+
+    try:
+        psutil.net_connections(kind="tcp")
+    except psutil.AccessDenied:
+        pytest.skip("psutil.net_connections requires root on this platform")
     assert _oauth_callback_port_holder().pid is not None
 
 

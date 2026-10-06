@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+import psutil
+
 _logger = logging.getLogger(__name__)
 
 _DATABRICKSCFG_PATH = Path.home() / ".databrickscfg"
@@ -170,14 +172,21 @@ class _OAuthPortHolder:
 def _oauth_callback_port_busy() -> bool:
     """Return whether the OAuth callback port is already bound on loopback.
 
-    Binds with ``SO_REUSEADDR`` (mirrors Go's ``net.Listen``) so TIME_WAIT
-    sockets are not false positives; only ``EADDRINUSE`` counts as busy.
+    On POSIX, binds with ``SO_REUSEADDR`` (mirrors Go's ``net.Listen``) so
+    TIME_WAIT sockets are not false positives. ``SO_REUSEADDR`` on Windows
+    lets a bind succeed even while another socket is actively LISTENing, so
+    ``SO_EXCLUSIVEADDRUSE`` is used there to detect the live listener. Only
+    ``EADDRINUSE`` counts as busy.
     """
     import errno
     import socket as _socket
+    import sys
 
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
-        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", _DATABRICKS_OAUTH_CALLBACK_PORT))
         except OSError as exc:
@@ -192,8 +201,6 @@ def _oauth_callback_port_holder() -> _OAuthPortHolder:
         determined (e.g. ``psutil.AccessDenied`` without root on macOS).
     """
     try:
-        import psutil
-
         for conn in psutil.net_connections(kind="tcp"):
             if conn.status == "LISTEN" and conn.laddr.port == _DATABRICKS_OAUTH_CALLBACK_PORT:  # type: ignore[union-attr]
                 pid = conn.pid
@@ -202,8 +209,8 @@ def _oauth_callback_port_holder() -> _OAuthPortHolder:
                     with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
                         proc_name = psutil.Process(pid).name()
                 return _OAuthPortHolder(pid=pid, name=proc_name)
-    except Exception:
-        pass
+    except (psutil.Error, OSError, AttributeError) as exc:
+        _logger.debug("OAuth port holder lookup failed: %s", exc)
     return _OAuthPortHolder(pid=None, name=None)
 
 
@@ -226,7 +233,7 @@ def _databricks_cli_version(databricks_bin: str) -> tuple[int, int, int] | None:
         return None
     if result.returncode != 0:
         return None
-    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout or "")
+    match = re.search(r"Databricks CLI v(\d+)\.(\d+)\.(\d+)", result.stdout or "")
     if match is None:
         return None
     version = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
