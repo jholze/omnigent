@@ -43,6 +43,7 @@ class RunnerEventDispatcher:
         self._state_changed = asyncio.Event()
         self._ever_ready = False
         self._send: Callable[[str], Awaitable[None]] | None = None
+        self._generation = 0
         self._pending: dict[str, asyncio.Future[EventAckFrame]] = {}
         self._queue: asyncio.Queue[
             tuple[str, list[dict[str, Any]], asyncio.Future[EventAckFrame]]
@@ -62,10 +63,17 @@ class RunnerEventDispatcher:
         self._state_changed = asyncio.Event()
         changed.set()
 
-    def connected(self, send: Callable[[str], Awaitable[None]]) -> None:
-        """Start capability negotiation for this connection generation."""
+    def connected(self, send: Callable[[str], Awaitable[None]]) -> int:
+        """Start capability negotiation for this connection generation.
+
+        :returns: A generation token to pass to :meth:`disconnected`, so a
+            superseded make-before-break connection closing after its
+            replacement is live does not tear down the live generation.
+        """
+        self._generation += 1
         self._send = send
         self._set_state("negotiating")
+        return self._generation
 
     async def _mode(self, *, initial_fallback: bool, preview: bool = False) -> bool:
         """Return tunnel support for this connection, waiting through outages."""
@@ -105,8 +113,16 @@ class RunnerEventDispatcher:
         self._ever_ready = True
         self._set_state("ready")
 
-    def disconnected(self) -> None:
-        """Wake pending attempts; source events remain queued for replay."""
+    def disconnected(self, generation: int | None = None) -> None:
+        """Wake pending attempts; source events remain queued for replay.
+
+        *generation* is the token from :meth:`connected`. When a newer
+        generation already took over (a make-before-break replacement is live),
+        the superseded connection's close is ignored so it does not null the
+        live socket or fail acks in flight on it.
+        """
+        if generation is not None and generation != self._generation:
+            return
         self._send = None
         self._set_state("disconnected")
         for future in self._pending.values():

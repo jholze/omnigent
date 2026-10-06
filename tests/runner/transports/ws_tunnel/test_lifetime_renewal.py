@@ -159,20 +159,6 @@ async def _drive(creds_factory, *, run_for_s: float) -> _Timeline:
     return timeline
 
 
-async def test_credentials_refresh_before_the_lifetime_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure_short_renewal(monkeypatch)
-    timeline = await _drive(_RecordingCredentials, run_for_s=_PEER_LIFETIME_S + 3)
-    boundary = timeline.lifetime_boundary()
-    calls_before = [t for t in timeline.factory_calls if t < boundary]
-    assert len(calls_before) >= 2, (
-        f"credentials were resolved only once (at connect) before the first socket's "
-        f"{_PEER_LIFETIME_S}s lifetime boundary: calls={timeline.rel(timeline.factory_calls)} "
-        f"aborts={timeline.rel(timeline.aborts)}"
-    )
-
-
 async def test_replacement_tunnel_opens_before_the_lifetime_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,9 +166,15 @@ async def test_replacement_tunnel_opens_before_the_lifetime_boundary(
     timeline = await _drive(_RecordingCredentials, run_for_s=_PEER_LIFETIME_S + 3)
     boundary = timeline.lifetime_boundary()
     upgrades_before = [t for t in timeline.upgrades if t < boundary]
+    calls_before = [t for t in timeline.factory_calls if t < boundary]
     assert len(upgrades_before) >= 2, (
         f"no replacement tunnel was accepted before the first socket's {_PEER_LIFETIME_S}s "
         f"lifetime boundary: upgrades={timeline.rel(timeline.upgrades)} "
+        f"aborts={timeline.rel(timeline.aborts)}"
+    )
+    assert len(calls_before) >= 2, (
+        f"credentials were resolved only once (at connect) before the first socket's "
+        f"{_PEER_LIFETIME_S}s lifetime boundary: calls={timeline.rel(timeline.factory_calls)} "
         f"aborts={timeline.rel(timeline.aborts)}"
     )
 
@@ -212,6 +204,10 @@ async def test_failed_renewal_keeps_the_existing_tunnel_serving(
     timeline = await _drive(
         lambda tl: _RecordingCredentials(tl, fail_after=1),
         run_for_s=_PEER_LIFETIME_S - 1,
+    )
+    assert len(timeline.factory_calls) >= 2, (
+        "the renewal watcher never attempted a mint, so this test would also pass with "
+        f"renewal disabled: factory_calls={timeline.rel(timeline.factory_calls)}"
     )
     assert len(timeline.upgrades) == 1 and not timeline.closes, (
         "a failed credential refresh must keep the working socket open and retry later: "

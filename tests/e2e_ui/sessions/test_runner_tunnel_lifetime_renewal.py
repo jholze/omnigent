@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 import httpx
 import pytest
@@ -117,6 +118,7 @@ class ProxiedRunner:
     workspace: Path
     stdout_log: Path
     started_at: float
+    stdout_handle: IO[str] | None = None
 
     def log_lines(self, *needles: str) -> list[str]:
         lines: list[str] = []
@@ -136,6 +138,8 @@ class ProxiedRunner:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(timeout=5)
+        if self.stdout_handle is not None and not self.stdout_handle.closed:
+            self.stdout_handle.close()
 
 
 def write_stored_login(data_dir: Path, server_url: str, *, lifetime_s: float) -> float:
@@ -213,7 +217,7 @@ def spawn_proxied_runner(
         stdout=handle,
         stderr=subprocess.STDOUT,
     )
-    runner = ProxiedRunner(runner_id, proc, data_dir, workspace, stdout_log, started_at)
+    runner = ProxiedRunner(runner_id, proc, data_dir, workspace, stdout_log, started_at, handle)
     deadline = time.monotonic() + _RUNNER_ONLINE_TIMEOUT_S
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -226,7 +230,6 @@ def spawn_proxied_runner(
             return runner
         time.sleep(0.5)
     runner.stop()
-    handle.close()
     raise RuntimeError(
         f"proxied runner did not come online through {proxy_url} within "
         f"{_RUNNER_ONLINE_TIMEOUT_S:.0f}s:\n{stdout_log.read_text()[-3000:]}"
@@ -335,9 +338,8 @@ def journey(server_url: str, mock_llm_server_url: str) -> Iterator[Journey]:
     try:
         yield j
     finally:
-        with_timeout = httpx.Client(timeout=10.0)
         with contextlib.suppress(httpx.HTTPError):
-            with_timeout.delete(f"{server_url}/v1/sessions/{session_id}")
+            httpx.delete(f"{server_url}/v1/sessions/{session_id}", timeout=10.0)
         runner.stop()
         proxy.stop()
 

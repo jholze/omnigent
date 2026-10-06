@@ -171,19 +171,20 @@ _AUTH_REDIRECT_SCHEMES = {"http", "https"}
 _LOGIN_REDIRECT_FATAL_ATTEMPTS = 3
 
 
-# Proactive tunnel renewal (make-before-break). An ingress that caps a
-# WebSocket's absolute lifetime (Databricks Apps severs one after ~24h) would
-# otherwise drop a long-lived tunnel mid-turn when the cap elapses. Renewing
-# ahead of the boundary opens the replacement while the current socket still
-# serves, so the server never sees the runner offline. The default sits just
-# under a 24h cap; the env var below lowers it and a non-positive value disables
-# renewal.
+# Make-before-break tunnel renewal: open a replacement just before an ingress
+# connection-lifetime cap (Databricks Apps severs WebSockets at ~24h) so the
+# server never sees the runner offline. See _tunnel_renewal_interval_s.
 _RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV = "OMNIGENT_RUNNER_TUNNEL_RENEWAL_INTERVAL_S"
 _DEFAULT_TUNNEL_RENEWAL_INTERVAL_S = 23 * 3600 + 50 * 60
 # Jitter the renewal moment below its interval so a fleet started together does
 # not renew in lockstep and re-synchronise the accept spikes renewal exists to
 # spread. Capped so a long interval still renews within minutes of its target.
 _TUNNEL_RENEWAL_JITTER_CAP_S = 300.0
+# After a renewal mint fails, retry on this short bounded backoff rather than a
+# full interval, so one transient failure does not forfeit renewal before the
+# ingress cap severs the socket.
+_TUNNEL_RENEWAL_RETRY_INITIAL_S = 60.0
+_TUNNEL_RENEWAL_RETRY_CAP_S = 300.0
 
 
 async def dispatch_via_asgi(
@@ -419,7 +420,7 @@ async def serve_tunnel(
         nonlocal login_redirect_streak
         nonlocal http_auth_rejection_streak
         nonlocal connect_monotonic
-        record_websocket_connected("runner", reconnect=ever_connected)
+        record_websocket_connected("runner", reconnect=reconnecting)
         # Tell the launching host's connect watchdog this runner made it.
         touch_connect_marker()
         connected_this_attempt = True
@@ -457,6 +458,11 @@ async def serve_tunnel(
     # Token the renewal watcher already minted, carried into the next iteration
     # so the make-before-break replacement reuses it instead of refreshing again.
     prepared_token: str | None = None
+    # The iteration right after a cutover opens a planned replacement, not a
+    # reconnect: suppress the catch-up scan and reconnect telemetry so a renewal
+    # is not recorded as a server-seen outage.
+    renewal_cutover = False
+    reconnecting = False
     # Superseded connections still draining an in-flight turn after a cutover.
     # Each is reaped — and its disconnect recorded — once its old socket closes.
     draining: set[asyncio.Task[_CloseDetails]] = set()
@@ -472,11 +478,15 @@ async def serve_tunnel(
             resumed_from_suspend=False,
         )
 
-    async def _drain_superseded() -> None:
+    async def _drain_superseded(*, cancel: bool) -> None:
         if not draining:
             return
-        for task in list(draining):
-            task.cancel()
+        # On a graceful shutdown the superseded connections observe the same
+        # shutdown_event and finish their own in-flight streams, so await them
+        # instead of cancelling mid-drain. A hard teardown cancels them.
+        if cancel:
+            for task in list(draining):
+                task.cancel()
         await asyncio.gather(*draining, return_exceptions=True)
         draining.clear()
 
@@ -492,20 +502,19 @@ async def serve_tunnel(
         if shutdown_event is not None and shutdown_event.is_set():
             # A shutdown requested between reconnect attempts (no live
             # connection to drain): nothing to flush, just stop looping.
-            await _drain_superseded()
+            await _drain_superseded(cancel=False)
             return
         connected_this_attempt = False
         disconnect_error: BaseException | None = None
         close_details: _CloseDetails | None = None
         renewed = False
         if prepared_token is not None:
-            # Reuse the token the renewal watcher minted for this cutover
-            # instead of refreshing again at loop top.
             auth_token = prepared_token
             prepared_token = None
         else:
             auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
-        reconnecting = ever_connected
+        reconnecting = ever_connected and not renewal_cutover
+        renewal_cutover = False
         retry_reason = "connection closed cleanly"
         recycle = False
         # True only for a server-initiated recycle (close code or 502 status);
@@ -555,14 +564,21 @@ async def serve_tunnel(
                     await conn_task
                 if not renewal_signal.done():
                     renewal_signal.cancel()
-                await _drain_superseded()
+                await _drain_superseded(cancel=True)
                 raise
-            if renewal_signal.done() and not renewal_signal.cancelled() and not conn_task.done():
+            shutting_down = shutdown_event is not None and shutdown_event.is_set()
+            if (
+                renewal_signal.done()
+                and not renewal_signal.cancelled()
+                and not conn_task.done()
+                and not shutting_down
+            ):
                 # Make-before-break: a fresh token is ready while this socket
                 # still serves. Drain the old connection while the next iteration
                 # opens the replacement; newest-wins retires it with no gap.
                 prepared_token = renewal_signal.result()
                 renewed = True
+                renewal_cutover = True
                 disconnected_monotonic = None
                 draining.add(conn_task)
                 conn_task.add_done_callback(_reap_drained)
@@ -570,11 +586,14 @@ async def serve_tunnel(
                 continue
             if not renewal_signal.done():
                 renewal_signal.cancel()
-            close_details = conn_task.result()
+            # Let the connection finish before reading its result; a graceful
+            # shutdown that raced a ready renewal signal still drains and closes
+            # cleanly rather than being handed to cancellation.
+            close_details = await conn_task
             # A graceful shutdown drains and closes the connection cleanly,
             # then returns here; stop looping instead of reconnecting.
             if shutdown_event is not None and shutdown_event.is_set():
-                await _drain_superseded()
+                await _drain_superseded(cancel=False)
                 return
             delay_s = _INITIAL_RECONNECT_DELAY_S
         except asyncio.CancelledError as exc:
@@ -880,8 +899,9 @@ def _tunnel_renewal_interval_s() -> float | None:
     """Seconds between proactive make-before-break tunnel renewals.
 
     Reads ``OMNIGENT_RUNNER_TUNNEL_RENEWAL_INTERVAL_S``; an unset value uses the
-    default (just under a 24h ingress cap) and a non-positive or unparseable
-    value disables proactive renewal.
+    default (just under a 24h ingress cap), a non-positive value disables
+    proactive renewal, and an unparseable value logs a warning and falls back to
+    the default.
 
     :returns: The renewal interval in seconds, or ``None`` when disabled.
     """
@@ -891,6 +911,11 @@ def _tunnel_renewal_interval_s() -> float | None:
     try:
         interval_s = float(raw)
     except ValueError:
+        _logger.warning(
+            "ignoring unparseable %s=%r; using the default tunnel renewal interval",
+            _RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV,
+            raw,
+        )
         return _DEFAULT_TUNNEL_RENEWAL_INTERVAL_S
     return interval_s if interval_s > 0 else None
 
@@ -918,8 +943,8 @@ async def _await_renewal(
     resolves credentials off the event loop. On success it hands the token to
     ``serve_tunnel`` through *renewal_signal* so the replacement opens while the
     current socket still serves. A failed or unavailable refresh keeps the
-    current tunnel and retries on the next interval: a renewal must never tear
-    down a healthy connection it cannot immediately replace.
+    current tunnel and retries on a short bounded backoff: a renewal must never
+    tear down a healthy connection it cannot immediately replace.
 
     :param interval_s: Target renewal interval in seconds.
     :param renewal_signal: Future resolved with the token for the replacement.
@@ -929,23 +954,29 @@ async def _await_renewal(
     :param runner_id: Runner id for log correlation.
     :returns: None.
     """
+    await asyncio.sleep(_tunnel_renewal_delay_s(interval_s))
+    retry_delay_s = _TUNNEL_RENEWAL_RETRY_INITIAL_S
     while not renewal_signal.done():
-        await asyncio.sleep(_tunnel_renewal_delay_s(interval_s))
         if shutdown_event is not None and shutdown_event.is_set():
-            return
-        if renewal_signal.done():
             return
         try:
             token = await on_prepare_renewal()
         except Exception:  # noqa: BLE001 -- any factory failure keeps the current tunnel
             _logger.warning(
                 "runner %s tunnel renewal could not resolve credentials; "
-                "keeping the current tunnel and retrying",
+                "keeping the current tunnel and retrying in %.0fs",
                 runner_id,
+                retry_delay_s,
                 exc_info=True,
                 extra={"session_id": runner_primary_session_id()},
             )
+            await asyncio.sleep(min(retry_delay_s, interval_s))
+            retry_delay_s = min(retry_delay_s * 2, _TUNNEL_RENEWAL_RETRY_CAP_S)
             continue
+        # Shutdown can begin while the mint is in flight; do not signal a cutover
+        # once the connection has started its graceful drain.
+        if shutdown_event is not None and shutdown_event.is_set():
+            return
         if not renewal_signal.done():
             renewal_signal.set_result(token)
         return
@@ -1132,8 +1163,9 @@ async def _serve_tunnel_once(
             connection_id=connection_id,
             event_dispatcher=event_dispatcher,
         )
-        if event_dispatcher is not None:
-            event_dispatcher.connected(ws.send)
+        event_generation = (
+            event_dispatcher.connected(ws.send) if event_dispatcher is not None else None
+        )
         # Reconnect work can itself await event delivery; start receiving the
         # new generation's ready frame before that work waits for an ACK.
         reconnect_task = (
@@ -1295,7 +1327,7 @@ async def _serve_tunnel_once(
                         await shutdown_wait
         finally:
             if event_dispatcher is not None:
-                event_dispatcher.disconnected()
+                event_dispatcher.disconnected(event_generation)
             if reconnect_task is not None:
                 reconnect_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

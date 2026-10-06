@@ -251,3 +251,65 @@ async def test_preview_drops_when_negotiated_tunnel_is_down() -> None:
         response = await asyncio.wait_for(client.post(_URL, json=preview), timeout=3)
     assert response.status_code == 503
     assert http_posts == []
+
+
+async def test_superseded_disconnect_keeps_live_tunnel_and_pending_ack() -> None:
+    """The shared dispatcher ignores a superseded generation's disconnect.
+
+    Make-before-break opens a replacement while the old socket drains. When the
+    old socket finally closes, its disconnect must not null the live send or
+    fail an ack in flight on the replacement generation.
+    """
+    dispatcher = RunnerEventDispatcher()
+    sent: list[EventBatchFrame] = []
+    release_ack = asyncio.Event()
+    ack_tasks: list[asyncio.Task[None]] = []
+
+    async def old_send(_text: str) -> None:
+        raise AssertionError("the superseded tunnel must not send")
+
+    async def live_send(text: str) -> None:
+        frame = decode_frame(text)
+        assert isinstance(frame, EventBatchFrame)
+        sent.append(frame)
+
+        async def _ack_when_released() -> None:
+            await release_ack.wait()
+            dispatcher.acknowledge(EventAckFrame(frame.id, 1))
+
+        ack_tasks.append(asyncio.create_task(_ack_when_released()))
+
+    old_generation = dispatcher.connected(old_send)
+    dispatcher.ready(old_send)
+    # The replacement supersedes the old generation while it is still draining.
+    dispatcher.connected(live_send)
+    dispatcher.ready(live_send)
+
+    submit = asyncio.create_task(dispatcher.submit("session-a", [_ITEM]))
+    for _ in range(50):
+        if sent:
+            break
+        await asyncio.sleep(0.01)
+    assert sent, "the live tunnel never received the batch"
+
+    dispatcher.disconnected(old_generation)
+    assert not submit.done(), "a superseded disconnect wrongly failed the live ack"
+
+    release_ack.set()
+    ack = await asyncio.wait_for(submit, timeout=1)
+    await asyncio.gather(*ack_tasks)
+    assert ack.applied == 1
+    assert len(sent) == 1
+
+
+async def test_current_generation_disconnect_tears_down() -> None:
+    dispatcher = RunnerEventDispatcher()
+
+    async def send(_text: str) -> None:
+        raise AssertionError("disconnected tunnel must not send")
+
+    generation = dispatcher.connected(send)
+    dispatcher.ready(send)
+    dispatcher.disconnected(generation)
+    assert dispatcher._state == "disconnected"
+    assert dispatcher._send is None

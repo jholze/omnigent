@@ -2926,3 +2926,45 @@ async def test_serve_tunnel_keeps_escalating_after_brief_connection(
     # Attempt 3 (brief_drop): connected for 2 s < 5 s; no reset → sleep 2.0
     # Attempt 4 (stop): CancelledError before sleep
     assert sleeps == [0.5, 1.0, 2.0]
+
+
+def test_tunnel_renewal_interval_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(serve_module._RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV, raising=False)
+    assert (
+        serve_module._tunnel_renewal_interval_s()
+        == serve_module._DEFAULT_TUNNEL_RENEWAL_INTERVAL_S
+    )
+
+
+def test_tunnel_renewal_interval_reads_positive_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(serve_module._RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV, "120")
+    assert serve_module._tunnel_renewal_interval_s() == 120.0
+
+
+def test_tunnel_renewal_interval_non_positive_disables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(serve_module._RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV, "0")
+    assert serve_module._tunnel_renewal_interval_s() is None
+
+
+def test_tunnel_renewal_interval_unparseable_warns_and_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    monkeypatch.setenv(serve_module._RUNNER_TUNNEL_RENEWAL_INTERVAL_ENV, "soon")
+    caplog.set_level(logging.WARNING, logger="omnigent.runner.transports.ws_tunnel.serve")
+    assert (
+        serve_module._tunnel_renewal_interval_s()
+        == serve_module._DEFAULT_TUNNEL_RENEWAL_INTERVAL_S
+    )
+    assert any(
+        "unparseable" in record.getMessage() and record.levelno == logging.WARNING
+        for record in caplog.records
+    ), "an unparseable interval must log a warning before falling back to the default"
