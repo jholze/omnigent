@@ -434,18 +434,9 @@ def test_distinct_messages_with_identical_usage_are_not_collapsed(
 
 
 def test_usage_baseline_survives_native_restart(tmp_path: Path) -> None:
-    """A relaunched Pi process restores its cumulative baseline (OMNI-10070).
-
-    Pi emits usage only for messages produced in a live agent loop, never for
-    history replayed from a resumed session file, so a relaunched process (idle
-    reap, crash, resume) restarts its in-memory counters at 0. Without a
-    restored baseline its first post-restart flush lands BELOW the server's
-    stored peak; the server's monotonic clamp drops it as a no-op and the web
-    Session-cost / per-model token display freezes for the rest of the
-    conversation. The extension must persist the running total to its
-    session-scoped bridge dir and restore it on ``session_start`` so every
-    post-restart flush keeps advancing. This drives the real extension across
-    two process launches that share one bridge dir.
+    """A relaunched Pi process restarts its cumulative counters at 0, so without a
+    restored baseline its first flush is below the server peak and the clamp
+    freezes the usage display; assert the restored baseline keeps advancing.
     """
     node = shutil.which("node")
     if node is None:
@@ -557,9 +548,8 @@ function launchExtension() {
   const afterRestart = usageEvents();
   assert.equal(afterRestart.length, 1, JSON.stringify(postedEvents));
   const data = afterRestart[afterRestart.length - 1].data;
-  // Must ADVANCE from the restored baseline (150000 + 900, 30000 + 250). The
-  // unfixed extension reports the lone 900/250 turn, which lands below the
-  // server's stored peak and is clamped away, freezing the display.
+  // Must ADVANCE from the restored baseline (150000 + 900, 30000 + 250), not the
+  // lone 900/250 turn the unfixed extension reports (clamped away, frozen).
   assert.equal(data.cumulative_input_tokens, 150900, JSON.stringify(data));
   assert.equal(data.cumulative_output_tokens, 30250, JSON.stringify(data));
   assert.equal(data.model, "databricks-claude-sonnet-4-6");

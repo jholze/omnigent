@@ -1708,17 +1708,9 @@ module.exports = function (pi) {
     await postEvent(config, { type: "external_session_usage", data });
   }
 
-  // Pi fires usage events only for messages produced inside a live agent loop,
-  // never for history replayed from a resumed session file. A relaunched Pi
-  // process (idle reap, crash, resume) therefore restarts these counters at 0,
-  // so its first post-resume flush carries a cumulative total BELOW the
-  // server's stored peak. The server's monotonic anti-forgery clamp drops that
-  // below-peak report as a no-op, freezing the web Session-cost badge and
-  // per-model token breakdown for the rest of the conversation. Persisting the
-  // running total to the session-scoped bridge dir (which survives a Pi
-  // relaunch) and restoring it on ``session_start`` keeps every post-resume
-  // flush advancing. These are the session's OWN totals only; the server sums
-  // the subtree at read time, so restoring here never double-counts children.
+  // A relaunched Pi process (idle reap, crash, resume) restarts these counters
+  // at 0; its first flush then lands below the server's monotonic peak and is
+  // dropped as a no-op, freezing the usage display until the baseline grows.
   function usageStatePath() {
     if (!config || !config.bridgeDir) return null;
     return path.join(config.bridgeDir, "cumulative_usage.json");

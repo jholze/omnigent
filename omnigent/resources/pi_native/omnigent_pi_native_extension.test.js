@@ -584,14 +584,9 @@ function lastUsagePost(postedEvents) {
   return posts.length ? posts[posts.length - 1].data : null;
 }
 
-// OMNI-10070: Pi fires usage events only for messages produced inside a live
-// agent loop, never for history replayed from a resumed session file, so a
-// relaunched Pi process restarts its in-memory cumulative counters at 0. Its
-// first post-resume flush then reports a cumulative total below the server's
-// stored peak, which the server's monotonic anti-forgery clamp drops as a
-// no-op — freezing the Session-cost badge and per-model token breakdown. The
-// fix persists the running total to the session-scoped bridge dir and restores
-// it on session_start, so every post-resume flush keeps advancing.
+// A relaunched Pi process restarts its cumulative counters at 0, so without a
+// restored baseline its first flush is below the server peak and the clamp
+// freezes the usage display. Assert the restored baseline keeps advancing.
 async function testUsageBaselineSurvivesNativeRestart() {
   // Process 1: accrue and flush a cumulative total, then "exit".
   const first = makeHarness({ captureEvents: true });
