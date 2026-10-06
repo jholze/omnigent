@@ -3,15 +3,12 @@
 A claude-native session has two kinds of terminal: the agent's terminal behind
 the header's Chat view / Terminal view switcher, and user shells that open as
 terminal tabs in the Workspace rail. A slash command sent from the chat composer
-(``/theme``) opens a dialog inside Claude Code, and the chat parks on a
-blocked-on-a-dialog indicator while the dialog is visible only in Terminal view.
-With a shell tab open beside the chat, telling the user to "open the terminal
-tab" sends them to a terminal that shows no dialog, so the session reads as hung.
+(``/theme``) opens a dialog inside Claude Code that is visible only in Terminal
+view, so an indicator saying "open the terminal tab" sends a user with a rail
+shell open to a terminal that shows no dialog.
 
-Contract: the indicator names the Terminal view and carries a control that opens
-it, so the user lands on the dialog in one click. Drives the real Claude Code CLI
-(mock model) so the ``dialog open`` status comes from Claude's own session status
-file rather than an injected event; the injected-status variant lives in
+Drives the real Claude Code CLI (mock model) so the ``dialog open`` status comes
+from Claude's own status file; the injected-status variant lives in
 ``test_blocked_dialog_terminal_routing.py``.
 """
 
