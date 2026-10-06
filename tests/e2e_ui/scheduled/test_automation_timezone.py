@@ -175,9 +175,14 @@ def _pick_agent(page: Page, agent_id: str, label: str) -> None:
         "new-chat-landing-agent-select"
     )
     trigger.click()
+    # A --agent-registered agent (hello_world) folds into the "Other..." submenu
+    # rather than the inline bundle list, so expand it before clicking the row.
+    custom = page.get_by_test_id("new-chat-landing-custom-agents")
+    expect(custom).to_be_visible(timeout=30_000)
     item = page.get_by_test_id(f"new-chat-landing-agent-{agent_id}")
     if not item.is_visible():
-        page.get_by_test_id("new-chat-landing-custom-agents").hover()
+        custom.click()
+    expect(item).to_be_visible(timeout=30_000)
     item.click()
     expect(trigger).to_contain_text(re.compile(label, re.IGNORECASE), timeout=10_000)
 
