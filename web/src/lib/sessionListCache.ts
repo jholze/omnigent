@@ -373,8 +373,7 @@ export function conversationRowFromSession(session: Session): Conversation {
 }
 
 /**
- * Paint a just-created session (a fork) into every cached sidebar list and arm the
- * recently-created keep-alive, as create does, so a lagging list refetch can't hide it.
+ * Paint a just-created session (a fork) into every cached sidebar list and arm create's keep-alive.
  */
 export function insertCreatedRowIntoCaches(queryClient: QueryClient, row: Conversation): void {
   markRecentlyCreated(row);
