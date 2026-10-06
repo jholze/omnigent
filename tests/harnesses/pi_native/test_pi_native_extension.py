@@ -716,6 +716,132 @@ function usageEvents() {
     _run_extension_script(node, extension_path, script)
 
 
+def test_restore_never_lowers_a_higher_live_total(tmp_path: Path) -> None:
+    """A stale/lower persisted total must never claw a higher live total down.
+
+    The restore is raise-only: if the counters already hold a higher total than
+    the saved file (e.g. a stale or partially clobbered state), restore keeps the
+    live total, and a follow-up turn advances from it rather than from the stale
+    lower value.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+    extension_path = (
+        Path(__file__).resolve().parents[3]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-stale-"));
+const bridgeDir = path.join(root, "bridge");
+const inboxDir = path.join(root, "inbox");
+fs.mkdirSync(bridgeDir, { recursive: true });
+fs.mkdirSync(inboxDir, { recursive: true });
+const statePath = path.join(bridgeDir, "cumulative_usage.json");
+
+const configPath = path.join(root, "config.json");
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "session-1",
+    inboxDir,
+    bridgeDir,
+    authHeaders: { authorization: "Bearer test" },
+  }),
+);
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const postedEvents = [];
+global.fetch = async (_url, request) => {
+  postedEvents.push(JSON.parse(request.body));
+  return { ok: true };
+};
+global.setInterval = () => ({ fakeInterval: true });
+
+const handlers = {};
+const pi = {
+  registerCommand() {},
+  on(eventName, handler) {
+    handlers[eventName] = handler;
+  },
+};
+require(extensionPath)(pi);
+
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
+};
+
+function usageEvents() {
+  return postedEvents.filter((e) => e.type === "external_session_usage");
+}
+
+(async () => {
+  await handlers.session_start({}, ctx);
+  await handlers.message_end(
+    {
+      message: {
+        role: "assistant",
+        model: "databricks-claude-sonnet-4-6",
+        timestamp: 1000,
+        usage: { input: 150000, output: 30000, cacheRead: 0, cacheWrite: 0, totalTokens: 180000 },
+      },
+    },
+    ctx,
+  );
+  assert.equal(usageEvents().length, 1, JSON.stringify(postedEvents));
+
+  // A stale/lower total appears on disk while this process already holds a
+  // higher live total (older process or a partially clobbered write).
+  fs.writeFileSync(
+    statePath,
+    JSON.stringify({
+      cumulative_input_tokens: 100000,
+      cumulative_output_tokens: 20000,
+      cumulative_cache_read_input_tokens: 0,
+      model: "databricks-claude-sonnet-4-6",
+    }),
+  );
+
+  postedEvents.length = 0;
+  // Restore runs again: the raise-only guard must keep the higher live total.
+  await handlers.session_start({}, ctx);
+  // A follow-up turn advances from the retained 150000 baseline (150000 + 500),
+  // proving the stale lower file never clawed the live counters down to 100000.
+  await handlers.message_end(
+    {
+      message: {
+        role: "assistant",
+        model: "databricks-claude-sonnet-4-6",
+        timestamp: 2000,
+        usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 600 },
+      },
+    },
+    ctx,
+  );
+
+  const after = usageEvents();
+  const data = after[after.length - 1].data;
+  assert.equal(data.cumulative_input_tokens, 150500, JSON.stringify(data));
+  assert.equal(data.cumulative_output_tokens, 30100, JSON.stringify(data));
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});"""
+    _run_extension_script(node, extension_path, script)
+
+
 def _extension_path() -> Path:
     return (
         Path(__file__).resolve().parents[3]
