@@ -1,8 +1,6 @@
-// Unsubmitted AskUserQuestion answers keyed by elicitation id. The card
-// unmounts whenever the user leaves the session (Inbox, another session, a
-// reload) while the question stays pending; the next mount picks its draft
-// back up from here. Same shape as sessionDrafts: an in-memory map mirrored
-// to sessionStorage.
+// Unsubmitted AskUserQuestion answers keyed by elicitation id, restored on the
+// next mount after the card unmounts (Inbox, another session, a reload). An
+// in-memory map mirrored to sessionStorage, like sessionDrafts.
 
 export interface AskUserQuestionDraft {
   currentIndex: number;

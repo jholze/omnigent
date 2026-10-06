@@ -29,19 +29,14 @@
 // answer}`` map matching MCP's ``ElicitResult.content`` shape and
 // passed to ``onSubmit``.
 //
-// Unsubmitted answers are mirrored to ``@/lib/askUserQuestionDrafts``
-// so the card can unmount (Inbox, another session, a reload) and come
-// back with the same carousel position, selections and typed text.
+// Unsubmitted answers mirror to ``@/lib/askUserQuestionDrafts`` so the card
+// survives unmount/reload with the same position, selections and typed text.
 
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
-import {
-  clearAskUserQuestionDraft,
-  getAskUserQuestionDraft,
-  setAskUserQuestionDraft,
-} from "@/lib/askUserQuestionDrafts";
+import { getAskUserQuestionDraft, setAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 
 /**
  * Map from question id/text → either a single selected label
@@ -233,13 +228,9 @@ export function AskUserQuestionForm({
       if (answer === null) return; // unreachable while ``allAnswered`` gates the button
       finalAnswers[key] = answer;
     }
-    clearAskUserQuestionDraft(elicitationId);
+    // Keep the draft until the resolve POST succeeds; the store clears it then,
+    // so a submit that rolls back on error still restores the typed answers.
     onSubmit(finalAnswers);
-  };
-
-  const handleReject = () => {
-    clearAskUserQuestionDraft(elicitationId);
-    onReject();
   };
 
   const current = questions[currentIndex];
@@ -431,7 +422,7 @@ export function AskUserQuestionForm({
         <Button
           size="sm"
           variant="outline"
-          onClick={handleReject}
+          onClick={onReject}
           className="ml-auto"
           componentId="question.cancel"
         >

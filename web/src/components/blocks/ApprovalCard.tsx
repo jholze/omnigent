@@ -32,7 +32,7 @@
 //      on `POST /v1/sessions/{id}/elicitations/{eid}/resolve`,
 //   3. rolls back to "pending" on network error.
 
-import { useContext, useEffect, useMemo } from "react";
+import { useContext, useEffect, useMemo, useRef } from "react";
 import {
   CheckIcon,
   ClipboardListIcon,
@@ -286,11 +286,9 @@ export function ApprovalCard({
     submit(elicitationId, "decline", trimmed ? { feedback: trimmed } : undefined);
   };
 
-  // Mode detection. Prefer the server-stamped structured payload
-  // (full, non-truncated); fall back to parsing the content_preview
-  // JSON for backwards compatibility with elicitations published
-  // before the structured field was added. Memoized so the form's
-  // draft mirror sees one stable ``questions`` reference per card.
+  // Mode detection: prefer the server-stamped structured payload, else parse
+  // content_preview for older elicitations. Memoized so the form's draft
+  // mirror sees one stable ``questions`` reference per card.
   const askPayload: AskUserQuestionPayload | null = useMemo(
     () =>
       castAskUserQuestionPayload(askUserQuestion) ?? parseAskUserQuestionPreview(contentPreview),
@@ -303,11 +301,13 @@ export function ApprovalCard({
   const isExitPlanMode = planMarkdown !== null;
   const optionLabels = askPayload === null ? extractOptionLabels(requestedSchema) : [];
   const isAskUserQuestion = askPayload !== null;
-  // A question answered anywhere (this card, another tab, the Inbox, the
-  // approve page) leaves no draft worth keeping.
+  // Drop a leftover draft only when the card mounts already resolved (answered
+  // elsewhere, or reloaded after answering). Not keyed on later status: the
+  // optimistic submit flip can roll back and must keep the draft.
+  const resolvedOnMount = useRef(status === "responded");
   useEffect(() => {
-    if (isAskUserQuestion && status === "responded") clearAskUserQuestionDraft(elicitationId);
-  }, [isAskUserQuestion, status, elicitationId]);
+    if (isAskUserQuestion && resolvedOnMount.current) clearAskUserQuestionDraft(elicitationId);
+  }, [isAskUserQuestion, elicitationId]);
   const isMultiChoice = optionLabels.length > 0;
   // Any other schema that names fields: a free-form string, several
   // properties, an enum under a name other than ``answer``. These used to

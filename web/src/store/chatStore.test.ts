@@ -32,6 +32,11 @@ import type {
 } from "@/lib/blocks";
 import type { ConversationItem, MessageItem } from "@/lib/conversationItems";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
+import {
+  clearAskUserQuestionDrafts,
+  getAskUserQuestionDraft,
+  setAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
 import { buildBubbles } from "@/lib/renderItems";
 import { getSessionSlim, INITIAL_WINDOW_ITEMS, SESSION_HISTORY_PAGE_SIZE } from "@/lib/sessionsApi";
 import { SSE_STALL_TIMEOUT_MS } from "@/lib/sse";
@@ -9066,6 +9071,58 @@ describe("chatStore — submitApproval", () => {
       expect(block.status).toBe("responded");
       expect(block.response).toEqual({ action: "accept" });
     }
+  });
+
+  it("clears the AskUserQuestion draft once the resolve POST succeeds", async () => {
+    clearAskUserQuestionDrafts();
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      blocks: [elicitationBlock("elic_draft_ok")],
+    });
+    setAskUserQuestionDraft("elic_draft_ok", {
+      currentIndex: 0,
+      selections: { Q: "A" },
+      customSelected: {},
+      customInputs: {},
+    });
+
+    await useChatStore.getState().submitApproval("elic_draft_ok", "accept", { Q: "A" });
+
+    // Dropped only now that the answer is committed server-side.
+    expect(getAskUserQuestionDraft("elic_draft_ok")).toBeUndefined();
+  });
+
+  it("keeps the AskUserQuestion draft when the resolve POST fails and rolls back", async () => {
+    clearAskUserQuestionDrafts();
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.match(/\/v1\/sessions\/[^/]+\/elicitations\/[^/]+\/resolve$/)) {
+        return mockResponse(
+          { error: { code: "boom", message: "resolve failed" } },
+          { ok: false, status: 500 },
+        );
+      }
+      return defaultFetchHandler(input, init);
+    });
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      blocks: [elicitationBlock("elic_draft_fail")],
+    });
+    setAskUserQuestionDraft("elic_draft_fail", {
+      currentIndex: 0,
+      selections: { Q: "A" },
+      customSelected: {},
+      customInputs: {},
+    });
+
+    await useChatStore.getState().submitApproval("elic_draft_fail", "accept", { Q: "A" });
+
+    // The POST failed: the card rolls back to pending and the draft survives
+    // so the restored form keeps the user's answers.
+    const block = useChatStore.getState().blocks[0];
+    expect(block?.type).toBe("elicitation");
+    if (block?.type === "elicitation") expect(block.status).toBe("pending");
+    expect(getAskUserQuestionDraft("elic_draft_fail")).toBeDefined();
   });
 
   it("preserves Codex MCP persistence metadata in the resolve payload", async () => {

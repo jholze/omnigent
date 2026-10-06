@@ -1086,39 +1086,44 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(true);
   });
 
-  it("starts over on a later mount once the answer was submitted", () => {
-    const submitApproval = vi.fn();
-    const card = (
-      <ApprovalCard
-        elicitationId="elic_draft_submitted"
-        message="Claude wants to call AskUserQuestion"
-        phase="pre_tool_use"
-        policyName="claude_native_permission"
-        contentPreview=""
-        requestedSchema={{}}
-        status="pending"
-        response={null}
-        askUserQuestion={{
-          questions: [
-            { question: "Only?", header: "", options: [{ label: "A", description: "" }] },
-          ],
-        }}
-        onSubmit={submitApproval}
-      />
-    );
-    const { unmount } = render(card);
+  it("keeps the draft when a submit rolls back to pending", () => {
+    // The store flips the card to "responded" the instant the user submits,
+    // then rolls back to "pending" if the resolve POST fails. The draft must
+    // survive that round trip so the restored form keeps the typed answers.
+    const props = {
+      elicitationId: "elic_draft_rollback",
+      message: "Claude wants to call AskUserQuestion",
+      phase: "pre_tool_use",
+      policyName: "claude_native_permission",
+      contentPreview: "",
+      requestedSchema: {},
+      askUserQuestion: {
+        questions: [{ question: "Only?", header: "", options: [{ label: "A", description: "" }] }],
+      },
+    } as const;
+    const { rerender } = render(<ApprovalCard {...props} status="pending" response={null} />);
     fireEvent.click(screen.getByLabelText("A"));
-    fireEvent.click(screen.getByTestId("ask-user-question-submit"));
-    expect(submitApproval).toHaveBeenCalledWith("elic_draft_submitted", "accept", { "Only?": "A" });
-    unmount();
 
-    render(card);
-    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(false);
+    // Optimistic flip: the form unmounts but the draft stays put.
+    rerender(
+      <ApprovalCard
+        {...props}
+        status="responded"
+        response={{ action: "accept", content: { "Only?": "A" } }}
+      />,
+    );
+    expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toContain(
+      "elic_draft_rollback",
+    );
+
+    // Rollback: the form comes back with the user's selection intact.
+    rerender(<ApprovalCard {...props} status="pending" response={null} />);
+    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(true);
   });
 
-  it("forgets the draft once the question was answered elsewhere", () => {
-    // Another tab or the Inbox resolved it: this card flips to responded and
-    // the draft would otherwise linger in sessionStorage.
+  it("drops a leftover draft when the card mounts already answered", () => {
+    // Answered in another tab or the Inbox while this card was away: it mounts
+    // responded with no form to fill, so the stale draft is cleared on mount.
     const props = {
       elicitationId: "elic_draft_resolved",
       message: "Claude wants to call AskUserQuestion",
@@ -1130,14 +1135,14 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
         questions: [{ question: "Only?", header: "", options: [{ label: "A", description: "" }] }],
       },
     } as const;
-    const { rerender, unmount } = render(
-      <ApprovalCard {...props} status="pending" response={null} />,
-    );
+    const { unmount } = render(<ApprovalCard {...props} status="pending" response={null} />);
     fireEvent.click(screen.getByLabelText("A"));
     expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toContain(
       "elic_draft_resolved",
     );
-    rerender(
+    unmount();
+
+    render(
       <ApprovalCard
         {...props}
         status="responded"
@@ -1145,10 +1150,6 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       />,
     );
     expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toBeNull();
-    unmount();
-
-    render(<ApprovalCard {...props} status="pending" response={null} />);
-    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(false);
   });
 
   it("restores a secret answer on remount without writing it to sessionStorage", () => {

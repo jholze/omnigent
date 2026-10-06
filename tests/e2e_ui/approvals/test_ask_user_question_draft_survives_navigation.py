@@ -37,8 +37,6 @@ _INBOX_BUTTON = '[data-testid="inbox-button"]'
 _RENDER_TIMEOUT_MS = 15_000
 # Loading the conversation page is slower than rendering a card in it.
 _LOAD_TIMEOUT_MS = 60_000
-# Long enough for a viewer of the recording to read the card's state.
-_HOLD_MS = 1_500
 
 _FIRST_CHOICE = "Apply proposal"
 _DRAFT_TEXT = "Draft answer that should survive navigation"
@@ -150,9 +148,15 @@ def test_partial_answers_survive_leaving_and_returning(
 
     result_holder: dict = {}
     _post_ask_user_question(base_url, session_id, result_holder)
-    _wait_for(lambda: _pending_elicitations(base_url, session_id))
-    if "error" in result_holder:
-        raise AssertionError(f"hook POST failed: {result_holder['error']}")
+
+    def _question_posted() -> bool:
+        # Fail fast on a hook POST error instead of waiting out the full
+        # timeout for a question that will never arrive.
+        if "error" in result_holder:
+            raise AssertionError(f"hook POST failed: {result_holder['error']}")
+        return bool(_pending_elicitations(base_url, session_id))
+
+    _wait_for(_question_posted)
 
     # The recorded page is created only now, after the non-browser setup.
     page: Page = request.getfixturevalue("page")
@@ -169,7 +173,6 @@ def test_partial_answers_survive_leaving_and_returning(
     expect(form.locator(_PROGRESS)).to_have_text("Question 2 of 4:")
     form.locator(_CUSTOM_INPUT).fill(_DRAFT_TEXT)
     expect(form.locator(_CUSTOM_INPUT)).to_have_value(_DRAFT_TEXT)
-    page.wait_for_timeout(_HOLD_MS)
 
     # Leave through the sidebar's Inbox row, come back through the session's row.
     session_row = page.locator(f'a[href$="/c/{session_id}"]').first
@@ -177,7 +180,6 @@ def test_partial_answers_survive_leaving_and_returning(
     page.locator(_INBOX_BUTTON).click()
     page.wait_for_url(re.compile(r"/inbox/?$"), timeout=_LOAD_TIMEOUT_MS)
     expect(page.locator(_FORM).first).to_be_visible(timeout=_RENDER_TIMEOUT_MS)
-    page.wait_for_timeout(_HOLD_MS)
     page.locator(f'a[href$="/c/{session_id}"]').first.click()
     page.wait_for_url(re.compile(rf"/c/{session_id}/?$"), timeout=_LOAD_TIMEOUT_MS)
 
@@ -186,12 +188,14 @@ def test_partial_answers_survive_leaving_and_returning(
     assert _pending_elicitations(base_url, session_id), (
         "the question itself was lost, not the draft"
     )
-    page.wait_for_timeout(_HOLD_MS)
 
     # Read the whole draft back, walking the carousel so the probe does not
-    # depend on where it landed, then return to question 1 and hold the view.
+    # depend on where it landed, then return to question 1.
     progress_on_return = form.locator(_PROGRESS).inner_text().strip()
-    while form.locator(_PREV).is_enabled():
+    # Bounded by the question count so a stuck Prev button can't spin forever.
+    for _ in range(len(_QUESTIONS)):
+        if not form.locator(_PREV).is_enabled():
+            break
         form.locator(_PREV).click()
     expect(form.locator(_PROGRESS)).to_have_text("Question 1 of 4:")
     first_choice_checked = _first_choice(form).is_checked()
@@ -200,7 +204,6 @@ def test_partial_answers_survive_leaving_and_returning(
     draft_text = form.locator(_CUSTOM_INPUT).input_value()
     form.locator(_PREV).click()
     expect(form.locator(_PROGRESS)).to_have_text("Question 1 of 4:")
-    page.wait_for_timeout(_HOLD_MS)
 
     observed = {
         "progress_on_return": progress_on_return,
