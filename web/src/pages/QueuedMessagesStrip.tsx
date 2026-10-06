@@ -44,7 +44,8 @@ export const queuedMessageCollisionDetection: CollisionDetection = (args) =>
 /**
  * Where dragging `activeId` onto `overId` lands: the own row it should sit
  * before (`null` = end), or `undefined` when nothing moves. Down lands after
- * the target, up before it; rows other windows hold keep their place.
+ * the target, up before it. A row another window holds is never a target:
+ * its slot cannot be taken, so dropping onto it moves nothing.
  */
 export function queuedReorderTarget(
   messages: QueuedMessage[],
@@ -54,7 +55,7 @@ export function queuedReorderTarget(
   if (activeId === overId) return undefined;
   const from = messages.findIndex((m) => m.queueId === activeId);
   const to = messages.findIndex((m) => m.queueId === overId);
-  if (from === -1 || to === -1) return undefined;
+  if (from === -1 || to === -1 || messages[to]!.remote !== undefined) return undefined;
   const landing = from < to ? to + 1 : to;
   const before = messages.slice(landing).find((m) => m.remote === undefined);
   const beforeQueueId = before?.queueId ?? null;
@@ -113,10 +114,11 @@ function QueuedRow({
     id: message.queueId,
     disabled: !reorderable || message.remote !== undefined,
   });
-  // The whole row is the drop target so dropping anywhere on it reorders.
+  // The whole row is the drop target so dropping anywhere on it reorders; a
+  // row another window holds is not one (see `queuedReorderTarget`).
   const { setNodeRef: setDropRef, isOver } = useDroppable({
     id: message.queueId,
-    disabled: !reorderable,
+    disabled: !reorderable || message.remote !== undefined,
   });
   const remote = message.remote;
   const hasText = message.text.trim().length > 0;
@@ -126,11 +128,12 @@ function QueuedRow({
     ? remote.attachments.every((name) => IMAGE_FILENAME.test(name))
     : files.every((file) => file.type.startsWith("image/"));
   const AttachmentIcon = allImages ? ImageIcon : PaperclipIcon;
-  const remoteLabel = remote
-    ? remote.createdBy
+  let remoteLabel: string | null = null;
+  if (remote !== undefined) {
+    remoteLabel = remote.createdBy
       ? `Queued by ${remote.createdBy} in another window`
-      : "Queued in another window"
-    : null;
+      : "Queued in another window";
+  }
 
   return (
     <div

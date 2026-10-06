@@ -26,6 +26,10 @@ from omnigent.server.schemas import QueuedMessageInput
 # ~5-minute stream cap and page refreshes don't flicker the queue.
 _DETACH_GRACE_S = 15.0
 
+# Shares whose client holds no stream are the only part of the registry a
+# caller can grow without an open connection, so cap them per user.
+_MAX_DETACHED_SHARES_PER_USER = 8
+
 _ShareKey = tuple[str, str]
 
 
@@ -194,6 +198,8 @@ def replace(
     :param user_id: Attribution identity of the caller (``None`` single-user).
     :param messages: The client's complete current queue for this
         conversation, head first. An empty list clears its share.
+        A new share from a client holding no stream drops the same user's
+        oldest stream-less shares beyond :data:`_MAX_DETACHED_SHARES_PER_USER`.
     """
     key = _share_key(user_id, client_id)
     schedule_expiry = False
@@ -206,6 +212,7 @@ def replace(
         if share is None:
             share = _Share(created_by=user_id)
             queue.shares[key] = share
+            changed = _evict_detached_locked(conversation_id, queue, key) or changed
         share.entries = entries
         if share.connections == 0:
             if not entries:
@@ -275,6 +282,21 @@ def _expire(conversation_id: str, key: _ShareKey) -> None:
         _drop_share_locked(conversation_id, queue, key)
     if had_entries:
         _broadcast(conversation_id)
+
+
+def _evict_detached_locked(
+    conversation_id: str, queue: _ConversationQueue, keep: _ShareKey
+) -> bool:
+    """Drop *keep*'s user's oldest stream-less shares beyond the cap; True if any went."""
+    detached = [
+        other
+        for other, share in queue.shares.items()
+        if other[0] == keep[0] and other != keep and share.connections == 0 and share.entries
+    ]
+    excess = len(detached) - (_MAX_DETACHED_SHARES_PER_USER - 1)
+    for other in detached[: max(excess, 0)]:
+        _drop_share_locked(conversation_id, queue, other)
+    return excess > 0
 
 
 def _drop_share_locked(conversation_id: str, queue: _ConversationQueue, key: _ShareKey) -> None:

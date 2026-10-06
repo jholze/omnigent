@@ -85,6 +85,15 @@ describe("shouldQueueSend with another window's queued follow-ups", () => {
     ).toBe(true);
   });
 
+  it("queues an idle send until this connection has seen the session's queue", () => {
+    // Between the stream (re)connecting and its `session.queue` snapshot, the
+    // queue may hold a follow-up this window knows nothing about yet.
+    expect(shouldQueueSend("conv_a", "idle", "idle", [], false, false, [], true)).toBe(true);
+    expect(shouldQueueSend("conv_a", "idle", "idle", [], true, false, [], true)).toBe(true);
+    // A /side command still bypasses the queue.
+    expect(shouldQueueSend("conv_a", "idle", "idle", [], false, true, [], true)).toBe(false);
+  });
+
   it("ignores this window's own echoed entries and failed remote ones", () => {
     expect(shouldQueueSend("conv_a", "idle", "idle", [], false, false, [shared(CLIENT_ID)])).toBe(
       false,

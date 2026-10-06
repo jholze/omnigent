@@ -12031,6 +12031,15 @@ async def test_put_queue_rejects_malformed_body_and_unknown_session(
         json={"messages": [{"queue_id": "q_1", "text": "x"}]},
     )
     assert resp.status_code == 422, resp.text
+    # The share limit is inclusive: 50 entries publish, 51 are rejected.
+    resp = await client.put(
+        f"/v1/sessions/{session['id']}/queue",
+        json={
+            "client_id": "c_1",
+            "messages": [{"queue_id": f"q_{i}", "text": "x"} for i in range(50)],
+        },
+    )
+    assert resp.status_code == 204, resp.text
     resp = await client.put(
         f"/v1/sessions/{session['id']}/queue",
         json={

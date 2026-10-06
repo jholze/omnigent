@@ -187,14 +187,16 @@ async def test_cleared_share_republished_while_detached_gets_full_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Clearing a detached share cancels its expiry; a later share starts a fresh window."""
-    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.3)
+    # Grace 0.8 s: the first timer would fire at 0.8 s, inside the no-event
+    # window (0.4 s → 1.0 s); the fresh share's own expiry lands at 1.2 s.
+    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.8)
     collector = await start_session_stream_collector(CONV)
     try:
         queued_messages.replace(
             CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_1", "d1")]
         )
         await collector.next_event()
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.4)
         queued_messages.replace(CONV, client_id=DESKTOP, user_id=None, messages=[])
         assert (await collector.next_event())["messages"] == []
         queued_messages.replace(
@@ -202,7 +204,7 @@ async def test_cleared_share_republished_while_detached_gets_full_grace(
         )
         await collector.next_event()
         # The first share's timer would have fired here; the new share must outlive it.
-        await collector.assert_no_event(within=0.2)
+        await collector.assert_no_event(within=0.6)
         assert _order(queued_messages.snapshot(CONV)) == [(DESKTOP, "d2")]
         expired = await collector.next_event()
         assert expired["messages"] == []
@@ -210,17 +212,23 @@ async def test_cleared_share_republished_while_detached_gets_full_grace(
         await collector.stop()
 
 
-async def test_share_expires_after_last_stream_detaches(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A closed window's entries disappear after the grace window, not immediately."""
+@pytest.mark.parametrize("streamed", [True, False], ids=["closed_window", "never_streamed"])
+async def test_share_without_a_stream_expires_after_grace(
+    streamed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A share whose client holds no stream — a closed window's, or one that never
+    attached — stays listed through the grace window, then disappears."""
     monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.05)
     collector = await start_session_stream_collector(CONV)
     try:
-        queued_messages.attach(CONV, client_id=DESKTOP, user_id=None)
+        if streamed:
+            queued_messages.attach(CONV, client_id=DESKTOP, user_id=None)
         queued_messages.replace(
             CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_1", "d1")]
         )
         await collector.next_event()
-        queued_messages.detach(CONV, client_id=DESKTOP, user_id=None)
+        if streamed:
+            queued_messages.detach(CONV, client_id=DESKTOP, user_id=None)
         # Still listed inside the grace window: a transient reconnect must
         # not flicker the other window's strip.
         assert _order(queued_messages.snapshot(CONV)) == [(DESKTOP, "d1")]
@@ -249,17 +257,30 @@ async def test_reattach_within_grace_keeps_share(monkeypatch: pytest.MonkeyPatch
         await collector.stop()
 
 
-async def test_share_without_stream_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A publish from a client holding no stream is kept only for the grace window."""
-    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 0.05)
+async def test_stream_less_shares_are_capped_per_user() -> None:
+    """Shares published without a stream are capped per user: the oldest go, others stay."""
     collector = await start_session_stream_collector(CONV)
     try:
+        queued_messages.attach(CONV, client_id="c_live", user_id=ALICE)
         queued_messages.replace(
-            CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_1", "d1")]
+            CONV, client_id="c_live", user_id=ALICE, messages=[_msg("q_1", "a")]
         )
         await collector.next_event()
-        expired = await collector.next_event()
-        assert expired["messages"] == []
+        queued_messages.replace(
+            CONV, client_id="c_bob", user_id="bob@example.com", messages=[_msg("q_1", "b")]
+        )
+        await collector.next_event()
+        cap = queued_messages._MAX_DETACHED_SHARES_PER_USER
+        for i in range(cap + 1):
+            queued_messages.replace(
+                CONV, client_id=f"c_{i}", user_id=ALICE, messages=[_msg("q_1", f"a{i}")]
+            )
+            event = await collector.next_event()
+        # Alice's oldest stream-less share (c_0) is gone from the broadcast and
+        # the snapshot; her attached share and Bob's share are untouched.
+        expected = ["c_live", "c_bob", *(f"c_{i}" for i in range(1, cap + 1))]
+        assert [client for client, _text in _order(event)] == expected
+        assert [client for client, _text in _order(queued_messages.snapshot(CONV))] == expected
     finally:
         await collector.stop()
 

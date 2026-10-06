@@ -2967,6 +2967,10 @@ def register_events_routes(
             media_type="text/event-stream",
             headers={
                 "X-Omnigent-Stream-Epoch": inflight_text.stream_epoch(),
+                # The snapshot-on-connect carries ``session.queue``; a client
+                # holds idle sends until it lands rather than overtake a
+                # follow-up another window queued (see API.md, Stream Session).
+                "X-Omnigent-Stream-Features": "queue",
                 # Keep intermediaries from buffering the SSE stream:
                 # ``X-Accel-Buffering: no`` disables nginx-style response
                 # buffering so heartbeats and deltas reach the client as

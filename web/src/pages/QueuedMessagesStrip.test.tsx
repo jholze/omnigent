@@ -19,6 +19,20 @@ const msg = (queueId: string, text: string): QueuedMessage => ({
   conversationId: "conv_abc",
 });
 
+/** Row geometry for dnd-kit's keyboard sensor, which measures via getBoundingClientRect. */
+const rect = (top: number, width: number) =>
+  ({
+    x: 0,
+    y: top,
+    top,
+    right: width,
+    bottom: top + 24,
+    left: 0,
+    width,
+    height: 24,
+    toJSON: () => ({}),
+  }) as DOMRect;
+
 afterEach(cleanup);
 
 describe("QueuedMessagesStrip", () => {
@@ -368,18 +382,6 @@ describe("QueuedMessagesStrip", () => {
 
     const handles = screen.getAllByRole("button", { name: "Reorder queued message" });
     const rows = screen.getAllByRole("listitem");
-    const rect = (top: number, width: number) =>
-      ({
-        x: 0,
-        y: top,
-        top,
-        right: width,
-        bottom: top + 24,
-        left: 0,
-        width,
-        height: 24,
-        toJSON: () => ({}),
-      }) as DOMRect;
     rows.forEach((row, index) =>
       vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(index * 32, 300)),
     );
@@ -468,17 +470,47 @@ describe("QueuedMessagesStrip — follow-ups another window holds", () => {
     }
   });
 
-  it("reorders own rows past a remote row without naming it as the target", () => {
+  it("never targets a remote row and reorders own rows around it", () => {
     const messages = [msg("q_1", "mine first"), remote("q_1", "theirs"), msg("q_2", "mine second")];
-    // Dropping "mine first" onto the remote row lands after it: before "mine second".
-    expect(queuedReorderTarget(messages, "q_1", "c_other:q_1")).toBe("q_2");
-    // Dropping "mine second" up onto the remote row would land before the next
-    // own row after it — itself — so nothing moves: remote rows keep their place.
+    // The fixed-slot protocol cannot move an own row relative to another
+    // window's, so a drop onto the remote row is an explicit no-op.
+    expect(queuedReorderTarget(messages, "q_1", "c_other:q_1")).toBeUndefined();
     expect(queuedReorderTarget(messages, "q_2", "c_other:q_1")).toBeUndefined();
-    // Dropping "mine second" onto "mine first" lands before it; dropping "mine
-    // first" onto "mine second" lands at the end.
+    // Own rows still reorder among themselves: up lands before the target,
+    // down after it (here: the end).
     expect(queuedReorderTarget(messages, "q_2", "q_1")).toBe("q_1");
     expect(queuedReorderTarget(messages, "q_1", "q_2")).toBeNull();
     expect(queuedReorderTarget(messages, "q_1", "q_1")).toBeUndefined();
+  });
+
+  it("skips the remote row when moving an own row down with the keyboard", async () => {
+    const onReorder = vi.fn();
+    render(
+      <QueuedMessagesStrip
+        messages={[msg("q_1", "mine first"), remote("q_1", "theirs"), msg("q_2", "mine second")]}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+        onReorder={onReorder}
+      />,
+    );
+    const rows = screen.getAllByRole("listitem");
+    const handles = screen.getAllByRole("button", { name: "Reorder queued message" });
+    expect(handles).toHaveLength(2);
+    rows.forEach((row, index) =>
+      vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(index * 32, 300)),
+    );
+    vi.spyOn(handles[0]!, "getBoundingClientRect").mockReturnValue(rect(0, 24));
+    vi.spyOn(handles[1]!, "getBoundingClientRect").mockReturnValue(rect(64, 24));
+
+    const handle = handles[0]!;
+    handle.focus();
+    fireEvent.keyDown(handle, { key: " ", code: "Space" });
+    await waitFor(() => expect(handle).toHaveAttribute("aria-pressed", "true"));
+    // The remote row is not a drop target, so the drag passes over it onto
+    // "mine second" and lands after it (the end of this window's order).
+    fireEvent.keyDown(handle, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(handle, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(handle, { key: " ", code: "Space" });
+    await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_1", null));
   });
 });

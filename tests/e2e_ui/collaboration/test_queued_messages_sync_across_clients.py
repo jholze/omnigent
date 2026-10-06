@@ -21,7 +21,12 @@ from collections.abc import Callable
 import httpx
 from playwright.sync_api import Browser, Page, expect
 
-from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm
+from tests.e2e_ui.conftest import (
+    configure_mock_llm,
+    release_mock_gate,
+    reset_mock_llm,
+    wait_for_mock_gate,
+)
 
 _COMPOSER_LABEL = "Message the agent"
 _QUEUED_LIST = "Queued messages"
@@ -32,22 +37,10 @@ def _send(page: Page, text: str) -> None:
     page.get_by_role("button", name="Send", exact=True).click()
 
 
-def _wait_for_gate(mock_url: str, *, timeout_s: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if httpx.get(f"{mock_url}/gate/pending", timeout=5.0, trust_env=False).json()["pending"]:
-            return
-        time.sleep(0.2)
-    raise AssertionError("the mock LLM never held the first turn on its gate")
-
-
 def _release_gates(mock_url: str) -> None:
+    """Release every held turn so teardown cannot leave the shared mock blocked."""
     deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        pending = httpx.get(f"{mock_url}/gate/pending", timeout=5.0, trust_env=False).json()
-        if not pending.get("pending"):
-            return
-        httpx.post(f"{mock_url}/gate/release", timeout=5.0, trust_env=False)
+    while release_mock_gate(mock_url) and time.monotonic() < deadline:
         time.sleep(0.2)
 
 
@@ -64,9 +57,7 @@ def _drain_turns_until(mock_url: str, done: Callable[[], bool], *, timeout_s: fl
         if time.monotonic() > deadline:
             raise AssertionError("the queued follow-ups did not drain in time")
         with contextlib.suppress(httpx.HTTPError):
-            pending = httpx.get(f"{mock_url}/gate/pending", timeout=5.0, trust_env=False).json()
-            if pending.get("pending"):
-                httpx.post(f"{mock_url}/gate/release", timeout=5.0, trust_env=False)
+            release_mock_gate(mock_url)
         time.sleep(0.5)
 
 
@@ -101,7 +92,7 @@ def test_queued_followups_are_shared_across_clients(
 
         first_message = f"Please take your time with this one. gate-{nonce}"
         _send(first, first_message)
-        _wait_for_gate(mock_llm_server_url)
+        wait_for_mock_gate(mock_llm_server_url)
         expect(
             second.locator(
                 '[data-testid="message-bubble"][data-role="user"]', has_text=first_message

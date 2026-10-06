@@ -1232,6 +1232,12 @@ Send `X-Omnigent-Client-Id: <client_id>` (the id used with **Publish Queued
 Follow-ups**) so the follow-ups this client has published stay in the
 session's merged queue while the stream is open.
 
+The response carries `X-Omnigent-Stream-Features: queue`: the
+snapshot-on-connect includes a `session.queue` event, and until it arrives a
+client should treat the session's queue as unknown — queue an idle send rather
+than let it overtake a follow-up it has not seen yet. A stream without the
+header (an older server) has no shared queue to wait for.
+
 ```
 GET /v1/sessions/{session_id}/stream
 
@@ -1310,7 +1316,9 @@ A share lives while the client holds the session's stream open — the stream
 request carries the same id in the `X-Omnigent-Client-Id` header — plus a
 15 s grace window, after which the server drops it and broadcasts the
 remaining queue. A share published without a matching stream also expires
-after the grace. The registry is process-local, like presence.
+after the grace, and a user may hold at most 8 such stream-less shares per
+session (publishing another drops the oldest). The registry is process-local,
+like presence.
 
 ### Stream Events
 

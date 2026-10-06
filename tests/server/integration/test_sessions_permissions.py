@@ -3548,6 +3548,8 @@ async def test_stream_snapshot_carries_other_windows_queue(
         assert join["type"] == "session.presence"
         resp = await _end_stream_via_close(session_id, task)
         assert resp.status_code == 200
+        # The client holds idle sends for the snapshot only on streams that announce it.
+        assert resp.headers["x-omnigent-stream-features"] == "queue"
         snapshots = _sse_queue_events(resp.text)
         assert snapshots, f"no session.queue frame in stream body: {resp.text[:500]}"
         assert [(m["client_id"], m["text"]) for m in snapshots[0]["messages"]] == [
@@ -3597,8 +3599,9 @@ async def test_stream_keeps_queue_share_open_and_expires_it_on_disconnect(
         assert expired["messages"] == []
         assert queued_messages.snapshot(session_id)["messages"] == []
     finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await collector.stop()
 
 

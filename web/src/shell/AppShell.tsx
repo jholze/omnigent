@@ -1011,6 +1011,7 @@ export function AppShell() {
             readAlwaysSteer(),
             false,
             chat.sharedQueue,
+            chat.sharedQueueStale,
           )
         ) {
           chat.enqueueMessage(text, files);

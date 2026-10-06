@@ -943,6 +943,7 @@ export function ChatPage() {
           readAlwaysSteer(),
           opensSideChat,
           chat.sharedQueue,
+          chat.sharedQueueStale,
         )
       ) {
         chat.enqueueMessage(text, files, replyDraft);
@@ -2507,6 +2508,7 @@ function ComposerImpl(
   const conversationId = useChatStore((s) => s.conversationId);
   const queuedMessages = useChatStore((s) => s.queuedMessages);
   const sharedQueue = useChatStore((s) => s.sharedQueue);
+  const sharedQueueStale = useChatStore((s) => s.sharedQueueStale);
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const flushBoundAgentId = useChatStore((s) => s.boundAgentId);
   const maybeFlushQueuedHead = useChatStore((s) => s.maybeFlushQueuedHead);
@@ -2523,7 +2525,8 @@ function ComposerImpl(
   // needs it: on navigate-back the binding lands after the status settles, and
   // without this dep the effect wouldn't re-fire to drain a queue for the
   // returned-to conversation. `sharedQueue`: another window's follow-up can
-  // leave the queue without any local status change.
+  // leave the queue without any local status change; `sharedQueueStale`: the
+  // stream's snapshot landing frees a flush held for it the same way.
   useEffect(() => {
     if (unreachable) return;
     maybeFlushQueuedHead();
@@ -2532,6 +2535,7 @@ function ComposerImpl(
     sessionStatus,
     queuedMessages,
     sharedQueue,
+    sharedQueueStale,
     conversationId,
     flushBoundAgentId,
     unreachable,
@@ -3061,6 +3065,7 @@ function ComposerImpl(
             readAlwaysSteer(),
             false,
             chat.sharedQueue,
+            chat.sharedQueueStale,
           )
         ) {
           toast.error("Compact is disabled while a chat is in progress", { richColors: true });

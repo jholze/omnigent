@@ -994,6 +994,14 @@ export interface ConversationState {
    */
   sharedQueue: SharedQueuedMessage[];
   /**
+   * True from a stream (re)connect attempt until that connection's
+   * `session.queue` snapshot lands: `sharedQueue` may be missing a follow-up
+   * another window holds, so an idle send queues and the flush waits (see
+   * `shouldQueueSend`). A stream that announces no queue snapshot (an older
+   * server) clears it on open; a bounded fallback clears it if none arrives.
+   */
+  sharedQueueStale: boolean;
+  /**
    * Managed-sandbox launch progress for the bound session. Seeded
    * from the session snapshot's `sandbox_status` field on bind and
    * updated by `session.sandbox_status` SSE events; a `ready` event
@@ -1790,6 +1798,9 @@ const heldQueueShares = new Map<
 // send never starts one).
 export const HELD_SHARE_RELEASE_TIMEOUT_MS = 15_000;
 const heldShareReleases = new Map<string, ReturnType<typeof setTimeout>>();
+// A stream that announces a queue snapshot delivers it right after connecting;
+// past this, a snapshot that never came no longer holds idle sends.
+export const SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS = 10_000;
 // The server's share bounds. Anything beyond them is disclosed as one summary
 // row/name rather than silently dropped from other windows' view.
 const QUEUE_SHARE_MAX_MESSAGES = 50;
@@ -1909,6 +1920,19 @@ function noteTurnEdgeForHeldShare(conversationId: string): void {
   if (held === undefined) return;
   held.turnSeen = true;
   if (held.holds === 0) releaseHeldQueueShare(conversationId);
+}
+
+/** Whether the stream's snapshot-on-connect includes `session.queue` (an older server's does not). */
+function streamAnnouncesQueueSnapshot(res: Response): boolean {
+  const features = res.headers.get("x-omnigent-stream-features") ?? "";
+  return features.split(",").some((feature) => feature.trim() === "queue");
+}
+
+/** This connection's view of the shared queue is current: let held flushes proceed. */
+function settleSharedQueue(set: Setter, get: Getter): void {
+  if (!get().sharedQueueStale) return;
+  set({ sharedQueueStale: false });
+  useChatStore.getState().flushBackgroundQueues();
 }
 
 /** Publish on every change to `queuedMessages`, for each conversation it touched. */
@@ -2086,6 +2110,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   runnerLaunchedAt: null,
   viewers: [],
   sharedQueue: [],
+  sharedQueueStale: false,
   sandboxStatus: null,
   mcpStartup: null,
   mcpStartupLaunch: { pending: false, dismissed: false },
@@ -2246,7 +2271,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // so an undrained message from another conversation can sit at index 0; a
     // head-only guard would let it block this conversation's messages forever.
     // A follow-up another window of the session holds ahead of ours sends
-    // first (one message per turn, session-wide), so wait while it is there.
+    // first (one message per turn, session-wide), so wait while it is there —
+    // and while this connection has not yet learned what the others hold.
+    if (s.sharedQueueStale) return;
     const head = ownFlushHead(s.queuedMessages, s.sharedQueue, s.conversationId);
     if (head === null || head.requiresRetry) return;
     // Remove it BEFORE the POST so a re-entrant flush can't double-send.
@@ -2312,6 +2339,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       if (backgroundFlushInFlight.has(conversationId)) continue;
       const cooldownUntil = backgroundFlushCooldownUntil.get(conversationId);
       if (cooldownUntil !== undefined && cooldownUntil > now) continue;
+      if (local?.sharedQueueStale) continue;
       const head = ownFlushHead(get().queuedMessages, local?.sharedQueue ?? [], conversationId);
       if (head === null || head.requiresRetry) continue;
       const compactAgentId = head.agentId ?? local?.boundAgentId;
@@ -5598,6 +5626,12 @@ export async function startStreamPump(
     for (const timer of catchupTimers) window.clearTimeout(timer);
     catchupTimers = [];
   };
+  // Frees idle sends if the queue snapshot this connection announced never lands.
+  let snapshotFallback: ReturnType<typeof setTimeout> | null = null;
+  const clearSnapshotFallback = (): void => {
+    if (snapshotFallback !== null) clearTimeout(snapshotFallback);
+    snapshotFallback = null;
+  };
   // Consecutive 404s only — reset on any non-404 outcome (success or a
   // different-status failure), so a 404 has to persist across attempts to
   // count toward the cap below.
@@ -5642,6 +5676,10 @@ export async function startStreamPump(
       // an open that has hung past the stale window, not just a dead body.
       streamAttemptActivity.set(attempt, Date.now());
       try {
+        // Until this connection's `session.queue` snapshot lands, the shared
+        // queue may be missing another window's follow-up: idle sends queue.
+        clearSnapshotFallback();
+        if (!get().sharedQueueStale) set({ sharedQueueStale: true });
         const idle = presenceIdle.idleNow();
         let streamRes: Response;
         try {
@@ -5753,6 +5791,16 @@ export async function startStreamPump(
           clearSseLog(id);
         }
         previousStreamEpoch = streamEpoch;
+        if (streamAnnouncesQueueSnapshot(streamRes)) {
+          snapshotFallback = setTimeout(() => {
+            snapshotFallback = null;
+            if (controller.signal.aborted || isConversationDisposed(id)) return;
+            settleSharedQueue(set, get);
+          }, SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS);
+        } else {
+          // An older server: no queue snapshot is coming, nothing to wait for.
+          settleSharedQueue(set, get);
+        }
         // Guard the byte stream with a silence watchdog: the server
         // heartbeats every 15 s, so a longer gap means a half-open socket
         // (laptop sleep, network path change, proxy reap). The guard ends
@@ -5823,8 +5871,10 @@ export async function startStreamPump(
   } finally {
     if (statusReconcileTimer !== null) window.clearInterval(statusReconcileTimer);
     clearCatchupTimers();
+    clearSnapshotFallback();
     if (get().abortController === controller) {
-      set({ abortController: null });
+      // No stream: nothing more can be learned about other windows' queues.
+      set({ abortController: null, sharedQueueStale: false });
     }
   }
   /* eslint-enable no-await-in-loop */
@@ -7322,7 +7372,11 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
     case "session_queue": {
       // Full-state replacement, like presence. Own entries stay authoritative
       // in `queuedMessages`; this list orders them against other windows'.
-      applyToNamedConversation(event.conversationId, { sharedQueue: event.messages });
+      // The first one on a connection is its snapshot: the view is current.
+      applyToNamedConversation(event.conversationId, {
+        sharedQueue: event.messages,
+        sharedQueueStale: false,
+      });
       // A list that disagrees with what this client published (the server
       // dropped its share past the grace window, or kept a stale one) is
       // republished.
