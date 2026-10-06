@@ -88,6 +88,14 @@ def test_chat_blocked_on_dialog_names_the_terminal_that_holds_it(
         "dialog)."
     )
 
+    # The hidden main view already targets the agent terminal; the rail shell is
+    # the competing surface the button must not open.
+    rail_key = f"terminal:{rail_shell.get_attribute('data-terminal-id')}"
+    agent_key = page.locator('[data-testid="main-terminal-view"]').first.get_attribute(
+        "data-active-terminal"
+    )
+    assert agent_key and agent_key != rail_key, (agent_key, rail_key)
+
     # The indicator's own control takes the user to the dialog.
     open_terminal_view = working.get_by_role(
         "button", name=re.compile("terminal view", re.IGNORECASE)
@@ -96,7 +104,11 @@ def test_chat_blocked_on_dialog_names_the_terminal_that_holds_it(
     open_terminal_view.click()
     main_terminal = page.locator('[data-testid="main-terminal-view"][data-visible="true"]')
     expect(main_terminal).to_be_visible(timeout=30_000)
-    expect(main_terminal.locator('[data-testid="terminal-view"]').last).to_have_attribute(
-        "data-state", "connected", timeout=60_000
+    expect(main_terminal).to_have_attribute("data-active-terminal", agent_key)
+    agent_terminal = main_terminal.locator('[data-testid="terminal-view"]').last
+    expect(agent_terminal).to_have_attribute("data-state", "connected", timeout=60_000)
+    expect(agent_terminal).to_have_attribute(
+        "data-terminal-id", agent_key.removeprefix("terminal:")
     )
     expect(terminal_segment).to_have_attribute("aria-pressed", "true")
+    expect(rail_shell).to_be_visible()
