@@ -145,9 +145,9 @@ def _supports_long_context(canonical: str) -> bool:
     for family, minimum in _MIN_LONG_CONTEXT_VERSION.items():
         if family not in segments:
             continue
-        # Read the version digits next to the family and stop before any trailing
-        # date stamp or vendor suffix (``-20250514``, ``-v1:0``): a run of four or
-        # more digits is a date, never a Claude version component.
+        # Collect the leading run of version digits, treating a 4+-digit run
+        # (a date like ``-20250514``) or a non-numeric vendor suffix (``-v1:0``)
+        # as the boundary — neither is a Claude version component.
         version: list[int] = []
         for segment in segments:
             if segment.isdigit() and len(segment) < 4:
@@ -172,8 +172,8 @@ def model_id_with_1m_marker(model_id: str) -> str:
         or spelled.lower().endswith(LONG_CONTEXT_MARKER)
         or not _supports_long_context(canonical)
     ):
-        return model_id
-    # Append to the normalized id so the marker sits flush against it; Claude
+        return spelled
+    # Append to the stripped id so the marker sits flush against it; Claude
     # Code strips the marker before requesting, and a stray space would leave
     # the gateway a trailing-space model name it cannot route.
     return f"{spelled}{LONG_CONTEXT_MARKER}"

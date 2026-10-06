@@ -721,10 +721,18 @@ def claude_config_with_launch_model_pinned(
     model = launch_model.strip()
     if model in _UCODE_CLAUDE_TIER_TO_ENV or model == _UCODE_CLAUDE_CUSTOM_TIER:
         return claude_config
-    if claude_model_command_arg(model, claude_config.env) is not None:
-        # Already speakable: an alias pinned to exactly this id, or the
-        # custom slot already holding it.
+    custom_slot = claude_config.env.get(_ANTHROPIC_CUSTOM_MODEL_OPTION_ENV, "").strip()
+    speakable = claude_model_command_arg(model, claude_config.env)
+    if speakable is not None and speakable != custom_slot:
+        # An alias or verbatim id already spells this exact launch model; the
+        # custom slot is a separate mechanism and needs no change.
         return claude_config
+    if custom_slot == model:
+        # The slot already holds this id byte-for-byte, marker included.
+        return claude_config
+    # Otherwise (re)write the slot to the launch model. A slot that matches only
+    # once ``[1m]`` is stripped would make ``/model`` re-select the bare id and
+    # fall back to 200K, so the slot must carry the marked spelling verbatim.
     normalized = normalized_model_id(model)
     tier = next(
         (family for family in _UCODE_CLAUDE_TIER_TO_ENV if family in normalized.split("-")),

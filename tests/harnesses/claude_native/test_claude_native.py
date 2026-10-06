@@ -909,6 +909,38 @@ def test_launch_model_takes_the_custom_slot_when_no_alias_names_it() -> None:
     )
 
 
+def test_launch_model_pin_marks_a_bare_matching_custom_slot() -> None:
+    """A custom slot holding the bare launch id is rewritten with the marker.
+
+    The slot and the marked launch model name the same model once ``[1m]`` is
+    stripped, so normalized identity reads as "already speakable" — but leaving
+    the bare id there means a ``/model`` re-selection takes it verbatim and
+    Claude Code sizes the pane at 200K. The recorded slot must carry the marked
+    spelling so returning to it keeps the 1M window.
+    """
+    from omnigent.models.claude_model_vocabulary import claude_model_command_arg
+
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-6",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "databricks-claude-sonnet-5",
+        },
+        model="databricks-claude-sonnet-5",
+    )
+
+    pinned = claude_native.claude_config_with_launch_model_pinned(
+        config, "databricks-claude-sonnet-5[1m]"
+    )
+
+    assert pinned is not None
+    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "databricks-claude-sonnet-5[1m]"
+    assert (
+        claude_model_command_arg("databricks-claude-sonnet-5[1m]", pinned.env)
+        == "databricks-claude-sonnet-5[1m]"
+    )
+
+
 @pytest.mark.parametrize(
     "launch_model",
     ["opus", "databricks-claude-opus-5", None, ""],

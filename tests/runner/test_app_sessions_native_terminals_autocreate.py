@@ -1652,7 +1652,6 @@ async def test_auto_create_claude_terminal_leaves_a_non_1m_launch_at_the_default
     # A 200K-only model keeps a bare launch id: no [1m] marker.
     launched = spec.args[spec.args.index("--model") + 1]
     assert launched == model
-    assert "[1m]" not in launched
     assert recorded_configs == {session_id: ucode}
 
 
@@ -4161,6 +4160,7 @@ async def _run_auto_create_claude_terminal_for_routing_class(
     session_id: str,
     routed: bool,
     auto_harness: bool = False,
+    custom_slot: str = "workspace-picker-row",
 ) -> Any:
     """Drive the claude-native launch and return the captured terminal spec.
 
@@ -4194,7 +4194,7 @@ async def _run_auto_create_claude_terminal_for_routing_class(
         env={
             "ANTHROPIC_BASE_URL": "https://gw.example/anthropic",
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION": "workspace-picker-row",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": custom_slot,
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Workspace pick",
         },
         api_key_helper="printf %s sk-sentinel-do-not-use",
@@ -4309,6 +4309,34 @@ async def test_a_routed_claude_native_launch_keeps_the_spawn_gate_and_the_pin(
     # A pinned session's spawns stay on the claude family, so it gets neither
     # the routed-spawn note nor the pre-approvals the cross-family hop needs.
     assert "--append-system-prompt" not in spec.args
+
+
+async def test_a_routed_launch_remarks_a_bare_matching_custom_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A custom slot already holding the launch id bare is rewritten with [1m].
+
+    A re-selected session re-enters with its own id already parked in the
+    custom slot, but bare — an earlier launch recorded it before the window
+    marker existed. Reading the normalized match as "already pinned" would
+    leave the slot bare and ``/model`` would re-select it at 200K, so the
+    routed launch must rewrite the slot to the marked id to keep the 1M window.
+    """
+    from omnigent.models.claude_model_vocabulary import claude_model_command_arg
+
+    spec = await _run_auto_create_claude_terminal_for_routing_class(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="4a1c9b1d1f0e4c5da0a1b2c3d4e5f604",
+        routed=True,
+        custom_slot="databricks-claude-opus-4-7",
+    )
+
+    assert spec.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "databricks-claude-opus-4-7[1m]"
+    assert (
+        claude_model_command_arg("databricks-claude-opus-4-7[1m]", spec.env)
+        == "databricks-claude-opus-4-7[1m]"
+    )
 
 
 async def test_an_auto_harness_launch_without_a_cost_control_stamp_is_still_routed(

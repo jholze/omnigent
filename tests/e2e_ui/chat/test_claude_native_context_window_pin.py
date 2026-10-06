@@ -169,9 +169,13 @@ def _wait_online(
             pass
         time.sleep(0.5)
     tails = "\n".join(f"{log.name}:\n{log.read_text()[-3000:]}" for log in logs)
-    raise RuntimeError(
-        f"gateway-1m rig did not come online within {_HEALTH_TIMEOUT_S:.0f}s.\n{tails}"
+    crashed = [proc for proc in procs if proc.poll() is not None]
+    reason = (
+        f"a process exited early with codes {[proc.poll() for proc in crashed]}"
+        if crashed
+        else f"it did not come online within {_HEALTH_TIMEOUT_S:.0f}s"
     )
+    raise RuntimeError(f"gateway-1m rig failed: {reason}.\n{tails}")
 
 
 @contextlib.contextmanager
@@ -430,8 +434,8 @@ def test_claude_native_1m_capable_default_model_gets_1m_window(
         claude_window, tokens_line = context_window_from_readout(pane)
         assert claude_window is not None, f"/context printed no usage line:\n{pane[-2000:]}"
 
-        # Claude Code sizes the window from the launch; the bug surfaces here before
-        # any composer turn, at 200K on the buggy build.
+        # Claude Code sizes the window from the launch model id, before any
+        # composer turn: a 1M-capable pinned model must size the session at 1M.
         assert claude_window >= _ONE_MILLION, (
             f"{_OPUS} is a 1M-capable model, but Claude Code sized the session at "
             f"{claude_window:,} tokens ({tokens_line!r})"
