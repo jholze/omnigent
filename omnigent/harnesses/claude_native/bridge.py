@@ -2317,7 +2317,20 @@ def build_hook_settings(
     from omnigent.native.tool_observer_hook import hook_settings
 
     observer_hook = hook_settings(bridge_dir, python, "omnigent.harnesses.claude_native.hook")
-    observer_hook["command"] = _pin_runner_tmpdir(cast(str, observer_hook["command"]))
+    observer_python = _pin_runner_tmpdir(cast(str, observer_hook["command"]))
+    # Claude blocks on every PostToolUse hook, so the observer is a bare curl to
+    # the relay like the policy hook below; before the relay advertises itself or
+    # when curl fails, the same stdin replays into the Python observer as before.
+    relay_env_quoted = shlex.quote(str(bridge_dir / _TOOL_RELAY_ENV_FILE))
+    observer_hook["command"] = (
+        "p=$(cat); "
+        f"if [ -r {relay_env_quoted} ]; then . {relay_env_quoted}; "
+        "printf '%s' \"$p\" | curl -s -o /dev/null --max-time 1 "
+        '-H "Authorization: Bearer $OMNIGENT_RELAY_TOKEN" '
+        "-H 'Content-Type: application/json' --data-binary @- "
+        '"$OMNIGENT_RELAY_URL/hook/observe-tool" 2>/dev/null && exit 0; fi; '
+        f"printf '%s' \"$p\" | {observer_python}"
+    )
     hooks["PostToolUse"].append({"hooks": [observer_hook]})
     if turn_routing:
         hooks["UserPromptSubmit"].append({"hooks": [_claude_route_turn_hook(bridge_dir, python)]})
@@ -2372,7 +2385,6 @@ def build_hook_settings(
         # replayed into the Python hook, which owns the direct-server
         # path and the phase-aware fail-closed contract — exactly the
         # pre-curl behavior.
-        relay_env_quoted = shlex.quote(str(bridge_dir / _TOOL_RELAY_ENV_FILE))
         evaluate_policy_python = _python_hook_command(
             [
                 python,

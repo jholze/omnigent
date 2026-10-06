@@ -1,0 +1,204 @@
+"""Tests for the hooks Claude Code runs synchronously on every native tool call."""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import threading
+import time
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, NamedTuple
+
+import pytest
+
+from omnigent.harnesses.claude_native.bridge import build_hook_settings, prepare_bridge_dir
+
+# Claude Code blocks its TUI until each command hook exits, so a hook that waits
+# on an interpreter this slow is user-visible latency on every tool call.
+_SLOW_INTERPRETER_S = 2.0
+_HOOK_BUDGET_S = 1.0
+_PAYLOAD: dict[str, Any] = {
+    "session_id": "claude-session",
+    "tool_name": "Bash",
+    "tool_input": {"command": "echo step"},
+    "tool_response": {"stdout": "step\n", "stderr": ""},
+}
+
+
+class _Request(NamedTuple):
+    path: str
+    authorization: str | None
+    payload: Any
+
+
+class _Relay(NamedTuple):
+    url: str
+    received: list[_Request]
+
+
+@pytest.fixture(autouse=True)
+def _trust_tmp_bridge_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path)
+
+
+@pytest.fixture
+def relay() -> Iterator[_Relay]:
+    """Stand-in tool relay that allows every policy call and records each POST."""
+    received: list[_Request] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            received.append(
+                _Request(self.path, self.headers.get("Authorization"), json.loads(raw))
+            )
+            body = json.dumps({"result": "POLICY_ACTION_ALLOW"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield _Relay(f"http://127.0.0.1:{server.server_address[1]}", received)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _bridge_dir_with_relay(tmp_path: Path, relay_url: str) -> Path:
+    bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_test", workspace=tmp_path)
+    (bridge_dir / "tool_relay.env").write_text(
+        f"OMNIGENT_RELAY_URL='{relay_url}'\nOMNIGENT_RELAY_TOKEN='token'\n"
+    )
+    (bridge_dir / "tool_relay.json").write_text(json.dumps({"url": relay_url, "token": "token"}))
+    return bridge_dir
+
+
+def _fake_python(tmp_path: Path, body: str) -> Path:
+    fake = tmp_path / "fake-python"
+    fake.write_text(f"#!/bin/sh\n{body}\n")
+    fake.chmod(0o755)
+    return fake
+
+
+def _every_tool_call_commands(settings: dict[str, Any], event: str) -> list[str]:
+    return [
+        hook["command"]
+        for entry in settings["hooks"].get(event, [])
+        if not entry.get("matcher")
+        for hook in entry["hooks"]
+    ]
+
+
+def _run_hook(
+    command: str, event: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/sh", "-c", command],
+        input=json.dumps({**_PAYLOAD, "hook_event_name": event}),
+        capture_output=True,
+        text=True,
+        timeout=_SLOW_INTERPRETER_S + 10,
+        check=False,
+        env=env,
+    )
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the hooks' fast path needs curl")
+def test_every_tool_call_hooks_return_without_waiting_on_an_interpreter(
+    tmp_path: Path, relay: _Relay
+) -> None:
+    bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
+    slow_python = _fake_python(tmp_path, f"sleep {_SLOW_INTERPRETER_S}")
+    settings = build_hook_settings(
+        bridge_dir, python_executable=str(slow_python), ap_server_url="http://127.0.0.1:8787"
+    )
+
+    waited_on_interpreter: dict[str, float] = {}
+    for event in ("PreToolUse", "PostToolUse"):
+        commands = _every_tool_call_commands(settings, event)
+        assert commands, f"{event} registers no every-tool hook"
+        for command in commands:
+            started = time.monotonic()
+            proc = _run_hook(command, event)
+            elapsed = time.monotonic() - started
+            assert proc.returncode == 0, (event, command, proc.stderr)
+            if "observe-tool" in command:
+                # Claude parses PostToolUse stdout as hook output; the observer has none.
+                assert proc.stdout == ""
+            if elapsed >= _HOOK_BUDGET_S:
+                waited_on_interpreter[f"{event}: {command}"] = round(elapsed, 2)
+
+    assert not waited_on_interpreter, (
+        "hooks on Claude's blocking tool-call path waited on the interpreter: "
+        f"{waited_on_interpreter}"
+    )
+    # Returning quickly must not mean skipping the observation.
+    observed = [request for request in relay.received if request.path == "/hook/observe-tool"]
+    assert observed == [
+        _Request(
+            "/hook/observe-tool", "Bearer token", {**_PAYLOAD, "hook_event_name": "PostToolUse"}
+        )
+    ]
+
+
+@pytest.mark.parametrize("missing", ["curl", "relay_env", "relay"])
+def test_observer_hook_falls_back_to_the_python_observer(
+    tmp_path: Path, relay: _Relay, missing: str
+) -> None:
+    bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
+    argv_log = tmp_path / "fake-python.argv"
+    stdin_log = tmp_path / "fake-python.stdin"
+    fake_python = _fake_python(
+        tmp_path,
+        f"printf '%s\\n' \"$@\" > {shlex.quote(str(argv_log))}; "
+        f"cat > {shlex.quote(str(stdin_log))}",
+    )
+    settings = build_hook_settings(bridge_dir, python_executable=str(fake_python))
+    [command] = [
+        c for c in _every_tool_call_commands(settings, "PostToolUse") if "observe-tool" in c
+    ]
+
+    env: dict[str, str] | None = None
+    if missing == "curl":
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for tool in ("cat", "env", "printf"):
+            path = shutil.which(tool)
+            assert path, tool
+            os.symlink(path, bin_dir / tool)
+        env = {**os.environ, "PATH": str(bin_dir)}
+    elif missing == "relay_env":
+        (bridge_dir / "tool_relay.env").unlink()
+    else:
+        # Nothing listens on port 1, so curl fails to connect.
+        (bridge_dir / "tool_relay.env").write_text(
+            "OMNIGENT_RELAY_URL='http://127.0.0.1:1'\nOMNIGENT_RELAY_TOKEN='token'\n"
+        )
+
+    proc = _run_hook(command, "PostToolUse", env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert argv_log.read_text().splitlines() == [
+        "-I",
+        "-m",
+        "omnigent.harnesses.claude_native.hook",
+        "observe-tool",
+        "--bridge-dir",
+        str(bridge_dir),
+    ]
+    assert json.loads(stdin_log.read_text()) == {**_PAYLOAD, "hook_event_name": "PostToolUse"}
+    assert relay.received == []
