@@ -1325,6 +1325,7 @@ def create_runner_app(
     # from its queue and releases on exception, so a request cancelled while
     # queued cannot strand the slot and wedge the conversation's later messages.
     _ingest_locks: dict[str, asyncio.Lock] = {}
+    app.state.ingest_locks = _ingest_locks
     _interrupted_sessions: set[str] = set()
     app.state.interrupted_sessions = _interrupted_sessions
     # Desynced conversations; cleared when a fresh turn binds.

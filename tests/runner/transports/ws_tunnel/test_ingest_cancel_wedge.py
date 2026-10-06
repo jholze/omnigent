@@ -1,16 +1,16 @@
 """A cancelled queued runner request must not wedge the conversation.
 
-The runner serializes per-conversation intake through an ingest gate. A request
-reserves a sequence number, then parks until it is its turn. If a parked request
-is cancelled by a ``request.cancel`` tunnel frame, its reserved number must be
-released or advanced; otherwise ``now_serving`` stops at the leaked number once
-the preceding message finishes, and every later message waits forever.
+The runner serializes per-conversation intake through a FIFO ingest gate. While
+one message holds the gate, later requests queue behind it. If a queued request
+is cancelled by a ``request.cancel`` tunnel frame while it waits, the gate must
+drop it cleanly so that, once the holder finishes, following messages still pass
+through. This test parks a request at the gate, cancels it mid-wait, and asserts
+a later message is still accepted.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from typing import Any
 
@@ -33,7 +33,7 @@ _FILE_ID = "c531a3c97ad5fca15709d73d1f734a0c"
 
 class _GatedFileServerClient:
     """Server client whose gated metadata GET parks the message that carries a
-    ``file_id`` block, so that message holds the ingest slot until released."""
+    ``file_id`` block, so that message holds the ingest gate until released."""
 
     def __init__(self) -> None:
         self.meta_fetch_started = asyncio.Event()
@@ -91,6 +91,12 @@ async def test_cancelled_queued_request_does_not_wedge_later_messages() -> None:
     dispatch_tasks: dict[str, asyncio.Task[None]] = {}
     held: list[asyncio.Task[None]] = []
 
+    def _queued_behind_holder() -> bool:
+        # Once the queued request parks, it waits on the still-held gate lock.
+        lock = getattr(app.state, "ingest_locks", {}).get(_SESSION)
+        waiters = getattr(lock, "_waiters", None)
+        return bool(lock and lock.locked() and waiters)
+
     async def send_text(data: str) -> None:
         frame = decode_frame(data)
         if isinstance(frame, ResponseHeadFrame):
@@ -107,8 +113,8 @@ async def test_cancelled_queued_request_does_not_wedge_later_messages() -> None:
 
     async with app.router.lifespan_context(app):
         try:
-            # Message A carries a gated file_id: it reserves the ingest slot and
-            # parks inside content resolution, holding the slot open.
+            # Message A carries a gated file_id: it takes the ingest gate and
+            # parks inside content resolution, holding the gate open.
             task_a = await feed(
                 _message_frame(
                     "reqA",
@@ -121,23 +127,30 @@ async def test_cancelled_queued_request_does_not_wedge_later_messages() -> None:
             assert task_a is not None
             await asyncio.wait_for(server.meta_fetch_started.wait(), timeout=5.0)
 
-            # A queued request reserves the next sequence number and parks in the
-            # ingest wait behind A.
+            # A second request queues behind A, waiting to enter the ingest gate.
             task_queued = await feed(
                 _message_frame("reqQueued", [{"type": "input_text", "text": "queued"}])
             )
             assert task_queued is not None
-            await asyncio.sleep(0.1)
+            # Wait until it parks behind A so the cancellation exercises the
+            # "cancelled while queued" path rather than returning before the
+            # request reaches the gate.
+            for _ in range(100):
+                if _queued_behind_holder():
+                    break
+                await asyncio.sleep(0.02)
             assert not task_queued.done()
             assert "reqQueued" not in heads
 
             # The server cancels the parked request mid-wait.
             await feed(RequestCancelFrame(id="reqQueued"))
-            await asyncio.sleep(0.1)
+            for _ in range(100):
+                if task_queued.cancelled():
+                    break
+                await asyncio.sleep(0.02)
             assert task_queued.cancelled()
 
-            # Release A so it finishes and advances the gate past its own number
-            # to the cancelled request's reserved number.
+            # Release A so it finishes and frees the gate; later messages must still pass.
             server.release.set()
             await asyncio.wait_for(asyncio.shield(task_a), timeout=5.0)
             assert heads.get("reqA") == 202
@@ -150,12 +163,10 @@ async def test_cancelled_queued_request_does_not_wedge_later_messages() -> None:
                 await asyncio.sleep(0.1)
 
             assert heads.get("reqLater") == 202, (
-                "subsequent message wedged: the cancelled queued request leaked its "
-                "ingest sequence number, so now_serving is stuck and later messages "
-                "never leave the ingest wait"
+                "subsequent message wedged: the cancelled queued request left the "
+                "ingest gate stuck, so later messages never pass through"
             )
         finally:
             for task in held:
                 task.cancel()
-            with contextlib.suppress(Exception):
-                await asyncio.gather(*held, return_exceptions=True)
+            await asyncio.gather(*held, return_exceptions=True)
