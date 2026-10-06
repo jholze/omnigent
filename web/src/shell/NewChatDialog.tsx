@@ -1297,11 +1297,8 @@ export function ComposerAgentIcon({ agent }: { agent: Pick<AvailableAgent, "name
   );
 }
 
-/**
- * Whether a host catalog query still awaits its first answer. `isLoading` holds
- * through the whole retry sequence and each attempt can run to the server's
- * host timeout; later retries keep running in the background instead.
- */
+/** Whether a host catalog query still awaits its first answer. `isLoading` also
+ *  holds through retries, each of which can run to the server's host timeout. */
 export function awaitingHostModelOptions(
   query: Pick<UseQueryResult<NativeModelOption[]>, "isLoading" | "failureCount">,
 ): boolean {

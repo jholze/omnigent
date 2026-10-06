@@ -1,13 +1,4 @@
-"""E2E: the landing composer must settle while a host's Claude catalog probe hangs.
-
-A real ``omnigent host`` daemon registers on the live server with a scripted
-``claude`` first on PATH: it answers ``--version`` / ``auth status`` so
-claude-native reads ready, and sleeps on the catalog probe, so every
-``GET /v1/hosts/{id}/harnesses/claude-native/model-options`` fails (504 at the
-server's 15 s budget, or 502 once the host's 20 s probe gives up). The composer
-must still leave "Loading session configuration…" promptly, on a cold landing
-and on a cached-pill landing alike. No browser request is intercepted.
-"""
+"""The landing composer must settle while a host's ``claude`` hangs on its catalog probe."""
 
 from __future__ import annotations
 
@@ -69,8 +60,7 @@ if "-p" in ARGS:
     raise SystemExit(0)
 
 print("stub claude: unsupported invocation: " + " ".join(ARGS), file=sys.stderr)
-raise SystemExit(1)
-"""
+raise SystemExit(1)"""
 
 
 @dataclass
@@ -125,12 +115,7 @@ def fetch_host_row(base_url: str, host_id: str) -> dict[str, object] | None:
 def start_slow_catalog_host(
     base_url: str, root: Path
 ) -> tuple[subprocess.Popen[bytes], SlowCatalogHost]:
-    """Spawn the daemon and wait until the server lists it online with claude-native ready.
-
-    :param base_url: Live server the host registers on.
-    :param root: Directory for the isolated home, stub binary and host log.
-    :returns: The daemon process and its description.
-    """
+    """Spawn the daemon and wait until the server lists it online with claude-native ready."""
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
     stub_bin = root / "stub-bin"
@@ -225,12 +210,10 @@ def _confirm_setup_dialog(page: Page) -> bool:
 def _hover_past_setup_dialog(
     page: Page, hover_target: Locator, observation: StallObservation, started: float
 ) -> None:
-    """Hover the submit wrapper, confirming the setup dialog whenever it is in the way.
-
-    "Your setup is ready" can open a moment after the composer renders, and its
-    overlay swallows pointer events, so one early check is not enough.
-    """
+    """Hover the submit wrapper, confirming the setup dialog whenever it blocks the hover."""
     deadline = time.monotonic() + 30.0
+    # "Your setup is ready" can open a moment after the composer renders, and its
+    # overlay swallows pointer events until confirmed.
     while True:
         if _confirm_setup_dialog(page):
             observation.setup_dialogs_confirmed_at.append(round(time.monotonic() - started, 1))
@@ -336,13 +319,7 @@ def test_landing_composer_settles_while_claude_catalog_probe_hangs(
     slow_catalog_host: SlowCatalogHost,
     output_path: str,
 ) -> None:
-    """Send must not stay behind "Loading session configuration…" for minutes.
-
-    First visit: cold landing (no picker cache). Second visit, on a new page of
-    the same browser context: the cached-pill landing the report's screenshot
-    shows. Both are measured before asserting so a failure still reports both
-    stalls.
-    """
+    """Send must not stay behind "Loading session configuration…" for minutes."""
     output = Path(output_path)
     output.mkdir(parents=True, exist_ok=True)
     page: Page = request.getfixturevalue("page")
@@ -353,6 +330,7 @@ def test_landing_composer_settles_while_claude_catalog_probe_hangs(
         page, base_url, "fresh", output, navigate=lambda: page.goto(f"{base_url}/")
     )
     page.close()
+    # Second visit on a new page of the same context: the cached-pill landing from the report.
     cached_page = context.new_page()
     try:
         cached_page.set_viewport_size({"width": 1440, "height": 900})
@@ -374,6 +352,7 @@ def test_landing_composer_settles_while_claude_catalog_probe_hangs(
     evidence_path.write_text(json.dumps(evidence, indent=2))
     print(f"stall observations: {evidence_path}")
 
+    # Both visits are measured before asserting so a failure still reports both stalls.
     for visit in (fresh, cached):
         catalog_failures = [
             r for r in visit.responses if _CATALOG_ROUTE in str(r["path"]) and r["status"] >= 500
