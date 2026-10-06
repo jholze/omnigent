@@ -3019,15 +3019,20 @@ def register_events_routes(
             head first; an empty list clears its share.
         :returns: ``204 No Content``.
         :raises OmnigentError: 404 if no session exists or the caller cannot
-            see it; 403 if the caller can read the session but not edit it.
+            see it; 403 if the caller can read the session but not edit it;
+            409 if the caller already holds the maximum populated shares for
+            the session.
         """
         user_id, _conv = await _authorized_conversation(request, session_id)
-        queued_messages.replace(
-            session_id,
-            client_id=body.client_id,
-            user_id=_attribution_user(user_id),
-            messages=body.messages,
-        )
+        try:
+            queued_messages.replace(
+                session_id,
+                client_id=body.client_id,
+                user_id=_attribution_user(user_id),
+                messages=body.messages,
+            )
+        except queued_messages.ShareLimitExceeded as exc:
+            raise OmnigentError(str(exc), code=ErrorCode.CONFLICT) from exc
         return Response(status_code=204)
 
     # ── DELETE /sessions/{session_id} ──────────────────────────────

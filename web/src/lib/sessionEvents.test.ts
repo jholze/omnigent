@@ -1815,8 +1815,12 @@ describe("session.queue (FLAT envelope)", () => {
       });
       expect(out).toHaveLength(0);
     }
+    // So is a frame whose top level drifted from the schema.
+    expect(
+      parse("session.queue", { type: "session.queue", conversation_id: "conv_abc", messages: "x" }),
+    ).toHaveLength(0);
     // A dropped snapshot delays idle sends until the fallback: that must be diagnosable.
-    expect(warn).toHaveBeenCalledTimes(malformed.length);
+    expect(warn).toHaveBeenCalledTimes(malformed.length + 1);
     warn.mockRestore();
   });
 });

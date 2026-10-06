@@ -3532,8 +3532,7 @@ async def test_stream_snapshot_carries_other_windows_queue(
         assert join["type"] == "session.presence"
         resp = await _end_stream_via_close(session_id, task)
         assert resp.status_code == 200
-        # The client holds idle sends for the snapshot only on streams that announce
-        # it; the header is a token list, so check membership.
+        # The features header is a comma-separated token list; check membership.
         features = [f.strip() for f in resp.headers["x-omnigent-stream-features"].split(",")]
         assert "queue" in features
         snapshots = _sse_events(resp.text, "session.queue")

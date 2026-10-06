@@ -1811,6 +1811,7 @@ export const SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS = 10_000;
 // ordering slot; attachment names beyond their bound are summarized.
 export const QUEUED_MESSAGE_LIMIT = 50;
 const QUEUE_SHARE_MAX_ATTACHMENTS = 32;
+const QUEUE_SHARE_ATTACHMENT_NAME_LIMIT = 255;
 // A publish that failed for a transient reason (network, 5xx) retries with
 // backoff; one the server rejected (older server, read-only caller, unknown
 // session) is not retried.
@@ -1820,8 +1821,9 @@ const queueShareRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const queueShareRetryDelays = new Map<string, number>();
 
 function boundedAttachmentNames(names: string[]): string[] {
-  if (names.length <= QUEUE_SHARE_MAX_ATTACHMENTS) return names;
-  const shown = names.slice(0, QUEUE_SHARE_MAX_ATTACHMENTS - 1);
+  const bounded = names.map((name) => name.slice(0, QUEUE_SHARE_ATTACHMENT_NAME_LIMIT));
+  if (bounded.length <= QUEUE_SHARE_MAX_ATTACHMENTS) return bounded;
+  const shown = bounded.slice(0, QUEUE_SHARE_MAX_ATTACHMENTS - 1);
   return [...shown, `+${names.length - shown.length} more`];
 }
 
@@ -1916,6 +1918,13 @@ function holdQueueShare(conversationId: string): () => void {
   };
   held.holds += 1;
   heldQueueShares.set(conversationId, held);
+  // A release fallback still pending from the previous send must not free the
+  // share under this hold.
+  const pending = heldShareReleases.get(conversationId);
+  if (pending !== undefined) {
+    clearTimeout(pending);
+    heldShareReleases.delete(conversationId);
+  }
   let released = false;
   return () => {
     if (released) return;
@@ -1944,7 +1953,10 @@ function releaseHeldQueueShare(conversationId: string): void {
   scheduleQueueSharePublish(conversationId);
 }
 
-/** The session started (or failed to start) a turn: a share held for a settled send can go. */
+/**
+ * The session started a turn (`running`, or `waiting` when it parked before this
+ * window saw `running`) or failed to: a share held for a settled send can go.
+ */
 function noteTurnEdgeForHeldShare(conversationId: string): void {
   const held = heldQueueShares.get(conversationId);
   if (held === undefined) return;
@@ -1963,8 +1975,7 @@ function streamAnnouncesQueueSnapshot(res: Response): boolean {
  * connection's view (nothing could remove its entries any more) and let held
  * flushes proceed.
  */
-function settleSharedQueue(set: Setter, get: Getter): void {
-  if (!get().sharedQueueStale) return;
+function dropSharedQueueView(set: Setter): void {
   set({ sharedQueueStale: false, sharedQueue: [] });
   useChatStore.getState().flushBackgroundQueues();
 }
@@ -2314,13 +2325,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // Clear the latch on THIS conversation's entry only, alongside its status.
       setActive({ status: "idle", sendLatchedAt: null });
     }
-    // Flush the FIRST message OF THE BOUND CONVERSATION (FIFO within it), not
-    // the global array head. The queue is one flat array across conversations,
-    // so an undrained message from another conversation can sit at index 0; a
-    // head-only guard would let it block this conversation's messages forever.
-    // A follow-up another window of the session holds ahead of ours sends
-    // first (one message per turn, session-wide), so wait while it is there —
-    // and while this connection has not yet learned what the others hold.
+    // The queue is one flat array across conversations, so scope the head to
+    // this conversation. A follow-up another window holds ahead of ours (or a
+    // queue this connection has not seen yet) sends first: wait while it is there.
     if (s.sharedQueueStale) return;
     const head = ownFlushHead(s.queuedMessages, s.sharedQueue, s.conversationId);
     if (head === null || head.requiresRetry) return;
@@ -5674,12 +5681,24 @@ export async function startStreamPump(
     for (const timer of catchupTimers) window.clearTimeout(timer);
     catchupTimers = [];
   };
-  // Frees idle sends if the queue snapshot this connection announced never lands.
+  // Frees idle sends if the queue snapshot this connection announced never lands
+  // (or the stream never opens at all).
   let snapshotFallback: ReturnType<typeof setTimeout> | null = null;
   const clearSnapshotFallback = (): void => {
     if (snapshotFallback !== null) clearTimeout(snapshotFallback);
     snapshotFallback = null;
   };
+  const armSnapshotFallback = (): void => {
+    clearSnapshotFallback();
+    snapshotFallback = setTimeout(() => {
+      snapshotFallback = null;
+      if (controller.signal.aborted || isConversationDisposed(id)) return;
+      if (get().sharedQueueStale) dropSharedQueueView(set);
+    }, SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS);
+  };
+  // The first connection's snapshot is awaited from the first attempt (the
+  // composer opens before the stream does); a reconnect's only from its open.
+  let awaitingFirstSnapshot = true;
   // Consecutive 404s only — reset on any non-404 outcome (success or a
   // different-status failure), so a 404 has to persist across attempts to
   // count toward the cap below.
@@ -5726,8 +5745,11 @@ export async function startStreamPump(
       try {
         // Until this connection's `session.queue` snapshot lands, the shared
         // queue may be missing another window's follow-up: idle sends queue.
-        clearSnapshotFallback();
-        if (!get().sharedQueueStale) set({ sharedQueueStale: true });
+        if (awaitingFirstSnapshot) {
+          awaitingFirstSnapshot = false;
+          if (!get().sharedQueueStale) set({ sharedQueueStale: true });
+          armSnapshotFallback();
+        }
         const idle = presenceIdle.idleNow();
         let streamRes: Response;
         try {
@@ -5840,14 +5862,12 @@ export async function startStreamPump(
         }
         previousStreamEpoch = streamEpoch;
         if (streamAnnouncesQueueSnapshot(streamRes)) {
-          snapshotFallback = setTimeout(() => {
-            snapshotFallback = null;
-            if (controller.signal.aborted || isConversationDisposed(id)) return;
-            settleSharedQueue(set, get);
-          }, SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS);
+          if (!get().sharedQueueStale) set({ sharedQueueStale: true });
+          armSnapshotFallback();
         } else {
           // An older server: no queue snapshot is coming, nothing to wait for.
-          settleSharedQueue(set, get);
+          clearSnapshotFallback();
+          dropSharedQueueView(set);
         }
         // Guard the byte stream with a silence watchdog: the server
         // heartbeats every 15 s, so a longer gap means a half-open socket
@@ -7532,7 +7552,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       const prevResponseId = useChatStore.getState().activeResponse?.responseId;
       if (
         event.conversationId === sourceConversationId &&
-        (event.status === "running" || event.status === "failed")
+        (event.status === "running" || event.status === "waiting" || event.status === "failed")
       ) {
         noteTurnEdgeForHeldShare(event.conversationId);
       }

@@ -983,10 +983,13 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
     } satisfies SessionPresenceEvent;
   }
   if (eventType === "session.queue") {
+    // A dropped snapshot holds idle sends until the fallback: say why.
     const conversationId = data.conversation_id;
-    if (typeof conversationId !== "string" || !conversationId) return null;
     const rawMessages = data.messages;
-    if (!Array.isArray(rawMessages)) return null;
+    if (typeof conversationId !== "string" || !conversationId || !Array.isArray(rawMessages)) {
+      console.warn("session.queue: dropping a malformed frame", data);
+      return null;
+    }
     const messages: SharedQueuedMessage[] = [];
     for (const raw of rawMessages) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -1001,7 +1004,6 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
         !Array.isArray(rawAttachments) ||
         rawAttachments.some((name) => typeof name !== "string")
       ) {
-        // A dropped snapshot holds idle sends until the fallback: say why.
         console.warn("session.queue: dropping a frame with a malformed entry", entry);
         return null;
       }

@@ -1302,6 +1302,8 @@ Request Body (JSON)
 403 Forbidden — the caller can read the session but not edit it
 404 Not Found — no session, or no access to it
 422 Unprocessable Entity — body fails validation
+409 Conflict — the caller already holds the maximum populated shares for
+    the session (see below)
 ```
 
 The web composer holds a message typed while the agent is busy in a
@@ -1318,9 +1320,11 @@ A share lives while the client holds the session's stream open — the stream
 request carries the same id in the `X-Omnigent-Client-Id` header — plus a
 15 s grace window, after which the server drops it and broadcasts the
 remaining queue. A share published without a matching stream also expires
-after the grace, and a user may hold at most 8 such stream-less shares per
-session (publishing another drops the oldest). The registry is process-local,
-like presence.
+after the grace. Because every stream receives the whole merged list on each
+change, a user may hold at most 8 populated shares per session, with or
+without a stream: beyond that, a publish drops the user's oldest stream-less
+share, and is refused with 409 when the existing shares all hold streams. The
+registry is process-local, like presence.
 
 ### Stream Events
 

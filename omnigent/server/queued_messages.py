@@ -26,11 +26,17 @@ from omnigent.server.schemas import QueuedMessageInput
 # ~5-minute stream cap and page refreshes don't flicker the queue.
 _DETACH_GRACE_S = 15.0
 
-# Shares whose client holds no stream are the only part of the registry a
-# caller can grow without an open connection, so cap them per user.
-_MAX_DETACHED_SHARES_PER_USER = 8
+# Every stream of a conversation receives the whole merged list on each change,
+# so one user may hold only this many populated shares per conversation. A
+# stream-less share beyond the cap gives way (oldest first); a populated share
+# whose client holds a stream is refused instead of evicting another's queue.
+_MAX_SHARES_PER_USER = 8
 
 _ShareKey = tuple[str, str]
+
+
+class ShareLimitExceeded(Exception):
+    """The user already holds the maximum populated shares for the conversation."""
 
 
 @dataclass
@@ -198,8 +204,10 @@ def replace(
     :param user_id: Attribution identity of the caller (``None`` single-user).
     :param messages: The client's complete current queue for this
         conversation, head first. An empty list clears its share.
-        A new share from a client holding no stream drops the same user's
-        oldest stream-less shares beyond :data:`_MAX_DETACHED_SHARES_PER_USER`.
+    :raises ShareLimitExceeded: If the share would become populated while
+        the user already holds :data:`_MAX_SHARES_PER_USER` populated shares
+        for the conversation whose clients all hold streams (stream-less ones
+        beyond the cap are dropped instead, oldest first).
     """
     key = _share_key(user_id, client_id)
     schedule_expiry = False
@@ -207,12 +215,14 @@ def replace(
         queue = _queues.setdefault(conversation_id, _ConversationQueue())
         share = queue.shares.get(key)
         previous = share.entries if share is not None else []
+        changed = False
+        if messages and not previous:
+            changed = _make_room_locked(conversation_id, queue, key)
         entries = _assign_entries(queue, previous, messages)
-        changed = entries != previous
+        changed = changed or entries != previous
         if share is None:
             share = _Share(created_by=user_id)
             queue.shares[key] = share
-            changed = _evict_detached_locked(conversation_id, queue, key) or changed
         share.entries = entries
         if share.connections == 0:
             if not entries:
@@ -284,19 +294,31 @@ def _expire(conversation_id: str, key: _ShareKey) -> None:
         _broadcast(conversation_id)
 
 
-def _evict_detached_locked(
-    conversation_id: str, queue: _ConversationQueue, keep: _ShareKey
-) -> bool:
-    """Drop *keep*'s user's oldest stream-less shares beyond the cap; True if any went."""
-    detached = [
-        other
+def _make_room_locked(conversation_id: str, queue: _ConversationQueue, keep: _ShareKey) -> bool:
+    """
+    Make room for *keep* to become populated among its user's shares.
+
+    :returns: Whether any stream-less share was dropped.
+    :raises ShareLimitExceeded: If the shares that would have to go hold streams.
+    """
+    others = [
+        (other, share)
         for other, share in queue.shares.items()
-        if other[0] == keep[0] and other != keep and share.connections == 0 and share.entries
+        if other[0] == keep[0] and other != keep and share.entries
     ]
-    excess = len(detached) - (_MAX_DETACHED_SHARES_PER_USER - 1)
-    for other in detached[: max(excess, 0)]:
+    excess = len(others) - (_MAX_SHARES_PER_USER - 1)
+    if excess <= 0:
+        return False
+    detached = [other for other, share in others if share.connections == 0]
+    if len(detached) < excess:
+        if not queue.shares:
+            _queues.pop(conversation_id, None)
+        raise ShareLimitExceeded(
+            f"at most {_MAX_SHARES_PER_USER} populated queue shares per user and conversation"
+        )
+    for other in detached[:excess]:
         _drop_share_locked(conversation_id, queue, other)
-    return excess > 0
+    return True
 
 
 def _drop_share_locked(conversation_id: str, queue: _ConversationQueue, key: _ShareKey) -> None:

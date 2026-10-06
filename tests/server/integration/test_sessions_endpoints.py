@@ -40,6 +40,7 @@ from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
 from omnigent.runner.transports.ws_tunnel.frames import EventBatchFrame
 from omnigent.runtime import inflight_text
 from omnigent.runtime.tool_output import MAX_TOOL_OUTPUT_BYTES
+from omnigent.server import queued_messages
 from omnigent.server.background_session_titles import BackgroundTitleRequest
 from omnigent.server.routes._sessions.helpers import (
     _NativeTerminalEnsureOutcome,
@@ -12048,6 +12049,17 @@ async def test_put_queue_rejects_malformed_body_and_unknown_session(
         },
     )
     assert resp.status_code == 422, resp.text
+    # Open streams cannot inflate the merged list: once this user's populated
+    # shares all hold streams, one more is refused rather than evicting any.
+    for i in range(queued_messages._MAX_SHARES_PER_USER + 1):
+        client_id = f"c_cap_{i}"
+        queued_messages.attach(session["id"], client_id=client_id, user_id=None)
+        resp = await client.put(
+            f"/v1/sessions/{session['id']}/queue",
+            json={"client_id": client_id, "messages": [{"queue_id": "q_1", "text": "x"}]},
+        )
+        expected = 409 if i == queued_messages._MAX_SHARES_PER_USER else 204
+        assert resp.status_code == expected, (i, resp.text)
     resp = await client.put(
         "/v1/sessions/does-not-exist/queue",
         json={"client_id": "c_1", "messages": []},

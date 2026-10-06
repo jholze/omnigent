@@ -17783,6 +17783,102 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(queuePuts("conv_abc")).toEqual([{ client_id: CLIENT_ID, messages: [] }]);
   });
 
+  it("keeps the share frozen when a new hold starts before the previous send's fallback", async () => {
+    acceptQueuePuts();
+    await tick();
+    const sendSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [
+        { queueId: "q_1", text: "first", conversationId: "conv_abc" },
+        { queueId: "q_2", text: "second", conversationId: "conv_abc" },
+      ],
+    });
+    await tick();
+    fetchMock.mockClear();
+    vi.useFakeTimers();
+    // The first send settles with no turn edge seen: its 15 s fallback is armed.
+    useChatStore.getState().maybeFlushQueuedHead();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    // A second send starts a new hold while that fallback is still pending.
+    useChatStore.getState().maybeFlushQueuedHead();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    // The first fallback's deadline passes: the share must stay frozen, or another
+    // window would send into the second message's turn.
+    await vi.advanceTimersByTimeAsync(HELD_SHARE_RELEASE_TIMEOUT_MS - 5_000);
+    expect(queuePuts("conv_abc")).toEqual([]);
+    // Only the second send's own fallback frees it.
+    await vi.advanceTimersByTimeAsync(5_000);
+    vi.useRealTimers();
+    await tick();
+    expect(queuePuts("conv_abc")).toEqual([{ client_id: CLIENT_ID, messages: [] }]);
+  });
+
+  it("frees a held share on a waiting edge when the running edge was missed", async () => {
+    acceptQueuePuts();
+    await tick();
+    const sendSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [{ queueId: "q_1", text: "mine", conversationId: "conv_abc" }],
+    });
+    await tick();
+    fetchMock.mockClear();
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(queuePuts("conv_abc")).toEqual([]);
+    // The turn parked on background work before this window saw `running`; it
+    // has started all the same, so the slot is free for the other windows.
+    handleSessionEvent({ type: "session_status", conversationId: "conv_abc", status: "waiting" });
+    await tick();
+    expect(queuePuts("conv_abc")).toEqual([{ client_id: CLIENT_ID, messages: [] }]);
+  });
+
+  it("frees queued sends after the fallback when the stream never opens", async () => {
+    vi.useFakeTimers();
+    const drain = () => vi.advanceTimersByTimeAsync(0);
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (/\/v1\/sessions\/[^/]+\/stream$/.test(url)) {
+        return mockResponse({}, { ok: false, status: 503 });
+      }
+      if (url.endsWith("/queue") && (init as RequestInit)?.method === "PUT") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return defaultFetchHandler(input as RequestInfo, init as RequestInit);
+    });
+    const id = "conv_no_stream";
+    seedSession(id, []);
+    const switching = useChatStore.getState().switchTo(id);
+    await drain();
+    await switching;
+    await drain();
+    useChatStore.setState({ boundAgentId: "agent_xyz" });
+    fetchMock.mockClear();
+    expect(useChatStore.getState().sharedQueueStale).toBe(true);
+    useChatStore.getState().enqueueMessage("mine");
+    await drain();
+    expect(eventPosts(id)).toEqual([]);
+    // Every open fails (a proxy blocking SSE while REST works): the fallback still
+    // frees the queue instead of holding it until the pump gives up.
+    await vi.advanceTimersByTimeAsync(SHARED_QUEUE_SNAPSHOT_TIMEOUT_MS);
+    expect(useChatStore.getState().sharedQueueStale).toBe(false);
+    useChatStore.getState().maybeFlushQueuedHead();
+    await drain();
+    expect(eventPosts(id)).toHaveLength(1);
+  });
+
   it("waits behind a follow-up another window holds, then flushes once it is gone", async () => {
     const sendSpy = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
