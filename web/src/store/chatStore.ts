@@ -5125,7 +5125,6 @@ async function reconcileOnReconnect(
     return;
   }
   if (stale()) return;
-  noteSnapshot(id, session, page.items);
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
 
   // Page backwards until the fetched window reaches the pre-gap transcript
@@ -5239,6 +5238,10 @@ async function reconcileOnReconnect(
     if (nextBlocks !== s.blocks) patch.blocks = nextBlocks;
     return patch;
   });
+  // Advance the recovery markers only once the covered backfill is applied. A
+  // failed later page returns above with them unchanged, so the next reconcile
+  // tick retries instead of treating the gap as already processed.
+  noteSnapshot(id, session, items);
 }
 
 // ── Presence idle reporting ─────────────────────────────────────────

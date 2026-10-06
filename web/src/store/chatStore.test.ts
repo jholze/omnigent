@@ -12797,6 +12797,113 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
+  it("retries after a later backfill page fails, not just the first", async () => {
+    seedSession("conv_items_page_fail", []);
+    const gapItems = Array.from({ length: 25 }, (_, i) => ({
+      ...assistantMessage(`g${i}`, `line ${i}`),
+      created_at: 110 + i,
+    }));
+    const sink = pushableStream();
+    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0, failOlderPage: 0 };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/v1/sessions/conv_items_page_fail/stream") {
+        clock.streamOpens += 1;
+        init?.signal?.addEventListener("abort", () =>
+          sink.error(new DOMException("aborted", "AbortError")),
+        );
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      if (
+        url.startsWith("/v1/sessions/conv_items_page_fail?") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return mockResponse({
+          id: "conv_items_page_fail",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          updated_at: clock.updatedAt,
+          items: [],
+          labels: {},
+        });
+      }
+      if (url.startsWith("/v1/sessions/conv_items_page_fail/items")) {
+        clock.itemFetches += 1;
+        // The newest page carries no cursor; an older page sets `after`.
+        if (url.includes("after=") && clock.failOlderPage > 0) {
+          clock.failOlderPage -= 1;
+          return Promise.reject(new TypeError("network error"));
+        }
+      }
+      return defaultFetchHandler(input, init);
+    });
+    const controller = new AbortController();
+    const bound = bindConversationForTest("conv_items_page_fail", { abortController: controller });
+    const loop = startStreamPump("conv_items_page_fail", controller, bound.set, bound.get);
+    await drainAsync();
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(clock.itemFetches).toBe(0);
+
+    // A gap longer than one page lands; the first page fetches, the older page fails once.
+    clock.updatedAt = 160;
+    clock.failOlderPage = 1;
+    seedSessionItems("conv_items_page_fail", gapItems);
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+
+    // The older-page failure aborts the backfill with nothing merged; the
+    // snapshot must stay unrecorded so the whole gap is retried next tick.
+    expect(bound.get().blocks).toEqual([]);
+    const afterFailFetches = clock.itemFetches;
+    expect(afterFailFetches).toBe(2);
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(clock.itemFetches).toBeGreaterThan(afterFailFetches);
+    const ids = bound.get().blocks.map((b) => b.ctx.itemId);
+    expect(ids).toHaveLength(25);
+    expect(ids[0]).toBe("msg_g0_asst");
+    expect(ids.at(-1)).toBe("msg_g24_asst");
+
+    controller.abort();
+    await drainAsync(2);
+    await loop;
+  });
+
+  it("backfills once for a bare metadata edit, then not again", async () => {
+    seedSession("conv_meta_only", []);
+    const sink = pushableStream();
+    const clock = routeSnapshotClock("conv_meta_only", sink);
+    const controller = new AbortController();
+    const bound = bindConversationForTest("conv_meta_only", { abortController: controller });
+    const loop = startStreamPump("conv_meta_only", controller, bound.set, bound.get);
+    await drainAsync();
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(clock.itemFetches).toBe(0);
+
+    // A metadata-only edit (such as a label change) bumps updatedAt with no new items.
+    clock.updatedAt = 160;
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    // One backfill confirms the gap, finds nothing new, and records the snapshot.
+    expect(clock.itemFetches).toBe(1);
+    expect(bound.get().blocks).toEqual([]);
+
+    // The recorded snapshot means the unchanged metadata triggers no refetch.
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(clock.itemFetches).toBe(1);
+
+    controller.abort();
+    await drainAsync(2);
+    await loop;
+  });
+
   it("keeps a live status event that arrives during snapshot reconciliation", async () => {
     seedSession("conv_status_race", []);
     const sink = pushableStream();
