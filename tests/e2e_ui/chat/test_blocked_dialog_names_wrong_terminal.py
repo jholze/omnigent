@@ -48,6 +48,7 @@ def _send_from_composer(page: Page, text: str) -> None:
     page.get_by_role("button", name="Send", exact=True).click()
 
 
+@pytest.mark.nightly
 @pytest.mark.timeout(600)
 @pytest.mark.browser_context_args(
     viewport={"width": 1440, "height": 900},
@@ -77,20 +78,17 @@ def test_chat_blocked_on_dialog_names_the_terminal_that_holds_it(
 
     working = page.locator(_WORKING)
     expect(working).to_contain_text(_BLOCKED_ON_DIALOG, timeout=_DIALOG_TIMEOUT_MS)
-    indicator_text = working.inner_text()
     expect(rail_shell).to_be_visible()
-    assert _NAMES_TERMINAL_VIEW.search(indicator_text) and not _NAMES_TERMINAL_TAB.search(
-        indicator_text
-    ), (
-        "Chat is parked on a Claude Code dialog with a user shell open as a terminal tab "
-        f"beside it, but the indicator says {indicator_text!r}: it must name the header's "
-        "Terminal view, where the dialog is, not a 'terminal tab' (the rail shell shows no "
-        "dialog)."
-    )
+    # With a user shell open as a terminal tab beside the chat, the indicator must
+    # name the header's Terminal view, where the dialog is, not a "terminal tab".
+    expect(working).to_contain_text(_NAMES_TERMINAL_VIEW)
+    expect(working).not_to_contain_text(_NAMES_TERMINAL_TAB)
 
     # The hidden main view already targets the agent terminal; the rail shell is
     # the competing surface the button must not open.
-    rail_key = f"terminal:{rail_shell.get_attribute('data-terminal-id')}"
+    rail_terminal_id = rail_shell.get_attribute("data-terminal-id")
+    assert rail_terminal_id, "rail shell is connected but has no data-terminal-id"
+    rail_key = f"terminal:{rail_terminal_id}"
     agent_key = page.locator('[data-testid="main-terminal-view"]').first.get_attribute(
         "data-active-terminal"
     )

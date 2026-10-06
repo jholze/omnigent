@@ -182,7 +182,10 @@ describe("WorkingIndicator", () => {
 
     act(() => useChatStore.setState({ sessionStatus: "running" }));
     rerender(<WorkingIndicator />);
-    expect(screen.getByTestId("working-indicator")).toBeInTheDocument();
+    const indicator = screen.getByTestId("working-indicator");
+    expect(indicator).toBeInTheDocument();
+    // The rotating label stays decorative; only the live region announces.
+    expect(indicator.querySelector('[aria-hidden="true"]')).toHaveTextContent("Working…");
     expect(screen.getByRole("status")).toHaveTextContent("Working…");
   });
 
