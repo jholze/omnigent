@@ -1,0 +1,153 @@
+// Unsubmitted AskUserQuestion answers keyed by elicitation id. The card
+// unmounts whenever the user leaves the session (Inbox, another session, a
+// reload) while the question stays pending; the next mount picks its draft
+// back up from here. Same shape as sessionDrafts: an in-memory map mirrored
+// to sessionStorage.
+
+export interface AskUserQuestionDraft {
+  currentIndex: number;
+  selections: Record<string, string | string[]>;
+  customSelected: Record<string, boolean>;
+  customInputs: Record<string, string>;
+}
+
+interface DraftEntry {
+  draft: AskUserQuestionDraft;
+  /** Question keys whose typed text must stay in memory only. */
+  secretKeys: ReadonlySet<string>;
+}
+
+const STORAGE_KEY = "omnigent.askUserQuestionDrafts";
+// Answering clears a draft; this bounds the ones whose card never renders again.
+const MAX_DRAFTS = 20;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readDraft(value: unknown): AskUserQuestionDraft | undefined {
+  if (!isRecord(value)) return undefined;
+  const { currentIndex, selections, customSelected, customInputs } = value;
+  if (typeof currentIndex !== "number" || !Number.isInteger(currentIndex) || currentIndex < 0) {
+    return undefined;
+  }
+  if (!isRecord(selections) || !isRecord(customSelected) || !isRecord(customInputs)) {
+    return undefined;
+  }
+  const draft: AskUserQuestionDraft = {
+    currentIndex,
+    selections: {},
+    customSelected: {},
+    customInputs: {},
+  };
+  for (const [key, selection] of Object.entries(selections)) {
+    if (typeof selection === "string") {
+      draft.selections[key] = selection;
+    } else if (
+      Array.isArray(selection) &&
+      selection.every((label): label is string => typeof label === "string")
+    ) {
+      draft.selections[key] = selection;
+    } else {
+      return undefined;
+    }
+  }
+  for (const [key, selected] of Object.entries(customSelected)) {
+    if (typeof selected !== "boolean") return undefined;
+    draft.customSelected[key] = selected;
+  }
+  for (const [key, text] of Object.entries(customInputs)) {
+    if (typeof text !== "string") return undefined;
+    draft.customInputs[key] = text;
+  }
+  return draft;
+}
+
+function loadDraftsFromStorage(): Map<string, DraftEntry> {
+  if (typeof window === "undefined") return new Map();
+  try {
+    const raw = window.sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return new Map();
+    const entries: unknown = JSON.parse(raw);
+    if (!isRecord(entries)) return new Map();
+    const drafts = new Map<string, DraftEntry>();
+    for (const [id, entry] of Object.entries(entries)) {
+      const draft = readDraft(entry);
+      if (draft) drafts.set(id, { draft, secretKeys: new Set() });
+    }
+    return drafts;
+  } catch {
+    return new Map();
+  }
+}
+
+function storableDraft({ draft, secretKeys }: DraftEntry): AskUserQuestionDraft {
+  if (secretKeys.size === 0) return draft;
+  const customInputs: Record<string, string> = {};
+  for (const [key, text] of Object.entries(draft.customInputs)) {
+    if (!secretKeys.has(key)) customInputs[key] = text;
+  }
+  return { ...draft, customInputs };
+}
+
+function saveDraftsToStorage(): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (drafts.size === 0) {
+      window.sessionStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+    const entries: Record<string, AskUserQuestionDraft> = {};
+    for (const [id, entry] of drafts) entries[id] = storableDraft(entry);
+    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+  } catch {
+    // Storage full or unavailable — drafts still work in-memory.
+  }
+}
+
+const drafts = loadDraftsFromStorage();
+
+/** True when nothing differs from a freshly rendered form. */
+function isEmptyDraft(draft: AskUserQuestionDraft): boolean {
+  return (
+    draft.currentIndex === 0 &&
+    Object.values(draft.selections).every((selection) => selection.length === 0) &&
+    Object.values(draft.customSelected).every((selected) => !selected) &&
+    Object.values(draft.customInputs).every((text) => text === "")
+  );
+}
+
+export function getAskUserQuestionDraft(elicitationId: string): AskUserQuestionDraft | undefined {
+  return drafts.get(elicitationId)?.draft;
+}
+
+/** Save a draft; typed text under `secretKeys` never reaches sessionStorage. */
+export function setAskUserQuestionDraft(
+  elicitationId: string,
+  draft: AskUserQuestionDraft,
+  secretKeys: Iterable<string> = [],
+): void {
+  if (isEmptyDraft(draft)) {
+    clearAskUserQuestionDraft(elicitationId);
+    return;
+  }
+  // Re-insert so Map order runs from least to most recently updated.
+  drafts.delete(elicitationId);
+  drafts.set(elicitationId, { draft, secretKeys: new Set(secretKeys) });
+  for (const id of drafts.keys()) {
+    if (drafts.size <= MAX_DRAFTS) break;
+    drafts.delete(id);
+  }
+  saveDraftsToStorage();
+}
+
+export function clearAskUserQuestionDraft(elicitationId: string): void {
+  if (!drafts.delete(elicitationId)) return;
+  saveDraftsToStorage();
+}
+
+/** Clear all drafts, primarily for logout/reset flows and isolated tests. */
+export function clearAskUserQuestionDrafts(): void {
+  drafts.clear();
+  saveDraftsToStorage();
+}

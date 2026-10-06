@@ -28,11 +28,20 @@
 // Selections are gathered into a flat ``{[question id or text]:
 // answer}`` map matching MCP's ``ElicitResult.content`` shape and
 // passed to ``onSubmit``.
+//
+// Unsubmitted answers are mirrored to ``@/lib/askUserQuestionDrafts``
+// so the card can unmount (Inbox, another session, a reload) and come
+// back with the same carousel position, selections and typed text.
 
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { type ChangeEvent, useState } from "react";
+import { type ChangeEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
+import {
+  clearAskUserQuestionDraft,
+  getAskUserQuestionDraft,
+  setAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
 
 /**
  * Map from question id/text → either a single selected label
@@ -41,6 +50,8 @@ import type { ClaudeQuestion } from "@/lib/askUserQuestion";
 export type AskUserQuestionAnswers = Record<string, string | string[]>;
 
 interface AskUserQuestionFormProps {
+  /** Keys the unsubmitted draft; see ``@/lib/askUserQuestionDrafts``. */
+  elicitationId: string;
   questions: ClaudeQuestion[];
   onSubmit: (answers: AskUserQuestionAnswers) => void;
   onReject: () => void;
@@ -82,16 +93,34 @@ function questionKey(question: ClaudeQuestion): string {
   return question.id && question.id.length > 0 ? question.id : question.question;
 }
 
-export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQuestionFormProps) {
+export function AskUserQuestionForm({
+  elicitationId,
+  questions,
+  onSubmit,
+  onReject,
+}: AskUserQuestionFormProps) {
+  // Unsubmitted answers left by an earlier mount of this same question.
+  const [saved] = useState(() => getAskUserQuestionDraft(elicitationId));
+
   // Currently-visible question (carousel index).
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(() =>
+    Math.max(0, Math.min(saved?.currentIndex ?? 0, questions.length - 1)),
+  );
 
   // Per-question option selection. Single-select stores a string;
   // multi-select stores a deduped array.
   const [selections, setSelections] = useState<Record<string, string | string[]>>(() => {
     const initial: Record<string, string | string[]> = {};
     for (const q of questions) {
-      initial[questionKey(q)] = q.multiSelect ? [] : "";
+      const key = questionKey(q);
+      const selection = saved?.selections[key];
+      initial[key] = q.multiSelect
+        ? Array.isArray(selection)
+          ? selection
+          : []
+        : typeof selection === "string"
+          ? selection
+          : "";
     }
     return initial;
   });
@@ -102,14 +131,30 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
   // the answer).
   const [customSelected, setCustomSelected] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
-    for (const q of questions) initial[questionKey(q)] = false;
+    for (const q of questions) {
+      const key = questionKey(q);
+      initial[key] = saved?.customSelected[key] ?? false;
+    }
     return initial;
   });
   const [customInputs, setCustomInputs] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
-    for (const q of questions) initial[questionKey(q)] = "";
+    for (const q of questions) {
+      const key = questionKey(q);
+      initial[key] = saved?.customInputs[key] ?? "";
+    }
     return initial;
   });
+
+  // Mirror every edit so the next mount of this question (after the card
+  // unmounts or the page reloads) starts where the user left off.
+  useEffect(() => {
+    setAskUserQuestionDraft(
+      elicitationId,
+      { currentIndex, selections, customSelected, customInputs },
+      questions.filter((q) => q.isSecret).map(questionKey),
+    );
+  }, [elicitationId, questions, currentIndex, selections, customSelected, customInputs]);
 
   const handleSingleSelect = (key: string, label: string) => {
     // Single-select mutex: clicking a real option clears the
@@ -188,7 +233,13 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
       if (answer === null) return; // unreachable while ``allAnswered`` gates the button
       finalAnswers[key] = answer;
     }
+    clearAskUserQuestionDraft(elicitationId);
     onSubmit(finalAnswers);
+  };
+
+  const handleReject = () => {
+    clearAskUserQuestionDraft(elicitationId);
+    onReject();
   };
 
   const current = questions[currentIndex];
@@ -380,7 +431,7 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
         <Button
           size="sm"
           variant="outline"
-          onClick={onReject}
+          onClick={handleReject}
           className="ml-auto"
           componentId="question.cancel"
         >

@@ -32,7 +32,7 @@
 //      on `POST /v1/sessions/{id}/elicitations/{eid}/resolve`,
 //   3. rolls back to "pending" on network error.
 
-import { useContext } from "react";
+import { useContext, useEffect, useMemo } from "react";
 import {
   CheckIcon,
   ClipboardListIcon,
@@ -52,6 +52,7 @@ import {
   exitPlanModePlan,
   parseAskUserQuestionPreview,
 } from "@/lib/askUserQuestion";
+import { clearAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
@@ -288,9 +289,13 @@ export function ApprovalCard({
   // Mode detection. Prefer the server-stamped structured payload
   // (full, non-truncated); fall back to parsing the content_preview
   // JSON for backwards compatibility with elicitations published
-  // before the structured field was added.
-  const askPayload: AskUserQuestionPayload | null =
-    castAskUserQuestionPayload(askUserQuestion) ?? parseAskUserQuestionPreview(contentPreview);
+  // before the structured field was added. Memoized so the form's
+  // draft mirror sees one stable ``questions`` reference per card.
+  const askPayload: AskUserQuestionPayload | null = useMemo(
+    () =>
+      castAskUserQuestionPayload(askUserQuestion) ?? parseAskUserQuestionPreview(contentPreview),
+    [askUserQuestion, contentPreview],
+  );
   // ExitPlanMode plan review: the server stamps the full tool_input
   // as `exit_plan_mode`; a usable plan card needs the `plan` markdown
   // string. Anything else falls back to the binary card.
@@ -298,6 +303,11 @@ export function ApprovalCard({
   const isExitPlanMode = planMarkdown !== null;
   const optionLabels = askPayload === null ? extractOptionLabels(requestedSchema) : [];
   const isAskUserQuestion = askPayload !== null;
+  // A question answered anywhere (this card, another tab, the Inbox, the
+  // approve page) leaves no draft worth keeping.
+  useEffect(() => {
+    if (isAskUserQuestion && status === "responded") clearAskUserQuestionDraft(elicitationId);
+  }, [isAskUserQuestion, status, elicitationId]);
   const isMultiChoice = optionLabels.length > 0;
   // Any other schema that names fields: a free-form string, several
   // properties, an enum under a name other than ``answer``. These used to
@@ -673,6 +683,7 @@ export function ApprovalCard({
           </>
         ) : isAskUserQuestion ? (
           <AskUserQuestionForm
+            elicitationId={elicitationId}
             questions={askPayload.questions}
             onSubmit={submitAnswers}
             onReject={() => submitBinary("decline")}

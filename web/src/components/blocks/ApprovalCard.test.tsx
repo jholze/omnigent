@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { clearAskUserQuestionDrafts } from "@/lib/askUserQuestionDrafts";
 import { BlockStream } from "@/lib/blockStream";
 import { buildBubbles } from "@/lib/renderItems";
 import { parseEventLines } from "@/lib/sse";
@@ -9,6 +10,7 @@ import { ApprovalCard, ElicitationCard } from "./ApprovalCard";
 
 afterEach(() => {
   cleanup();
+  clearAskUserQuestionDrafts();
 });
 
 describe("ApprovalCard — binary approve/reject", () => {
@@ -1028,6 +1030,163 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     // Prev returns to the first.
     fireEvent.click(screen.getByTestId("ask-user-question-prev"));
     expect(screen.getByText("First?")).toBeDefined();
+  });
+
+  it("keeps a partially entered answer when the card is unmounted and mounted again", () => {
+    // Leaving the session (Inbox, another session) unmounts the card while
+    // the question stays pending; the draft must come back with it.
+    const card = (
+      <ApprovalCard
+        elicitationId="elic_draft"
+        message="Claude wants to call AskUserQuestion"
+        phase="pre_tool_use"
+        policyName="claude_native_permission"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "First?",
+              header: "",
+              options: [
+                { label: "A", description: "" },
+                { label: "B", description: "" },
+              ],
+              multiSelect: false,
+            },
+            {
+              question: "Second?",
+              header: "",
+              options: [{ label: "C", description: "" }],
+              multiSelect: false,
+            },
+          ],
+        }}
+      />
+    );
+    const { unmount } = render(card);
+    fireEvent.click(screen.getByLabelText("A"));
+    fireEvent.click(screen.getByTestId("ask-user-question-next"));
+    fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+      target: { value: "draft text" },
+    });
+    expect(
+      (screen.getByTestId("ask-user-question-custom-input") as HTMLTextAreaElement).value,
+    ).toBe("draft text");
+    unmount();
+
+    render(card);
+    expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 2 of 2:");
+    expect(
+      (screen.getByTestId("ask-user-question-custom-input") as HTMLTextAreaElement).value,
+    ).toBe("draft text");
+    fireEvent.click(screen.getByTestId("ask-user-question-prev"));
+    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("starts over on a later mount once the answer was submitted", () => {
+    const submitApproval = vi.fn();
+    const card = (
+      <ApprovalCard
+        elicitationId="elic_draft_submitted"
+        message="Claude wants to call AskUserQuestion"
+        phase="pre_tool_use"
+        policyName="claude_native_permission"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            { question: "Only?", header: "", options: [{ label: "A", description: "" }] },
+          ],
+        }}
+        onSubmit={submitApproval}
+      />
+    );
+    const { unmount } = render(card);
+    fireEvent.click(screen.getByLabelText("A"));
+    fireEvent.click(screen.getByTestId("ask-user-question-submit"));
+    expect(submitApproval).toHaveBeenCalledWith("elic_draft_submitted", "accept", { "Only?": "A" });
+    unmount();
+
+    render(card);
+    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("forgets the draft once the question was answered elsewhere", () => {
+    // Another tab or the Inbox resolved it: this card flips to responded and
+    // the draft would otherwise linger in sessionStorage.
+    const props = {
+      elicitationId: "elic_draft_resolved",
+      message: "Claude wants to call AskUserQuestion",
+      phase: "pre_tool_use",
+      policyName: "claude_native_permission",
+      contentPreview: "",
+      requestedSchema: {},
+      askUserQuestion: {
+        questions: [{ question: "Only?", header: "", options: [{ label: "A", description: "" }] }],
+      },
+    } as const;
+    const { rerender, unmount } = render(
+      <ApprovalCard {...props} status="pending" response={null} />,
+    );
+    fireEvent.click(screen.getByLabelText("A"));
+    expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toContain(
+      "elic_draft_resolved",
+    );
+    rerender(
+      <ApprovalCard
+        {...props}
+        status="responded"
+        response={{ action: "accept", content: { "Only?": "A" } }}
+      />,
+    );
+    expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toBeNull();
+    unmount();
+
+    render(<ApprovalCard {...props} status="pending" response={null} />);
+    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("restores a secret answer on remount without writing it to sessionStorage", () => {
+    const card = (
+      <ApprovalCard
+        elicitationId="elic_draft_secret"
+        message="Codex needs input"
+        phase="codex_request_user_input"
+        policyName="codex_native_permission"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "API token?",
+              header: "",
+              options: [{ label: "Skip", description: "" }],
+              multiSelect: false,
+              isSecret: true,
+            },
+          ],
+        }}
+      />
+    );
+    const { unmount } = render(card);
+    fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+      target: { value: "hunter2" },
+    });
+    expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).toContain("elic_draft_secret");
+    expect(sessionStorage.getItem("omnigent.askUserQuestionDrafts")).not.toContain("hunter2");
+    unmount();
+
+    render(card);
+    expect(
+      (screen.getByTestId("ask-user-question-custom-input") as HTMLTextAreaElement).value,
+    ).toBe("hunter2");
   });
 
   it("hides Submit until the carousel is on the final question", () => {
