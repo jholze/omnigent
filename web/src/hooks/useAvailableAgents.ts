@@ -79,12 +79,9 @@ function stockNativeAgent(
 }
 
 /**
- * The vendor wrapper a row collapses into for dedup and shadow removal: the
- * canonical wrapper itself (or a clone of it, by name), plus legacy or session
- * rows that resolve to a native vendor only by harness and carry no explicit
- * `builtin` flag — a stale or mistyped local row must not compete with the
- * seeded wrapper. A row the server explicitly flags (builtin true or false)
- * under its own name is a distinct agent and keeps its own picker row.
+ * The vendor wrapper slot a row folds into for dedup and shadow removal: the
+ * stock wrapper, or a flagless legacy/session row that matches a native vendor
+ * by harness alone. A row the server flags `builtin` keeps its own picker row.
  */
 function nativeWrapperSlot(
   agent: Pick<AvailableAgent, "name" | "harness" | "builtin">,
@@ -370,7 +367,7 @@ function mergeAvailableAgents(
   const catalogIds = new Set(catalog.map((a) => a.id));
   const userAgentIds = new Set(userAgents.map((a) => a.id));
   const seededNames = new Set(seeded.map((a) => agentRootName(a.name)));
-  const hasKiroBuiltin = seeded.some((a) => nativeCodingAgentForAvailableAgent(a)?.key === "kiro");
+  const hasKiroBuiltin = seeded.some((a) => nativeWrapperSlot(a)?.key === "kiro");
   const kiroLegacyNames = new Set(["kiro"]);
 
   const recencyOf = (a: AvailableAgent): number => a.created_at ?? 0;

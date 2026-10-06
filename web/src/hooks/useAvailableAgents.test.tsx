@@ -469,6 +469,38 @@ describe("useAvailableAgents", () => {
     ]);
   });
 
+  it("a seeded built-in custom Kiro agent does not shadow legacy Kiro rows", async () => {
+    routeFetch({
+      [BUILTINS_URL]: mockResponse({
+        object: "list",
+        data: [
+          { id: "ag_native", name: "claude-native-ui", harness: "claude-native", builtin: true },
+          // Seeded on kiro-native under its own name, not the stock
+          // kiro-native-ui wrapper, so it is not the Kiro built-in.
+          { id: "ag_teamkiro", name: "teamkiro", harness: "kiro-native", builtin: true },
+        ],
+        has_more: false,
+      }),
+      [MINE_URL]: sessionResponse({
+        object: "list",
+        // A legacy plain-"kiro" row is hidden only when the stock Kiro wrapper
+        // exists; with no wrapper seeded it keeps its own session row.
+        data: [{ id: "ag_legacy_kiro", name: "kiro" }],
+        has_more: false,
+      }),
+    });
+
+    const { result } = renderHook(() => ({ ...useAvailableAgents() }), { wrapper });
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+      expect(result.current.isPlaceholderData).toBe(false);
+    });
+
+    const rows = (result.current.data ?? []).map((a) => [a.id, a.display_name]);
+    expect(rows).toContainEqual(["ag_teamkiro", "Teamkiro"]);
+    expect(rows.map(([id]) => id)).toContain("ag_legacy_kiro");
+  });
+
   it("defaults a missing harness to null", async () => {
     routeFetch({
       [BUILTINS_URL]: mockResponse({

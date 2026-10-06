@@ -19,9 +19,10 @@ from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import Locator, Page, expect
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, expect
 
 from tests._helpers.compat import apply_server_env, compat_server_cwd, server_executable
+from tests._helpers.live_server import terminate_process
 from tests.e2e_ui.conftest import (
     _BUILD_OUTPUT,
     _HEALTH_POLL_INTERVAL_S,
@@ -47,17 +48,6 @@ def _agent_yaml(name: str) -> str:
         "executor:\n"
         "  harness: claude-native\n"
     )
-
-
-def terminate(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=10)
 
 
 @dataclass
@@ -121,7 +111,7 @@ def spawn_server(server_tmp: Path) -> ServerRig:
         except httpx.HTTPError as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(_HEALTH_POLL_INTERVAL_S)
-    terminate(proc)
+    terminate_process(proc)
     raise RuntimeError(
         f"omnigent server not healthy within {_HEALTH_TIMEOUT_S:.0f}s on {base_url} "
         f"({last_error}).\n{log_path.read_text()[-3000:]}"
@@ -189,7 +179,7 @@ def spawn_host(base_url: str, host_tmp: Path) -> HostRig:
         if online:
             return HostRig(proc, online[0], log_path)
         time.sleep(1.0)
-    terminate(proc)
+    terminate_process(proc)
     raise RuntimeError(f"omnigent host never came online: {log_path.read_text()[-3000:]}")
 
 
@@ -208,7 +198,7 @@ def custom_native_agent_server(
     try:
         yield rig
     finally:
-        terminate(rig.proc)
+        terminate_process(rig.proc)
 
 
 @pytest.fixture(scope="module")
@@ -221,7 +211,7 @@ def registered_host(
     try:
         yield rig
     finally:
-        terminate(rig.proc)
+        terminate_process(rig.proc)
 
 
 def open_landing_picker(page: Page, base_url: str) -> None:
@@ -236,14 +226,21 @@ def open_landing_picker(page: Page, base_url: str) -> None:
 def reveal_row(page: Page, agent_id: str) -> Locator:
     """The picker row for *agent_id*, opening the Other... submenus when it is not inline."""
     row = page.get_by_test_id(f"new-chat-landing-agent-{agent_id}")
+    if row.count() > 0:
+        return row
     for submenu in ("new-chat-landing-harness-more", "new-chat-landing-custom-agents"):
-        if row.count() > 0:
-            break
         trigger = page.get_by_test_id(submenu)
-        if trigger.count() > 0:
-            trigger.hover()
-            page.wait_for_timeout(500)
-    return row
+        if trigger.count() == 0:
+            continue
+        trigger.hover()
+        try:
+            row.wait_for(state="visible", timeout=4_000)
+            return row
+        except PlaywrightTimeoutError:
+            continue
+    raise AssertionError(
+        f"picker row for agent {agent_id} not found inline or in either Other... submenu"
+    )
 
 
 def test_custom_native_agents_keep_their_own_picker_rows(
@@ -254,6 +251,9 @@ def test_custom_native_agents_keep_their_own_picker_rows(
     """Both startup-registered claude-native agents get their own row, named by their own name."""
     base_url = custom_native_agent_server.base_url
     rows = catalog_rows(base_url)
+    expected = {TEMPLATE_AGENT_NAME, SEEDED_AGENT_NAME, STOCK_AGENT_NAME}
+    missing = expected - rows.keys()
+    assert not missing, f"agents {sorted(missing)} missing from catalog: {sorted(rows)}"
     template, seeded, stock = (
         rows[TEMPLATE_AGENT_NAME],
         rows[SEEDED_AGENT_NAME],
@@ -277,5 +277,6 @@ def test_custom_native_agents_keep_their_own_picker_rows(
     expect(seeded_row).to_be_visible(timeout=10_000)
     expect(seeded_row).to_contain_text(re.compile(SEEDED_AGENT_NAME, re.IGNORECASE))
     expect(page.get_by_role("menuitem", name=STOCK_LABEL, exact=True)).to_have_count(1)
-    # Hold the resolved picker so a recording ends on the three distinct rows.
-    page.wait_for_timeout(2_000)
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        # Hold the resolved picker so a recording ends on the three distinct rows.
+        page.wait_for_timeout(2_000)
