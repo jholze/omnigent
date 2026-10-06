@@ -30,6 +30,7 @@ from omnigent.runner.identity import (
 )
 from omnigent.runner.transports.ws_tunnel import serve as serve_module
 from omnigent.runner.transports.ws_tunnel.frames import (
+    RESPONSE_BODY_FRAME_MAX_BYTES,
     PingFrame,
     RequestCancelFrame,
     RequestFrame,
@@ -40,6 +41,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
 )
 from omnigent.runner.transports.ws_tunnel.serve import (
     _handle_tunnel_frame,
+    _iter_body_fragments,
     _serve_tunnel_once,
     _websocket_auth_redirect_url,
     _websocket_close_code,
@@ -2928,3 +2930,40 @@ async def test_serve_tunnel_keeps_escalating_after_brief_connection(
     # Attempt 3 (brief_drop): connected for 2 s < 5 s; no reset → sleep 2.0
     # Attempt 4 (stop): CancelledError before sleep
     assert sleeps == [0.5, 1.0, 2.0]
+
+
+def test_iter_body_fragments_small_chunk_is_single_frame() -> None:
+    """A chunk at or below the cap is yielded unchanged as one fragment."""
+    small = b"x" * (RESPONSE_BODY_FRAME_MAX_BYTES - 1)
+    exact = b"y" * RESPONSE_BODY_FRAME_MAX_BYTES
+
+    assert list(_iter_body_fragments(small, "application/octet-stream")) == [small]
+    assert list(_iter_body_fragments(exact, "application/octet-stream")) == [exact]
+
+
+def test_iter_body_fragments_binary_splits_and_reassembles() -> None:
+    """A large binary chunk splits into capped frames that rejoin exactly."""
+    chunk = os.urandom(RESPONSE_BODY_FRAME_MAX_BYTES * 3 + 123)
+
+    fragments = list(_iter_body_fragments(chunk, "application/octet-stream"))
+
+    assert len(fragments) == 4
+    assert all(len(f) <= RESPONSE_BODY_FRAME_MAX_BYTES for f in fragments)
+    assert all(len(f) > 0 for f in fragments)
+    assert b"".join(fragments) == chunk
+
+
+def test_iter_body_fragments_text_cuts_on_utf8_boundaries() -> None:
+    """Text frames never tear a multi-byte character across the boundary."""
+    # "€" is three bytes (E2 82 AC); repeating it guarantees a character
+    # straddles every 64 KiB cut, so a naive byte split would be invalid utf-8.
+    chunk = "€".encode() * (RESPONSE_BODY_FRAME_MAX_BYTES)
+
+    fragments = list(_iter_body_fragments(chunk, "text/plain; charset=utf-8"))
+
+    assert len(fragments) > 1
+    assert all(len(f) <= RESPONSE_BODY_FRAME_MAX_BYTES for f in fragments)
+    # Each fragment decodes on its own: no fragment ends mid-character.
+    for fragment in fragments:
+        fragment.decode("utf-8")
+    assert b"".join(fragments) == chunk

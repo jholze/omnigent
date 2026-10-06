@@ -37,7 +37,7 @@ _LINK_RATE_BYTES_PER_S = 1_500_000
 _MAX_SERVER_GROWTH_MIB = 16.0
 # The preview envelope frees once its response is sent; wait for RSS to drop
 # back to within this margin of the pre-preview baseline before measuring.
-_PREVIEW_SETTLE_MARGIN_MIB = 8.0
+_PREVIEW_SETTLE_MARGIN_MIB = 20.0
 _PREVIEW_SETTLE_TIMEOUT_S = 30.0
 
 

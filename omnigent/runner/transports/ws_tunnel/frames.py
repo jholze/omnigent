@@ -166,6 +166,11 @@ class RequestFlowFrame:
 RESPONSE_FLOW_WINDOW_FRAMES = 48
 RESPONSE_FLOW_CREDIT_BATCH = 16
 
+# A single ASGI body chunk is split into frames of at most this many bytes, so
+# the send window bounds buffered memory by bytes, not just frame count. 64 KiB
+# matches the download read size, so ordinary downloads frame as before.
+RESPONSE_BODY_FRAME_MAX_BYTES = 64 * 1024
+
 
 @dataclass
 class PingFrame:
