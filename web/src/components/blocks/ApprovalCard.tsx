@@ -301,14 +301,19 @@ export function ApprovalCard({
   const isExitPlanMode = planMarkdown !== null;
   const optionLabels = askPayload === null ? extractOptionLabels(requestedSchema) : [];
   const isAskUserQuestion = askPayload !== null;
-  // Retire a leftover draft when the server resolves the card, including a
-  // pending→responded resolve while mounted. An optimistic in-flight flip also
-  // shows "responded" but can roll back, so skip it; its committed resolve clears it.
+  // Retire a leftover draft once the server commits a verdict, including a
+  // resolve while mounted. Skip an optimistic in-flight flip (it can roll back)
+  // and an auto_resolved card (a re-park can revive it to pending).
   useEffect(() => {
-    if (isAskUserQuestion && status === "responded" && !isApprovalInFlight(elicitationId)) {
+    if (
+      isAskUserQuestion &&
+      status === "responded" &&
+      response?.action !== "auto_resolved" &&
+      !isApprovalInFlight(elicitationId)
+    ) {
       clearAskUserQuestionDraft(elicitationId);
     }
-  }, [isAskUserQuestion, elicitationId, status]);
+  }, [isAskUserQuestion, elicitationId, status, response]);
   const isMultiChoice = optionLabels.length > 0;
   // Any other schema that names fields: a free-form string, several
   // properties, an enum under a name other than ``answer``. These used to

@@ -156,13 +156,13 @@ export function clearAskUserQuestionDraft(elicitationId: string): void {
 /** Clear every draft at once; used to reset module state between tests. */
 export function clearAskUserQuestionDrafts(): void {
   drafts.clear();
+  inFlightApprovals.clear();
   saveDraftsToStorage();
 }
 
 // Elicitation ids whose approval POST has not settled. The optimistic flip to
 // "responded" remounts a card as fresh before the server confirms; this lets
-// the remount tell an unconfirmed flip from a committed answer. Reference
-// counted so overlapping Chat and Inbox submits of one id stay balanced.
+// the remount tell an unconfirmed flip from a committed answer.
 const inFlightApprovals = new Map<string, number>();
 
 export function markApprovalInFlight(elicitationId: string): void {

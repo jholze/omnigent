@@ -9213,6 +9213,7 @@ describe("chatStore — submitApproval", () => {
     // The finally clears the mark even though the POST failed and rolled back.
     expect(isApprovalInFlight("elic_inflight_fail")).toBe(false);
     const block = useChatStore.getState().blocks[0];
+    expect(block?.type).toBe("elicitation");
     if (block?.type === "elicitation") expect(block.status).toBe("pending");
   });
 

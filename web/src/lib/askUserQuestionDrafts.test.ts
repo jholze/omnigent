@@ -140,4 +140,17 @@ describe("AskUserQuestion drafts", () => {
     expect(getAskUserQuestionDraft("elic_1")).toBeDefined();
     expect(getAskUserQuestionDraft("elic_2")).toBeUndefined();
   });
+
+  it("keeps a reference-counted mark in flight until every overlap clears", async () => {
+    const { markApprovalInFlight, clearApprovalInFlight, isApprovalInFlight } =
+      await import("./askUserQuestionDrafts");
+    // Chat and Inbox can each submit the same id; the mark must outlast the
+    // first clear and drop only once the matching clear count reaches zero.
+    markApprovalInFlight("elic_overlap");
+    markApprovalInFlight("elic_overlap");
+    clearApprovalInFlight("elic_overlap");
+    expect(isApprovalInFlight("elic_overlap")).toBe(true);
+    clearApprovalInFlight("elic_overlap");
+    expect(isApprovalInFlight("elic_overlap")).toBe(false);
+  });
 });

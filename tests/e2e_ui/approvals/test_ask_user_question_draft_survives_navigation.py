@@ -218,7 +218,8 @@ def test_partial_answers_survive_leaving_and_returning(
     assert observed == expected, f"draft lost after leaving and returning: {observed}"
 
     # The hook POST is still parked server-side (no verdict was ever sent), so
-    # the thread stays alive until teardown deletes the session. A late request
-    # error would otherwise be swallowed, so surface it before finishing.
-    assert post_thread.is_alive(), "the hook POST returned before any verdict"
+    # the thread stays alive until teardown deletes the session. Surface a late
+    # request error first; otherwise a dead thread hides it behind a misleading
+    # "returned before any verdict" message.
     assert "error" not in result_holder, f"hook POST errored: {result_holder.get('error')}"
+    assert post_thread.is_alive(), "the hook POST returned before any verdict"

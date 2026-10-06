@@ -1196,6 +1196,152 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     await waitFor(() => expect(getAskUserQuestionDraft("elic_draft_external")).toBeUndefined());
   });
 
+  it("keeps the draft across an auto_resolved flip that a re-park revives", () => {
+    // A severed harness wait flips the card to auto_resolved ("Resolved
+    // elsewhere") before the retry re-parks it as pending. The draft must
+    // survive that round trip so the revived form keeps the typed answer.
+    const props = {
+      elicitationId: "elic_draft_autoresolved",
+      message: "Claude wants to call AskUserQuestion",
+      phase: "pre_tool_use",
+      policyName: "claude_native_permission",
+      contentPreview: "",
+      requestedSchema: {},
+      askUserQuestion: {
+        questions: [{ question: "Only?", header: "", options: [{ label: "A", description: "" }] }],
+      },
+    } as const;
+    const { rerender } = render(
+      <TooltipProvider>
+        <ApprovalCard {...props} status="pending" response={null} />
+      </TooltipProvider>,
+    );
+    fireEvent.click(screen.getByLabelText("A"));
+    expect(getAskUserQuestionDraft("elic_draft_autoresolved")).toBeDefined();
+
+    // auto_resolved is not a committed verdict, so the draft stays even with no
+    // in-flight mark; a re-park can still revive the card as pending.
+    rerender(
+      <TooltipProvider>
+        <ApprovalCard {...props} status="responded" response={{ action: "auto_resolved" }} />
+      </TooltipProvider>,
+    );
+    expect(getAskUserQuestionDraft("elic_draft_autoresolved")).toBeDefined();
+
+    rerender(
+      <TooltipProvider>
+        <ApprovalCard {...props} status="pending" response={null} />
+      </TooltipProvider>,
+    );
+    expect((screen.getByLabelText("A") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("drops a restored selection whose option is no longer offered", () => {
+    // The draft kept a selected label, but the card remounts after the server
+    // re-published the question without that option. The gone label must not
+    // preselect, leaving the form at its empty default.
+    const base = {
+      elicitationId: "elic_draft_staleoption",
+      message: "Claude wants to call AskUserQuestion",
+      phase: "pre_tool_use",
+      policyName: "claude_native_permission",
+      contentPreview: "",
+      requestedSchema: {},
+    } as const;
+    const { unmount } = render(
+      <ApprovalCard
+        {...base}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "Pick?",
+              header: "",
+              options: [
+                { label: "A", description: "" },
+                { label: "B", description: "" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("A"));
+    unmount();
+
+    render(
+      <ApprovalCard
+        {...base}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "Pick?",
+              header: "",
+              options: [
+                { label: "B", description: "" },
+                { label: "C", description: "" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByLabelText("A")).toBeNull();
+    expect((screen.getByLabelText("B") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("C") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("clamps a restored carousel index past the shortened question list", () => {
+    // The draft remembered a later slide; the remounted question now has fewer
+    // slides, so the restored index clamps into range instead of a blank card.
+    const base = {
+      elicitationId: "elic_draft_clamp",
+      message: "Claude wants to call AskUserQuestion",
+      phase: "pre_tool_use",
+      policyName: "claude_native_permission",
+      contentPreview: "",
+      requestedSchema: {},
+    } as const;
+    const { unmount } = render(
+      <ApprovalCard
+        {...base}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            { question: "First?", header: "", options: [{ label: "A", description: "" }] },
+            { question: "Second?", header: "", options: [{ label: "B", description: "" }] },
+            { question: "Third?", header: "", options: [{ label: "C", description: "" }] },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("ask-user-question-next"));
+    fireEvent.click(screen.getByTestId("ask-user-question-next"));
+    expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 3 of 3:");
+    unmount();
+
+    render(
+      <ApprovalCard
+        {...base}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            { question: "First?", header: "", options: [{ label: "A", description: "" }] },
+            { question: "Second?", header: "", options: [{ label: "B", description: "" }] },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 2 of 2:");
+  });
+
   it("restores a secret answer on remount without writing it to sessionStorage", () => {
     const card = (
       <ApprovalCard

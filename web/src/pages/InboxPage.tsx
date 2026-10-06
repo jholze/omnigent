@@ -309,24 +309,26 @@ export function InboxPage() {
         action,
         ...(content === undefined ? {} : { content }),
         ...(meta === undefined ? {} : { _meta: meta }),
-      }).then(
-        () => {
+      })
+        .then(
+          () => {
+            // Only a confirmed resolve retires the draft; the rollback below
+            // keeps it so the restored card can retry with the same answers.
+            clearAskUserQuestionDraft(elicitationId);
+            void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+          },
+          () => {
+            // Roll back to pending so the buttons reappear and the user
+            // can retry — same recovery the chat store uses.
+            setResponded((prev) => {
+              const { [elicitationId]: _respondedVerdict, ...pendingVerdicts } = prev;
+              return pendingVerdicts;
+            });
+          },
+        )
+        .finally(() => {
           clearApprovalInFlight(elicitationId);
-          // Only a confirmed resolve retires the draft; the rollback below
-          // keeps it so the restored card can retry with the same answers.
-          clearAskUserQuestionDraft(elicitationId);
-          void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-        },
-        () => {
-          clearApprovalInFlight(elicitationId);
-          // Roll back to pending so the buttons reappear and the user
-          // can retry — same recovery the chat store uses.
-          setResponded((prev) => {
-            const { [elicitationId]: _respondedVerdict, ...pendingVerdicts } = prev;
-            return pendingVerdicts;
-          });
-        },
-      );
+        });
     };
   };
 
