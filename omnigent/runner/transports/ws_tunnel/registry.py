@@ -790,9 +790,10 @@ class TunnelRegistry:
 
     async def _send_response_flow(self, state: RequestState, credits: int) -> None:
         """Grant ``credits`` response-body send credits back to the runner."""
-        # A replaced tunnel means the request is ending anyway, so the
-        # ungranted credits no longer matter.
-        with contextlib.suppress(ConnectionError):
+        # Best-effort: a replaced tunnel (ConnectionError) or a session loop
+        # already closing during shutdown (RuntimeError) ends the request
+        # anyway, so drop the ungranted credit rather than abort the body read.
+        with contextlib.suppress(ConnectionError, RuntimeError):
             await self.send_text(
                 state.session,
                 encode_frame(RequestFlowFrame(id=state.req_id, credits=credits)),

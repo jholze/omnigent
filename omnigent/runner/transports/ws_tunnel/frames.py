@@ -166,6 +166,9 @@ RESPONSE_FLOW_CAPABILITY = "response-flow-control-v1"
 # drains them (window > batch so the final partial batch never stalls).
 RESPONSE_FLOW_WINDOW_FRAMES = 48
 RESPONSE_FLOW_CREDIT_BATCH = 16
+assert RESPONSE_FLOW_WINDOW_FRAMES > RESPONSE_FLOW_CREDIT_BATCH, (
+    "send window must exceed the credit batch or the final partial batch stalls"
+)
 
 # A single ASGI body chunk is split into frames of at most this many bytes, so
 # the send window bounds buffered memory by bytes, not just frame count. 64 KiB

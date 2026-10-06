@@ -16,6 +16,10 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
+from omnigent.runner.transports.ws_tunnel.frames import (
+    RESPONSE_FLOW_CREDIT_BATCH,
+    RESPONSE_FLOW_WINDOW_FRAMES,
+)
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runner.transports.ws_tunnel.serve import serve_tunnel
 from omnigent.runner.transports.ws_tunnel.transport import WSTunnelTransport
@@ -26,8 +30,10 @@ _RUNNER_ID = "runner-backpressure-test"
 _CHUNK = 64 * 1024
 # 64 MiB: far more than loopback socket buffers can absorb on the runner's behalf.
 _CHUNKS = 1024
-# Frames the server may hold for one request while its consumer is stalled.
-_MAX_QUEUED_FRAMES = _CHUNKS // 8
+# Frames the server may hold for one request while its consumer is stalled: at
+# most the send window plus one in-flight credit batch of slack. Derived from
+# the protocol constants so the bound tracks what it is testing.
+_MAX_QUEUED_FRAMES = RESPONSE_FLOW_WINDOW_FRAMES + RESPONSE_FLOW_CREDIT_BATCH
 
 
 async def _start_tunnel_server(

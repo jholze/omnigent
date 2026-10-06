@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -23,8 +23,8 @@ from tests.e2e_ui.conftest import open_right_rail
 _FILE_NAME = "big-download.bin"
 _FILE_BYTES = 48 * 1024 * 1024
 _LINK_RATE_BYTES_PER_S = 1_500_000
-# Headroom for ordinary RSS jitter over the download; buffering even a
-# quarter of the file would exceed it.
+# Headroom for ordinary RSS jitter over the download; buffering even half
+# of the file would exceed it.
 _MAX_SERVER_GROWTH_MIB = 16.0
 _RSS_SETTLE_WINDOW_S = 1.0
 _RSS_SETTLE_TIMEOUT_S = 15.0
@@ -157,7 +157,7 @@ def _is_preview_read(file_name: str) -> Callable[[Response], bool]:
         return (
             response.request.method == "GET"
             and url.path.endswith(f"/filesystem/{file_name}")
-            and "download=true" not in url.query
+            and parse_qs(url.query).get("download", ["false"])[0] != "true"
         )
 
     return matches
@@ -182,7 +182,9 @@ def test_slow_download_keeps_server_memory_flat(
     target.write_bytes(payload)
     request.addfinalizer(lambda: target.unlink(missing_ok=True))
 
-    proxy = SlowLinkProxy(urlparse(base_url).port or 80)
+    upstream_port = urlparse(base_url).port
+    assert upstream_port is not None, f"base_url must carry an explicit port: {base_url}"
+    proxy = SlowLinkProxy(upstream_port)
     proxy_url = f"http://127.0.0.1:{proxy.start()}"
     request.addfinalizer(proxy.stop)
 
@@ -241,6 +243,7 @@ def test_slow_download_keeps_server_memory_flat(
         stop.set()
         sampler.join(2)
 
+    assert samples, "sampler thread recorded no RSS samples (did the server die?)"
     peak_t, peak_kib, received_at_peak = max(samples, key=lambda s: s[1])
     growth_mib = (peak_kib - baseline_kib) / 1024
     summary = {

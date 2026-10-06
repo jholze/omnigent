@@ -34,6 +34,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
     RESPONSE_FLOW_CAPABILITY,
     PingFrame,
     RequestCancelFrame,
+    RequestFlowFrame,
     RequestFrame,
     WSCloseFrame,
     WSFrame,
@@ -41,8 +42,10 @@ from omnigent.runner.transports.ws_tunnel.frames import (
     encode_frame,
 )
 from omnigent.runner.transports.ws_tunnel.serve import (
+    _graceful_drain,
     _handle_tunnel_frame,
     _iter_body_fragments,
+    _SendWindow,
     _serve_tunnel_once,
     _websocket_auth_redirect_url,
     _websocket_close_code,
@@ -1037,6 +1040,7 @@ async def test_graceful_drain_fires_hook_and_awaits_inflight_task() -> None:
     await asyncio.wait_for(
         serve_module._graceful_drain(
             dispatch_tasks=dispatch_tasks,
+            flow_credits={},
             on_graceful_shutdown=_on_graceful_shutdown,
         ),
         timeout=5.0,
@@ -1071,6 +1075,7 @@ async def test_graceful_drain_bounded_when_task_never_finishes(
         await asyncio.wait_for(
             serve_module._graceful_drain(
                 dispatch_tasks={"req-stuck": task},
+                flow_credits={},
                 on_graceful_shutdown=lambda: None,
             ),
             timeout=2.0,
@@ -2991,7 +2996,7 @@ async def test_handle_tunnel_frame_opens_send_window_only_when_requested() -> No
         del text
 
     dispatch_tasks: dict[str, asyncio.Task[None]] = {}
-    flow_credits: dict[str, asyncio.Semaphore] = {}
+    flow_credits: dict[str, _SendWindow] = {}
     windowed = RequestFrame(id="req-windowed", method="GET", path="/health", flow_window=4)
     legacy = RequestFrame(id="req-legacy", method="GET", path="/health")
 
@@ -3008,3 +3013,64 @@ async def test_handle_tunnel_frame_opens_send_window_only_when_requested() -> No
     assert set(flow_credits) == {"req-windowed"}
     await asyncio.gather(*dispatch_tasks.values(), return_exceptions=True)
     assert flow_credits == {}
+
+
+@pytest.mark.asyncio
+async def test_handle_tunnel_frame_marks_flow_grant_activity() -> None:
+    """A request.flow credit grant counts as activity so a slow download is not reaped."""
+    activities: list[str] = []
+
+    async def _send_text(text: str) -> None:
+        del text
+
+    flow_credits: dict[str, _SendWindow] = {"req-flow": _SendWindow(1)}
+    raw = encode_frame(RequestFlowFrame(id="req-flow", credits=2))
+
+    await _handle_tunnel_frame(
+        _noop_app,
+        raw,
+        _send_text,
+        {},
+        {},
+        flow_credits=flow_credits,
+        on_activity=lambda: activities.append("activity"),
+    )
+
+    assert activities == ["activity"]
+
+
+@pytest.mark.asyncio
+async def test_send_window_open_fully_unblocks_parked_acquire() -> None:
+    """open_fully wakes a dispatch parked on an exhausted window and stops throttling."""
+    window = _SendWindow(1)
+    await window.acquire()
+    parked = asyncio.create_task(window.acquire())
+    await asyncio.sleep(0)
+    assert not parked.done()
+
+    window.open_fully()
+
+    await asyncio.wait_for(parked, timeout=1)
+    # A fully opened window no longer throttles.
+    await asyncio.wait_for(window.acquire(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_graceful_drain_releases_credit_starved_dispatch() -> None:
+    """Graceful drain opens send windows so a credit-starved stream can finish."""
+    window = _SendWindow(1)
+    await window.acquire()  # exhaust the window
+    finished = asyncio.Event()
+
+    async def _blocked_dispatch() -> None:
+        await window.acquire()
+        finished.set()
+
+    task = asyncio.create_task(_blocked_dispatch())
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    await _graceful_drain({"req": task}, {"req": window}, None)
+
+    assert finished.is_set()
+    assert task.done() and not task.cancelled()

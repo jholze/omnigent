@@ -198,11 +198,40 @@ def _iter_body_fragments(chunk: bytes, content_type: str) -> Iterator[bytes]:
         start = end
 
 
+class _SendWindow:
+    """Per-request response send-credit window.
+
+    Wraps a semaphore so a graceful drain can unblock a credit-starved stream:
+    ``open_fully`` makes every later ``acquire`` return at once, so the dispatch
+    can flush its remaining frames and end sentinel instead of parking on an
+    exhausted window until the drain times out.
+    """
+
+    def __init__(self, window: int) -> None:
+        self._sem = asyncio.Semaphore(window)
+        self._open = False
+
+    async def acquire(self) -> None:
+        """Spend one send credit, blocking while the window is exhausted."""
+        if self._open:
+            return
+        await self._sem.acquire()
+
+    def release(self) -> None:
+        """Return one send credit granted by a ``request.flow`` frame."""
+        self._sem.release()
+
+    def open_fully(self) -> None:
+        """Stop throttling and wake any dispatch parked in ``acquire``."""
+        self._open = True
+        self._sem.release()
+
+
 async def dispatch_via_asgi(
     app: _ASGIApp,
     frame: RequestFrame,
     send_text: Callable[[str], Awaitable[None]],
-    flow_credits: asyncio.Semaphore | None = None,
+    flow_credits: _SendWindow | None = None,
 ) -> None:
     """Run a tunneled ``request`` frame through the runner's ASGI app
     and stream the response back as frames via ``send_text``.
@@ -211,7 +240,7 @@ async def dispatch_via_asgi(
     :param frame: The incoming ``request`` frame the server sent.
     :param send_text: Async callback that writes a frame onto the
         WebSocket back to the server (typically ``ws.send_text``).
-    :param flow_credits: Per-request send-credit semaphore; the dispatch
+    :param flow_credits: Per-request send-credit window; the dispatch
         blocks once the server's unconsumed-frame window is full. ``None`` disables it.
     """
     body_bytes = decode_body(frame.body, frame.encoding) if frame.body is not None else b""
@@ -934,7 +963,7 @@ async def _serve_tunnel_once(
     import websockets
 
     dispatch_tasks: dict[str, asyncio.Task[None]] = {}
-    flow_credits: dict[str, asyncio.Semaphore] = {}
+    flow_credits: dict[str, _SendWindow] = {}
     ws_channels: dict[str, _RunnerWSChannel] = {}
     # Identify as a first-party client so the server's WebSocket origin
     # guard (CSWSH protection) allows the handshake — this runner is not a
@@ -1116,6 +1145,7 @@ async def _serve_tunnel_once(
                                 )
                             await _graceful_drain(
                                 dispatch_tasks,
+                                flow_credits,
                                 on_graceful_shutdown,
                             )
                             break
@@ -1162,6 +1192,7 @@ async def _serve_tunnel_once(
 
 async def _graceful_drain(
     dispatch_tasks: dict[str, asyncio.Task[None]],
+    flow_credits: dict[str, _SendWindow],
     on_graceful_shutdown: Callable[[], None] | None,
 ) -> None:
     """Flush in-flight streams so the connection can close cleanly.
@@ -1185,10 +1216,17 @@ async def _graceful_drain(
     are torn down by the caller's ``_cancel_ws_channels``.
 
     :param dispatch_tasks: In-flight request/stream dispatch tasks.
+    :param flow_credits: Per-request send windows; each is opened so a
+        credit-starved stream can flush its final frames and end sentinel.
     :param on_graceful_shutdown: Sync callback that enqueues the sentinels;
         ``None`` skips the flush (nothing to drain).
     :returns: None.
     """
+    # Unblock any stream parked on an exhausted send window so it can flush its
+    # end sentinel; otherwise it waits out the whole drain timeout and is still
+    # cut off, defeating the clean end-of-stream the drain exists to provide.
+    for window in flow_credits.values():
+        window.open_fully()
     if on_graceful_shutdown is not None:
         try:
             on_graceful_shutdown()
@@ -1286,7 +1324,7 @@ async def _handle_tunnel_frame(
     dispatch_tasks: dict[str, asyncio.Task[None]],
     ws_channels: dict[str, _RunnerWSChannel],
     *,
-    flow_credits: dict[str, asyncio.Semaphore] | None = None,
+    flow_credits: dict[str, _SendWindow] | None = None,
     on_activity: Callable[[], None] | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
 ) -> None:
@@ -1329,9 +1367,9 @@ async def _handle_tunnel_frame(
     elif isinstance(frame, RequestFrame):
         if on_activity is not None:
             on_activity()
-        request_credits: asyncio.Semaphore | None = None
+        request_credits: _SendWindow | None = None
         if flow_credits is not None and frame.flow_window is not None:
-            request_credits = asyncio.Semaphore(frame.flow_window)
+            request_credits = _SendWindow(frame.flow_window)
             flow_credits[frame.id] = request_credits
         task = asyncio.create_task(
             dispatch_via_asgi(app, frame, send_text, request_credits),
@@ -1340,6 +1378,8 @@ async def _handle_tunnel_frame(
         dispatch_tasks[frame.id] = task
         task.add_done_callback(_forget_dispatch_task(dispatch_tasks, flow_credits, frame.id))
     elif isinstance(frame, RequestFlowFrame):
+        if on_activity is not None:
+            on_activity()
         if flow_credits is not None:
             request_credits = flow_credits.get(frame.id)
             if request_credits is not None:
@@ -1594,7 +1634,7 @@ def _forget_ws_channel(
 
 def _forget_dispatch_task(
     dispatch_tasks: dict[str, asyncio.Task[None]],
-    flow_credits: dict[str, asyncio.Semaphore] | None,
+    flow_credits: dict[str, _SendWindow] | None,
     req_id: str,
 ) -> Callable[[asyncio.Task[None]], None]:
     """Build a callback that forgets a completed dispatch task.
