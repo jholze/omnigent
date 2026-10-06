@@ -67,6 +67,7 @@ import { terminalsQueryKey } from "@/hooks/useTerminals";
 import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSessions";
 import {
   ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
+  HELD_SHARE_RELEASE_TIMEOUT_MS,
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
   beginLocalConversation,
   committedItemProvesDelivery,
@@ -17574,6 +17575,54 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(puts[1]!.body.messages.map((m) => m.text)).toEqual(["second"]);
   });
 
+  it("bounds the published share and discloses the remainder as one row", async () => {
+    acceptQueuePuts();
+    const id = "conv_bounded";
+    seedSession(id, []);
+    await useChatStore.getState().switchTo(id);
+    await tick();
+    fetchMock.mockClear();
+    const files = Array.from(
+      { length: 40 },
+      (_, index) => new File(["x"], `shot-${index}.png`, { type: "image/png" }),
+    );
+    useChatStore.setState({
+      queuedMessages: Array.from({ length: 60 }, (_, index) => ({
+        queueId: `q_${index}`,
+        text: `message ${index}`,
+        conversationId: id,
+        ...(index === 0 ? { files } : {}),
+      })),
+    });
+    await tick();
+    const [put] = queuePuts(id) as {
+      messages: { queue_id: string; text: string; attachments: string[] }[];
+    }[];
+    expect(put!.messages).toHaveLength(50);
+    expect(put!.messages.at(-1)).toMatchObject({
+      queue_id: "overflow",
+      text: "+11 more queued messages",
+    });
+    expect(put!.messages[0]!.attachments).toHaveLength(32);
+    expect(put!.messages[0]!.attachments.at(-1)).toBe("+9 more");
+    // The server echoing exactly that representation is not a disagreement.
+    fetchMock.mockClear();
+    handleSessionEvent({
+      type: "session_queue",
+      conversationId: id,
+      messages: put!.messages.map((m, index) => ({
+        queueId: m.queue_id,
+        clientId: CLIENT_ID,
+        seq: index + 1,
+        text: m.text,
+        attachments: m.attachments,
+        requiresRetry: false,
+      })),
+    });
+    await tick();
+    expect(queuePuts(id)).toEqual([]);
+  });
+
   it("keeps a flushing head in the published share until its send settles", async () => {
     acceptQueuePuts();
     // Settle the publish the beforeEach reset may have scheduled before counting.
@@ -17609,6 +17658,38 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(queuePuts("conv_abc")).toEqual([]);
 
     settleSend();
+    await tick();
+    // POST acceptance alone is not enough: a native harness reports the turn
+    // start later, and another window must not send into it meanwhile.
+    expect(queuePuts("conv_abc")).toEqual([]);
+    handleSessionEvent({ type: "session_status", conversationId: "conv_abc", status: "running" });
+    await tick();
+    expect(queuePuts("conv_abc")).toEqual([{ client_id: CLIENT_ID, messages: [] }]);
+  });
+
+  it("frees a held share after the fallback when no turn start is ever seen", async () => {
+    acceptQueuePuts();
+    await tick();
+    fetchMock.mockClear();
+    const sendSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [{ queueId: "q_1", text: "mine", conversationId: "conv_abc" }],
+    });
+    await tick();
+    fetchMock.mockClear();
+    // Fake timers from here so the fallback armed by the release is advanceable.
+    vi.useFakeTimers();
+    useChatStore.getState().maybeFlushQueuedHead();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(queuePuts("conv_abc")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(HELD_SHARE_RELEASE_TIMEOUT_MS);
+    vi.useRealTimers();
     await tick();
     expect(queuePuts("conv_abc")).toEqual([{ client_id: CLIENT_ID, messages: [] }]);
   });

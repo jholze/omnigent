@@ -1291,7 +1291,8 @@ Request Body (JSON)
                                  skip it when deciding whose head flushes next.
 
 204 No Content
-404 Not Found — no session, or the caller lacks edit access
+403 Forbidden — the caller can read the session but not edit it
+404 Not Found — no session, or no access to it
 422 Unprocessable Entity — body fails validation
 ```
 

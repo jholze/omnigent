@@ -3014,8 +3014,8 @@ def register_events_routes(
         :param body: The client's complete current queue for this session,
             head first; an empty list clears its share.
         :returns: ``204 No Content``.
-        :raises OmnigentError: 404 if no session exists or the caller
-            lacks edit access.
+        :raises OmnigentError: 404 if no session exists or the caller cannot
+            see it; 403 if the caller can read the session but not edit it.
         """
         user_id, _conv = await _authorized_conversation(request, session_id)
         queued_messages.replace(

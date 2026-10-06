@@ -30,14 +30,6 @@ BROWSER = "c_browser"
 ALICE = "alice@example.com"
 
 
-@pytest.fixture(autouse=True)
-def _reset_registry() -> Any:
-    """Isolate the module-global registry (and its timers) per test."""
-    queued_messages.reset_for_tests()
-    yield
-    queued_messages.reset_for_tests()
-
-
 def _msg(queue_id: str, text: str, **overrides: Any) -> QueuedMessageInput:
     return QueuedMessageInput(queue_id=queue_id, text=text, **overrides)
 

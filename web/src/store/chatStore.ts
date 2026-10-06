@@ -1750,6 +1750,8 @@ export function initChatStore(client: QueryClient): void {
   publishedQueueShares.clear();
   pendingQueueSharePublishes.clear();
   heldQueueShares.clear();
+  for (const timer of heldShareReleases.values()) clearTimeout(timer);
+  heldShareReleases.clear();
   queueSharePublishInFlight.clear();
   queueSharePublishDirty.clear();
   // Drop every live conversation: their streams must not outlive the app (or,
@@ -1779,19 +1781,49 @@ let queueSharePublishScheduled = false;
 let queueSharePublisherInstalled = false;
 // Shares frozen while a queued message is being sent, so other windows learn
 // the turn started before they learn the slot freed (one message per turn).
-const heldQueueShares = new Map<string, { share: QueuedMessageShare[]; holds: number }>();
+const heldQueueShares = new Map<
+  string,
+  { share: QueuedMessageShare[]; holds: number; turnSeen: boolean }
+>();
+// A settled send whose turn the session has not yet been seen to start keeps
+// its share frozen until that edge arrives or this fallback elapses (a failed
+// send never starts one).
+export const HELD_SHARE_RELEASE_TIMEOUT_MS = 15_000;
+const heldShareReleases = new Map<string, ReturnType<typeof setTimeout>>();
+// The server's share bounds. Anything beyond them is disclosed as one summary
+// row/name rather than silently dropped from other windows' view.
+const QUEUE_SHARE_MAX_MESSAGES = 50;
+const QUEUE_SHARE_MAX_ATTACHMENTS = 32;
+
+function boundedAttachmentNames(names: string[]): string[] {
+  if (names.length <= QUEUE_SHARE_MAX_ATTACHMENTS) return names;
+  const shown = names.slice(0, QUEUE_SHARE_MAX_ATTACHMENTS - 1);
+  return [...shown, `+${names.length - shown.length} more`];
+}
 
 function queueShareFor(conversationId: string): QueuedMessageShare[] {
-  return useChatStore
+  const own = useChatStore
     .getState()
-    .queuedMessages.filter((m) => m.conversationId === conversationId)
-    .map((m) => ({
-      queue_id: m.queueId,
-      text: m.text.slice(0, QUEUE_SHARE_TEXT_LIMIT),
-      attachments: (m.files ?? []).map(attachmentFilename),
-      ...(m.stableId ? { stable_id: m.stableId } : {}),
-      requires_retry: m.requiresRetry === true,
-    }));
+    .queuedMessages.filter((m) => m.conversationId === conversationId);
+  const shown =
+    own.length > QUEUE_SHARE_MAX_MESSAGES ? own.slice(0, QUEUE_SHARE_MAX_MESSAGES - 1) : own;
+  const share: QueuedMessageShare[] = shown.map((m) => ({
+    queue_id: m.queueId,
+    text: m.text.slice(0, QUEUE_SHARE_TEXT_LIMIT),
+    attachments: boundedAttachmentNames((m.files ?? []).map(attachmentFilename)),
+    ...(m.stableId ? { stable_id: m.stableId } : {}),
+    requires_retry: m.requiresRetry === true,
+  }));
+  if (shown.length < own.length) {
+    // One row for the rest, so other windows still see (and wait behind) it.
+    share.push({
+      queue_id: "overflow",
+      text: `+${own.length - shown.length} more queued messages`,
+      attachments: [],
+      requires_retry: false,
+    });
+  }
+  return share;
 }
 
 // One PUT in flight per conversation; a change during the flight publishes
@@ -1839,6 +1871,7 @@ function holdQueueShare(conversationId: string): () => void {
   const held = heldQueueShares.get(conversationId) ?? {
     share: queueShareFor(conversationId),
     holds: 0,
+    turnSeen: false,
   };
   held.holds += 1;
   heldQueueShares.set(conversationId, held);
@@ -1848,9 +1881,34 @@ function holdQueueShare(conversationId: string): () => void {
     released = true;
     held.holds -= 1;
     if (held.holds > 0) return;
-    heldQueueShares.delete(conversationId);
-    scheduleQueueSharePublish(conversationId);
+    // POST acceptance is not the turn start other windows see (native
+    // harnesses report `running` from the terminal later), so wait for that
+    // edge — or the fallback — before the slot is shown as free.
+    if (held.turnSeen || setterForState(conversationId)?.sessionStatus === "running") {
+      releaseHeldQueueShare(conversationId);
+      return;
+    }
+    heldShareReleases.set(
+      conversationId,
+      setTimeout(() => releaseHeldQueueShare(conversationId), HELD_SHARE_RELEASE_TIMEOUT_MS),
+    );
   };
+}
+
+function releaseHeldQueueShare(conversationId: string): void {
+  const timer = heldShareReleases.get(conversationId);
+  if (timer !== undefined) clearTimeout(timer);
+  heldShareReleases.delete(conversationId);
+  heldQueueShares.delete(conversationId);
+  scheduleQueueSharePublish(conversationId);
+}
+
+/** The session started (or failed to start) a turn: a share held for a settled send can go. */
+function noteTurnEdgeForHeldShare(conversationId: string): void {
+  const held = heldQueueShares.get(conversationId);
+  if (held === undefined) return;
+  held.turnSeen = true;
+  if (held.holds === 0) releaseHeldQueueShare(conversationId);
 }
 
 /** Publish on every change to `queuedMessages`, for each conversation it touched. */
@@ -7265,22 +7323,18 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // Full-state replacement, like presence. Own entries stay authoritative
       // in `queuedMessages`; this list orders them against other windows'.
       applyToNamedConversation(event.conversationId, { sharedQueue: event.messages });
-      // A list that disagrees with what this client holds (the server dropped
-      // its share past the grace window, or kept a stale one) is republished.
-      // Not while a send holds the share: the server rightly still lists it.
+      // A list that disagrees with what this client published (the server
+      // dropped its share past the grace window, or kept a stale one) is
+      // republished.
       const listed = new Set(
         event.messages.filter((m) => m.clientId === CLIENT_ID).map((m) => m.queueId),
       );
-      const own = new Set(
-        useChatStore
-          .getState()
-          .queuedMessages.filter((m) => m.conversationId === event.conversationId)
-          .map((m) => m.queueId),
+      const expected = new Set(
+        (
+          heldQueueShares.get(event.conversationId)?.share ?? queueShareFor(event.conversationId)
+        ).map((m) => m.queue_id),
       );
-      if (
-        !heldQueueShares.has(event.conversationId) &&
-        (own.size !== listed.size || [...own].some((id) => !listed.has(id)))
-      ) {
+      if (expected.size !== listed.size || [...expected].some((id) => !listed.has(id))) {
         scheduleQueueSharePublish(event.conversationId, { force: true });
       }
       // A follow-up another window held ahead of ours may have just left the
@@ -7370,6 +7424,12 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // Captured BEFORE the patch below adopts event.responseId, so a
       // running/waiting status carrying an unseen id marks a new turn.
       const prevResponseId = useChatStore.getState().activeResponse?.responseId;
+      if (
+        event.conversationId === sourceConversationId &&
+        (event.status === "running" || event.status === "failed")
+      ) {
+        noteTurnEdgeForHeldShare(event.conversationId);
+      }
       // The status patch is conversation-scoped; the cache/query side effects
       // further down are deliberately NOT (they are keyed by explicit id, so a
       // sub-agent's status still refreshes its parent's rail).

@@ -1,35 +1,13 @@
-"""In-memory registry of the follow-ups each client holds queued for a session.
+"""Process-local registry of the follow-ups each client holds queued for a session.
 
-The web composer parks a message typed while the agent is busy in a
-client-side queue and flushes it when the turn ends (see
-``docs/QUEUE_STEER_DESIGN.md``). The message itself — including any
-attachment blobs — stays in that client until it is POSTed, so the queue
-cannot live on the server. What the server owns instead is the *session-wide
-view* of those queues: every client publishes the entries it holds for a
-conversation (``PUT /v1/sessions/{id}/queue``), the registry merges all
-clients' shares into one FIFO list, and broadcasts it as ``session.queue`` to
-every stream of that conversation. Two windows on one session therefore show
-the same queue in the same order, and each flushes its own head only when it
-is the session-wide head.
-
-Shares are keyed by ``(user, client_id)``: a client can only replace its own
-entries, so one window cannot drop another's. Ordering is a per-conversation
-sequence number assigned when an entry is first seen; a client that reorders
-its entries keeps the same sequence slots (refilled in the new order), so its
-position relative to other clients' entries is stable.
-
-Lifecycle: a client's share is tied to its open SSE streams for the
-conversation (:func:`attach` / :func:`detach`, driven by the stream route
-exactly like presence). When the last stream closes — or a share arrives from
-a client with no stream — the share expires after :data:`_DETACH_GRACE_S`
-unless a stream (re)attaches, so a closed window cannot leave phantom entries
-blocking other clients' flushes while a transient reconnect stays invisible.
-Like :mod:`omnigent.server.presence`, the registry is process-local ephemeral
-state and dies with the process; clients repair it from the snapshot-on-connect
-event and republish what they still hold.
-
-All mutating entry points run on the server's event loop; the lock guards
-snapshot reads that may interleave with the loop-callback expiry timer.
+The queue itself stays in the client that typed the message (the body and
+attachments never reach the server until the message is POSTed); this module
+keeps the session-wide *view* of those queues. Each client publishes its share
+(``PUT /v1/sessions/{id}/queue``); the registry merges shares into one FIFO list
+ordered by a per-conversation sequence, broadcasts it as ``session.queue``, and
+drops a share :data:`_DETACH_GRACE_S` after the client's last stream for the
+conversation closes (:func:`attach` / :func:`detach`, driven by the stream
+route). See ``docs/QUEUE_STEER_DESIGN.md`` for the design.
 """
 
 from __future__ import annotations

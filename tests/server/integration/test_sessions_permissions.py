@@ -3600,3 +3600,40 @@ async def test_stream_keeps_queue_share_open_and_expires_it_on_disconnect(
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await collector.stop()
+
+
+async def test_put_queue_requires_edit_access(auth_client: httpx.AsyncClient) -> None:
+    """A reader cannot publish a queue share (403); an editor can (204); strangers see 404."""
+    agent = await create_test_agent(auth_client, user="alice@example.com")
+    session_id = (await _create_session_as(auth_client, agent["id"], "alice@example.com"))["id"]
+    bob = {"X-Forwarded-Email": "bob@example.com"}
+    body = {"client_id": "c_bob", "messages": [{"queue_id": "q_1", "text": "held"}]}
+
+    resp = await auth_client.put(f"/v1/sessions/{session_id}/queue", headers=bob, json=body)
+    assert resp.status_code == 404, resp.text
+
+    grant = await _grant_permission(
+        auth_client,
+        session_id,
+        granter="alice@example.com",
+        target_user="bob@example.com",
+        level=LEVEL_READ,
+    )
+    assert grant.status_code == 200, grant.text
+    resp = await auth_client.put(f"/v1/sessions/{session_id}/queue", headers=bob, json=body)
+    assert resp.status_code == 403, resp.text
+    assert queued_messages.snapshot(session_id)["messages"] == []
+
+    grant = await _grant_permission(
+        auth_client,
+        session_id,
+        granter="alice@example.com",
+        target_user="bob@example.com",
+        level=LEVEL_EDIT,
+    )
+    assert grant.status_code == 200, grant.text
+    resp = await auth_client.put(f"/v1/sessions/{session_id}/queue", headers=bob, json=body)
+    assert resp.status_code == 204, resp.text
+    assert [
+        (m["created_by"], m["text"]) for m in queued_messages.snapshot(session_id)["messages"]
+    ] == [("bob@example.com", "held")]
