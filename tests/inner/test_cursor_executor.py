@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 import types
 from types import SimpleNamespace
@@ -1937,6 +1938,121 @@ async def test_bridge_spawns_in_workspace_cwd(
     assert os.path.realpath(sdk_state["launch_cwds"][0]) == os.path.realpath(str(workspace))
     # ...and the process cwd was restored afterwards.
     assert os.getcwd() == original_cwd
+
+
+async def test_bridge_launch_hardens_sdk_callback_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """The executor swaps in an argv-safe callback token generator before launch.
+
+    cursor-sdk mints ``secrets.token_urlsafe`` tokens and hands them to the
+    bridge as ``--tool-callback-auth-token <token>``; the bridge's flag parser
+    rejects any value starting with ``-`` as a missing value, so the 1-in-64
+    dash-leading draw killed the launch before discovery. The fake SDK here
+    replays that parser rule; the real-bridge test below drives the actual SDK.
+    """
+    sdk_state = _install_fake_sdk(monkeypatch, [{"messages": [_assistant("ok")], "result": "ok"}])
+    fake_sdk = sys.modules["cursor_sdk"]
+
+    def _dash_leading_token() -> str:
+        return "-" + "a" * 42
+
+    generators: dict[str, types.ModuleType] = {}
+    for name in ("cursor_sdk._tool_callback", "cursor_sdk._store_callback"):
+        module = types.ModuleType(name)
+        module._new_auth_token = _dash_leading_token  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, name, module)
+        generators[name] = module
+
+    launch_bridge = fake_sdk.AsyncClient.launch_bridge
+
+    async def launch_bridge_with_flag_parser(cls: Any, **kwargs: Any) -> Any:
+        token = sys.modules["cursor_sdk._tool_callback"]._new_auth_token()
+        if token.startswith("-"):  # the bridge's takeValue() rule
+            raise RuntimeError(
+                "Bridge exited before discovery with status 1: cursor-sdk-bridge "
+                "failed: Error: Missing value for --tool-callback-auth-token"
+            )
+        return await launch_bridge(**kwargs)
+
+    monkeypatch.setattr(
+        fake_sdk.AsyncClient, "launch_bridge", classmethod(launch_bridge_with_flag_parser)
+    )
+
+    executor = CursorExecutor(api_key="crsr_x", cwd=str(tmp_path))
+    try:
+        events = [e async for e in executor.run_turn([_user("hi")], [], "SYS")]
+    finally:
+        await executor.close()
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert errors == [], [e.message for e in errors]
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(sdk_state["launch_kwargs"]) == 1
+    for name, module in generators.items():
+        tokens = {module._new_auth_token() for _ in range(256)}
+        assert all(not token.startswith("-") for token in tokens), name
+
+
+async def test_real_bridge_launch_survives_dash_leading_callback_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """The real cursor-sdk bridge launches even when the token draw starts with ``-``.
+
+    Drives the installed cursor-sdk and its vendored bridge binary (skipped
+    without the ``cursor`` extra). Only ``AsyncAgent.create`` is faked: a real
+    agent needs Cursor credentials and network, while bridge launch -- the
+    boundary under test -- does not. The first ``secrets.token_urlsafe`` draw
+    is scripted to the 1-in-64 dash-leading case so the test is deterministic.
+    """
+    cursor_sdk = pytest.importorskip("cursor_sdk")
+    monkeypatch.delenv("RUNNER_SERVER_URL", raising=False)
+
+    real_token_urlsafe = secrets.token_urlsafe
+    scripted = iter(["-" + real_token_urlsafe(32)[1:]])
+
+    def token_urlsafe(nbytes: int | None = None) -> str:
+        return next(scripted, None) or real_token_urlsafe(nbytes)
+
+    monkeypatch.setattr(secrets, "token_urlsafe", token_urlsafe)
+
+    class _Run:
+        async def events(self) -> Any:
+            yield SimpleNamespace(sdk_message=_assistant("ok"), interaction_update=None)
+
+        async def wait(self) -> Any:
+            return SimpleNamespace(status="finished", result="ok")
+
+        async def cancel(self) -> None:
+            pass
+
+    class _Agent:
+        async def send(self, prompt: str, **kwargs: Any) -> _Run:
+            return _Run()
+
+        async def close(self) -> None:
+            pass
+
+    clients: list[Any] = []
+
+    async def create(cls: Any, *, client: Any, **kwargs: Any) -> _Agent:
+        clients.append(client)
+        return _Agent()
+
+    monkeypatch.setattr(cursor_sdk.AsyncAgent, "create", classmethod(create))
+
+    executor = CursorExecutor(api_key="crsr_x", cwd=str(tmp_path))
+    try:
+        events = [e async for e in executor.run_turn([_user("hi")], [], "SYS")]
+    finally:
+        await executor.close()
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert errors == [], [e.message for e in errors]
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert len(clients) == 1 and isinstance(clients[0], cursor_sdk.AsyncClient)
 
 
 async def test_hooks_json_not_written_without_server_url(
