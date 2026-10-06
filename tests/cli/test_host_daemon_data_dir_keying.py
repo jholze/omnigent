@@ -111,20 +111,26 @@ def test_find_daemon_record_matches_local_record_by_server_url_without_pidfile(
     assert found.target == cli._LOCAL_DAEMON_MARKER
 
 
+def test_same_local_server_rejects_an_unparsable_url() -> None:
+    """A malformed URL (unclosed IPv6 bracket) is a mismatch, not a crash."""
+    assert cli._same_local_server("http://127.0.0.1:6767", "http://[::1:6767") is False
+
+
+@pytest.mark.parametrize("running_sig", ["sig-of-the-running-server", None])
 def test_collapsed_spawn_runs_the_daemon_in_local_mode(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, running_sig: str | None
 ) -> None:
     """A ``--server`` spelling of the tracked server spawns the local daemon in adopt mode.
 
     A collapsed target must take the local path (local-mode args and the local
     daemon env allowlist) so the record under the ``local`` key never carries
     server-mode metadata, but it adopts the running server: ``--adopt-server``
-    is passed and the record is stamped with the running server's signature,
-    so neither this invocation's config nor a later one restarts that server.
+    is passed and the record is stamped with the running server's signature
+    (or left unverifiable when that server has none), never this shell's.
     """
     _track_local_server(tmp_path, 6767)
     monkeypatch.setattr(cli, "_load_existing_host_id", lambda: "host_abc")
-    monkeypatch.setattr(cli, "_read_local_server_sig", lambda: "sig-of-the-running-server")
+    monkeypatch.setattr(cli, "_read_local_server_sig", lambda: running_sig)
 
     sig_calls: list[bool] = []
 
@@ -168,6 +174,6 @@ def test_collapsed_spawn_runs_the_daemon_in_local_mode(
     assert "--local" in captured_args
     assert "--adopt-server" in captured_args
     assert "http://localhost:6767" not in captured_args
-    assert captured_env[cli.DAEMON_CONFIG_SIG_ENV_VAR] == "sig-of-the-running-server"
+    assert captured_env[cli.DAEMON_CONFIG_SIG_ENV_VAR] == (running_sig or "")
     assert sig_calls == []
     assert env_urls == [None]

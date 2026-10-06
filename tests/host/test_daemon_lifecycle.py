@@ -373,6 +373,8 @@ def test_adopting_local_daemon_records_the_server_url_it_serves(
     from omnigent.process_logging import DATA_DIR_ENV_VAR
 
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    # The CLI stamps an empty signature when the adopted server has no sidecar.
+    monkeypatch.setenv("OMNIGENT_HOST_DAEMON_CONFIG_SIG", "")
     monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
     monkeypatch.setattr(sys, "argv", ["omnigent.host._daemon_entry", "--local", "--adopt-server"])
     monkeypatch.setattr(
@@ -400,6 +402,8 @@ def test_adopting_local_daemon_records_the_server_url_it_serves(
     assert ensure_calls == [{"replace_on_config_drift": False}]
     payload = json.loads(daemon_record_path("local", base_dir=tmp_path).read_text())
     assert payload["mode"] == "local"
+    assert payload["adopted"] is True
+    assert payload["config_sig"] is None
     assert payload["resolved_server_url"] == "http://127.0.0.1:6767"
     # No local_server.pid exists here, so the URL keys on itself — and the
     # published URL is what still leads the lookup to the local record.

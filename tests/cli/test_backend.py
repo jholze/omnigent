@@ -535,6 +535,56 @@ def test_reuse_adopting_local_daemon_ignores_config_drift(
     assert terminated == ["config changed (auth)"]
 
 
+@pytest.mark.parametrize("recorded_sig", [None, ""])
+def test_owning_invocation_revalidates_an_adopted_daemon_without_a_server_signature(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorded_sig: str | None
+) -> None:
+    """Adoption to ownership with an unknown server signature goes through the lifecycle path.
+
+    An adopted daemon whose server had no (or an unreadable) signature sidecar
+    cannot vouch for that server's config. Another adopting invocation reuses
+    it, but an owning one tears it down so the respawned owner validates the
+    server through ``ensure_local_omnigent_server`` instead of trusting it.
+    """
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    record_path = cli._daemon_record_path("local")
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "pid": 4242,
+                "target": "local",
+                "mode": "local",
+                "server_url": None,
+                "log_path": str(tmp_path / "daemon.log"),
+                "started_at": 100,
+                "host_id": "host_abc",
+                "config_sig": recorded_sig,
+                "adopted": True,
+            }
+        )
+    )
+    monkeypatch.setattr(cli, "_daemon_owner_is_live", lambda record: True)
+    monkeypatch.setattr(cli, "_daemon_host_identity_changed", lambda record: False)
+    monkeypatch.setattr(cli, "server_config_signature", lambda **_kw: "sig-of-this-shell")
+    monkeypatch.setattr(cli, "_daemon_tunnel_recovers", lambda record: True)
+    terminated: list[str] = []
+    monkeypatch.setattr(
+        cli, "_terminate_host_unit", lambda record, *, reason: terminated.append(reason)
+    )
+
+    adopting = cli._reuse_existing_daemon_record("local", adopt_server=True)
+
+    assert adopting.reuse is True
+    assert terminated == []
+
+    owning = cli._reuse_existing_daemon_record("local")
+
+    assert owning.reuse is False
+    assert owning.config_changed is True
+    assert terminated == ["adopted server config is unverified"]
+
+
 def test_ensure_host_daemon_reuses_healthy_background_daemon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

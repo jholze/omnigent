@@ -129,9 +129,9 @@ def test_second_loopback_spelling_reuses_daemon_and_stop_converges(
             f"first host spawn failed (rc={first.returncode})\n"
             f"stdout:\n{first.stdout}\nstderr:\n{first.stderr}"
         )
-        pids = _live_daemon_pids(home)
-        daemon_pids |= pids
-        assert len(pids) == 1, (
+        first_pids = _live_daemon_pids(home)
+        daemon_pids |= first_pids
+        assert len(first_pids) == 1, (
             f"expected exactly one daemon after the first spawn, got {_live_daemon_records(home)}"
         )
 
@@ -151,9 +151,9 @@ def test_second_loopback_spelling_reuses_daemon_and_stop_converges(
         )
         pids = _live_daemon_pids(home)
         daemon_pids |= pids
-        assert len(pids) == 1, (
-            f"one server instance must be served by one host daemon, but the "
-            f"localhost spelling spawned its own instead of reusing the live "
+        assert pids == first_pids, (
+            f"one server instance must be served by the one live host daemon, but the "
+            f"localhost spelling spawned or replaced it instead of reusing the live "
             f"127.0.0.1 one: {_live_daemon_records(home)}\nstdout:\n{second.stdout}"
         )
 

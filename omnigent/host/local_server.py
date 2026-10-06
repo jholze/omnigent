@@ -625,6 +625,10 @@ def ensure_local_omnigent_server(*, replace_on_config_drift: bool = True) -> Loc
         # mode, cookie secret, etc. are baked at boot). Stop it and spawn
         # a fresh one below so the invocation's intent takes effect.
         stop_local_omnigent_server()
+    if not replace_on_config_drift:
+        raise LocalServerStartupError(
+            "The local server this daemon was asked to adopt is no longer running."
+        )
 
     # Prefer the stable :6767 so the daemon-spawned server lands on the
     # same URL as a manual `omnigent server` (and reuse via the pidfile

@@ -185,6 +185,21 @@ def test_ensure_local_omnigent_server_adopts_drifted_server_when_not_replacing(
     assert stopped == []
 
 
+def test_ensure_local_omnigent_server_adopt_fails_loud_without_a_running_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adopt mode never spawns: if the named server is gone, the daemon fails loud."""
+    monkeypatch.setattr(local_server, "local_server_url_if_healthy", lambda: None)
+
+    def _must_not_popen(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("spawned a fresh server instead of adopting the named one")
+
+    monkeypatch.setattr(local_server.subprocess, "Popen", _must_not_popen)
+
+    with pytest.raises(local_server.LocalServerStartupError, match="no longer running"):
+        local_server.ensure_local_omnigent_server(replace_on_config_drift=False)
+
+
 def test_ensure_local_omnigent_server_respawns_on_config_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

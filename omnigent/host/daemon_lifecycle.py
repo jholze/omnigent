@@ -55,6 +55,9 @@ class HostDaemonRecord:
     :param host_id: Stable host id advertised to the server.
     :param resolved_server_url: Concrete URL owned by a local-mode daemon.
     :param config_sig: Signature of server-affecting launch configuration.
+    :param adopted: The daemon connects to a local server it does not own
+        (requested through an explicit loopback URL); ``config_sig`` is then
+        that server's signature, or ``None`` when the server has none.
     """
 
     pid: int
@@ -66,6 +69,7 @@ class HostDaemonRecord:
     host_id: str | None = None
     resolved_server_url: str | None = None
     config_sig: str | None = None
+    adopted: bool = False
 
 
 def normalize_daemon_target(

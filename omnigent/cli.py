@@ -2842,6 +2842,7 @@ def _record_from_json(raw: _HostJsonObject) -> _HostDaemonRecord | None:
             else None
         ),
         config_sig=config_sig if isinstance(config_sig, str) and config_sig else None,
+        adopted=raw.get("adopted") is True,
     )
 
 
@@ -3163,8 +3164,13 @@ def _reuse_existing_daemon_record(
         # process or guess at an unstamped config).
         return _DaemonReuseDecision(reuse=True, config_changed=False)
 
-    # Config drift → the running server has the wrong auth source.
+    # Config drift → the running server has the wrong auth source. An adopted
+    # daemon with no verified server signature cannot vouch for the server, so
+    # an owning invocation re-validates it through the server lifecycle path.
     desired_sig = server_config_signature()
+    if not adopt_server and existing.adopted and existing.config_sig is None:
+        _terminate_host_unit(existing, reason="adopted server config is unverified")
+        return _DaemonReuseDecision(reuse=False, config_changed=True)
     if not adopt_server and existing.config_sig is not None and existing.config_sig != desired_sig:
         _terminate_host_unit(existing, reason="config changed (auth)")
         return _DaemonReuseDecision(reuse=False, config_changed=True)
@@ -3210,7 +3216,11 @@ def _same_local_server(local_url: str, requested_url: str) -> bool:
 
     if local_url.rstrip("/") == requested_url.rstrip("/"):
         return True
-    if urlsplit(local_url).scheme.lower() != urlsplit(requested_url).scheme.lower():
+    try:
+        same_scheme = urlsplit(local_url).scheme.lower() == urlsplit(requested_url).scheme.lower()
+    except ValueError:
+        return False
+    if not same_scheme:
         return False
     local_port = _loopback_server_port(local_url)
     return local_port is not None and local_port == _loopback_server_port(requested_url)
@@ -3564,9 +3574,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     # without changing the caller's working directory or agent workspace.
     args = [sys.executable, "-P", "-m", "omnigent.host._daemon_entry", *mode_args]
     # An adopting daemon serves whatever config the running server has, so its
-    # record carries that signature instead of this invocation's.
-    config_sig = _read_local_server_sig() if adopt_server else None
-    if config_sig is None:
+    # record carries that signature, or none when the server has no sidecar.
+    if adopt_server:
+        config_sig = _read_local_server_sig() or ""
+    else:
         config_sig = server_config_signature(include_features=not server_url)
     daemon_env = _build_host_daemon_env(server_url=server_url)
     daemon_env[DAEMON_CONFIG_SIG_ENV_VAR] = config_sig

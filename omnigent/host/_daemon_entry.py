@@ -95,7 +95,8 @@ def main() -> None:
             log_path=str(log_path),
             started_at=int(time.time()),
             host_id=identity.host_id,
-            config_sig=os.environ.get(DAEMON_CONFIG_SIG_ENV_VAR),
+            config_sig=os.environ.get(DAEMON_CONFIG_SIG_ENV_VAR) or None,
+            adopted=args.adopt_server,
         )
         write_daemon_record(record, update_legacy_pidfile=True)
 
