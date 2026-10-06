@@ -1588,7 +1588,7 @@ async def forward_claude_transcript_to_session(
                         session_id,
                         extra={"session_id": session_id},
                     )
-                    # Keep backing off while the fd table is still full.
+                    # Reset only outside an fd outage; mid-outage keep the backed-off delay.
                     if fd_exhausted_since is None:
                         next_poll_delay = poll_interval_s
                 else:

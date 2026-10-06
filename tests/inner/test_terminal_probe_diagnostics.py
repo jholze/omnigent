@@ -346,6 +346,9 @@ async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
 
     stop = threading.Event()
     still_running = None
+    loop = asyncio.get_running_loop()
+    outage_started = loop.time()
+    outage_ended = outage_started
     with caplog.at_level(logging.INFO, logger=terminal_mod.__name__):
         if threaded:
             task = asyncio.create_task(
@@ -362,6 +365,7 @@ async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
             )
         try:
             await _until(lambda: attempts["failed"] >= 40)
+            outage_ended = loop.time()
             descriptors_available.set()
             await _until(lambda: attempts["started"] >= 2)
             still_running = instance.running
@@ -375,8 +379,11 @@ async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
         for r in caplog.records
         if r.levelno == logging.WARNING and "capture-pane probe could not start" in r.getMessage()
     ]
-    assert 2 <= len(could_not_start) < attempts["failed"] // 2, (
-        f"{len(could_not_start)} warnings for {attempts['failed']} failed attempts"
+    # One WARNING per 0.1s window across the outage, however many attempts it took.
+    windows = (outage_ended - outage_started) / 0.1
+    assert 2 <= len(could_not_start) <= windows + 2, (
+        f"{len(could_not_start)} warnings for {attempts['failed']} failed attempts "
+        f"over {windows:.1f} rewarn windows"
     )
     recovered = [
         r
@@ -489,3 +496,48 @@ def test_probe_start_bookkeeping_survives_concurrent_failures_and_recoveries(
         assert instance._probe_start_failures >= 1
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
+async def test_partial_probe_start_failures_keep_backing_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    threaded: bool,
+) -> None:
+    """A cycle whose capture-pane starts but whose pane-death probe cannot is still one outage."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._remember_pane_snapshot("private terminal output")
+    pane_death_attempts = {"n": 0}
+
+    def run(cmd, **kwargs):
+        if cmd[5] == "list-panes":
+            pane_death_attempts["n"] += 1
+            raise OSError(errno.EMFILE, "Too many open files", "tmux")
+        return subprocess.CompletedProcess(cmd, 0, b"frame\n", b"")
+
+    _patch_tmux(monkeypatch, run)
+    with (
+        caplog.at_level(logging.WARNING, logger=terminal_mod.__name__),
+        contextlib.suppress(TimeoutError, asyncio.TimeoutError),
+    ):
+        await _run_watcher(instance, threaded, lambda *_: None)
+
+    assert pane_death_attempts["n"] >= 5
+    assert instance._probe_start_failures == pane_death_attempts["n"]
+    assert instance._probe_start_retry_delay() == (
+        terminal_mod._TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS
+        * 2**terminal_mod._TMUX_PROBE_START_FAILURE_MAX_DOUBLINGS
+    )
+    could_not_start = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "pane-death probe could not start" in r.getMessage()
+    ]
+    assert len(could_not_start) == 1

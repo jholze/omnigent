@@ -2000,6 +2000,7 @@ class TerminalInstance:
             began = self._probe_start_outage_began
             if began is None:
                 return
+            ended = time.monotonic()
             warned = self._probe_start_outage_warned
             failures = self._probe_start_failures
             self._probe_start_outage_began = None
@@ -2012,7 +2013,7 @@ class TerminalInstance:
                 self.name,
                 self.session_key,
                 failures,
-                time.monotonic() - began,
+                ended - began,
             )
 
     async def _idle_watch_loop(
@@ -2070,7 +2071,6 @@ class TerminalInstance:
                 await asyncio.sleep(self._probe_start_retry_delay())
                 continue
             except RuntimeError as exc:
-                self._record_probe_started()
                 self._remember_probe_failure("capture-pane", exc, started_at)
                 self._last_capture_probe_error = str(exc)
                 logger.warning(
@@ -2086,7 +2086,10 @@ class TerminalInstance:
                     self._probe_failures.clear()
                     if session_exists is None:
                         await asyncio.sleep(self._probe_start_retry_delay())
+                    else:
+                        self._record_probe_started()
                     continue
+                self._record_probe_started()
                 consecutive_capture_failures += 1
                 if consecutive_capture_failures < _IDLE_EXIT_FAILURE_THRESHOLD:
                     continue
@@ -2098,7 +2101,6 @@ class TerminalInstance:
                     await _fire(on_exit, "exit")
                 return
 
-            self._record_probe_started()
             consecutive_capture_failures = 0
             self._probe_failures.clear()
             self._remember_pane_snapshot(snapshot)
@@ -2106,6 +2108,8 @@ class TerminalInstance:
             if pane_dead is None:
                 await asyncio.sleep(self._probe_start_retry_delay())
                 continue
+            # Every probe in this cycle started, so a start-failure outage is over.
+            self._record_probe_started()
             if pane_dead:
                 await self._capture_exit_snapshot()
                 # Retained dead panes must release attached clients and report
@@ -2278,15 +2282,18 @@ class TerminalInstance:
                 if stop_event.wait(self._probe_start_retry_delay()):
                     return
                 continue
-            self._record_probe_started()
             if snapshot is None:
                 session_exists = self._tmux_session_exists_sync()
                 if session_exists is not False:
                     consecutive_capture_failures = 0
                     self._probe_failures.clear()
-                    if session_exists is None and stop_event.wait(self._probe_start_retry_delay()):
-                        return
+                    if session_exists is None:
+                        if stop_event.wait(self._probe_start_retry_delay()):
+                            return
+                    else:
+                        self._record_probe_started()
                     continue
+                self._record_probe_started()
                 consecutive_capture_failures += 1
                 if consecutive_capture_failures < _IDLE_EXIT_FAILURE_THRESHOLD:
                     continue
@@ -2305,6 +2312,8 @@ class TerminalInstance:
                 if stop_event.wait(self._probe_start_retry_delay()):
                     return
                 continue
+            # Every probe in this cycle started, so a start-failure outage is over.
+            self._record_probe_started()
             if pane_dead:
                 self._capture_exit_snapshot_sync()
                 # Retained dead panes must release attached clients and report

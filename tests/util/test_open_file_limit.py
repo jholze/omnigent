@@ -170,6 +170,8 @@ def test_real_process_raises_its_own_soft_limit() -> None:
     )
     raised, live, hard_unlimited = json.loads(child.stdout)
     soft, hard = live
+    if not hard_unlimited and hard <= 256:
+        pytest.skip(f"hard RLIMIT_NOFILE ({hard}) is too low to raise the soft limit above 256")
     # macOS may reject 65536 under an unlimited hard limit and settle on a fallback.
     accepted = (
         {DEFAULT_SOFT_OPEN_FILE_LIMIT, *_FALLBACK_SOFT_LIMITS}
