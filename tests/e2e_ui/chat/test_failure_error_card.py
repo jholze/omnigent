@@ -235,7 +235,7 @@ def test_runner_disconnect_card_clears_when_the_runner_reports_a_live_status(
         (
             "runner_failed_to_start",
             "runner process exited with code 1 before connecting",
-            "The session's runner process exited on the host",
+            "The session's runner failed to start on the host",
         ),
     ],
 )

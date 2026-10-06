@@ -277,7 +277,7 @@ describe("ErrorBanner", () => {
       "transient_upstream_error",
       "The model service hit a temporary error mid-response; retrying usually continues the turn.",
     ],
-    ["runner_failed_to_start", "The session's runner process exited on the host."],
+    ["runner_failed_to_start", "The session's runner failed to start on the host."],
   ])("describes a %s failure in plain English", (code, sentence) => {
     render(<ErrorBanner message="raw diagnostics" source="execution" code={code} />);
     expect(screen.getByText(sentence)).toBeInTheDocument();
