@@ -17,6 +17,7 @@ from omnigent.harnesses.codex_native.bridge import (
     read_bridge_state,
     write_bridge_state,
 )
+from omnigent.runner.turn_routing import ROUTED_PROMPT_BLOCK_PREFIX
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
 )
@@ -656,6 +657,7 @@ def _hook_run_params(
 _MISSING_SCRIPT_FEEDBACK = (
     "python3: can't open file '/tmp/plugin/activate.py': [Errno 2] No such file or directory"
 )
+_ROUTING_HANDOFF_NOTICE = f"{ROUTED_PROMPT_BLOCK_PREFIX}gpt-5.6; rerunning your message on it."
 
 
 def test_terminal_error_from_hook_run_blocked_prompt_carries_hook_output() -> None:
@@ -719,6 +721,12 @@ def test_terminal_error_from_hook_run_without_user_output_names_outcome() -> Non
                 entries=[{"kind": "feedback", "text": "no rm -rf"}],
             ),
             id="pre-tool-use-block-denies-a-call-not-the-turn",
+        ),
+        pytest.param(
+            _hook_run_params(
+                status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
+            ),
+            id="smart-routing-handoff-is-replayed-not-rejected",
         ),
         pytest.param(
             {"threadId": "thread_123", "turnId": "turn_123", "run": "garbage"}, id="malformed"
@@ -843,3 +851,71 @@ async def test_handle_event_failed_hook_run_leaves_turn_lifecycle_alone(tmp_path
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_event_smart_routing_block_does_not_fail_replayed_turn(
+    tmp_path: Path,
+) -> None:
+    """Smart Routing's deliberate prompt block is a handoff, not a failure.
+
+    The runner replays the prompt on the routed model and waits for the blocked
+    turn's own ``turn/completed`` to clear the active turn, so the forwarder
+    must post no failed edge and leave that boundary intact.
+    """
+    _seed_active_turn(tmp_path, "turn_123")
+    client = _RecordingClient()
+    usage_coalescer = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
+    elicitation_tracker = fwd._CodexElicitationTaskTracker()
+    forwarder_state = fwd._CodexForwarderState()
+
+    await fwd._handle_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        event={
+            "method": "hook/completed",
+            "params": _hook_run_params(
+                status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
+            ),
+        },
+        usage_coalescer=usage_coalescer,
+        elicitation_tracker=elicitation_tracker,
+        expected_thread_id="thread_123",
+        forwarder_state=forwarder_state,
+    )
+
+    assert client.posts == []
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id == "turn_123"
+
+    await fwd._handle_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        event={
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread_123",
+                "turn": {"id": "turn_123", "status": "completed", "items": [], "error": None},
+            },
+        },
+        usage_coalescer=usage_coalescer,
+        elicitation_tracker=elicitation_tracker,
+        expected_thread_id="thread_123",
+        forwarder_state=forwarder_state,
+    )
+
+    assert client.posts == [
+        (
+            "/v1/sessions/conv_x/events",
+            {
+                "type": "external_session_status",
+                "data": {"status": "idle", "response_id": "codex_turn_123"},
+            },
+        )
+    ]
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id is None

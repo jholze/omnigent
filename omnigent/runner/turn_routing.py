@@ -112,6 +112,10 @@ ADVERTISEMENT_FILE = "turn_router.json"
 #: the pane fast-skip on a verdict that was never theirs. The session id (and
 #: the decision it belongs to) go INSIDE the file and a mismatch reads as
 #: absent; see :func:`turn_routing_marker_present`.
+#: Reason the codex route-turn hook attaches when it blocks the first prompt so
+#: the runner can replay it on the routed model. The forwarder recognizes this
+#: prefix so the handoff is not surfaced as a hook rejection.
+ROUTED_PROMPT_BLOCK_PREFIX = "Smart Routing selected "
 MARKER_FILE = "turn_routing_done"
 
 #: Bridge-dir file holding the prompt a routed verdict still owes a replay.

@@ -66,6 +66,7 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
     replay_dead_letters,
 )
+from omnigent.runner.turn_routing import ROUTED_PROMPT_BLOCK_PREFIX
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger(__name__)
@@ -1143,7 +1144,9 @@ def _terminal_error_from_hook_run(params: _JsonObject) -> _CodexTerminalError | 
     ``blocked`` or ``stopped`` ends the turn with zero items and a clean
     ``turn/completed``, so this notification is the only carrier of the reason
     the TUI prints as "Blocked by hook" plus the hook's output. Other hook
-    events and statuses leave the turn running and yield ``None``.
+    events and statuses leave the turn running and yield ``None``, as does
+    Smart Routing's own block: the runner replays that prompt on the routed
+    model, so the ordinary ``turn/completed`` boundary must stay in charge.
 
     :param params: Codex ``hook/completed`` params.
     :returns: Generic-classified error naming the outcome, the hook's output
@@ -1165,6 +1168,8 @@ def _terminal_error_from_hook_run(params: _JsonObject) -> _CodexTerminalError | 
         and isinstance(entry.get("text"), str)
         and entry["text"].strip()
     ]
+    if any(text.startswith(ROUTED_PROMPT_BLOCK_PREFIX) for text in texts):
+        return None
     detail = "\n".join(texts)
     message = f"{label}: {detail}" if detail else label
     source_path = run.get("sourcePath")
