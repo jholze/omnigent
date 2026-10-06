@@ -139,6 +139,14 @@ async def test_cancelled_queued_request_does_not_wedge_later_messages() -> None:
                 if _queued_behind_holder():
                     break
                 await asyncio.sleep(0.02)
+            # The fixed runner exposes its ingest lock, so require the parked
+            # waiter here; this keeps the test from passing on the "cancelled
+            # before the gate" path. A pre-fix gate without the lock instead
+            # falls through to the wedge assertion below.
+            if hasattr(app.state, "ingest_locks"):
+                assert _queued_behind_holder(), (
+                    "queued request never parked behind the ingest gate"
+                )
             assert not task_queued.done()
             assert "reqQueued" not in heads
 
