@@ -941,7 +941,16 @@ def test_launch_model_pin_marks_a_bare_matching_custom_slot() -> None:
     )
 
 
-def test_launch_model_pins_the_slot_when_only_a_bare_alias_names_it() -> None:
+@pytest.mark.parametrize(
+    ("alias_env", "model", "display_name"),
+    [
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", "databricks-claude-opus-5", "Opus 5"),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", "databricks-claude-sonnet-5", "Sonnet 5"),
+    ],
+)
+def test_launch_model_pins_the_slot_when_only_a_bare_alias_names_it(
+    alias_env: str, model: str, display_name: str
+) -> None:
     """A marked launch model whose family alias is pinned bare still gets a slot.
 
     The family alias is pinned to this very model, so it names the model — but
@@ -955,23 +964,18 @@ def test_launch_model_pins_the_slot_when_only_a_bare_alias_names_it() -> None:
     config = claude_native.ClaudeNativeUcodeConfig(
         env={
             "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5",
+            alias_env: model,
         },
-        model="databricks-claude-opus-5",
+        model=model,
     )
 
-    pinned = claude_native.claude_config_with_launch_model_pinned(
-        config, "databricks-claude-opus-5[1m]"
-    )
+    pinned = claude_native.claude_config_with_launch_model_pinned(config, f"{model}[1m]")
 
     assert pinned is not None
-    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "databricks-claude-opus-5[1m]"
-    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] == "Opus 5"
+    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == f"{model}[1m]"
+    assert pinned.env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] == display_name
     assert config.env.get("ANTHROPIC_CUSTOM_MODEL_OPTION") is None
-    assert (
-        claude_model_command_arg("databricks-claude-opus-5[1m]", pinned.env)
-        == "databricks-claude-opus-5[1m]"
-    )
+    assert claude_model_command_arg(f"{model}[1m]", pinned.env) == f"{model}[1m]"
 
 
 @pytest.mark.parametrize(
