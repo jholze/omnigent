@@ -240,9 +240,7 @@ def register_agent_routes(
                 code=ErrorCode.INTERNAL_ERROR,
             )
         try:
-            bundle_bytes = await asyncio.to_thread(
-                artifact_store.get, agent.bundle_location
-            )
+            bundle_bytes = await asyncio.to_thread(artifact_store.get, agent.bundle_location)
         except KeyError as exc:
             raise agent_bundle_missing_error(agent) from exc
         return Response(
