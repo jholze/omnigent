@@ -129,22 +129,22 @@ describe("live cross-device merge", () => {
     expect(reloaded.isConversationUnseen("conv-1", 2_000, "idle")).toBe(false);
   });
 
-  it("keeps a local explicit-unread override through a server read without the flag — a stale replica can't revert Mark as unread", async () => {
+  it("keeps an explicitly-unread session visibly unread through a stale higher server read — a replica can't revert Mark as unread", async () => {
     const mod = await loadFresh();
-    vi.useFakeTimers({ now: 5_000_000 });
-    // Read up to 3_000, then Mark as unread lowers the baseline to 1_999.
+    // Read up to 3_000 on the server, then Mark as unread here: the baseline
+    // drops to 1_999 and the explicit flag is set.
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000 }]);
     mod.markConversationUnread("conv-1", 2_000); // baseline 1_999 + override
-    vi.setSystemTime(5_010_000); // past the post-write grace window
 
-    // A replica that never saw the PUT still serves the pre-mark read (3_000,
-    // not unread). Adopting its cleared flag would silently undo the action.
+    // A replica that missed the unread PUT still serves the old, higher read
+    // (3_000, not unread). Raising the baseline to it would clear the dot, row
+    // and badge and undo the action, so the merge skips an explicitly-unread row.
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, viewer_unread: false }]);
 
-    // The override is sticky until the thread is reopened/read here, but the
-    // newer baseline is still adopted (so a later reopen leaves no stale dot).
+    // The dot, Inbox row and badge all read the unseen bit, so the session
+    // stays visibly unread until read/reopened here; it reconciles on reload.
     expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
-    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(true);
   });
 
   it("adopts only the baseline live — a cross-device Mark as unread reconciles on the next reload", async () => {
@@ -167,10 +167,8 @@ describe("live cross-device merge", () => {
 
   it("ignores older, equal and missing server values — a stale replica can't lower the baseline or re-flag unread", async () => {
     const mod = await loadFresh();
-    vi.useFakeTimers({ now: 5_000_000 });
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000 }]);
     mod.markConversationSeen("conv-1", 3_000);
-    vi.setSystemTime(5_010_000);
 
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 2_000, viewer_unread: true }]);
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, viewer_unread: true }]);
@@ -179,27 +177,6 @@ describe("live cross-device merge", () => {
     expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
     expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false); // baseline still 3_000
     expect(mod.isConversationUnseen("conv-1", 3_500, "idle")).toBe(true);
-  });
-
-  it("skips list values inside the grace window after a local write — an in-flight poll can't undo Mark as unread", async () => {
-    const mod = await loadFresh();
-    vi.useFakeTimers({ now: 5_000_000 });
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000 }]); // read earlier, on the server too
-    mod.markConversationUnread("conv-1", 5_000); // baseline 4_999 + override; PUT in flight
-
-    // A poll that left before the PUT landed still carries the old read.
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_unread: false }]);
-    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
-    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
-
-    // After the window the merge runs again: a stale replica serving the
-    // pre-mark read (6_000, genuinely above the 4_999 anchor) raises the
-    // activity baseline, but the explicit override is left untouched — only
-    // reopening/reading here clears it.
-    vi.setSystemTime(5_010_000);
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_unread: false }]);
-    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
-    expect(mod.isConversationUnseen("conv-1", 5_500, "idle")).toBe(false); // baseline raised to 6_000
   });
 });
 

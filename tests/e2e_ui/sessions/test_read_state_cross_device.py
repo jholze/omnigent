@@ -8,6 +8,7 @@ badge count pushed through ``setBadgeCount``).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -66,12 +67,16 @@ def three_sessions(
     """
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
-    ids = [_create_runner_bound_session(live_server, runner_id) for _ in range(3)]
+    ids: list[str] = []
     try:
+        for _ in range(3):
+            ids.append(_create_runner_bound_session(live_server, runner_id))
         yield live_server, ids
     finally:
         for sid in ids:
-            httpx.delete(f"{live_server}/v1/sessions/{sid}", timeout=10.0)
+            # Best-effort cleanup must not mask the test result.
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{sid}", timeout=10.0)
         if respawned is not None:
             respawned.terminate()
             try:
@@ -178,8 +183,9 @@ def _wait_for_list_refresh(
 ) -> bool:
     """Wait until the client has received the server's read-state for every session.
 
-    Returns ``False`` after the refresh window has elapsed without it, so the
-    caller still observes the UI rather than failing on the transport.
+    Returns whether every session reached *floor* within the refresh window, so
+    the caller can assert the mobile's own list — not some other path — carried
+    the desktop read before checking that the UI cleared.
     """
     deadline = time.monotonic() + _LIST_REFRESH_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -289,14 +295,18 @@ def test_read_on_desktop_clears_unread_on_open_mobile_client(
         mobile.screenshot(path=str(artifacts / "mobile-after-desktop-read.png"))
         print(f"mobile badge after desktop read: {_last_badge(mobile)}")
 
+        # The mobile's own list must carry the desktop read, so a cleared badge
+        # and rows below can only be the fix, not a dropped refresh.
+        assert synced, f"mobile never received the desktop read-state: {observer.seen}"
         expect(mobile.locator(_UNREAD_ROW)).to_have_count(0, timeout=15_000)
         expect(mobile.get_by_title(re.compile(r"\bunread\b"))).to_have_count(0)
-        assert _last_badge(mobile) == 0
+        _wait_badge(mobile, 0, timeout_ms=15_000)
         toggle = mobile.get_by_role("button", name="Open sidebar")
         if toggle.count() > 0:
             toggle.tap()
-            for sid in session_ids:
-                expect(_unread_dot(_row(mobile, sid))).to_have_count(0)
+        for sid in session_ids:
+            expect(_row(mobile, sid)).to_be_visible()
+            expect(_unread_dot(_row(mobile, sid))).to_have_count(0)
     finally:
         mobile_ctx.close()
         desktop_ctx.close()

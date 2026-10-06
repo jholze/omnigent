@@ -10,7 +10,8 @@
 // source; the server seed only ever *raises* a baseline (max-merge), and a
 // list refresh re-raises it from a newer server value, so a read on another
 // device clears an activity dot here without a reload. An explicit "Mark as
-// unread" is local and sticky; it reconciles across devices on reload.
+// unread" is local and sticky: a stale replica can't clear it, and a full
+// seed adopts an explicit unread set on another device.
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -94,12 +95,6 @@ hydrateFromStorage();
 // device's read clears the dot here without a reload.
 const seeded = new Set<string>();
 
-// Wall-clock ms of each conversation's last local write. A list value inside
-// the grace window may predate that write (an in-flight poll or push), so the
-// live merge skips it; the next refresh carries the post-write state.
-const localWriteAt = new Map<string, number>();
-const LOCAL_WRITE_GRACE_MS = 5_000;
-
 // Until the first seed runs we don't know the server's baselines, so the
 // automatic mark-seen (useMarkConversationSeen) must NOT write — a deep-link
 // / reload into /c/{id} mounts ChatPage synchronously, before the list loads,
@@ -118,7 +113,6 @@ export function nowSeconds(): number {
  * call when there's no baseline to report (nothing meaningful to sync).
  */
 async function syncReadState(conversationId: string): Promise<void> {
-  localWriteAt.set(conversationId, Date.now());
   const lastSeen = lastSeenMap[conversationId];
   if (lastSeen === undefined) return;
   try {
@@ -142,19 +136,19 @@ export interface ReadStateSeed {
 
 /**
  * Live merge for an already-seeded conversation: raise the seen baseline to a
- * strictly-newer server value (a read on another device), clearing an activity
- * dot here without a reload. Older, equal, missing, or in-grace values are
- * ignored so a stale replica or in-flight poll can't lower it. The merge leaves
- * the explicit-unread override alone — a replica that missed a read-state PUT
- * serves pre-write state, so clearing or resurrecting the flag here would revert
- * a user action; the explicit flag reconciles on the next full seed, not live.
+ * strictly-newer server value (a read on another device), which clears an
+ * activity dot here without a reload. Older, equal and missing values are
+ * ignored, so a stale replica can't lower the baseline. An explicitly-unread
+ * conversation is skipped: the local "Mark as unread" is authoritative, and a
+ * replica that missed the read-state PUT would otherwise serve a pre-mark read,
+ * raise the baseline and clear the dot, reverting the user's action. It stays
+ * unread until the user reads or reopens it here.
  */
-function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
+function mergeNewerServerReadState(conv: ReadStateSeed): boolean {
   if (typeof conv.viewer_last_seen !== "number") return false;
+  if (explicitlyUnread.has(conv.id)) return false;
   const local = lastSeenMap[conv.id];
   if (local !== undefined && conv.viewer_last_seen <= local) return false;
-  const writtenAt = localWriteAt.get(conv.id);
-  if (writtenAt !== undefined && now - writtenAt < LOCAL_WRITE_GRACE_MS) return false;
   lastSeenMap[conv.id] = conv.viewer_last_seen;
   return true;
 }
@@ -171,10 +165,9 @@ function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
  */
 export function seedReadState(conversations: readonly ReadStateSeed[]): void {
   let changed = false;
-  const now = Date.now();
   for (const conv of conversations) {
     if (seeded.has(conv.id)) {
-      if (mergeNewerServerReadState(conv, now)) changed = true;
+      if (mergeNewerServerReadState(conv)) changed = true;
       continue;
     }
     seeded.add(conv.id);
@@ -228,7 +221,6 @@ export function resetReadStateForTests(): void {
   lastSeenMap = {};
   explicitlyUnread.clear();
   seeded.clear();
-  localWriteAt.clear();
   hydrated = false;
   try {
     globalThis.localStorage?.removeItem(STORAGE_KEY);
