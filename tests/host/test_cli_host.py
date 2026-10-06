@@ -976,39 +976,6 @@ def test_host_background_trusts_daemon_registration_stamp(
     assert terminated == []
 
 
-def test_daemon_record_rewrite_preserves_registration_stamp(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CLI-side record rewrites carry the daemon's ``registered_at`` through.
-
-    ``_update_daemon_resolved_server_url`` re-writes the record from the
-    parsed dataclass; a parse that dropped the stamp would erase the daemon's
-    registration evidence mid-startup.
-    """
-    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
-    target = "https://example.databricksapps.com"
-    cli_module._write_daemon_record(
-        cli_module._HostDaemonRecord(
-            pid=4242,
-            target=target,
-            mode="server",
-            server_url=target,
-            log_path=None,
-            started_at=int(time.time()),
-            registered_at=123456789,
-        )
-    )
-
-    read = cli_module._find_daemon_record(target)
-    assert read is not None and read.registered_at == 123456789
-
-    cli_module._update_daemon_resolved_server_url(target, "http://127.0.0.1:6767")
-
-    again = cli_module._find_daemon_record(target)
-    assert again is not None and again.registered_at == 123456789
-
-
 def test_daemon_record_rewrite_waits_for_daemon_stamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1017,7 +984,7 @@ def test_daemon_record_rewrite_waits_for_daemon_stamp(
 
     The daemon stamps ``registered_at`` while local startup rewrites
     ``resolved_server_url``; without the writer lock the CLI could read before
-    the stamp and write afterwards, erasing it.
+    the stamp and write afterwards, erasing it. Both fields must parse back.
     """
     fcntl = pytest.importorskip("fcntl")
     import threading

@@ -1300,7 +1300,12 @@ class _AckThenDisconnectTunnel:
             self._acked = True
             return encode_frame(PingFrame(ts=1))
         if self._record_path is not None:
-            self.record_after_ack = json.loads(self._record_path.read_text())
+            # The stamp is written off the receive loop; give it a moment.
+            for _ in range(200):
+                self.record_after_ack = json.loads(self._record_path.read_text())
+                if self.record_after_ack.get("registered_at") is not None:
+                    break
+                await asyncio.sleep(0.01)
         raise ConnectionError("test disconnect")
 
 
@@ -2173,6 +2178,53 @@ async def test_serve_frames_stamps_registration_on_first_server_frame(tmp_path: 
     assert tunnel.record_after_ack is not None
     assert isinstance(tunnel.record_after_ack["registered_at"], int)
     assert json.loads(record_path.read_text())["registered_at"] is None
+
+
+class _AckThenPongWatchTunnel(_AckThenDisconnectTunnel):
+    """Ack tunnel that notes whether the stamp had landed when the pong was sent."""
+
+    def __init__(self, record_path: Path) -> None:
+        super().__init__(record_path)
+        self.stamped_before_pong: bool | None = None
+
+    async def recv(self) -> str:
+        if not self._acked:
+            return await super().recv()
+        for _ in range(400):
+            if len(self.sent) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        assert self._record_path is not None
+        payload = json.loads(self._record_path.read_text())
+        self.stamped_before_pong = payload.get("registered_at") is not None
+        return await super().recv()
+
+
+async def test_serve_frames_dispatches_frames_while_stamp_write_is_slow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow registry write must not hold back the ack ping's pong."""
+    record_path, lock = _owned_daemon_record(tmp_path)
+    host = _make_host_process()
+    host._lifecycle_lock = lock
+    real_set = host._set_daemon_registered
+
+    def slow_set(registered: bool) -> None:
+        if registered:
+            time.sleep(0.4)
+        real_set(registered)
+
+    monkeypatch.setattr(host, "_set_daemon_registered", slow_set)
+    tunnel = _AckThenPongWatchTunnel(record_path)
+
+    with pytest.raises(ConnectionError, match="test disconnect"):
+        await host._serve_frames(tunnel)  # type: ignore[arg-type] — duck-typed ws
+    await asyncio.gather(*host._frame_tasks, return_exceptions=True)
+
+    assert len(tunnel.sent) >= 2, "the ack ping was never answered"
+    assert tunnel.stamped_before_pong is False
+    assert tunnel.record_after_ack is not None
+    assert isinstance(tunnel.record_after_ack["registered_at"], int)
 
 
 async def test_serve_frames_does_not_stamp_before_server_ack(tmp_path: Path) -> None:

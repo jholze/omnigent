@@ -4585,7 +4585,6 @@ class HostProcess:
                         stamp_write = asyncio.ensure_future(
                             asyncio.to_thread(self._set_daemon_registered, True)
                         )
-                        await asyncio.shield(stamp_write)
                     # Each request frame is handled on its own task so a slow
                     # handler (a model-options CLI exec, a long git walk) can't
                     # head-of-line block the frames behind it — measured
@@ -4600,11 +4599,16 @@ class HostProcess:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
             if stamp_write is not None:
-                # Let an in-flight stamp land before clearing it, off the loop.
+                # Let an in-flight stamp land before clearing it, off the loop;
+                # shielded so a cancellation during teardown still clears.
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await asyncio.shield(stamp_write)
-                with contextlib.suppress(RuntimeError):
-                    await asyncio.to_thread(self._set_daemon_registered, False)
+                with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                    await asyncio.shield(
+                        asyncio.ensure_future(
+                            asyncio.to_thread(self._set_daemon_registered, False)
+                        )
+                    )
 
     async def _harness_readiness_loop(
         self,
@@ -4675,13 +4679,11 @@ class HostProcess:
             self._raise_connection_error(frame)
 
     def _set_daemon_registered(self, registered: bool) -> None:
-        """Record in the daemon's registry record whether this tunnel is registered.
+        """Set or clear this daemon's tunnel-registration stamp.
 
         The server sends nothing but connection errors before it completes
-        registration, so the first other frame after ``host.hello`` (the
-        immediate keepalive ping this host asks for) is its acknowledgement.
-        Cleared when the tunnel drops so a reconnecting daemon is not mistaken
-        for a registered one.
+        registration, so its first other frame after ``host.hello`` is the
+        acknowledgement; the stamp is cleared when the tunnel drops.
 
         :param registered: Whether the server has acknowledged this tunnel.
         """

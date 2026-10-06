@@ -146,7 +146,11 @@ def write_daemon_record(
 
 
 def record_update_lock_path(record_path: Path) -> Path:
-    """Return the sidecar lock that serializes rewrites of *record_path*."""
+    """Return the sidecar lock that serializes rewrites of *record_path*.
+
+    One small file per target, kept after the record is deleted: unlinking it
+    could let a new writer lock a fresh inode while one is still held.
+    """
     return record_path.with_name(record_path.name + ".lock")
 
 
@@ -157,10 +161,13 @@ def read_daemon_record_text(record_path: Path) -> str:
     :returns: The record text.
     :raises OSError: If the record cannot be read.
     """
-    lock_path = record_update_lock_path(record_path)
-    if fcntl is None or not lock_path.exists():
+    if fcntl is None or not record_path.exists():
         return record_path.read_text(encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(
+        record_update_lock_path(record_path),
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
     try:
         fcntl.flock(fd, fcntl.LOCK_SH)
         return record_path.read_text(encoding="utf-8")
@@ -195,33 +202,49 @@ def _record_update_lock(record_path: Path) -> Iterator[None]:
 
 
 def update_daemon_record_fields(
-    record_path: Path, *, pid: int | None = None, **fields: object
+    record_path: Path,
+    *,
+    pid: int | None = None,
+    create: HostDaemonRecord | None = None,
+    **fields: object,
 ) -> bool:
-    """Rewrite *fields* of an existing record in place, under the writer lock.
+    """Rewrite *fields* of a record in place, under the writer lock.
 
     :param record_path: The daemon's ``<hash>.json`` registry record.
     :param pid: When given, only a record owned by this pid is rewritten.
+    :param create: Record to materialize (with *fields* applied) when none
+        exists yet; without it a missing record is left alone.
     :param fields: Record fields to replace, e.g. ``registered_at=1700000000``.
-    :returns: ``True`` when the record was rewritten; ``False`` when it is
+    :returns: ``True`` when the record was written; ``False`` when it is
         missing, malformed, unwritable, or owned by another pid.
     """
-    if not record_path.exists():
+    if create is None and not record_path.exists():
         return False
     try:
-        # One ``r+`` handle keeps the inode (the daemon's flock), fails on a
-        # record ``host stop`` removed meanwhile instead of resurrecting it, and
-        # writes back to the same file it validated.
-        with _record_update_lock(record_path), record_path.open("r+", encoding="utf-8") as handle:
-            try:
-                data = json.loads(handle.read())
-            except ValueError:
-                return False
-            if not isinstance(data, dict) or (pid is not None and data.get("pid") != pid):
-                return False
-            data.update(fields)
-            handle.seek(0)
-            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-            handle.truncate()
+        if create is not None:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+        with _record_update_lock(record_path):
+            if create is not None and not record_path.exists():
+                # Exclusive create: a daemon claiming the target meanwhile wins.
+                payload = json.dumps({**asdict(create), **fields}, indent=2, sort_keys=True)
+                with record_path.open("x", encoding="utf-8") as handle:
+                    handle.write(payload + "\n")
+                return True
+            # One ``r+`` handle keeps the inode (the daemon's flock), fails on a
+            # record ``host stop`` removed meanwhile instead of resurrecting it,
+            # and writes back to the same file it validated.
+            with record_path.open("r+", encoding="utf-8") as handle:
+                try:
+                    data = json.loads(handle.read())
+                except ValueError:
+                    _logger.debug("daemon record %s is malformed; update skipped", record_path)
+                    return False
+                if not isinstance(data, dict) or (pid is not None and data.get("pid") != pid):
+                    return False
+                data.update(fields)
+                handle.seek(0)
+                handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+                handle.truncate()
     except OSError:
         _logger.debug("daemon record update failed for %s", record_path, exc_info=True)
         return False

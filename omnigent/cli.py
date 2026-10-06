@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from importlib import import_module, resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast
@@ -2985,18 +2985,18 @@ def _update_daemon_resolved_server_url(target: str, server_url: str) -> None:
     :param server_url: Concrete server URL, e.g.
         ``"http://127.0.0.1:8123"``.
     """
+    legacy_only = not _daemon_record_path(target).exists()
     record = _find_daemon_record(target)
     if record is None:
         return
-    resolved = server_url.rstrip("/")
-    path = _daemon_record_path(record.target)
-    if _update_daemon_record_fields(path, resolved_server_url=resolved):
-        return
-    if not path.exists():
-        # A daemon known only through the legacy pidfile has no JSON record yet.
-        _write_daemon_record(
-            _HostDaemonRecord(**{**asdict(record), "resolved_server_url": resolved})
-        )
+    # Only a daemon known solely through the legacy pidfile gets a record
+    # materialized; a JSON record deleted meanwhile must stay deleted.
+    _update_daemon_record_fields(
+        _daemon_record_path(record.target),
+        pid=record.pid,
+        create=record if legacy_only else None,
+        resolved_server_url=server_url.rstrip("/"),
+    )
 
 
 def _load_existing_host_id() -> str | None:

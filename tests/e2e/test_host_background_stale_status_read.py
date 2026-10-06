@@ -1,15 +1,9 @@
-"""E2E regression: ``omnigent host --background`` must not tear down a daemon
-that already registered.
+"""Regression coverage for a registered background host behind a stale status read.
 
-``omnigent host --background`` (and ``omnigent start``) spawns a detached host
-daemon and, before reporting success, polls ``GET /v1/hosts/{host_id}`` until
-it reports ``online``, while the daemon registers over a different transport,
-the WebSocket tunnel. The test stands up a transparent reverse proxy in front
-of the e2e ``live_server`` that forwards everything, including the tunnel, but
-rewrites that single status read to ``offline``. It then runs the real
-``omnigent host --server <proxy> --background`` command: the daemon genuinely
-reaches ``online`` on the real server, so the command must exit 0 and leave the
-daemon running (pid alive, registry record intact).
+A transparent proxy in front of the e2e ``live_server`` forwards everything,
+including the host tunnel, but answers ``GET /v1/hosts/{host_id}`` with
+``offline``; the real ``omnigent host --server <proxy> --background`` must still
+exit 0 and leave the registered daemon running.
 
 Run with::
 
@@ -229,8 +223,9 @@ class _StaleStatusProxy:
             asyncio.run_coroutine_threadsafe(_shutdown(), self._loop).result(timeout=10)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
-        if not self._thread.is_alive():
-            self._loop.close()
+        if self._thread.is_alive():
+            raise AssertionError("stale-status proxy loop thread did not stop within 10s")
+        self._loop.close()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -386,9 +381,9 @@ def test_host_background_keeps_registered_daemon_on_stale_status_read(
             proc.kill()
             out, err = proc.communicate()
 
-        # A fast (fixed) success can exit before the concurrent poll observed
-        # the online transition; confirm registration once more while the
-        # daemon may still be running.
+        # A quick success can exit before the concurrent poll observed the
+        # online transition; confirm registration once more while the daemon
+        # may still be running.
         if not online_seen:
             extra_deadline = time.monotonic() + 10.0
             while time.monotonic() < extra_deadline:
@@ -401,8 +396,8 @@ def test_host_background_keeps_registered_daemon_on_stale_status_read(
                     break
                 time.sleep(POLL_INTERVAL_S)
 
-        # Precondition (holds before and after the fix): the daemon genuinely
-        # registered on the real server, so tearing it down is a bug.
+        # Precondition: the daemon genuinely registered on the real server, so
+        # tearing it down is incorrect.
         assert daemon_pid is not None, (
             "daemon record with a pid never appeared -- the background spawn "
             f"did not start a daemon. CLI stdout:\n{out}\nstderr:\n{err}"
@@ -413,9 +408,8 @@ def test_host_background_keeps_registered_daemon_on_stale_status_read(
             f"Daemon log tail:\n{_host_log_tail(tmp_path)}"
         )
 
-        # A daemon that already registered must not be torn down; with the bug
-        # the CLI reports the 30s timeout and force-kills it. ``proxy.stale_reads``
-        # is surfaced for diagnosis only: a fix may stop polling that endpoint.
+        # A daemon that already registered must not be torn down even when the
+        # status probe reads stale; ``proxy.stale_reads`` is diagnostic only.
         assert proc.returncode == 0, (
             "omnigent host --background exited non-zero for a daemon that had "
             f"already registered online (divergent readiness reads="

@@ -20,6 +20,7 @@ from omnigent.host.daemon_lifecycle import (
     normalize_daemon_target,
     record_flock_is_held,
     record_update_lock_path,
+    update_daemon_record_fields,
     write_daemon_record,
 )
 from omnigent.host.identity import HostIdentity
@@ -296,6 +297,25 @@ def test_write_daemon_record_waits_for_concurrent_writer(tmp_path: Path) -> None
     assert written.wait(5.0)
     worker.join(5.0)
     assert json.loads(record.read_text())["started_at"] == 1
+
+
+def test_update_daemon_record_fields_can_materialize_missing_record(tmp_path: Path) -> None:
+    """``create`` writes a missing record with the fields applied but never replaces one."""
+    record = daemon_record_path("local", base_dir=tmp_path)
+    template = HostDaemonRecord(
+        pid=4242, target="local", mode="local", server_url=None, log_path=None, started_at=1
+    )
+
+    assert update_daemon_record_fields(record, create=template, resolved_server_url="http://x")
+    payload = json.loads(record.read_text())
+    assert payload["pid"] == 4242
+    assert payload["resolved_server_url"] == "http://x"
+
+    _write_record(record, os.getpid())
+    assert update_daemon_record_fields(record, create=template, resolved_server_url="http://y")
+    payload = json.loads(record.read_text())
+    assert payload["pid"] == os.getpid()
+    assert payload["resolved_server_url"] == "http://y"
 
 
 def test_mark_daemon_registered_refuses_foreign_or_missing_record(tmp_path: Path) -> None:
