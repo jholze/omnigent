@@ -1284,6 +1284,7 @@ async def forward_claude_transcript_to_session(
         ) as subagent_client,
     ):
         while True:
+            fd_exhausted_this_poll = False
             try:
                 if subagent_task is not None and subagent_task.done():
                     try:
@@ -1557,18 +1558,6 @@ async def forward_claude_transcript_to_session(
                             bridge_dir=bridge_dir,
                             dedupe=dedupe,
                         )
-                if fd_exhausted_since is not None:
-                    if fd_exhaustion_outage_warned:
-                        _logger.info(
-                            "Claude transcript forwarder recovered after fd exhaustion "
-                            "(%.1fs since it began); session=%s",
-                            time.monotonic() - fd_exhausted_since,
-                            session_id,
-                            extra={"session_id": session_id},
-                        )
-                    fd_exhausted_since = None
-                    fd_exhaustion_outage_warned = False
-                next_poll_delay = poll_interval_s
             except asyncio.CancelledError:
                 await _cancel_subagent_forward_task(subagent_task)
                 raise
@@ -1583,8 +1572,6 @@ async def forward_claude_transcript_to_session(
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
-                if fd_exhausted_since is None:
-                    next_poll_delay = poll_interval_s
             except Exception as exc:
                 fd_errno = fd_exhaustion_errno(exc)
                 if fd_errno is None:
@@ -1593,10 +1580,8 @@ async def forward_claude_transcript_to_session(
                         session_id,
                         extra={"session_id": session_id},
                     )
-                    # Reset only outside an fd outage; mid-outage keep the backed-off delay.
-                    if fd_exhausted_since is None:
-                        next_poll_delay = poll_interval_s
                 else:
+                    fd_exhausted_this_poll = True
                     now = time.monotonic()
                     if fd_exhausted_since is None:
                         fd_exhausted_since = now
@@ -1620,6 +1605,21 @@ async def forward_claude_transcript_to_session(
                         extra={"session_id": session_id},
                     )
                     next_poll_delay = _fd_exhaustion_poll_delay(next_poll_delay, poll_interval_s)
+            if not fd_exhausted_this_poll:
+                # Any other outcome got past the descriptor-dependent reads, so the
+                # fd outage is over even when the poll failed for another reason.
+                if fd_exhausted_since is not None:
+                    if fd_exhaustion_outage_warned:
+                        _logger.info(
+                            "Claude transcript forwarder recovered after fd exhaustion "
+                            "(%.1fs since it began); session=%s",
+                            time.monotonic() - fd_exhausted_since,
+                            session_id,
+                            extra={"session_id": session_id},
+                        )
+                    fd_exhausted_since = None
+                    fd_exhaustion_outage_warned = False
+                next_poll_delay = poll_interval_s
             try:
                 await _poll_sleep(next_poll_delay)
             except asyncio.CancelledError:

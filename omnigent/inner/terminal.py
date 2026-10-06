@@ -367,6 +367,10 @@ class _TmuxProcessStartError(RuntimeError):
     """A tmux subprocess transiently could not start, so liveness is unknown."""
 
 
+class _TmuxSpawnFailedError(RuntimeError):
+    """A tmux subprocess could not start for a permanent reason (missing binary, EACCES)."""
+
+
 def _is_transient_tmux_process_start_error(exc: OSError) -> bool:
     """Return whether a tmux process launch can reasonably be retried."""
     return exc.errno in _TRANSIENT_TMUX_PROCESS_START_ERRNOS
@@ -383,7 +387,7 @@ def _tmux_process_start_error(cmd: list[str], exc: OSError) -> RuntimeError:
     detail = f"tmux command could not start: {' '.join(cmd)}: {exc}"
     if _is_transient_tmux_process_start_error(exc):
         return _TmuxProcessStartError(detail)
-    return RuntimeError(detail)
+    return _TmuxSpawnFailedError(detail)
 
 
 # Unrecognized failures leave liveness unknown and are retried.
@@ -1975,16 +1979,16 @@ class TerminalInstance:
                 self._probe_start_outage_warned = True
             failures = self._probe_start_failures
             delay = _probe_start_backoff(failures)
+        detail = ["%d failed attempt(s) over %.1fs"]
+        args: list[object] = [probe, self.name, self.session_key, failures, now - began]
+        if retrying:
+            detail.append("retrying in %.1fs")
+            args.append(delay)
         logger.log(
             logging.WARNING if warn else logging.DEBUG,
             "tmux %s probe could not start for terminal %s:%s; liveness remains unknown "
-            "(%d failed attempt(s) over %.1fs%s): %s",
-            probe,
-            self.name,
-            self.session_key,
-            failures,
-            now - began,
-            f", retrying in {delay:.1f}s" if retrying else "",
+            f"({', '.join(detail)}): %s",
+            *args,
             exc,
         )
 
@@ -2397,7 +2401,8 @@ class TerminalInstance:
             )
             return None
         except RuntimeError as exc:
-            self._record_probe_started()
+            if not isinstance(exc, _TmuxSpawnFailedError):
+                self._record_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             return False
@@ -2427,8 +2432,9 @@ class TerminalInstance:
         except _TmuxProcessStartError as exc:
             self._record_probe_start_failure("pane-death", exc)
             return None
-        except RuntimeError:
-            self._record_probe_started()
+        except RuntimeError as exc:
+            if not isinstance(exc, _TmuxSpawnFailedError):
+                self._record_probe_started()
             return False
         self._record_probe_started()
         self._remember_exit_status(out)
@@ -2587,8 +2593,9 @@ class TerminalInstance:
         except _TmuxProcessStartError as exc:
             self._record_probe_start_failure("pane-death", exc)
             return None
-        except RuntimeError:
-            self._record_probe_started()
+        except RuntimeError as exc:
+            if not isinstance(exc, _TmuxSpawnFailedError):
+                self._record_probe_started()
             return False
         self._record_probe_started()
         self._remember_exit_status(out)
@@ -2615,7 +2622,8 @@ class TerminalInstance:
             )
             return None
         except RuntimeError as exc:
-            self._record_probe_started()
+            if not isinstance(exc, _TmuxSpawnFailedError):
+                self._record_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             return False

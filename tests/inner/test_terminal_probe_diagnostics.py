@@ -487,9 +487,9 @@ def test_probe_start_bookkeeping_survives_concurrent_failures_and_recoveries(
             thread.start()
         for thread in threads:
             thread.join(timeout=30)
+            assert not thread.is_alive(), f"thread {thread.name} did not finish within 30s"
 
     assert not errors, errors
-    assert all(not thread.is_alive() for thread in threads)
     if instance._probe_start_outage_began is None:
         assert instance._probe_start_failures == 0
     else:
@@ -614,3 +614,50 @@ async def test_inconclusive_probe_that_started_closes_the_outage(
         if r.levelno == logging.INFO and "tmux probes can start again" in r.getMessage()
     ]
     assert len(recovered) == 1
+
+
+@pytest.mark.parametrize("probe", ["has-session", "pane-death"])
+@pytest.mark.parametrize("variant", ["sync", "async"])
+async def test_permanent_spawn_failure_does_not_end_the_outage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, variant: str, probe: str
+) -> None:
+    """A missing or unrunnable tmux binary is not a started probe, so no recovery is logged."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._record_probe_start_failure(
+        "capture-pane", OSError(errno.EMFILE, "Too many open files", "tmux")
+    )
+    permanent = terminal_mod._tmux_process_start_error(
+        ["tmux", probe], FileNotFoundError(errno.ENOENT, "tmux not found")
+    )
+
+    def raise_sync(*args: str) -> str:
+        raise permanent
+
+    async def raise_async(*args: str) -> str:
+        raise permanent
+
+    with caplog.at_level(logging.INFO, logger=terminal_mod.__name__):
+        if variant == "sync":
+            instance._tmux_output_sync = raise_sync  # type: ignore[method-assign]
+            result = (
+                instance._tmux_session_exists_sync()
+                if probe == "has-session"
+                else instance._pane_is_dead()
+            )
+        else:
+            instance._tmux_output = raise_async  # type: ignore[method-assign]
+            result = await (
+                instance._tmux_session_exists_async()
+                if probe == "has-session"
+                else instance._pane_is_dead_async()
+            )
+
+    assert result is False
+    assert instance._probe_start_outage_began is not None
+    assert not [r for r in caplog.records if "tmux probes can start again" in r.getMessage()]

@@ -190,7 +190,10 @@ def test_real_process_raises_its_own_soft_limit() -> None:
             "import json, resource\n"
             "from omnigent.util.open_file_limit import raise_soft_open_file_limit\n"
             "_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
-            "resource.setrlimit(resource.RLIMIT_NOFILE, (min(_soft, 256), hard))\n"
+            "inherited = 256 if _soft == resource.RLIM_INFINITY else min(_soft, 256)\n"
+            "if hard != resource.RLIM_INFINITY:\n"
+            "    inherited = min(inherited, hard)\n"
+            "resource.setrlimit(resource.RLIMIT_NOFILE, (inherited, hard))\n"
             "raised = raise_soft_open_file_limit()\n"
             "print(json.dumps([list(raised), list(resource.getrlimit(resource.RLIMIT_NOFILE)),"
             " hard == resource.RLIM_INFINITY]))\n",
