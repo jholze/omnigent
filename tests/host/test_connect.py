@@ -6828,16 +6828,17 @@ async def test_server_application_pings_keep_the_tunnel_open(
 ) -> None:
     """Each server frame resets the silence watchdog, so a live tunnel is never dropped.
 
-    The pings arrive well inside the (shortened) silence budget but keep coming
-    for twice that budget; the host answers each and never aborts the socket.
-    The watchdog also dies with the connection instead of firing afterwards.
+    Pings arrive at a tenth of the (shortened) silence budget, so only a
+    multi-second stall could expire it, and they keep coming for longer than
+    that budget; the host answers each and never aborts the socket. The
+    watchdog also dies with the connection instead of firing afterwards.
     """
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_CAP_S", 0.0)
-    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 1.0)
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
-    pings = [encode_frame(PingFrame(ts=i)) for i in range(6)]
+    pings = [encode_frame(PingFrame(ts=i)) for i in range(15)]
     tunnel = _SilentPeerTunnel(pings, interval=0.1, then=ConnectionClosedError(None, None))
     spy = _ConnectSpy([tunnel, asyncio.CancelledError()])
     _patch_connect(monkeypatch, spy)
@@ -6845,7 +6846,7 @@ async def test_server_application_pings_keep_the_tunnel_open(
 
     with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
         await host.run()
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.2)
 
     assert not tunnel.transport.aborted.is_set()
     assert not [m for m in caplog.messages if m.startswith("No frame from the server")]
@@ -6853,7 +6854,7 @@ async def test_server_application_pings_keep_the_tunnel_open(
     for raw in tunnel.sent:
         with contextlib.suppress(ValueError):
             pongs.append(decode_frame(raw))
-    assert [frame.ts for frame in pongs if isinstance(frame, PongFrame)] == list(range(6))
+    assert [frame.ts for frame in pongs if isinstance(frame, PongFrame)] == list(range(15))
 
 
 async def test_connection_error_frame_fails_loudly_on_live_receive_path() -> None:

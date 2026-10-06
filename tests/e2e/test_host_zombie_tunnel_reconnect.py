@@ -219,8 +219,10 @@ def _run_sever_case(tmp_path: Path, *, zombie: bool, deadline_s: float) -> None:
                 )
 
             try:
-                elapsed = wait_until(
-                    recovered, timeout=deadline_s, what="the host to notice and reconnect"
+                wait_until(
+                    recovered,
+                    timeout=max(0.0, deadline_s - (time.monotonic() - severed_at)),
+                    what="the host to notice and reconnect",
                 )
             except AssertionError as exc:
                 status = host_status(client, host.host_id)
@@ -230,6 +232,7 @@ def _run_sever_case(tmp_path: Path, *, zombie: bool, deadline_s: float) -> None:
                     f"application frames ({cut})\n"
                     f"{_describe(host, status, time.monotonic() - severed_at)}"
                 ) from exc
+            elapsed = time.monotonic() - severed_at
             assert elapsed <= RECONNECT_DEADLINE_S, (
                 f"host reconnected only after {elapsed:.0f}s (> {RECONNECT_DEADLINE_S:.0f}s)\n"
                 f"{_describe(host, 'online', elapsed)}"

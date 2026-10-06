@@ -4152,9 +4152,8 @@ class HostProcess:
                     # outside the silent-churn gate so wake never takes the slow path.
                     woke = self._woke_from_suspend
                     self._woke_from_suspend = False
-                    # The silence watchdog dropped a tunnel the server stopped
-                    # pinging: the drop is ours and the server is expected to
-                    # be reachable, so reconnect as promptly as after a wake,
+                    # Watchdog-dropped tunnel: the drop is ours and the server is
+                    # likely reachable, so reconnect as promptly as after a wake,
                     # unless the endpoint keeps accepting without ever speaking.
                     server_silent = self._server_silent
                     self._server_silent = False

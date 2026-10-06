@@ -142,6 +142,8 @@ class ZombieTunnelProxy:
             self._server = None
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
+        if not self._thread.is_alive():
+            self._loop.close()
 
     def wait_for_tunnel(self, timeout: float = 60.0) -> None:
         """Block until at least one host tunnel has been forwarded upstream."""
