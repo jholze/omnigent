@@ -76,6 +76,10 @@ class _Timeline:
                 cur_end = end
             else:
                 cur_end = max(cur_end, end)
+        # A socket that closed with no replacement before the recording ended
+        # leaves a trailing outage up to that end time.
+        if self.ended is not None:
+            gap = max(gap, self.ended - cur_end)
         return gap
 
 

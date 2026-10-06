@@ -81,6 +81,7 @@ class LifetimeProxy:
         self._thread = threading.Thread(target=self._run, name="ws-lifetime-proxy", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=10):
+            self.stop()
             raise RuntimeError("lifetime proxy did not start within 10s")
 
     def stop(self) -> None:

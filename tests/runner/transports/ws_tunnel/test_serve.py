@@ -2689,9 +2689,7 @@ async def test_serve_tunnel_resets_backoff_after_stable_connection_drops(
     outcomes = iter(["error", "error", "stable_drop", "stop"])
     sleeps: list[float] = []
     handshakes: list[tuple[int, bool, float | None]] = []
-    # Drive the stable attempt's connection age off a semantic flag rather than
-    # a fixed call count: the reconnect loop and the asyncio loop both read the
-    # clock, so a count-based stub is sensitive to incidental loop cycling.
+    # Use connection state so unrelated clock reads do not affect the simulated age.
     connected_flag = [False]
 
     def _fake_monotonic() -> float:
@@ -3148,3 +3146,76 @@ async def test_serve_tunnel_cutover_reuses_minted_token_and_records_each_generat
     assert mint_calls == 2, "the loop top re-minted instead of reusing the renewal token"
     assert connects == 2, f"expected one connect per generation, got {connects}"
     assert disconnects == 2, f"expected one disconnect per generation, got {disconnects}"
+
+
+@pytest.mark.asyncio
+async def test_serve_tunnel_graceful_shutdown_callback_fires_once_across_cutover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_graceful_shutdown fires once even when a drained generation also drains.
+
+    After a cutover the superseded connection keeps the same callback, so a
+    graceful shutdown reaches the drain on both the draining and the live
+    generation. The callback must still fire at most once per serve_tunnel.
+    """
+    shutdown_event = asyncio.Event()
+    graceful_calls = 0
+    generations = 0
+
+    def _count_graceful() -> None:
+        nonlocal graceful_calls
+        graceful_calls += 1
+
+    monkeypatch.setattr(serve_module, "touch_connect_marker", lambda: None)
+    monkeypatch.setattr(serve_module, "record_websocket_connected", lambda *a, **k: None)
+    monkeypatch.setattr(serve_module, "record_websocket_disconnected", lambda *a, **k: None)
+
+    async def _serve_once(
+        app: Any,
+        *,
+        on_connected: Any = None,
+        on_prepare_renewal: Any = None,
+        renewal_signal: asyncio.Future[str | None] | None = None,
+        on_graceful_shutdown: Any = None,
+        **_kwargs: Any,
+    ) -> None:
+        del app
+        nonlocal generations
+        generations += 1
+        if on_connected is not None:
+            on_connected()
+        if generations == 1:
+            # Superseded generation: signal a cutover, then drain on shutdown.
+            assert on_prepare_renewal is not None
+            assert renewal_signal is not None
+            renewal_signal.set_result(await on_prepare_renewal())
+            await shutdown_event.wait()
+            if on_graceful_shutdown is not None:
+                on_graceful_shutdown()
+            return
+        # Replacement generation: trigger the graceful shutdown of both.
+        shutdown_event.set()
+        if on_graceful_shutdown is not None:
+            on_graceful_shutdown()
+
+    monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
+
+    await asyncio.wait_for(
+        serve_tunnel(
+            _noop_app,
+            server_url="http://127.0.0.1:8000",
+            runner_id="runner_graceful_once",
+            runner_version="0.1.0",
+            auth_token="initial",
+            auth_token_factory=lambda: "minted",
+            shutdown_event=shutdown_event,
+            on_graceful_shutdown=_count_graceful,
+        ),
+        timeout=5.0,
+    )
+    await asyncio.sleep(0)
+
+    assert generations == 2, "the replacement connection never opened"
+    assert graceful_calls == 1, (
+        f"on_graceful_shutdown fired {graceful_calls} times; the once-latch did not hold"
+    )

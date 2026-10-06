@@ -472,9 +472,10 @@ async def serve_tunnel(
         draining.discard(task)
         cancelled = task.cancelled()
         error = None if cancelled else task.exception()
-        # Only a real graceful shutdown is a local shutdown; a drain cancelled by
-        # a fatal exit must not mask that failure in disconnect-reason metrics.
-        local_shutdown = shutdown_event is not None and shutdown_event.is_set()
+        # A drain is only cancelled when serve_tunnel itself is torn down, which
+        # the main path also treats as a local shutdown; keep the two aligned so
+        # a teardown is not logged as an unexpected server-seen drop.
+        local_shutdown = cancelled or (shutdown_event is not None and shutdown_event.is_set())
         record_websocket_disconnected(
             "runner",
             error,
@@ -501,6 +502,22 @@ async def serve_tunnel(
         # A None mint is a valid no-auth state (see _refresh_auth_token);
         # keep the current token so renewal still replaces the socket.
         return auth_token if token is None else token
+
+    # After a cutover the superseded connection keeps the same callback, so a
+    # later graceful shutdown would reach the drain on both the draining and
+    # live generations. Latch it so on_graceful_shutdown fires at most once.
+    graceful_shutdown_once = on_graceful_shutdown
+    if on_graceful_shutdown is not None:
+        graceful_fired = False
+
+        def _fire_graceful_shutdown_once() -> None:
+            nonlocal graceful_fired
+            if graceful_fired:
+                return
+            graceful_fired = True
+            on_graceful_shutdown()
+
+        graceful_shutdown_once = _fire_graceful_shutdown_once
 
     try:
         while True:
@@ -543,7 +560,7 @@ async def serve_tunnel(
                         auth_token=auth_token,
                         tunnel_token=tunnel_token,
                         shutdown_event=shutdown_event,
-                        on_graceful_shutdown=on_graceful_shutdown,
+                        on_graceful_shutdown=graceful_shutdown_once,
                         on_connected=_mark_connected,
                         on_ready=_notify_reconnected if reconnecting else None,
                         on_resume_note=_note_resume_from_suspend,
