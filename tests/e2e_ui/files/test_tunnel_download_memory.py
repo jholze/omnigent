@@ -1,6 +1,6 @@
 """E2E: a slow browser download must not make the server buffer the whole file.
-The viewer's capped preview read is drained before baselining, so growth is
-measured on the ``?download=true`` streaming path only (see DISPUTE-ANALYSIS.md)."""
+The viewer's capped preview read is awaited and server RSS settled before the
+link is throttled and baselined, so the measured growth is the download's alone."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Response, expect
 
 from tests.e2e_ui.conftest import open_right_rail
 
@@ -25,16 +26,14 @@ _LINK_RATE_BYTES_PER_S = 1_500_000
 # Headroom for ordinary RSS jitter over the download; buffering even a
 # quarter of the file would exceed it.
 _MAX_SERVER_GROWTH_MIB = 16.0
-# The preview envelope frees once its response is sent; wait for RSS to drop
-# back to within this margin of the pre-preview baseline before measuring.
-_PREVIEW_SETTLE_MARGIN_MIB = 20.0
-_PREVIEW_SETTLE_TIMEOUT_S = 30.0
+_RSS_SETTLE_WINDOW_S = 1.0
+_RSS_SETTLE_TIMEOUT_S = 15.0
 
 
 class SlowLinkProxy:
     """Loopback TCP proxy that caps server->browser throughput.
-    It reads one rate slice per tick, so TCP backpressure reaches the server
-    exactly as a slow client link would."""
+    It reads one rate slice from the server per tick, so TCP backpressure
+    reaches the server exactly as a slow client link would."""
 
     def __init__(self, upstream_port: int) -> None:
         self._upstream_port = upstream_port
@@ -135,25 +134,33 @@ def _server_rss_kib(pid: int) -> int:
     raise AssertionError(f"no VmRSS for pid {pid}")
 
 
-def _await_preview_drained(pid: int, baseline_kib: int, timeout_s: float) -> None:
-    """Wait for the preview envelope to allocate (RSS rises) and then free.
-    Block until the rise is observed and RSS falls back near ``baseline_kib``
-    so the download measured afterwards starts clean."""
-    rise_kib = baseline_kib + 15 * 1024
-    settle_kib = baseline_kib + _PREVIEW_SETTLE_MARGIN_MIB * 1024
-    deadline = time.monotonic() + timeout_s
-    rose = False
+def _settled_server_rss_kib(pid: int) -> int:
+    """Return the server RSS once it has held still for a short window.
+    Best-effort: after the timeout the latest reading is returned."""
+    deadline = time.monotonic() + _RSS_SETTLE_TIMEOUT_S
+    last = _server_rss_kib(pid)
+    still_since = time.monotonic()
     while time.monotonic() < deadline:
-        rss = _server_rss_kib(pid)
-        rose = rose or rss >= rise_kib
-        if rose and rss <= settle_kib:
-            return
         time.sleep(0.2)
-    raise AssertionError(
-        f"preview envelope did not allocate-then-release within {timeout_s:.0f}s "
-        f"(baseline {baseline_kib / 1024:.1f} MiB, rose={rose}); "
-        "cannot isolate the download measurement"
-    )
+        current = _server_rss_kib(pid)
+        if abs(current - last) > 1024:
+            still_since = time.monotonic()
+        last = current
+        if time.monotonic() - still_since >= _RSS_SETTLE_WINDOW_S:
+            break
+    return last
+
+
+def _is_preview_read(file_name: str) -> Callable[[Response], bool]:
+    def matches(response: Response) -> bool:
+        url = urlparse(response.url)
+        return (
+            response.request.method == "GET"
+            and url.path.endswith(f"/filesystem/{file_name}")
+            and "download=true" not in url.query
+        )
+
+    return matches
 
 
 def test_slow_download_keeps_server_memory_flat(
@@ -189,17 +196,24 @@ def test_slow_download_keeps_server_memory_flat(
     )
     expect(row).to_be_visible(timeout=30_000)
 
-    # Opening the viewer issues the capped preview read; its envelope frees
-    # only after the response is sent, so wait for that allocate-then-release
-    # before measuring so the download starts from a clean baseline.
     pre_preview_kib = _server_rss_kib(server_pid)
-    row.click()
+    with page.expect_response(_is_preview_read(_FILE_NAME), timeout=30_000) as preview_info:
+        row.click()
     expect(rail.get_by_test_id("file-viewer")).to_be_visible()
-    proxy.set_rate(_LINK_RATE_BYTES_PER_S)
-    _await_preview_drained(server_pid, pre_preview_kib, _PREVIEW_SETTLE_TIMEOUT_S)
-    rail.get_by_role("button", name="View settings").click()
+    preview = preview_info.value
+    assert preview.ok, f"preview read failed: {preview.status} {preview.url}"
+    assert preview.finished() is None, "preview read did not complete"
+    post_preview_kib = _server_rss_kib(server_pid)
 
-    baseline_kib = _server_rss_kib(server_pid)
+    # The Download action only appears once the preview has loaded; settling
+    # first keeps the preview's release out of the download measurement.
+    baseline_kib = _settled_server_rss_kib(server_pid)
+    rail.get_by_role("button", name="View settings").click()
+    download_item = page.get_by_role("menuitem", name="Download file")
+    expect(download_item).to_be_visible()
+
+    proxy.set_rate(_LINK_RATE_BYTES_PER_S)
+    received_before = proxy.bytes_to_client
     samples: list[tuple[float, int, int]] = []
     stop = threading.Event()
     started = time.monotonic()
@@ -210,7 +224,7 @@ def test_slow_download_keeps_server_memory_flat(
                 (
                     round(time.monotonic() - started, 2),
                     _server_rss_kib(server_pid),
-                    proxy.bytes_to_client,
+                    proxy.bytes_to_client - received_before,
                 )
             )
             stop.wait(0.5)
@@ -219,7 +233,7 @@ def test_slow_download_keeps_server_memory_flat(
     sampler.start()
     try:
         with page.expect_download() as download_info:
-            page.get_by_role("menuitem", name="Download file").click()
+            download_item.click()
         download = download_info.value
         saved = tmp_path / _FILE_NAME
         download.save_as(saved)
@@ -236,6 +250,10 @@ def test_slow_download_keeps_server_memory_flat(
         "session_id": session_id,
         "base_url": base_url,
         "server_pid": server_pid,
+        "preview_content_type": preview.headers.get("content-type"),
+        "preview_content_length": preview.headers.get("content-length"),
+        "pre_preview_rss_mib": round(pre_preview_kib / 1024, 1),
+        "post_preview_rss_mib": round(post_preview_kib / 1024, 1),
         "baseline_rss_mib": round(baseline_kib / 1024, 1),
         "peak_rss_mib": round(peak_kib / 1024, 1),
         "peak_growth_mib": round(growth_mib, 1),
@@ -256,5 +274,5 @@ def test_slow_download_keeps_server_memory_flat(
     assert growth_mib <= _MAX_SERVER_GROWTH_MIB, (
         f"server RSS grew {growth_mib:.1f} MiB at t={peak_t}s while the browser had received "
         f"only {received_at_peak / 2**20:.1f} MiB of {_FILE_BYTES / 2**20:.0f} MiB: the tunnel "
-        "buffered the undelivered remainder instead of applying backpressure to the runner"
+        "buffered the undelivered remainder instead of pausing the runner"
     )
