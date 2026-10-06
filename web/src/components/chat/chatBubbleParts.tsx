@@ -454,20 +454,19 @@ export function WorkingIndicator() {
     dialogOpen && !scopedConversationId && terminalFirst?.isTerminalFirst
       ? () => terminalFirst.setView("terminal")
       : null;
-  const blockedLabel = !blockedOn
-    ? null
-    : dialogOpen && scopedConversationId
-      ? SIDE_CHAT_DIALOG_OPEN_LABEL
-      : workingIndicatorLabel(tick, blockedOn);
+  let blockedLabel: string | null = null;
+  if (dialogOpen && scopedConversationId) {
+    blockedLabel = SIDE_CHAT_DIALOG_OPEN_LABEL;
+  } else if (blockedOn) {
+    blockedLabel = workingIndicatorLabel(tick, blockedOn);
+  }
   const label = openTerminalView
     ? DIALOG_OPEN_LABEL
     : (blockedLabel ?? workingIndicatorLabel(tick));
   return (
     <>
-      {/* Sole aria-live region for the working state. The rotating label would
-          re-announce every few seconds, so an unblocked turn reads once as
-          "Working…"; a blocked state is stable and names what needs the user.
-          The visible shimmer below stays aria-hidden. */}
+      {/* Keep the rotating label aria-hidden; announce only the stable working or
+          blocked state so screen readers hear the turn once. */}
       <span role="status" aria-live="polite" className="sr-only">
         {blockedLabel ?? "Working…"}
       </span>

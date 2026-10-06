@@ -147,6 +147,9 @@ describe("side-chat working indicator", () => {
     const indicator = screen.getByTestId("working-indicator");
     expect(indicator).toHaveTextContent("Waiting on a dialog in the side chat's own terminal.");
     expect(indicator).not.toHaveTextContent(/terminal view/i);
+    expect(screen.getAllByRole("status").map((el) => el.textContent)).toContain(
+      "Waiting on a dialog in the side chat's own terminal.",
+    );
     expect(screen.queryByRole("button", { name: /terminal view/i })).toBeNull();
     expect(setView).not.toHaveBeenCalled();
   });
