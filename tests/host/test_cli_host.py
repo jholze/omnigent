@@ -1056,6 +1056,111 @@ def test_host_background_reuses_running_daemon(
     assert spawned_args == [], "a healthy daemon must not be respawned"
 
 
+def _write_live_local_daemon_record(tmp_path: Path, pid: int) -> None:
+    """Register a fresh local-mode daemon record for *pid* as a running daemon would."""
+    from omnigent.cli import (
+        _LOCAL_DAEMON_MARKER,
+        _HostDaemonRecord,
+        _write_daemon_record,
+        server_config_signature,
+    )
+
+    _write_daemon_record(
+        _HostDaemonRecord(
+            pid=pid,
+            target=_LOCAL_DAEMON_MARKER,
+            mode="local",
+            server_url=None,
+            log_path=str(tmp_path / "existing.log"),
+            started_at=int(time.time()),
+            host_id=None,
+            config_sig=server_config_signature(),
+        )
+    )
+
+
+def test_host_background_reports_reused_daemon_still_connecting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reused daemon that has not registered yet is pending, not 'already running'."""
+    spawned_args, _ = _patch_background_host_spawn(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "omnigent.cli._pid_is_recorded_daemon",
+        lambda record: cli_module._pid_alive(record.pid),
+    )
+    monkeypatch.setattr("omnigent.cli._pid_alive", lambda checked: checked in {4242, 5150})
+    monkeypatch.setattr(
+        "omnigent.cli._daemon_host_status_probe",
+        lambda record, **kwargs: cli_module._HostHttpResult(
+            status_code=200, body={"status": "offline"}
+        ),
+    )
+    monkeypatch.setattr("omnigent.cli._BACKGROUND_HOST_REGISTRATION_GRACE_S", 0.0)
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        "omnigent.cli._terminate_daemon",
+        lambda record, *, force: terminated.append(record.pid),
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "omnigent.cli._maybe_open_host_web_ui",
+        lambda server_url, **kwargs: opened.append(server_url),
+    )
+    _write_live_local_daemon_record(tmp_path, 5150)
+
+    result = CliRunner().invoke(cli, ["host", "--background", "--server", ""])
+
+    assert result.exit_code == 0, result.output
+    assert "still connecting (pid 5150)" in result.output
+    assert "already running" not in result.output
+    assert "omnigent host status" in result.output
+    assert spawned_args == []
+    assert terminated == []
+    assert opened == []
+
+
+def test_host_background_reports_local_daemon_serving_target_still_connecting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local daemon that owns the requested URL but is not online yet is reported pending."""
+    spawned_args, _ = _patch_background_host_spawn(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "omnigent.cli._pid_is_recorded_daemon",
+        lambda record: cli_module._pid_alive(record.pid),
+    )
+    monkeypatch.setattr("omnigent.cli._pid_alive", lambda checked: checked in {4242, 5150})
+    monkeypatch.setattr("omnigent.cli._local_daemon_serves_target", lambda target, server: True)
+    monkeypatch.setattr(
+        "omnigent.cli._daemon_host_status_probe",
+        lambda record, **kwargs: cli_module._HostHttpResult(
+            status_code=200, body={"status": "offline"}
+        ),
+    )
+    monkeypatch.setattr("omnigent.cli._BACKGROUND_HOST_REGISTRATION_GRACE_S", 0.0)
+    monkeypatch.setattr(
+        "omnigent.cli._ensure_databricks_server_auth", lambda *args, **kwargs: None
+    )
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        "omnigent.cli._terminate_daemon",
+        lambda record, *, force: terminated.append(record.pid),
+    )
+    _write_live_local_daemon_record(tmp_path, 5150)
+
+    result = CliRunner().invoke(cli, ["host", "--background", "--server", "http://127.0.0.1:6767"])
+
+    assert result.exit_code == 0, result.output
+    assert "(pid 5150)" in result.output
+    assert "has not registered with it yet" in result.output
+    assert "omnigent host status" in result.output
+    assert "existing.log" in result.output
+    assert "already serves" not in result.output
+    assert spawned_args == []
+    assert terminated == []
+
+
 def test_recycled_pid_record_is_pruned_and_host_claims(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

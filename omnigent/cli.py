@@ -9076,6 +9076,8 @@ def _run_background_host(
                         f"{display_server_url(target)} but has not registered with it yet; "
                         f"check on it with `{cli_invocation()} host status`."
                     )
+                    if local_record.log_path is not None:
+                        _echo_host_field("log", _display_path(Path(local_record.log_path)))
                 return
         raise click.ClickException(
             "Could not spawn the background host daemon. "
