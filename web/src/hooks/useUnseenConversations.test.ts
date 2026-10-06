@@ -129,17 +129,22 @@ describe("live cross-device merge", () => {
     expect(reloaded.isConversationUnseen("conv-1", 2_000, "idle")).toBe(false);
   });
 
-  it("clears a local explicit-unread override when another device reads the session later", async () => {
+  it("keeps a local explicit-unread override through a server read without the flag — a stale replica can't revert Mark as unread", async () => {
     const mod = await loadFresh();
     vi.useFakeTimers({ now: 5_000_000 });
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000 }]);
-    mod.markConversationUnread("conv-1", 5_000); // baseline 4_999 + override
+    // Read up to 3_000, then Mark as unread lowers the baseline to 1_999.
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000 }]);
+    mod.markConversationUnread("conv-1", 2_000); // baseline 1_999 + override
     vi.setSystemTime(5_010_000); // past the post-write grace window
 
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_unread: false }]);
+    // A replica that never saw the PUT still serves the pre-mark read (3_000,
+    // not unread). Adopting its cleared flag would silently undo the action.
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, viewer_unread: false }]);
 
-    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
-    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
+    // The override is sticky until the thread is reopened/read here, but the
+    // newer baseline is still adopted (so a later reopen leaves no stale dot).
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 2_500, "idle")).toBe(false);
   });
 
   it("adopts a newer explicit unread flagged on another device", async () => {

@@ -141,10 +141,13 @@ export interface ReadStateSeed {
 }
 
 /**
- * Live merge for an already-seeded conversation: adopt the server's read-state
- * only when its baseline is strictly newer than ours (another device acted
- * after this client's last write). Older, equal, missing, or in-grace values
- * are ignored, so a stale replica or in-flight poll can't undo a local write.
+ * Live merge for an already-seeded conversation: adopt a strictly-newer server
+ * baseline (another device read after this client's last write); older, equal,
+ * missing, or in-grace values are ignored so a stale replica or in-flight poll
+ * can't undo a local write. The merge may adopt an explicit unread from another
+ * device, but never *clears* a local override: a replica that missed the "mark
+ * unread" PUT serves the pre-mark baseline, so clearing it would silently revert
+ * the user's action. An override stays until the thread is reopened/read here.
  */
 function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
   if (typeof conv.viewer_last_seen !== "number") return false;
@@ -154,7 +157,6 @@ function mergeNewerServerReadState(conv: ReadStateSeed, now: number): boolean {
   if (writtenAt !== undefined && now - writtenAt < LOCAL_WRITE_GRACE_MS) return false;
   lastSeenMap[conv.id] = conv.viewer_last_seen;
   if (conv.viewer_unread) explicitlyUnread.add(conv.id);
-  else explicitlyUnread.delete(conv.id);
   return true;
 }
 
