@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -63,6 +64,7 @@ from omnigent.native.failure_telemetry import (
     native_failure_id,
     normalize_failure_context,
 )
+from omnigent.native.fd_exhaustion import fd_exhaustion_errno
 from omnigent.process_logging import harness_stderr_capture_enabled
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 from omnigent.session_event_batch import (
@@ -178,6 +180,17 @@ _SUBAGENT_DROPPED_ITEM_REASON = "sub-agent transcript incomplete: an item could 
 _SUPERVISOR_INITIAL_BACKOFF_S = 1.0
 _SUPERVISOR_MAX_BACKOFF_S = 30.0
 _SUPERVISOR_HEALTHY_UPTIME_S = 60.0
+# fd-table exhaustion (EMFILE/ENFILE) is an environmental, process-wide
+# condition, not a per-poll defect: while it lasts every poll fails the same
+# way, so the loop re-warns at most this often and slows its polls to this cap.
+_FD_EXHAUSTION_REWARN_S = 60.0
+_FD_EXHAUSTION_MAX_POLL_S = 5.0
+
+
+def _fd_exhaustion_poll_delay(previous_delay_s: float, poll_interval_s: float) -> float:
+    """Double the poll delay while fd exhaustion lasts, capped at the configured ceiling."""
+    return min(previous_delay_s * 2, max(poll_interval_s, _FD_EXHAUSTION_MAX_POLL_S))
+
 
 # Claude Code hook event names → Omnigent session-status values
 # published on the per-conversation SSE stream. Unmapped events emit
@@ -1241,6 +1254,10 @@ async def forward_claude_transcript_to_session(
     subagent_task: asyncio.Task[SubagentForwardState] | None = None
     observer_stderr_offset = 0
     transcript_diagnostics = _TranscriptDiscoveryDiagnostics(started_at=time.monotonic())
+    fd_exhausted_since: float | None = None
+    fd_exhaustion_last_warned: float | None = None
+    fd_exhaustion_outage_warned = False
+    next_poll_delay = poll_interval_s
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
     from omnigent.cli_auth import open_server_client
 
@@ -1535,6 +1552,18 @@ async def forward_claude_transcript_to_session(
                             bridge_dir=bridge_dir,
                             dedupe=dedupe,
                         )
+                if fd_exhausted_since is not None:
+                    if fd_exhaustion_outage_warned:
+                        _logger.info(
+                            "Claude transcript forwarder recovered after fd exhaustion "
+                            "(%.1fs); session=%s",
+                            time.monotonic() - fd_exhausted_since,
+                            session_id,
+                            extra={"session_id": session_id},
+                        )
+                    fd_exhausted_since = None
+                    fd_exhaustion_outage_warned = False
+                next_poll_delay = poll_interval_s
             except asyncio.CancelledError:
                 await _cancel_subagent_forward_task(subagent_task)
                 raise
@@ -1549,14 +1578,39 @@ async def forward_claude_transcript_to_session(
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
-            except Exception:
-                _logger.exception(
-                    "Claude transcript forwarder loop failed; session=%s",
-                    session_id,
-                    extra={"session_id": session_id},
-                )
+            except Exception as exc:
+                fd_errno = fd_exhaustion_errno(exc)
+                if fd_errno is None:
+                    _logger.exception(
+                        "Claude transcript forwarder loop failed; session=%s",
+                        session_id,
+                        extra={"session_id": session_id},
+                    )
+                    next_poll_delay = poll_interval_s
+                else:
+                    now = time.monotonic()
+                    if fd_exhausted_since is None:
+                        fd_exhausted_since = now
+                    rewarn = (
+                        fd_exhaustion_last_warned is None
+                        or now - fd_exhaustion_last_warned >= _FD_EXHAUSTION_REWARN_S
+                    )
+                    if rewarn:
+                        fd_exhaustion_last_warned = now
+                        fd_exhaustion_outage_warned = True
+                    _logger.log(
+                        logging.WARNING if rewarn else logging.DEBUG,
+                        "Claude transcript forwarder poll hit fd exhaustion (%s: %s); "
+                        "transcript mirroring paused until file descriptors free up; "
+                        "session=%s",
+                        errno.errorcode.get(fd_errno, fd_errno),
+                        exc,
+                        session_id,
+                        extra={"session_id": session_id},
+                    )
+                    next_poll_delay = _fd_exhaustion_poll_delay(next_poll_delay, poll_interval_s)
             try:
-                await asyncio.sleep(poll_interval_s)
+                await asyncio.sleep(next_poll_delay)
             except asyncio.CancelledError:
                 await _cancel_subagent_forward_task(subagent_task)
                 raise

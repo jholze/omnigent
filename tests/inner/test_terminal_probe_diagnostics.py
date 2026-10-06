@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import json
 import logging
@@ -253,3 +254,179 @@ def test_socket_stat_failure_does_not_hide_probe_error(
     record = next(r for r in caplog.records if "tmux unavailable after" in r.getMessage())
     assert record.attributes["socket_state"] == "stat_failed"
     assert record.attributes["socket_stat_errno"] == errno.EACCES
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
+async def test_emfile_capture_pane_probe_warns_once_per_outage_not_per_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    threaded: bool,
+) -> None:
+    """A descriptor-exhausted host (EMFILE on every tmux spawn) yields one WARNING per outage.
+
+    The poll and backoff intervals are compressed so many probe attempts fit in
+    the window; the contract under test is the per-outage warning, not timing.
+    """
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._remember_pane_snapshot("private terminal output")
+    attempts = {"n": 0}
+
+    def run(cmd, **kwargs):
+        attempts["n"] += 1
+        raise OSError(errno.EMFILE, "Too many open files", "tmux")
+
+    _patch_tmux(monkeypatch, run)
+    with (
+        caplog.at_level(logging.WARNING, logger=terminal_mod.__name__),
+        contextlib.suppress(TimeoutError, asyncio.TimeoutError),
+    ):
+        await _run_watcher(instance, threaded, lambda *_: None)
+
+    # An outage leaves liveness unknown; it never marks the terminal dead.
+    assert instance.running is True
+    could_not_start = [
+        r
+        for r in caplog.records
+        if r.name == terminal_mod.__name__
+        and "capture-pane probe could not start" in r.getMessage()
+        and "liveness remains unknown" in r.getMessage()
+    ]
+    assert attempts["n"] >= 20, (
+        f"probe attempted only {attempts['n']} spawns in the window; harness too slow"
+    )
+    assert len(could_not_start) == 1, (
+        f"capture-pane probe logged the EMFILE 'could not start / liveness remains unknown' "
+        f"WARNING {len(could_not_start)} time(s) across {attempts['n']} attempts in one outage"
+    )
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
+async def test_probe_start_outage_rewarns_per_window_then_logs_one_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    threaded: bool,
+) -> None:
+    """A sustained start-failure outage warns per window, not per attempt, and logs recovery."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    instance._remember_pane_snapshot("private terminal output")
+    attempts = {"failed": 0, "started": 0}
+    descriptors_available = threading.Event()
+
+    def run(cmd, **kwargs):
+        if not descriptors_available.is_set():
+            attempts["failed"] += 1
+            raise OSError(errno.EMFILE, "Too many open files", "tmux")
+        attempts["started"] += 1
+        stdout = b"0 \n" if cmd[5] == "list-panes" else b"frame\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout, b"")
+
+    _patch_tmux(monkeypatch, run)
+    monkeypatch.setattr(terminal_mod, "_TMUX_PROBE_START_FAILURE_REWARN_SECONDS", 0.1)
+
+    async def _until(predicate, *, timeout: float = 10.0) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not predicate():
+            assert loop.time() < deadline, f"watcher stalled at {attempts}"
+            await asyncio.sleep(0.005)
+
+    stop = threading.Event()
+    with caplog.at_level(logging.INFO, logger=terminal_mod.__name__):
+        if threaded:
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    instance._idle_watch_loop_threaded,
+                    stop,
+                    on_exit=lambda *_: None,
+                    poll_interval_s=0.001,
+                )
+            )
+        else:
+            task = asyncio.create_task(
+                instance._idle_watch_loop(lambda: None, on_exit=lambda *_: None)
+            )
+        try:
+            await _until(lambda: attempts["failed"] >= 40)
+            descriptors_available.set()
+            await _until(lambda: attempts["started"] >= 2)
+        finally:
+            stop.set()
+            instance.running = False
+            await asyncio.wait_for(task, timeout=10)
+
+    could_not_start = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "capture-pane probe could not start" in r.getMessage()
+    ]
+    assert 2 <= len(could_not_start) < attempts["failed"] // 2, (
+        f"{len(could_not_start)} warnings for {attempts['failed']} failed attempts"
+    )
+    recovered = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "tmux probes can start again" in r.getMessage()
+    ]
+    assert len(recovered) == 1
+    assert f"after {attempts['failed']} failed attempt(s)" in recovered[0].getMessage()
+    assert instance._probe_start_outage_began is None
+
+
+def test_probe_start_retry_delay_doubles_to_a_cap_and_resets_on_recovery(tmp_path: Path) -> None:
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    delays = []
+    for _ in range(6):
+        instance._record_probe_start_failure(
+            "capture-pane", OSError(errno.EMFILE, "Too many open files", "tmux")
+        )
+        delays.append(instance._probe_start_retry_delay())
+
+    assert delays == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
+
+    instance._record_probe_started()
+
+    assert instance._probe_start_retry_delay() == 1.0
+
+
+def test_probe_start_flapping_stays_within_one_warning_per_window(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Alternating failures and recoveries at the descriptor ceiling do not storm either level."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    with caplog.at_level(logging.DEBUG, logger=terminal_mod.__name__):
+        for _ in range(3):
+            instance._record_probe_start_failure(
+                "pane-death", OSError(errno.EMFILE, "Too many open files", "tmux")
+            )
+            instance._record_probe_started()
+
+    levels = [r.levelno for r in caplog.records if r.name == terminal_mod.__name__]
+    assert levels.count(logging.WARNING) == 1
+    assert levels.count(logging.INFO) == 1
+    assert levels.count(logging.DEBUG) == 2
