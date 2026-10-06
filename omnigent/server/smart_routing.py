@@ -660,11 +660,7 @@ class LLMRoutingClient:
                 None,
             )
 
-        return RoutingResult(
-            model=model,
-            rationale=str(rationale),
-            harness=chosen_harness,
-        )
+        return RoutingResult(model=model, rationale=str(rationale), harness=chosen_harness)
 
 
 def _bearer_auth(token: str) -> httpx.Auth:
