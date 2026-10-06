@@ -1,8 +1,6 @@
-// Opening a changed image, PDF, 3D model or binary file must not request its
-// diff: the viewer never renders one for those types. A deleted file, or one
-// whose content request fails, must still request its diff rather than hang on a
-// permanently disabled query. The real useFileDiff runs against a stubbed fetch
-// so the assertion holds whichever layer gates the query.
+// Never-diffed types (image/PDF/model/binary) must not request a diff; deleted
+// or content-errored files must still fetch theirs instead of hanging on a
+// disabled query. The real useFileDiff runs against a stubbed fetch.
 
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -183,7 +181,9 @@ afterEach(() => {
 
 describe("FileViewer — diff fetch for files it never diffs", () => {
   const neverDiffed: OpenedFile[] = [
-    { kind: "image", path: "report.png", content_type: "image/png", encoding: "base64" },
+    // Text-encoded and extensionless, so only the image content-type suppresses
+    // the diff — exercises the image gate independently of binary detection.
+    { kind: "image", path: "diagram", content_type: "image/svg+xml", encoding: "utf-8" },
     { kind: "PDF", path: "sample.pdf", content_type: "application/pdf", encoding: "base64" },
     {
       kind: "3D model",
@@ -239,9 +239,8 @@ describe("FileViewer — diff fetch for files it never diffs", () => {
 
   it("still requests the diff for a deleted changed text file", async () => {
     // A deleted file's content request keeps retrying its 404, so its metadata
-    // stays pending; the diff must still be fetched (it diffs against previous
-    // contents) rather than wait behind the pending-metadata gate. Using the
-    // pending phase makes this fail if the deleted-file exception is removed.
+    // stays pending; the diff must still be fetched against previous contents.
+    // The pending phase makes this fail if the deleted-file exception is removed.
     const queryClient = openChangedFile({
       path: "removed.txt",
       status: "deleted",
