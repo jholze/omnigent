@@ -8,6 +8,7 @@ import time
 
 import pytest
 from playwright.sync_api import Browser, Page, Response, Route, WebSocketRoute, expect
+from playwright.sync_api import Error as PlaywrightError
 
 EDGE_MESSAGE = "You do not have permission to access this resource."
 _EDGE_BODY = json.dumps({"error_code": "PERMISSION_DENIED", "message": EDGE_MESSAGE})
@@ -48,7 +49,7 @@ def _mine_list_rows(resp: Response) -> int | None:
         return None
     try:
         return len(resp.json().get("data", []))
-    except Exception:
+    except (ValueError, PlaywrightError):
         return None
 
 
@@ -106,6 +107,5 @@ def test_sidebar_lists_sessions_again_after_edge_denial_ends(
             f"after access returned the list refetch succeeded with {refetched_rows[0]} row(s), "
             f"but the sidebar shows {shown!r} until the page is reloaded"
         )
-        page.wait_for_timeout(3_000)
     finally:
         context.close()

@@ -265,7 +265,7 @@ let identityResolved = false;
 let identityPromise: Promise<string | null> | null = null;
 // Consecutive probes that ended without a definitive answer (an edge 403, a 5xx,
 // no network). The viewer stays unknown until `authenticatedFetch` sees API
-// responses succeed again and re-runs the probe, no earlier than this time.
+// responses succeed again and re-runs the probe; nobody probes before this time.
 let failedIdentityProbes = 0;
 let identityRetryAfter = 0;
 const identityListeners = new Set<() => void>();
@@ -285,10 +285,9 @@ function setIdentity(userId: string | null, isAdmin: boolean): void {
   for (const listener of identityListeners) listener();
 }
 
-/** Whether a failed probe is due for another attempt (see `resolveIdentity`). */
-function identityRetryDue(): boolean {
-  if (identityResolved || failedIdentityProbes === 0) return false;
-  return identityPromise !== null || Date.now() >= identityRetryAfter;
+/** Whether a failed probe is waiting for API responses to succeed again. */
+function identityRetryPending(): boolean {
+  return !identityResolved && failedIdentityProbes > 0;
 }
 // Cache the server-provided login URL on the first /v1/me probe so
 // later session-expiry redirects in authenticatedFetch hit the right
@@ -356,7 +355,8 @@ function isOnLoginPath(): boolean {
  * Fetch the current user identity from the server.
  * Called once on app load; a definitive answer (a user, or 401) is cached for
  * later calls. Any other failure — an edge 403, a 5xx, no network — resolves
- * null without caching, so a later call probes again.
+ * null without caching, so a later call probes again (after a backoff once it
+ * has failed repeatedly).
  *
  * When the server returns 401 with a ``login_url`` (OIDC mode),
  * redirects the browser to the login page.
@@ -364,6 +364,7 @@ function isOnLoginPath(): boolean {
 export async function resolveIdentity(): Promise<string | null> {
   if (identityResolved) return currentUserId;
   if (identityPromise) return identityPromise;
+  if (Date.now() < identityRetryAfter) return currentUserId;
   identityPromise = (async () => {
     let definitive = false;
     try {
@@ -576,9 +577,9 @@ export async function authenticatedFetch(
   }
 
   // A transiently failed probe left the viewer unknown; the first successful
-  // response shows the path is open again. Settle identity before handing the
-  // data back so ownership-scoped views never see rows against a null viewer.
-  if (res.ok && identityRetryDue()) await resolveIdentity();
+  // response shows the path is open again. The probe runs in the background and
+  // publishes through `subscribeIdentity`, so a slow /v1/me never holds up data.
+  if (res.ok && identityRetryPending()) void resolveIdentity();
 
   if (
     // When embedded, the host owns auth (e.g. cookie/session via

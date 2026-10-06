@@ -32,7 +32,7 @@ export function useViewerId(): string | null {
       if (!cancelled) setViewerId(getCurrentUserId());
     };
     const unsubscribe = subscribeIdentity(sync);
-    void resolveIdentity().then(sync);
+    void resolveIdentity().then(sync, sync);
     return () => {
       cancelled = true;
       unsubscribe();

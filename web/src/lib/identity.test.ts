@@ -156,6 +156,39 @@ describe("resolveIdentity after a failed probe", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it("backs off instead of probing on every call while the server stays broken", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(mockJsonResponse({}, { ok: false, status: 503 }));
+      const { resolveIdentity } = await import("./identity");
+
+      // One immediate retry, then component mounts stop reaching the network
+      // until the delay has passed; the delay doubles and caps at a minute.
+      await resolveIdentity();
+      await resolveIdentity();
+      let probes = 2;
+      expect(fetchMock).toHaveBeenCalledTimes(probes);
+      const expectNextProbeAfter = async (delay: number) => {
+        vi.advanceTimersByTime(delay - 1);
+        await resolveIdentity();
+        expect(fetchMock).toHaveBeenCalledTimes(probes);
+        vi.advanceTimersByTime(1);
+        await resolveIdentity();
+        expect(fetchMock).toHaveBeenCalledTimes(++probes);
+      };
+      await expectNextProbeAfter(1_000);
+      await expectNextProbeAfter(2_000);
+      await expectNextProbeAfter(4_000);
+      await expectNextProbeAfter(8_000);
+      await expectNextProbeAfter(16_000);
+      await expectNextProbeAfter(32_000);
+      await expectNextProbeAfter(60_000);
+      await expectNextProbeAfter(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("notifies subscribers only when the viewer changes", async () => {
     fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 503 }));
     const { resolveIdentity, subscribeIdentity } = await import("./identity");
@@ -191,10 +224,42 @@ describe("authenticatedFetch identity recovery", () => {
     const res = await authenticatedFetch("/v1/sessions?visibility=mine");
 
     expect(res.ok).toBe(true);
-    // Settled before the caller sees the rows, so ownership-scoped views never
-    // render them against a null viewer.
-    expect(getCurrentUserId()).toBe("alice");
     expect(urls()).toEqual(["/v1/me", "/v1/sessions?visibility=mine", "/v1/me"]);
+    // The probe publishes the viewer once it lands; the rows were not held back.
+    await vi.waitFor(() => expect(getCurrentUserId()).toBe("alice"));
+  });
+
+  it("delivers successful responses while the retried probe is still pending", async () => {
+    let finishProbe!: (res: Response) => void;
+    const me = [
+      Promise.resolve(mockJsonResponse({}, { ok: false, status: 503 })),
+      new Promise<Response>((resolve) => {
+        finishProbe = resolve;
+      }),
+    ];
+    fetchMock.mockImplementation((url: string) =>
+      url.includes("/v1/me") ? me.shift() : Promise.resolve(mockJsonResponse({ data: [] })),
+    );
+    const { resolveIdentity, authenticatedFetch, getCurrentUserId, subscribeIdentity } =
+      await import("./identity");
+    await resolveIdentity();
+
+    const res = await authenticatedFetch("/v1/sessions");
+    expect(res.ok).toBe(true);
+    expect(getCurrentUserId()).toBeNull();
+
+    // A direct caller and later successes share the one pending probe.
+    const direct = resolveIdentity();
+    const later = await authenticatedFetch("/v1/hosts");
+    expect(later.ok).toBe(true);
+    expect(urls()).toEqual(["/v1/me", "/v1/sessions", "/v1/me", "/v1/hosts"]);
+
+    const listener = vi.fn();
+    subscribeIdentity(listener);
+    finishProbe(mockJsonResponse({ user_id: "alice" }));
+    expect(await direct).toBe("alice");
+    expect(getCurrentUserId()).toBe("alice");
+    expect(listener).toHaveBeenCalledOnce();
   });
 
   it("leaves the probe alone while responses keep failing", async () => {
@@ -235,6 +300,8 @@ describe("authenticatedFetch identity recovery", () => {
 
       await authenticatedFetch("/v1/a");
       expect(urls()).toEqual(["/v1/me", "/v1/a", "/v1/me"]);
+      // Let the background probe record its failure before the next response.
+      await vi.advanceTimersByTimeAsync(0);
 
       await authenticatedFetch("/v1/b");
       expect(urls()).toEqual(["/v1/me", "/v1/a", "/v1/me", "/v1/b"]);
@@ -242,7 +309,7 @@ describe("authenticatedFetch identity recovery", () => {
       vi.advanceTimersByTime(1_000);
       await authenticatedFetch("/v1/c");
       expect(urls()).toEqual(["/v1/me", "/v1/a", "/v1/me", "/v1/b", "/v1/c", "/v1/me"]);
-      expect(getCurrentUserId()).toBe("alice");
+      await vi.waitFor(() => expect(getCurrentUserId()).toBe("alice"));
     } finally {
       vi.useRealTimers();
     }
