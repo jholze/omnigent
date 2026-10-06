@@ -193,6 +193,7 @@ from omnigent.util.env_credentials import env_names_with_omnigent_prefix
 from omnigent.util.suspend_watch import watch_for_resume
 from omnigent.util.tls import client_ssl_context
 from omnigent.util.tunnel_limits import (
+    HOST_TUNNEL_SILENCE_TIMEOUT_S,
     TUNNEL_KEEPALIVE_PING_INTERVAL_S,
     TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
 )
@@ -1312,6 +1313,12 @@ class HostProcess:
         # detected resume; read+cleared in run()'s reconnect handler to force a
         # prompt reconnect (skip the backoff).
         self._woke_from_suspend = False
+        # Set by _inbound_silence_watchdog when it drops a tunnel the server
+        # stopped sending frames on; read+cleared in run()'s reconnect handler
+        # for the same prompt reconnect.
+        self._server_silent = False
+        # Loop time of the last frame received on the live tunnel.
+        self._last_server_frame_at = 0.0
         # Lifecycle guard: hold the target's flock and watch its registry
         # record. When the record is deleted/reassigned the monitor sets
         # _lifecycle_lost and aborts the live tunnel so run() breaks out of its
@@ -4144,6 +4151,11 @@ class HostProcess:
                     # outside the silent-churn gate so wake never takes the slow path.
                     woke = self._woke_from_suspend
                     self._woke_from_suspend = False
+                    # The silence watchdog dropped a tunnel the server stopped
+                    # pinging: the drop is ours and the server is expected to
+                    # be reachable, so reconnect as promptly as after a wake.
+                    server_silent = self._server_silent
+                    self._server_silent = False
                     classified_recycle = (
                         explicit_recycle
                         or (ingress_recycle and not _url_is_loopback(self._server_url))
@@ -4156,15 +4168,21 @@ class HostProcess:
                             # the backoff ladder so a dead endpoint is probed
                             # gently instead of twice a second forever.
                             classified_recycle = False
-                    recycle = woke or classified_recycle
+                    recycle = woke or server_silent or classified_recycle
                     wait_s = _RECONNECT_BASE_S if recycle else backoff
+                    if woke:
+                        cadence = " (resumed from suspend — prompt reconnect)"
+                    elif server_silent:
+                        cadence = " (server went silent — prompt reconnect)"
+                    elif recycle:
+                        cadence = " (recycle — prompt reconnect)"
+                    else:
+                        cadence = ""
                     _logger.warning(
                         "Host tunnel disconnected: %s. Reconnecting in %.1fs%s",
                         exc,
                         wait_s,
-                        " (resumed from suspend — prompt reconnect)"
-                        if woke
-                        else (" (recycle — prompt reconnect)" if recycle else ""),
+                        cadence,
                     )
                     # Interruptible backoff: wake early if the lifecycle
                     # monitor loses ownership mid-backoff so the top-of-loop
@@ -4310,9 +4328,11 @@ class HostProcess:
         :returns: None.
         :raises Exception: On WebSocket disconnect or error.
         """
-        # Fresh per-connection markers for the silent-connect streak.
+        # Fresh per-connection markers for the silent-connect streak and the
+        # silence watchdog.
         self._conn_upgrade_accepted = False
         self._conn_frame_received = False
+        self._server_silent = False
         url = self._tunnel_url()
         # Credential discovery may invoke the Databricks CLI. Keep it off the
         # event loop so startup capability discovery can make progress at the
@@ -4381,6 +4401,7 @@ class HostProcess:
                     or self._lifecycle_lost.is_set()
                 ),
                 resumed_from_suspend=self._woke_from_suspend,
+                server_silent=self._server_silent,
             )
             # Drop the watcher tasks' send target — exit reports raised
             # between connections park in _unreported_exits instead of
@@ -4550,7 +4571,10 @@ class HostProcess:
         # the server is offline. Successful or in-flight work is retained.
         self._ensure_model_options_prewarm()
         self._ws = ws
+        loop = asyncio.get_running_loop()
+        self._last_server_frame_at = loop.time()
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
+        silence_task = asyncio.create_task(self._inbound_silence_watchdog(ws))
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -4571,6 +4595,7 @@ class HostProcess:
             # with ``4003 ping timeout``.
             while True:
                 raw = await ws.recv()
+                self._last_server_frame_at = loop.time()
                 self._conn_frame_received = True
                 if isinstance(raw, str):
                     # Connection-control frames decide whether this receive
@@ -4588,9 +4613,10 @@ class HostProcess:
                     # _runner_lifecycle_lock in _dispatch_host_frame.
                     self._start_frame_task(ws, raw)
         finally:
-            readiness_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await readiness_task
+            for task in (readiness_task, silence_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     async def _harness_readiness_loop(
         self,
@@ -4643,6 +4669,37 @@ class HostProcess:
                 )
                 published_configured = configured
                 published_gateway = gateway
+
+    async def _inbound_silence_watchdog(
+        self, ws: websockets.asyncio.client.ClientConnection
+    ) -> None:
+        """Drop the tunnel once the server's frames stop arriving.
+
+        The server pings this tunnel at the application level every 30 s, so a
+        live tunnel is never silent for :data:`HOST_TUNNEL_SILENCE_TIMEOUT_S`.
+        A front door that ends the backend request but keeps the host-facing
+        socket open and answers protocol PINGs leaves ``recv()`` waiting
+        forever with the protocol keepalive satisfied, while the server already
+        lists this host offline. Aborting the transport makes ``recv()`` raise
+        so :meth:`run` reconnects promptly, as after a resume from suspend.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            remaining = self._last_server_frame_at + HOST_TUNNEL_SILENCE_TIMEOUT_S - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue
+            self._server_silent = True
+            _logger.warning(
+                "No frame from the server for %.0fs (its application pings stopped); "
+                "dropping the host tunnel to reconnect",
+                loop.time() - self._last_server_frame_at,
+            )
+            transport = getattr(ws, "transport", None)
+            if transport is not None:
+                with contextlib.suppress(Exception):
+                    transport.abort()
+            return
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""

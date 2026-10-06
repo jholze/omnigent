@@ -36,6 +36,17 @@ RUNNER_TUNNEL_MAX_MESSAGE_BYTES = 100 * 1024 * 1024
 TUNNEL_KEEPALIVE_PING_INTERVAL_S = 30.0
 TUNNEL_KEEPALIVE_PING_TIMEOUT_S = 90.0
 
+# How long the host waits for *any* server frame before it presumes its tunnel
+# dead and reconnects. The server pings the host at the application level every
+# 30 s (``host_tunnel.PING_INTERVAL_S``), so a live tunnel is never silent this
+# long. A front door that ends the backend request but keeps the host-facing
+# socket open and answers protocol PINGs is: the server has already
+# deregistered the host while the protocol keepalive above stays satisfied
+# forever. Above one ping interval so a late ping is tolerated; below the
+# one-minute target for a host whose server is reachable to be back online
+# (detection, then the 0.5 s prompt reconnect and registration).
+HOST_TUNNEL_SILENCE_TIMEOUT_S = 50.0
+
 
 class UvicornTunnelKwargs(TypedDict):
     """The uvicorn settings that terminate omnigent tunnels; see :func:`uvicorn_tunnel_kwargs`."""

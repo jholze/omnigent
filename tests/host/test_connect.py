@@ -94,6 +94,12 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
+from omnigent.runner.transports.ws_tunnel.frames import (
+    PingFrame,
+    PongFrame,
+    decode_frame,
+    encode_frame,
+)
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 
 pytestmark = pytest.mark.asyncio
@@ -5054,6 +5060,65 @@ class _AcceptingConnect:
         return False
 
 
+class _AbortableTransport:
+    """Transport stand-in whose ``abort()`` ends the fake tunnel's ``recv``."""
+
+    def __init__(self) -> None:
+        self.aborted = asyncio.Event()
+
+    def abort(self) -> None:
+        self.aborted.set()
+
+
+class _SilentPeerTunnel:
+    """Fake accepted tunnel whose peer stays open but stops sending frames.
+
+    Serves the scripted inbound *frames* ``interval`` seconds apart, then
+    either raises *then* or, by default, models a front door that keeps the
+    host-facing socket alive (answering protocol pings below the application)
+    after the server leg is gone: ``recv`` blocks until ``transport.abort()``
+    and only then raises like a lost connection.
+    """
+
+    def __init__(
+        self,
+        frames: list[str] | None = None,
+        *,
+        interval: float = 0.0,
+        then: BaseException | None = None,
+    ) -> None:
+        self.sent: list[str] = []
+        self.transport = _AbortableTransport()
+        self._frames = list(frames or [])
+        self._interval = interval
+        self._then = then
+
+    async def send(self, data: str | bytes) -> None:
+        self.sent.append(data if isinstance(data, str) else data.decode())
+
+    async def recv(self) -> str:
+        if self._frames:
+            await asyncio.sleep(self._interval)
+            return self._frames.pop(0)
+        if self._then is not None:
+            raise self._then
+        await self.transport.aborted.wait()
+        raise ConnectionClosedError(None, None)
+
+
+class _ScriptedConnect:
+    """Async-CM stand-in for a successful WS upgrade onto a prepared tunnel."""
+
+    def __init__(self, tunnel: _SilentPeerTunnel) -> None:
+        self._tunnel = tunnel
+
+    async def __aenter__(self) -> _SilentPeerTunnel:
+        return self._tunnel
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
 class _ConnectSpy:
     """Stub for ``websockets.asyncio.client.connect`` that records calls
     and scripts each handshake with the next queued entry.
@@ -5061,7 +5126,8 @@ class _ConnectSpy:
     An exception entry fails that handshake; a ``None`` entry accepts it
     with a tunnel that drops on first ``recv()`` (so the reconnect loop
     regains control); an int entry accepts it with a tunnel that serves
-    that many inbound frames before dropping. The last queued entry
+    that many inbound frames before dropping; a :class:`_SilentPeerTunnel`
+    entry accepts it onto that prepared tunnel. The last queued entry
     repeats for any further calls, so a single fatal exception covers
     the "fails on first attempt" case and a ``[transient,
     CancelledError]`` pair covers "retried once, then stop".
@@ -5070,7 +5136,7 @@ class _ConnectSpy:
         ``[None, InvalidStatus(resp_503), asyncio.CancelledError()]``.
     """
 
-    def __init__(self, exceptions: list[BaseException | int | None]) -> None:
+    def __init__(self, exceptions: list[BaseException | _SilentPeerTunnel | int | None]) -> None:
         """Initialize the spy with a handshake script.
 
         :param exceptions: Exception to raise (``None`` or an int frame
@@ -5081,20 +5147,24 @@ class _ConnectSpy:
         self.call_count = 0
         self.calls: list[dict[str, object]] = []
 
-    def __call__(self, url: str, **kwargs: object) -> _HandshakeFailingConnect | _AcceptingConnect:
+    def __call__(
+        self, url: str, **kwargs: object
+    ) -> _HandshakeFailingConnect | _AcceptingConnect | _ScriptedConnect:
         """Return an async-CM scripting the handshake for this call.
 
         :param url: Tunnel URL passed by production (ignored).
         :param kwargs: Connect kwargs passed by production (recorded).
         :returns: A context manager whose ``__aenter__`` raises the
-            queued exception, or completes the handshake for a ``None``
-            entry.
+            queued exception, or completes the handshake for a ``None``,
+            int or tunnel entry.
         """
         self.calls.append(kwargs)
         exc = self._exceptions[min(self.call_count, len(self._exceptions) - 1)]
         self.call_count += 1
         if exc is None or isinstance(exc, int):
             return _AcceptingConnect(exc or 0)
+        if isinstance(exc, _SilentPeerTunnel):
+            return _ScriptedConnect(exc)
         return _HandshakeFailingConnect(exc)
 
 
@@ -6639,6 +6709,76 @@ async def test_inbound_frame_resets_silent_connect_streak(
 
     assert host._silent_connect_streak == 2
     assert not [record for record in caplog.records if record.levelno == logging.ERROR]
+
+
+async def test_silent_server_drops_tunnel_and_reconnects_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A peer that stays open but never sends a frame is dropped and redialed.
+
+    Models a front door that ended the server leg of the tunnel while keeping
+    the host leg alive: the server already lists the host offline, yet nothing
+    reaches ``recv()``. The host must notice the missing application pings,
+    abort the socket and reconnect on the prompt cadence even against a
+    loopback server, where an abrupt drop otherwise rides the backoff ladder.
+    """
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_CAP_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    tunnel = _SilentPeerTunnel()
+    spy = _ConnectSpy([tunnel, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host("http://127.0.0.1:18501")
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+        await host.run()
+
+    assert tunnel.transport.aborted.is_set()
+    assert spy.call_count == 2
+    assert any(m.startswith("No frame from the server for") for m in caplog.messages), (
+        caplog.messages
+    )
+    reconnects = [m for m in caplog.messages if "Reconnecting in" in m]
+    assert len(reconnects) == 1
+    assert "(server went silent — prompt reconnect)" in reconnects[0]
+    assert host._server_silent is False
+
+
+async def test_server_application_pings_keep_the_tunnel_open(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each server frame resets the silence watchdog, so a live tunnel is never dropped.
+
+    The pings arrive well inside the (shortened) silence budget but keep coming
+    for twice that budget; the host answers each and never aborts the socket.
+    The watchdog also dies with the connection instead of firing afterwards.
+    """
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_CAP_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect.HOST_TUNNEL_SILENCE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    pings = [encode_frame(PingFrame(ts=i)) for i in range(6)]
+    tunnel = _SilentPeerTunnel(pings, interval=0.1, then=ConnectionClosedError(None, None))
+    spy = _ConnectSpy([tunnel, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host()
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+        await host.run()
+    await asyncio.sleep(0.5)
+
+    assert not tunnel.transport.aborted.is_set()
+    assert not [m for m in caplog.messages if m.startswith("No frame from the server")]
+    pongs = []
+    for raw in tunnel.sent:
+        with contextlib.suppress(ValueError):
+            pongs.append(decode_frame(raw))
+    assert [frame.ts for frame in pongs if isinstance(frame, PongFrame)] == list(range(6))
 
 
 async def test_connection_error_frame_fails_loudly_on_live_receive_path() -> None:
