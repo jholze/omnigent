@@ -19,7 +19,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, expect
+from playwright.sync_api import Locator, Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests._helpers.compat import apply_server_env, compat_server_cwd, server_executable
 from tests._helpers.live_server import terminate_process
