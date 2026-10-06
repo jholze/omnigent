@@ -3299,13 +3299,9 @@ def create_runner_app(
         # Close any OpenCode server that no forwarder adopted.
         await _native_runtime.teardown_opencode_native_server(session_id)
 
-        # A tree-delete removes the parent's whole spawn family server-side, but
-        # the server issues only this one runner DELETE for the parent. Walk the
-        # runner-local spawn family and reap each native descendant's transcript
-        # forwarder too; otherwise they keep tailing their panes and POSTing
-        # events to child sessions the cascade already deleted (404s). Snapshot
-        # the family here, before the parent's work bookkeeping is unregistered
-        # below.
+        # A server tree-delete sends only this one runner DELETE for the parent.
+        # Snapshot the runner-local spawn family (before unregistering it below)
+        # and reap each native descendant, or their forwarders POST to dead ids.
         descendant_ids: list[str] = []
         family_seen = {session_id}
         family_frontier = [session_id]
@@ -3318,8 +3314,10 @@ def create_runner_app(
                     descendant_ids.append(child_id)
                     family_frontier.append(child_id)
         for descendant_id in descendant_ids:
-            await _cancel_auto_forwarder_task(descendant_id)
-            await _native_runtime.teardown_opencode_native_server(descendant_id)
+            await _native_runtime.reap_native_session(descendant_id)
+            if process_manager is not None:
+                await process_manager.release(descendant_id)
+            await resource_registry.cleanup_session(descendant_id)
             unregister_child_session(descendant_id)
             unregister_subagent_work_for_session(descendant_id)
 
@@ -7375,16 +7373,10 @@ def create_runner_app(
     )
 
     async def _reconcile_forwarders_after_reconnect() -> None:
-        # A session deleted while this runner's tunnel was down never had its
-        # runner-side cleanup run: the server took the offline path and nothing
-        # replays it on reconnect, so the session's transcript forwarder keeps
-        # tailing its pane and POSTing events to a session that no longer exists.
-        # Now that the tunnel is back, ask the server about each live forwarder's
-        # session; a definitive 404 means it was deleted during the gap, so reap
-        # that forwarder. A transient error or a live (200) session is left
-        # untouched — an ordinary event-post 404 is recoverable and must not
-        # cancel a forwarder, so only this reconnect-time GET 404 does.
-        for forwarder_session_id in list(_native_runtime._AUTO_FORWARDER_TASKS):
+        # Sessions deleted while the tunnel was down never got runner cleanup, so
+        # their forwarders keep POSTing to dead sessions. Only a definitive GET
+        # 404 reaps one; a transient error or a 200 leaves it running.
+        async def _deleted_during_gap(forwarder_session_id: str) -> bool:
             try:
                 resp = await server_client.get(
                     f"/v1/sessions/{forwarder_session_id}",
@@ -7392,14 +7384,20 @@ def create_runner_app(
                     timeout=10.0,
                 )
             except (httpx.HTTPError, RuntimeError):
+                return False
+            return resp.status_code == 404
+
+        forwarder_ids = list(_native_runtime._AUTO_FORWARDER_TASKS)
+        deleted_flags = await asyncio.gather(*(_deleted_during_gap(sid) for sid in forwarder_ids))
+        for forwarder_session_id, deleted in zip(forwarder_ids, deleted_flags, strict=True):
+            if not deleted:
                 continue
-            if resp.status_code == 404:
-                _logger.info(
-                    "Cancelling forwarder for session deleted during disconnect: %s",
-                    forwarder_session_id,
-                    extra={"session_id": forwarder_session_id},
-                )
-                await _cancel_auto_forwarder_task(forwarder_session_id)
+            _logger.info(
+                "Cancelling forwarder for session deleted during disconnect: %s",
+                forwarder_session_id,
+                extra={"session_id": forwarder_session_id},
+            )
+            await _native_runtime.reap_native_session(forwarder_session_id)
 
     app.state.reconcile_forwarders_after_reconnect = _reconcile_forwarders_after_reconnect
 

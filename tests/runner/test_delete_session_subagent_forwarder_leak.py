@@ -31,6 +31,16 @@ from omnigent.runner.native import orchestration as orch
 from tests.runner.helpers import NullServerClient
 
 
+class _FakeAppServer:
+    """Stand-in for a native app-server whose close() the teardown must await."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def app() -> FastAPI:
     return create_runner_app(server_client=NullServerClient())  # type: ignore[arg-type]
@@ -55,6 +65,7 @@ def _register_forwarder(session_id: str) -> asyncio.Task[object]:
 
 
 async def test_delete_parent_cancels_descendant_native_forwarders(
+    app: FastAPI,
     client: httpx.AsyncClient,
 ) -> None:
     parent = f"conv_parent_{uuid.uuid4().hex}"
@@ -80,6 +91,21 @@ async def test_delete_parent_cancels_descendant_native_forwarders(
     child_task = _register_forwarder(child)
     grand_task = _register_forwarder(grand)
 
+    # A native descendant whose forwarder never adopted its server leaves the
+    # app-server registered; reaping the descendant must close it too.
+    child_app_server = _FakeAppServer()
+    orch._AUTO_CODEX_APP_SERVERS[child] = child_app_server  # type: ignore[assignment]
+
+    cleaned: list[str] = []
+    registry = app.state.session_resource_registry
+    original_cleanup = registry.cleanup_session
+
+    async def _recording_cleanup(session_id: str) -> None:
+        cleaned.append(session_id)
+        await original_cleanup(session_id)
+
+    registry.cleanup_session = _recording_cleanup  # type: ignore[method-assign]
+
     try:
         resp = await client.delete(f"/v1/sessions/{parent}")
         assert resp.status_code == 200
@@ -94,7 +120,17 @@ async def test_delete_parent_cancels_descendant_native_forwarders(
         assert grand_task.cancelled(), "grandchild sub-agent forwarder leaked after parent delete"
         assert child not in orch._AUTO_FORWARDER_TASKS
         assert grand not in orch._AUTO_FORWARDER_TASKS
+
+        # Reaping a descendant must do a real per-session cleanup, not just a
+        # forwarder cancel: close its orphaned native server and release its
+        # panes/env, or each native descendant leaks on every tree-delete.
+        assert child_app_server.closed, "codex app-server leaked for a native descendant"
+        assert child not in orch._AUTO_CODEX_APP_SERVERS
+        assert child in cleaned, "native descendant did not get per-session resource cleanup"
+        assert grand in cleaned, "native descendant did not get per-session resource cleanup"
     finally:
+        registry.cleanup_session = original_cleanup  # type: ignore[method-assign]
+        orch._AUTO_CODEX_APP_SERVERS.pop(child, None)
         for sid, task in ((parent, parent_task), (child, child_task), (grand, grand_task)):
             orch._AUTO_FORWARDER_TASKS.pop(sid, None)
             if not task.done():

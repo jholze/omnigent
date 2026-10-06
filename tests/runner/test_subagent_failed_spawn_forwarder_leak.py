@@ -106,10 +106,11 @@ async def test_failed_spawn_cancels_child_forwarder() -> None:
         # The teardown deleted the server child but must also cancel the
         # runner-local forwarder; otherwise it keeps POSTing events to a
         # session the server has deleted once the reverse tunnel is down.
-        assert forwarder.cancelled() or CHILD_ID not in orch._AUTO_FORWARDER_TASKS, (
+        assert forwarder.cancelled(), (
             "failed spawn leaked the child's transcript forwarder: teardown relied "
             "on a reverse-tunnel DELETE that never cancels it"
         )
+        assert CHILD_ID not in orch._AUTO_FORWARDER_TASKS
     finally:
         subagent_work._session_inboxes_ref.pop(PARENT_ID, None)
         subagent_work.unregister_child_session(CHILD_ID)
