@@ -1,11 +1,5 @@
-// Desktop-shell recording lane: shared cookies within a conversation, isolated
-// cookies between conversations.
-//
-// Journey: boot the shell connected to a local server → conversation A opens a
-// browser view on a site and "signs in" (sets an identity cookie) → conversation
-// B opens its own view on the SAME site → B must start signed out (no cookie).
-// On the unfixed shell both views live on session.defaultSession, so B sees A's
-// cookie; with per-conversation partitions B's jar starts empty.
+// Desktop-shell recording lane: private conversation cookies by default, with
+// optional shared browser logins that survive an app restart.
 //
 // Run from web/electron after building the SPA:
 //   OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_cookie_isolation.e2e.js
@@ -55,6 +49,28 @@ async function setActive(window, conversationId) {
     conversationId,
   );
   assert.equal(result.ok, true, `activate ${conversationId} failed: ${result.error}`);
+}
+
+async function clickBrowserMenu(desktop, id) {
+  await desktop.electronApp.evaluate(async ({ Menu, dialog, BrowserWindow }, menuId) => {
+    const item = Menu.getApplicationMenu().getMenuItemById(menuId);
+    const showMessageBox = dialog.showMessageBox;
+    dialog.showMessageBox = async () => ({ response: 0 });
+    try {
+      await item.click(item, BrowserWindow.getFocusedWindow());
+    } finally {
+      dialog.showMessageBox = showMessageBox;
+    }
+  }, id);
+  // Electron's click wrapper does not return the async handler's promise.
+  await desktop.window.waitForFunction(
+    async () => (await window.omnigentDesktop.browserClose("storage-test-idle-probe")).ok,
+    null,
+    { timeout: 10_000 },
+  );
+  return desktop.electronApp.evaluate(
+    ({ Menu }) => Menu.getApplicationMenu().getMenuItemById("remember_browser_logins").checked,
+  );
 }
 
 // Cookie updates can reach sibling renderers after the writer returns.
@@ -110,7 +126,7 @@ function bannerJs(title, detail, color) {
 }
 
 describe(
-  "desktop shell — per-conversation browser cookie isolation",
+  "desktop shell — browser login storage",
   { skip: deps.ok ? false : `missing deps: ${deps.missing.join(", ")}` },
   () => {
     let tmpDir;
@@ -239,6 +255,137 @@ describe(
           fs.rmSync(userDataDir, { recursive: true, force: true });
         }
         assert.ok(saved && saved.length > 0, "no desktop recording was produced");
+      },
+    );
+
+    it(
+      "remembered logins share cookies and storage, survive restart, and can be disabled or cleared",
+      { timeout: 180_000 },
+      async (t) => {
+        t.diagnostic(`Desktop recordings: ${recordDir}`);
+        const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "omni-saved-logins-"));
+        const site = `${server.serverUrl}/health`;
+        const first = "conv_A";
+        const second = "browser-tab:conv_B:first";
+        let desktop;
+        const open = async (id) => {
+          const result = await openView(desktop.window, id, site);
+          assert.equal(result.ok, true, `open ${id} failed: ${result.error}`);
+          await waitForViewOnOrigin(desktop.window, id, server.serverUrl);
+          await setActive(desktop.window, id);
+        };
+        const storage = async (id) => {
+          const result = await execInView(
+            desktop.window,
+            id,
+            'JSON.stringify([document.cookie, localStorage.getItem("agent_identity")])',
+          );
+          assert.equal(result.ok, true, `read ${id} failed: ${result.error}`);
+          return JSON.parse(result.result);
+        };
+        try {
+          desktop = await launchDesktop({ recordDir, serverUrl: server.serverUrl, userDataDir });
+          assert.equal(
+            await desktop.electronApp.evaluate(
+              ({ Menu }) =>
+                Menu.getApplicationMenu().getMenuItemById("remember_browser_logins").checked,
+            ),
+            false,
+          );
+          assert.equal(await clickBrowserMenu(desktop, "remember_browser_logins"), true);
+          await open(first);
+          const signIn = await execInView(
+            desktop.window,
+            first,
+            'document.cookie = "agent_identity=alice; max-age=86400; path=/";' +
+              'localStorage.setItem("agent_identity", "alice"); document.title = "Conversation A";' +
+              bannerJs(
+                "Conversation A",
+                "Remember browser logins enabled — signed in as alice",
+                "#1a7f37",
+              ),
+          );
+          assert.equal(signIn.ok, true, `sign in failed: ${signIn.error}`);
+          await open(second);
+          await waitForIdentityCookie(desktop.window, second, "agent_identity=alice");
+          assert.deepEqual(await storage(second), ["agent_identity=alice", "alice"]);
+          await execInView(
+            desktop.window,
+            second,
+            'document.title = "Conversation B";' +
+              bannerJs(
+                "Conversation B",
+                "Already signed in as alice in this new session",
+                "#0969da",
+              ),
+          );
+          assert.deepEqual(await execInView(desktop.window, first, "document.title"), {
+            ok: true,
+            result: "Conversation A",
+          });
+          assert.deepEqual(
+            await desktop.window.evaluate(() => [
+              document.cookie.includes("agent_identity="),
+              localStorage.getItem("agent_identity"),
+            ]),
+            [false, null],
+            "embedded logins must not enter the Omnigent shell's session",
+          );
+          await desktop.window.waitForTimeout(1_500);
+          await desktop.electronApp.close();
+          await desktop.stopDisplayCapture();
+          saveRecording(recordDir, "remember-browser-logins");
+          desktop = undefined;
+
+          // Reuse the profile without reseeding settings.json.
+          desktop = await launchDesktop({ recordDir, userDataDir });
+          assert.equal(
+            await desktop.electronApp.evaluate(
+              ({ Menu }) =>
+                Menu.getApplicationMenu().getMenuItemById("remember_browser_logins").checked,
+            ),
+            true,
+          );
+          await open(first);
+          assert.deepEqual(await storage(first), ["agent_identity=alice", "alice"]);
+          await execInView(
+            desktop.window,
+            first,
+            bannerJs("After restarting Omnigent", "Still signed in as alice", "#1a7f37"),
+          );
+          await desktop.window.waitForTimeout(1_500);
+
+          assert.equal(await clickBrowserMenu(desktop, "remember_browser_logins"), false);
+          await open(first);
+          assert.deepEqual(await storage(first), ["", null]);
+          const privateLogin = await execInView(
+            desktop.window,
+            first,
+            'document.cookie = "agent_identity=private; path=/";' +
+              'localStorage.setItem("agent_identity", "private"); document.cookie',
+          );
+          assert.equal(privateLogin.ok, true, `private sign in failed: ${privateLogin.error}`);
+          await open(second);
+          assert.deepEqual(await storage(second), ["", null]);
+
+          await clickBrowserMenu(desktop, "clear_saved_browser_data");
+          assert.equal(await clickBrowserMenu(desktop, "remember_browser_logins"), true);
+          await open(first);
+          assert.deepEqual(await storage(first), ["", null]);
+          await execInView(
+            desktop.window,
+            first,
+            bannerJs("Saved browser data cleared", "Signed out with empty site storage", "#0969da"),
+          );
+          await desktop.window.waitForTimeout(1_500);
+        } finally {
+          if (desktop) {
+            await desktop.electronApp.close();
+            await desktop.stopDisplayCapture();
+            saveRecording(recordDir, "remember-browser-logins-restarted");
+          }
+          fs.rmSync(userDataDir, { recursive: true, force: true });
+        }
       },
     );
   },

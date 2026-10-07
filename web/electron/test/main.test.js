@@ -570,7 +570,7 @@ function loadNavigationHarness({
   const mainRequire = createRequire(mainPath);
   const source =
     fs.readFileSync(mainPath, "utf8") +
-    "\nmodule.exports.testApi = { buildMenu, signOutOfServer, createWindow, createBrowserRegistryForWindow, loadServerUrl, loadSetupPage, pinWindow, pickWorkspaceForBridge, registerIpc, registerSessionExpiryAccess, registerNavigationFallbacks, windows, SETUP_PAGE, disposeAuth: () => { databricksAuth?.dispose(); oidcAuth?.dispose(); for (const watch of awayWatches.values()) watch.dispose(); }, setAwayBannerDelayMs: (ms) => { awayBannerDelayMs = ms; }, setReconnectDelaysMs: (delays) => { reconnectDelaysMs = delays; }, reconnectDelaysMs: () => reconnectDelaysMs };";
+    "\nmodule.exports.testApi = { buildMenu, signOutOfServer, createWindow, createBrowserRegistryForWindow, browserRegistryForSender, loadServerUrl, loadSetupPage, pinWindow, pickWorkspaceForBridge, registerIpc, registerSessionExpiryAccess, registerNavigationFallbacks, windows, SETUP_PAGE, disposeAuth: () => { databricksAuth?.dispose(); oidcAuth?.dispose(); for (const watch of awayWatches.values()) watch.dispose(); }, setAwayBannerDelayMs: (ms) => { awayBannerDelayMs = ms; }, setReconnectDelaysMs: (delays) => { reconnectDelaysMs = delays; }, reconnectDelaysMs: () => reconnectDelaysMs };";
   const module = { exports: {} };
   const sandbox = {
     __dirname: path.dirname(mainPath),
@@ -1854,6 +1854,91 @@ describe("Databricks auth mode wiring", () => {
     await rejected;
     assert.deepEqual(h.calls.loadURL, [["https://server.example"]]);
     assert.deepEqual(h.calls.loadFile, []);
+  });
+});
+
+describe("browser storage menu", () => {
+  it("keeps private storage and existing views when enabling is cancelled", async (t) => {
+    const h = loadNavigationHarness({ registerFallbacks: false });
+    t.after(h.cleanup);
+    h.api.windows.get(h.win).browserRegistry.closeAll = () => assert.fail("views must stay open");
+    h.electron.session.fromPartition = () => assert.fail("storage must remain untouched");
+    h.electron.dialog.showMessageBox = async (_win, options) => {
+      assert.equal(options.defaultId, options.cancelId);
+      return { response: options.cancelId };
+    };
+    h.api.buildMenu();
+    const item = h.calls.appMenu.getMenuItemById("remember_browser_logins");
+    assert.equal(item.checked, false);
+    item.checked = true;
+    await item.click(item);
+    assert.equal(item.checked, false);
+    assert.equal(fs.existsSync(h.settingsPath), false);
+    assert.equal(
+      h.api.browserRegistryForSender({ sender: h.webContents }),
+      h.api.windows.get(h.win).browserRegistry,
+    );
+  });
+
+  it("blocks browser access while clearing and restores it after a reported failure", async (t) => {
+    const h = loadNavigationHarness({ registerFallbacks: false });
+    t.after(h.cleanup);
+    fs.writeFileSync(h.settingsPath, JSON.stringify({ browser_remember_logins: true }));
+    const cleared = [];
+    const dialogs = [];
+    h.api.windows.get(h.win).browserRegistry.closeAll = () => cleared.push("window");
+    h.api.windows.set({}, { browserRegistry: { closeAll: () => cleared.push("sibling") } });
+    let failClear;
+    const browserSession = {
+      clearStorageData: () =>
+        new Promise((_resolve, reject) => {
+          cleared.push("storage");
+          failClear = reject;
+        }),
+      clearCache: async () => cleared.push("cache"),
+    };
+    h.electron.session.fromPartition = (partition) => {
+      assert.equal(partition, "persist:omnigent-browser");
+      return browserSession;
+    };
+    h.electron.dialog.showMessageBox = async (_win, options) => {
+      dialogs.push(options);
+      return { response: 0 };
+    };
+    h.api.buildMenu();
+    const clear = h.calls.appMenu.getMenuItemById("clear_saved_browser_data");
+    const pending = clear.click();
+    await until(() => failClear, "storage deletion");
+    assert.deepEqual(cleared, ["window", "sibling", "storage"]);
+    assert.equal(h.api.browserRegistryForSender({ sender: h.webContents }), null);
+    const toggle = h.calls.appMenu.getMenuItemById("remember_browser_logins");
+    toggle.checked = false;
+    await toggle.click(toggle);
+    assert.equal(toggle.checked, true);
+    assert.equal(dialogs.length, 1);
+
+    failClear(new Error("storage deletion failed"));
+    await pending;
+    assert.equal(dialogs[1].type, "error");
+    assert.match(dialogs[1].detail, /storage deletion failed/);
+    assert.equal(
+      h.api.browserRegistryForSender({ sender: h.webContents }),
+      h.api.windows.get(h.win).browserRegistry,
+    );
+    assert.equal(JSON.parse(fs.readFileSync(h.settingsPath, "utf8")).browser_remember_logins, true);
+
+    browserSession.clearStorageData = async () => cleared.push("storage");
+    await clear.click();
+    assert.deepEqual(cleared, [
+      "window",
+      "sibling",
+      "storage",
+      "window",
+      "sibling",
+      "storage",
+      "cache",
+    ]);
+    assert.equal(dialogs.length, 3);
   });
 });
 

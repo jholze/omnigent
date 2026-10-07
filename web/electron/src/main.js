@@ -3382,6 +3382,23 @@ function buildMenu() {
       { role: "togglefullscreen" },
     ],
   });
+  template.push({
+    label: "Browser",
+    submenu: [
+      {
+        id: "remember_browser_logins",
+        label: "Remember Logins Across Sessions",
+        type: "checkbox",
+        checked: loadSettings().browser_remember_logins === true,
+        click: (item) => updateBrowserStorage(item),
+      },
+      {
+        id: "clear_saved_browser_data",
+        label: "Clear Saved Browser Data…",
+        click: () => updateBrowserStorage(),
+      },
+    ],
+  });
   template.push({ role: "windowMenu" });
   if (!isMac) {
     template.push({ label: "Help", submenu: [aboutItem] });
@@ -3557,6 +3574,56 @@ function isPinnedOriginSender(event) {
 // See preload.js + README.
 // ---------------------------------------------------------------------------
 
+const SHARED_BROWSER_PARTITION = "persist:omnigent-browser";
+let browserStorageBusy = false;
+
+async function updateBrowserStorage(item) {
+  const enabled = loadSettings().browser_remember_logins === true;
+  if (item) item.checked = enabled;
+  if (browserStorageBusy) return;
+  browserStorageBusy = true;
+  const clearing = !item;
+  try {
+    const { response } = await dialog.showMessageBox(activeWindow(), {
+      type: "question",
+      message: clearing
+        ? "Clear saved browser data?"
+        : enabled
+          ? "Stop sharing browser logins?"
+          : "Remember browser logins across sessions?",
+      detail: clearing
+        ? "This signs you out of sites in the shared browser and deletes its cookies, site storage, and cache. All open browser pages will close."
+        : enabled
+          ? "All open browser pages will close. Each session will use separate temporary storage again. Saved logins remain until you choose Clear Saved Browser Data."
+          : "Cookies and site storage will be saved on this device and shared by all sessions, agents, windows, and connected servers, including other Omnigent accounts in this desktop profile. All open browser pages will close; sign in once after enabling.",
+      buttons: [clearing ? "Clear Data" : enabled ? "Disable" : "Enable", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (response !== 0) return;
+    if (!clearing) {
+      const settings = loadSettings();
+      settings.browser_remember_logins = !enabled;
+      saveSettings(settings);
+      item.checked = !enabled;
+    }
+    for (const state of windows.values()) state.browserRegistry?.closeAll("storage-changed");
+    if (clearing) {
+      const browserSession = session.fromPartition(SHARED_BROWSER_PARTITION);
+      await browserSession.clearStorageData();
+      await browserSession.clearCache();
+    }
+  } catch (error) {
+    await dialog.showMessageBox(activeWindow(), {
+      type: "error",
+      message: clearing ? "Couldn't clear saved browser data" : "Couldn't change browser storage",
+      detail: String(error.message || error),
+    });
+  } finally {
+    browserStorageBusy = false;
+  }
+}
+
 /** Deny browser permissions except user-approved local network access. */
 function hardenAgentPartition(partition, win, canPrompt, getAnchorBounds) {
   const ses = session.fromPartition(partition);
@@ -3583,6 +3650,8 @@ function createBrowserRegistryForWindow(win) {
     !registry.isSuppressed() &&
     registry.get(registry.activeConversationId())?.view.webContents === wc;
   const registry = createBrowserViewRegistry({
+    getSharedPartition: () =>
+      loadSettings().browser_remember_logins === true ? SHARED_BROWSER_PARTITION : null,
     WebContentsViewCtor: (opts) => {
       // Install before construction: Electron otherwise auto-grants requests.
       const policy = hardenAgentPartition(opts.webPreferences.partition, win, canPrompt, () =>
@@ -3639,6 +3708,7 @@ function createBrowserRegistryForWindow(win) {
  * @returns {ReturnType<typeof createBrowserViewRegistry> | null}
  */
 function browserRegistryForSender(event) {
+  if (browserStorageBusy) return null;
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) return null;
   return windows.get(win)?.browserRegistry ?? null;
