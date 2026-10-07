@@ -80,6 +80,7 @@ function makeRotation() {
 // Scene-graph records for the controls and headlight tests.
 interface ControlsRecord {
   kind: "orbit" | "trackball";
+  instance: { rotateSpeed: number };
   camera: unknown;
   cameraPositionOnConstruction: { x: number; y: number; z: number };
   handleResizeCalls: number;
@@ -142,6 +143,7 @@ vi.mock("three/examples/jsm/loaders/OBJLoader.js", () => ({ OBJLoader: loaderStu
 // TrackballControls snapshot it for reset().
 function controlsStub(kind: "orbit" | "trackball") {
   return class {
+    rotateSpeed = 1;
     constructor(camera: unknown) {
       if (kind === "trackball" && behavior.trackballThrows) {
         throw new Error("controls init failed");
@@ -149,6 +151,7 @@ function controlsStub(kind: "orbit" | "trackball") {
       const position = (camera as { position: { x: number; y: number; z: number } }).position;
       lastControls = {
         kind,
+        instance: this,
         camera,
         cameraPositionOnConstruction: { x: position.x, y: position.y, z: position.z },
         handleResizeCalls: 0,
@@ -465,6 +468,13 @@ describe("ModelViewer trackball controls and headlight", () => {
 
     resizeControls?.();
     expect(controls.handleResizeCalls).toBe(1);
+  });
+
+  it("turns the model about once per canvas width of drag", async () => {
+    render(<ModelViewer data={makeData()} path="part.stl" />);
+    await waitFor(() => expect(lastControls).not.toBeNull());
+    // TrackballControls rotate rotateSpeed radians per half canvas width.
+    expect(lastControls?.instance.rotateSpeed).toBe(Math.PI);
   });
 
   it("parents the key light and its target to the camera, which joins the scene", async () => {
