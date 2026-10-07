@@ -1132,19 +1132,45 @@ const EXTERNAL_SIGN_IN_PROBE_TIMEOUT_MS = 5000;
 const MAX_SIGN_IN_PROBE_HOPS = 10;
 
 /**
- * Return the first off-origin redirect an unauthenticated navigation to
- * `serverUrl` is bounced to — an external SSO front door — or null. Carries the
- * session cookies so an already-signed-in server is not mistaken for one, and
- * fails open rather than blocking a connect.
+ * Classify a probe redirect against the server being connected to. Only a hop
+ * that leaves the server for a different host is a browser sign-in hand-off; a
+ * same-origin hop or a plain http→https upgrade of the same host is
+ * canonicalization and must keep loading in the window.
+ *
+ * @param {URL} server The server URL being connected to.
+ * @param {string} redirectUrl The redirect's Location.
+ * @returns {"foreign" | "same-site" | "unparseable"}
+ */
+function classifyProbeRedirect(server, redirectUrl) {
+  let target;
+  try {
+    target = new URL(redirectUrl);
+  } catch {
+    return "unparseable";
+  }
+  if (target.origin === server.origin) return "same-site";
+  const sameHostUpgrade =
+    target.hostname === server.hostname &&
+    server.protocol === "http:" &&
+    target.protocol === "https:" &&
+    (target.port === "" || target.port === server.port);
+  return sameHostUpgrade ? "same-site" : "foreign";
+}
+
+/**
+ * Return the first redirect to a different sign-in host an unauthenticated
+ * navigation to `serverUrl` is bounced to — an external SSO front door — or
+ * null. Carries the session cookies so an already-signed-in server is not
+ * mistaken for one, and fails open rather than blocking a connect.
  *
  * @param {string} serverUrl
  * @param {{ signal?: AbortSignal }} [options]
  * @returns {Promise<string | null>}
  */
 function detectExternalSignIn(serverUrl, { signal } = {}) {
-  let serverOrigin;
+  let server;
   try {
-    serverOrigin = new URL(serverUrl).origin;
+    server = new URL(serverUrl);
   } catch {
     return Promise.resolve(null);
   }
@@ -1175,22 +1201,16 @@ function detectExternalSignIn(serverUrl, { signal } = {}) {
     };
     request.on("redirect", (_status, _method, redirectUrl) => {
       if (settled || foreign) return;
-      let offOrigin;
-      try {
-        offOrigin = new URL(redirectUrl).origin !== serverOrigin;
-      } catch {
-        // An unparseable Location isn't a page the window could load either.
-        request.abort();
-        return;
-      }
-      // Leaving the origin is the signal; abort so the foreign sign-in page is
-      // never fetched and the probe resolves deterministically.
-      if (offOrigin) {
+      const kind = classifyProbeRedirect(server, redirectUrl);
+      if (kind === "foreign") {
+        // Leaving the server's host is the signal; abort so the foreign sign-in
+        // page is never fetched and the probe resolves deterministically.
         foreign = redirectUrl;
         request.abort();
         return;
       }
-      if (hops++ >= MAX_SIGN_IN_PROBE_HOPS) {
+      // An unparseable Location isn't a page the window could load either.
+      if (kind === "unparseable" || hops++ >= MAX_SIGN_IN_PROBE_HOPS) {
         request.abort();
         return;
       }
@@ -1212,17 +1232,25 @@ function detectExternalSignIn(serverUrl, { signal } = {}) {
  * window to the connect screen: the IdP's security-key / biometric step has no
  * prompt UI in the Electron window.
  */
-function requireBrowserSignIn(win, serverUrl, { interactive = false } = {}) {
+async function requireBrowserSignIn(win, serverUrl, { interactive = false } = {}) {
   if (win.isDestroyed()) return;
   console.warn("[omnigent] connect: sign-in moved to the system browser", {
     origin: originOf(serverUrl),
     interactive,
   });
-  if (interactive) void shell.openExternal(serverUrl);
   const server = serverDisplayName(serverUrl);
-  const message = interactive
+  let message = interactive
     ? `${server} signs you in through your browser. Finish there, then select Connect.`
     : `${server} signs you in through your browser. Select Connect to open it.`;
+  if (interactive) {
+    try {
+      await shell.openExternal(serverUrl);
+    } catch (err) {
+      console.error("[omnigent] connect: could not open the system browser", err);
+      message = `Couldn't open your browser. Visit ${serverUrl} to sign in, then select Connect.`;
+    }
+  }
+  if (win.isDestroyed()) return;
   const params = new URLSearchParams({ error: message, url: serverUrl });
   if (windows.get(win)?.ephemeral) params.set("ephemeral", "1");
   pinWindow(win, null);
@@ -2238,10 +2266,9 @@ async function loadServerUrl(
       }
     }
     assertCurrent();
-    // A Databricks App, or a server whose manifest a front door hid, can bounce
-    // unauthenticated requests to a sign-in page on another origin demanding a
-    // security key the Electron window cannot prompt for. Hand those to the
-    // browser; an embedded-rollback workspace stays in-window (login is same-origin).
+    // A Databricks App (or a server whose manifest a front door hid) can bounce
+    // an unauthenticated request off-origin to a security-key sign-in the window
+    // cannot prompt for. Hand those off; a same-origin login stays in-window.
     if (
       !databricksBrowserAuth &&
       !signInCookie &&
@@ -2250,7 +2277,7 @@ async function loadServerUrl(
       const externalSignIn = await detectExternalSignIn(serverUrl, { signal });
       assertCurrent();
       if (externalSignIn) {
-        requireBrowserSignIn(win, serverUrl, { interactive });
+        await requireBrowserSignIn(win, serverUrl, { interactive });
         throw Object.assign(new Error("sign-in continues in the system browser"), {
           code: "EXTERNAL_BROWSER_SIGN_IN",
         });
