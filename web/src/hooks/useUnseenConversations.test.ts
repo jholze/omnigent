@@ -424,3 +424,71 @@ describe("pod-independent read-state (replica sharding)", () => {
     expect(stale.isConversationUnseen("conv-1", 6_000, "idle")).toBe(true);
   });
 });
+
+describe("live cross-device read-state merge", () => {
+  it("clears the dot live when another device's read raises the baseline", async () => {
+    // A read on another open client must clear this client's unread on the
+    // next list refresh, with no reload.
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000, updated_at: 2_000 }]);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(true);
+
+    // The other device reads through 2_000; the refreshed list carries the
+    // newer viewer_last_seen on the already-seeded row.
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 2_000, updated_at: 2_000 }]);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(false);
+  });
+
+  it("does not lower the baseline for a stale cross-device read", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 5_000, updated_at: 5_000 }]);
+    // A lagging replica reports an older read — it must not resurface the dot.
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, updated_at: 5_000 }]);
+    expect(mod.isConversationUnseen("conv-1", 4_000, "idle")).toBe(false);
+  });
+
+  it("surfaces a cross-device Mark-as-unread live on a client that already read it", async () => {
+    // This client read the session (baseline past updated_at) so the dot is
+    // clear. Another device Marks-as-unread; the refreshed list carries
+    // viewer_unread and a lowered viewer_last_seen on the already-seeded row.
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, updated_at: 3_000 }]);
+    expect(mod.isConversationUnseen("conv-1", 3_000, "idle")).toBe(false);
+
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: 2_999, viewer_unread: true, updated_at: 3_000 },
+    ]);
+    expect(mod.isConversationUnseen("conv-1", 3_000, "idle")).toBe(true);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+  });
+
+  it("adopts a cross-device Mark-as-unread on reload for a session read on this device", async () => {
+    // After a reload the stored baseline is past updated_at (this device read
+    // the session), yet the server now reports viewer_unread. The first seed
+    // must pin the baseline just below updated_at so the dot shows.
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 3_000, updated_at: 3_000 }]);
+    mod.markConversationSeen("conv-1", 3_000);
+    expect(mod.isConversationUnseen("conv-1", 3_000, "idle")).toBe(false);
+
+    const reloaded = await reloadKeepingStorage();
+    reloaded.seedReadState([
+      { id: "conv-1", viewer_last_seen: 2_999, viewer_unread: true, updated_at: 3_000 },
+    ]);
+    expect(reloaded.isConversationUnseen("conv-1", 3_000, "idle")).toBe(true);
+    expect(reloaded.isExplicitlyUnread("conv-1")).toBe(true);
+  });
+
+  it("keeps a local Mark-as-unread authoritative when another device reads it", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000, updated_at: 5_000 }]);
+    mod.markConversationUnread("conv-1", 5_000);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+
+    // A refresh shows the session read on another device — the local override
+    // survives (its baseline is not raised out from under it).
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, updated_at: 5_000 }]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
+  });
+});

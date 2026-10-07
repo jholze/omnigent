@@ -7,10 +7,14 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source; the server seed only ever *raises* a baseline (max-merge), which
-// also picks up newer reads from the user's other devices when the serving
-// replica happens to have them. Cross-device unread is best-effort by
-// design.
+// source. Each list refresh merges the server's read-state: it *raises* a
+// baseline toward a newer `viewer_last_seen` (so a read on another device
+// clears the dot here without a reload) and adopts a cross-device
+// `viewer_unread` (pinning the baseline just below `updated_at`, like a local
+// Mark-as-unread). The merge never lowers a baseline for a read nor clobbers
+// a pending local write. Cross-device read-state is best-effort by design:
+// under replica sharding a lagging pod may miss or resurface a change until
+// the next consistent refresh.
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -89,11 +93,11 @@ function persistToStorage(): void {
 
 hydrateFromStorage();
 
-// Sessions already seeded from the list. Seeding is once-per-session: the
-// first time a conversation is seen we copy its server `viewer_*` into the
-// mirror, then ignore later list values so an in-flight poll can't clobber a
-// local optimistic write. Cross-device changes after first load surface on a
-// reload (a deliberate Phase-1 scope: live merge is a follow-up).
+// Sessions already seeded from the list. The first time a conversation
+// appears we copy its server `viewer_*` into the mirror; later refreshes
+// merge only *newer* server read-state (see {@link mergeServerReadState}) so
+// an in-flight poll can't clobber a local optimistic write, while a read or
+// Mark-as-unread from another device still surfaces live.
 const seeded = new Set<string>();
 
 // Until the first seed runs we don't know the server's baselines, so the
@@ -136,21 +140,67 @@ export interface ReadStateSeed {
 }
 
 /**
+ * Merges the server's read-state for a conversation already seeded this
+ * session, called on every list refresh. Returns whether the mirror changed.
+ *
+ * - A cross-device Mark-as-unread (`viewer_unread`) is adopted like a local
+ *   {@link markConversationUnread}: the baseline is pinned just below
+ *   `updated_at` so the dot surfaces even on a device whose own earlier read
+ *   had raised the baseline past it.
+ * - Otherwise a read on another device only *raises* the baseline toward a
+ *   newer `viewer_last_seen` (monotonic, so a lagging replica's older value
+ *   is ignored).
+ *
+ * A conversation the user kept explicitly unread stays authoritative — its
+ * baseline is never raised out from under the local override.
+ */
+function mergeServerReadState(conv: ReadStateSeed): boolean {
+  if (conv.viewer_unread) {
+    let changed = false;
+    if (!explicitlyUnread.has(conv.id)) {
+      explicitlyUnread.add(conv.id);
+      changed = true;
+    }
+    if (typeof conv.updated_at === "number") {
+      const pinned = conv.updated_at - 1;
+      const local = lastSeenMap[conv.id];
+      if (local === undefined || local > pinned) {
+        lastSeenMap[conv.id] = pinned;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  if (explicitlyUnread.has(conv.id)) return false;
+  if (typeof conv.viewer_last_seen !== "number") return false;
+  const local = lastSeenMap[conv.id];
+  if (local !== undefined && conv.viewer_last_seen <= local) return false;
+  lastSeenMap[conv.id] = conv.viewer_last_seen;
+  return true;
+}
+
+/**
  * Seeds the local mirror from the conversation list (the server's per-viewer
- * read path). Once-per-session: a conversation is merged the first time it
- * appears, then ignored, so an in-flight list poll can't clobber a local
- * optimistic write. The merge is max(localStorage baseline, server value) —
- * last-seen is monotonic, so taking the max is always safe and picks up a
- * newer read from another device when the serving replica has it. A session
- * with no baseline on either side seeds to its `updated_at` ("read as of
- * load"): pod-independent, so a replica that can't see the user's read-state
- * can never freeze a row's dot off. Flips {@link hydrated} on the first call
- * (even for an empty list) so the automatic mark-seen can resume.
+ * read path) and merges newer server read-state on later refreshes. On a
+ * conversation's first appearance the baseline is max(localStorage, server)
+ * — last-seen is monotonic, so the max is always safe and picks up a newer
+ * read from another device — and a `viewer_unread` flag is adopted (pinning
+ * the baseline just below `updated_at`, like a local Mark-as-unread). A
+ * session with no baseline on either side seeds to its `updated_at` ("read as
+ * of load"), so a replica that can't see the user's read-state can never
+ * freeze a row's dot off. On later appearances {@link mergeServerReadState}
+ * raises the baseline for a cross-device read and adopts a cross-device
+ * Mark-as-unread, without clobbering a pending local write. Flips
+ * {@link hydrated} on the first call (even for an empty list) so the automatic
+ * mark-seen can resume.
  */
 export function seedReadState(conversations: readonly ReadStateSeed[]): void {
   let changed = false;
   for (const conv of conversations) {
-    if (seeded.has(conv.id)) continue;
+    if (seeded.has(conv.id)) {
+      if (mergeServerReadState(conv)) changed = true;
+      continue;
+    }
     seeded.add(conv.id);
     const local = lastSeenMap[conv.id];
     const server = typeof conv.viewer_last_seen === "number" ? conv.viewer_last_seen : undefined;
@@ -158,6 +208,13 @@ export function seedReadState(conversations: readonly ReadStateSeed[]): void {
       local !== undefined && server !== undefined ? Math.max(local, server) : (local ?? server);
     if (baseline === undefined && typeof conv.updated_at === "number") {
       baseline = conv.updated_at;
+    }
+    if (conv.viewer_unread && typeof conv.updated_at === "number") {
+      // Mirror markConversationUnread: a read elsewhere may have raised the
+      // server baseline past updated_at, so pin just below it or the dot would
+      // never show.
+      const pinned = conv.updated_at - 1;
+      if (baseline === undefined || baseline > pinned) baseline = pinned;
     }
     if (baseline !== undefined && baseline !== local) {
       lastSeenMap[conv.id] = baseline;
