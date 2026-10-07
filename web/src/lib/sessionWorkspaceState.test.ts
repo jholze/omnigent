@@ -146,5 +146,13 @@ describe("sessionWorkspaceState", () => {
       ]),
     );
     expect(readSessionWorkspaceState("conv_b")).toEqual({ open: true });
+
+    // A non-URL string is forwarded verbatim as a query parameter, so a corrupt
+    // value is dropped rather than kept to cause repeated 400 round-trips.
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify([{ id: "conv_c", state: { open: true, selectedPrUrl: "not a url" } }]),
+    );
+    expect(readSessionWorkspaceState("conv_c")).toEqual({ open: true });
   });
 });

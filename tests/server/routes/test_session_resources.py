@@ -1284,15 +1284,14 @@ async def test_get_resource_by_id_404_from_runner(
 
 
 @pytest.mark.asyncio
-async def test_get_resource_by_id_400_returns_typed_invalid_input(
+async def test_get_resource_by_id_400_from_runner_surfaces_as_502(
     client: httpx.AsyncClient,
 ) -> None:
-    """A runner 400 passes through as a typed ``invalid_input``, not a 502.
+    """A generic resource route flattens a runner 400 to a 502.
 
-    The runner rejected the request itself, which is a client error rather than
-    a gateway failure. The GET proxy re-derives the typed 400 for every resource
-    route — not only GitHub — alongside the existing 404/410 re-derivation, so
-    the public contract matches the runner's classification.
+    The typed ``invalid_input`` re-derivation is opt-in for the GitHub-info
+    path, so other resource GETs keep the original gateway contract instead of
+    exposing the runner's own client-error classification.
     """
     fake_runner = _FakeRunnerClient(
         responses={
@@ -1306,10 +1305,7 @@ async def test_get_resource_by_id_400_returns_typed_invalid_input(
 
     resp = await client.get("/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/env_bad")
 
-    assert resp.status_code == 400
-    body = resp.json()
-    assert body["error"]["code"] == "invalid_input"
-    assert body["error"]["message"] == "Unsupported revision 'nope'"
+    assert resp.status_code == 502
 
 
 @pytest.mark.asyncio
@@ -3054,6 +3050,36 @@ async def test_github_info_unassociated_pr_returns_typed_400(
     body = resp.json()
     assert body["error"]["code"] == "invalid_input"
     assert body["error"]["message"] == "This pull request is not associated with the session"
+
+
+@pytest.mark.asyncio
+async def test_github_info_400_error_envelope_returns_typed_invalid_input(
+    client: httpx.AsyncClient,
+) -> None:
+    """The GitHub-info 400 translation also reads the typed ``error`` envelope.
+
+    A newer runner wraps the rejection as an ``error`` object rather than a bare
+    ``detail`` string; both envelope shapes must surface the same typed 400.
+    """
+    fake_runner = _FakeRunnerClient(
+        responses={
+            "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/github": (
+                400,
+                {"error": {"code": "invalid_input", "message": "Unsupported revision 'nope'"}},
+            ),
+        },
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.get(
+        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/github",
+        params={"pr_url": "https://github.com/o/r/pull/1"},
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_input"
+    assert body["error"]["message"] == "Unsupported revision 'nope'"
 
 
 @pytest.mark.asyncio

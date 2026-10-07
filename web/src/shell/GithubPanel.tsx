@@ -829,21 +829,18 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
   }, [conversationId, info.data]);
   const cachedAssociations =
     knownAssociations?.sessionId === conversationId ? knownAssociations.data : undefined;
-  // Older hosts still wrap the runner's "PR no longer tracked" rejection as a
-  // 502 instead of the typed 400 below, so a dropped remembered PR can't be told
-  // apart from a transient failure and must be kept. When the per-PR request
-  // fails that way with nothing cached, fetch the session default so the picker
-  // and Link/Unlink controls stay usable while the preference is preserved.
+  // Older hosts return a 502 (not the typed 400 below) for a dropped PR, so it
+  // can't be told from a transient failure and is kept; with nothing cached,
+  // fetch the session default so the picker and controls stay usable.
   const restorationUnrecoverable =
     !!selected &&
     !!info.error &&
     !info.data &&
     !(info.error instanceof RunnerOfflineError) &&
     !cachedAssociations;
-  // This recovery query shares the session-default cache key, so a PR
-  // attach/unlink that writes that key would re-render the panel from here too.
-  // Stay silent until recovery is actually needed, so the normal flow keeps a
-  // single live metadata observer and never re-requests a just-unlinked PR.
+  // Shares the session-default cache key, so stay silent (and disabled) outside
+  // recovery: the normal flow keeps a single live metadata observer and never
+  // re-requests a just-unlinked PR from here.
   const defaultInfo = useGithubInfo(conversationId, {
     poll: true,
     enabled: restorationUnrecoverable,
@@ -869,12 +866,9 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
     },
     [conversationId],
   );
-  // A remembered PR is tentative until the runner serves it. An authoritative
-  // 400 (invalid_input: the session no longer tracks that URL) drops it,
-  // checked before cached data so a stale success can't mask a fresh rejection
-  // and keyed on the live selection so a later poll still clears it, not just
-  // the first restore. Any other failure (an older host's 502, a transient
-  // gateway/network error, the runner asleep) keeps the preference.
+  // Only an authoritative 400 (invalid_input) drops the pick — checked before
+  // cached data so a stale success can't mask a fresh rejection, and keyed on
+  // the live selection so a later poll still clears it. Other failures keep it.
   useEffect(() => {
     if (
       selected &&

@@ -61,6 +61,16 @@ function isRailTab(value: unknown): value is RightRailTab {
   return typeof value === "string" && (RAIL_TABS as readonly string[]).includes(value);
 }
 
+// `URL.canParse` is newer than this app's build targets (vite.config.ts), where
+// calling it throws; `new URL` is universally available, so probe with it.
+function isParseableUrl(value: string): boolean {
+  try {
+    return Boolean(new URL(value));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * One persisted session entry. The store is an ordered array (not a keyed
  * object) so recency ordering survives serialization regardless of the id
@@ -121,10 +131,9 @@ function sanitize(entry: unknown): SessionWorkspaceState {
   if (record.selectedSideChatId === null || typeof record.selectedSideChatId === "string") {
     state.selectedSideChatId = record.selectedSideChatId;
   }
-  // Shape-checked like the other fields: it is forwarded verbatim as a query
-  // parameter, so a corrupted value should be dropped rather than cause repeated
-  // 400 round-trips.
-  if (typeof record.selectedPrUrl === "string" && URL.canParse(record.selectedPrUrl)) {
+  // Forwarded verbatim as a query parameter, so drop a corrupted value rather
+  // than cause repeated 400 round-trips.
+  if (typeof record.selectedPrUrl === "string" && isParseableUrl(record.selectedPrUrl)) {
     state.selectedPrUrl = record.selectedPrUrl;
   }
   return state;

@@ -134,6 +134,15 @@ function renderChanges() {
 
 let scrollIntoView: ReturnType<typeof vi.fn>;
 
+// The latest metadata request driven by the current selection. Filters out the
+// recovery query (the only call carrying `enabled`) so a switch back to an
+// earlier PR can't be satisfied by that PR's stale initial call.
+const lastSelectedPrCall = () =>
+  vi
+    .mocked(useGithubInfo)
+    .mock.calls.filter(([, options]) => !(options && "enabled" in options))
+    .at(-1);
+
 beforeEach(() => {
   // The diff-layout toggle seeds from persisted prefs; start each test clean.
   window.localStorage.clear();
@@ -693,7 +702,7 @@ describe("session PR selection", () => {
     expect(picker).toHaveTextContent("example/two #42 — Second repository");
     expect(picker).not.toHaveAttribute("title");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: two });
+    expect(lastSelectedPrCall()).toEqual(["conv_1", { poll: true, prUrl: two }]);
     await user.hover(picker);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "example/two #42 — Second repository",
@@ -720,7 +729,7 @@ describe("session PR selection", () => {
     expect(fallback).toHaveAttribute("href", two);
     await user.click(picker);
     await user.click(screen.getByRole("option", { name: "example/one #42 — First repository" }));
-    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: one });
+    expect(lastSelectedPrCall()).toEqual(["conv_1", { poll: true, prUrl: one }]);
 
     state.info = { isLoading: true, error: null, isFetching: true };
     rerender(<GithubPanel conversationId="conv_other" />);

@@ -173,7 +173,10 @@ os_env:
 
 
 def _git(*args: str) -> None:
-    subprocess.run(["git", *args], check=True, capture_output=True)
+    result = subprocess.run(["git", *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
 
 
 def _terminate(proc: subprocess.Popen[bytes] | None) -> None:
