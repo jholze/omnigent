@@ -338,21 +338,9 @@ def _register_auto_forwarder_task(session_id: str, task: asyncio.Task[object]) -
 
 
 def _rekey_codex_native_session(old_session_id: str, new_session_id: str) -> None:
-    """
-    Move a codex-native session's teardown bookkeeping after a native /clear.
-
-    A native ``/clear`` rotates Omnigent ownership onto a fresh session that
-    takes over the terminal/pane while the same ``codex app-server`` subprocess
-    and forwarder task keep running. ``DELETE /v1/sessions``, the idle-pane
-    reaper, and the required-terminal-exit path all tear down by the id that
-    now owns the terminal, so these registries must follow the rotation; else
-    teardown of the rotated session finds nothing under its id and the retired
-    session's app-server (and its MCP children) leak until the runner stops.
-
-    :param old_session_id: Session rotated away from, e.g. ``"conv_old"``.
-    :param new_session_id: Session rotated onto, e.g. ``"conv_new"``.
-    :returns: None.
-    """
+    """Move a codex-native session's teardown bookkeeping after a native /clear:
+    the fresh session owns the terminal while the same app-server/forwarder run on,
+    so teardown (DELETE, idle reaper, terminal-exit) misses the old key and leaks it."""
     if old_session_id == new_session_id:
         return
     app_server = _AUTO_CODEX_APP_SERVERS.pop(old_session_id, None)

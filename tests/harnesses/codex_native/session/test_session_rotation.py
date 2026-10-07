@@ -499,14 +499,9 @@ def test_supervise_forwarder_rotation_clears_unparented_pending_child_threads(
 
 
 def test_supervise_forwarder_unsubscribes_retired_thread_after_rotation(tmp_path: Path) -> None:
-    """
-    A ``/clear`` rotation releases the forwarder's subscription to the retired thread.
-
-    Codex keeps a thread and its stdio MCP servers loaded while any connection
-    is subscribed. The TUI unsubscribes on ``/clear``; the forwarder's own
-    ``thread/resume`` subscription must not pin the old thread for the life of
-    the app server.
-    """
+    """A /clear rotation releases the forwarder's subscription to the retired
+    thread; Codex keeps a thread's stdio MCP servers loaded while subscribed, so the
+    forwarder's own thread/resume must not pin it for the app server's lifetime."""
     _write_forwarder_bridge(
         tmp_path, session_id="conv_old", thread_id="thread_old", active_turn_id=None
     )
@@ -515,12 +510,7 @@ def test_supervise_forwarder_unsubscribes_retired_thread_after_rotation(tmp_path
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        """
-        Serve AP calls made while the supervise loop rotates sessions.
-
-        :param request: HTTP request from the forwarder.
-        :returns: Fake AP response.
-        """
+        """Serve AP calls made while the supervise loop rotates sessions."""
         if request.method == "GET" and request.url.path == "/v1/sessions/conv_old":
             return httpx.Response(
                 200,
@@ -550,11 +540,7 @@ def test_supervise_forwarder_unsubscribes_retired_thread_after_rotation(tmp_path
         )
 
     async def run() -> None:
-        """
-        Run the supervise loop through a native thread switch.
-
-        :returns: None.
-        """
+        """Run the supervise loop through a native thread switch."""
         await codex_native_forwarder.supervise_forwarder(
             base_url="http://127.0.0.1:8000",
             headers={},

@@ -1,18 +1,6 @@
-"""Codex-native ``/clear`` must release the retired thread's MCP processes.
-
-Native ``/clear`` starts a new thread in the session's ``codex app-server``.
-Codex stops a thread's stdio MCP servers once the thread is idle with no
-subscribers; the TUI unsubscribes from the retired thread, but Omnigent's
-forwarder keeps the ``thread/resume`` subscription it took after the first
-turn, so every ``/clear`` leaves another generation of MCP wrappers running
-under the live app server. Rotation also leaves the runner registries keyed by
-the pre-rotation session id, so deleting the rotated session no longer closes
-its app server.
-
-Real ``codex`` and ``tmux`` against the local mock model. The runner reads the
-stub MCP servers from ``CODEX_HOME/config.toml``, so this module points an
-unset ``CODEX_HOME`` at a scratch directory before the runner is spawned.
-"""
+"""Codex-native /clear must release the retired thread's MCP processes: the
+forwarder keeps its thread/resume subscription, so each /clear leaks a generation
+of stdio MCP wrappers, and rotation leaves the runner registries on the old id."""
 
 from __future__ import annotations
 

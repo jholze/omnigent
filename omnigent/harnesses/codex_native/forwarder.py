@@ -2067,20 +2067,9 @@ async def _unsubscribe_retired_thread(
     *,
     thread_id: str,
 ) -> None:
-    """
-    Release the forwarder's subscription to a thread retired by rotation.
-
-    Codex keeps a thread and its stdio MCP servers loaded while any
-    connection stays subscribed to it. On a native ``/clear`` the TUI
-    unsubscribes, but the forwarder's own ``thread/resume`` subscription
-    would otherwise pin the retired thread -- and its MCP processes -- for
-    the life of the app server. Best effort: a failed unsubscribe is logged,
-    never fatal to the live forwarder.
-
-    :param client: Codex app-server connection the forwarder subscribes on.
-    :param thread_id: Retired Codex thread id, e.g. ``"thread_old"``.
-    :returns: None.
-    """
+    """Unsubscribe a thread retired by a native /clear so Codex can idle-unload
+    it. Codex keeps a thread's stdio MCP servers loaded while any connection
+    stays subscribed, so a lingering forwarder subscription pins them (best effort)."""
     try:
         await client.request("thread/unsubscribe", {"threadId": thread_id})
     except asyncio.CancelledError:
@@ -2215,10 +2204,8 @@ async def supervise_forwarder(
                         subscribe_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await subscribe_task
-                        # Release this connection's subscription to the retired
-                        # thread so Codex can idle-unload it and stop its stdio
-                        # MCP servers; the forwarder's own thread/resume would
-                        # otherwise pin the old thread for the app server's life.
+                        # Drop this connection's subscription so Codex idle-unloads
+                        # the retired thread and stops its stdio MCP servers.
                         await _unsubscribe_retired_thread(client, thread_id=retiring_thread_id)
                         # Ownership moved to the rotated session; let the runner
                         # move its teardown bookkeeping so deleting or reaping
