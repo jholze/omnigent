@@ -76,6 +76,10 @@ async def _drive_slow_worktree_discovery(base_url: str, session_id: str) -> None
             await expect(page).to_have_url(f"{base_url}/c/{session_id}", timeout=30_000)
             assert len(worktree_requests) == 1
         finally:
-            release_worktrees.set()
-            await page.context.close()
-            await browser.close()
+            # Close the page before releasing the held route, so the handler's
+            # fulfill cannot race a closing context and raise TargetClosedError.
+            try:
+                await page.context.close()
+            finally:
+                release_worktrees.set()
+                await browser.close()

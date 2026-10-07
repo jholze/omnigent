@@ -16,7 +16,7 @@ function response(status: number, body: unknown) {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
 }
 
-function wrapper(queries: DefaultOptions["queries"] = { retry: false }) {
+function wrapper(queries: DefaultOptions["queries"] = { retry: false, retryDelay: 0 }) {
   const client = new QueryClient({ defaultOptions: { queries } });
   return ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client }, children);
@@ -79,7 +79,7 @@ describe("useHostWorktrees", () => {
   it.each([401, 404, 409, 500])("surfaces HTTP %s without claiming non-git", async (status) => {
     authenticatedFetchMock.mockResolvedValue(response(status, { detail: "host unavailable" }));
     const { result } = renderHook(() => useHostWorktrees("host", "/repo"), {
-      wrapper: wrapper({ retryDelay: 0 }),
+      wrapper: wrapper(),
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
@@ -91,7 +91,7 @@ describe("useHostWorktrees", () => {
       response(400, { detail: "worktree listing failed: git command timed out after 120s" }),
     );
     const { result } = renderHook(() => useHostWorktrees("host", "/repo"), {
-      wrapper: wrapper({ retryDelay: 0 }),
+      wrapper: wrapper(),
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(authenticatedFetchMock).toHaveBeenCalledTimes(1);
@@ -101,7 +101,7 @@ describe("useHostWorktrees", () => {
   it("keeps retrying when the host could not be reached", async () => {
     authenticatedFetchMock.mockResolvedValue(response(409, { detail: "host did not respond" }));
     const { result } = renderHook(() => useHostWorktrees("host", "/repo"), {
-      wrapper: wrapper({ retryDelay: 0 }),
+      wrapper: wrapper(),
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(authenticatedFetchMock.mock.calls.length).toBeGreaterThan(1);

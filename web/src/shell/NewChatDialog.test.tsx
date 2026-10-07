@@ -5028,17 +5028,16 @@ describe("NewChatLandingScreen", () => {
       json: async () => ({ id: "conv_new" }),
     } as unknown as Response);
     let discovered = false;
-    useHostWorktreesMock.mockImplementation(
-      (_host, path) =>
-        (path === null
-          ? DISABLED_QUERY_RESULT
-          : discovered
-            ? {
-                ...SUCCESS_QUERY_STATE,
-                data: [{ path, branch: "main", is_main: true, detached: false }],
-              }
-            : { ...PENDING_QUERY_STATE, data: undefined }) as ReturnType<typeof useHostWorktrees>,
-    );
+    useHostWorktreesMock.mockImplementation((_host, path) => {
+      if (path === null) return DISABLED_QUERY_RESULT as ReturnType<typeof useHostWorktrees>;
+      if (!discovered) {
+        return { ...PENDING_QUERY_STATE, data: undefined } as ReturnType<typeof useHostWorktrees>;
+      }
+      return {
+        ...SUCCESS_QUERY_STATE,
+        data: [{ path, branch: "main", is_main: true, detached: false }],
+      } as ReturnType<typeof useHostWorktrees>;
+    });
     renderLanding();
     const input = screen.getByTestId("new-chat-landing-input");
     fireEvent.change(input, { target: { value: "set up the project" } });
