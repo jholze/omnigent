@@ -5898,6 +5898,30 @@ describe("chatStore — stop", () => {
     expect(state.activeResponse?.state).toBe("cancelled");
   });
 
+  it("lets the server's terminal status settle a bubble that stop kept (non-native)", () => {
+    // stop() no longer wipes the optimistic bubble, so on an SDK session the
+    // server's own terminal edge must still drop a prompt it never consumed.
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      pendingUserMessages: [
+        { tempId: "pend_dangling", content: [{ type: "input_text", text: "never consumed" }] },
+      ],
+      activeResponse: { responseId: "resp_1", state: "streaming", error: null },
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    seedConversationsCache([conv("conv_abc", "running")]);
+
+    useChatStore.getState().stop();
+    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual([
+      "pend_dangling",
+    ]);
+
+    handleSessionEvent({ type: "session_status", conversationId: "conv_abc", status: "idle" });
+
+    expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+  });
+
   it("leaves a non-streaming activeResponse untouched on stop", () => {
     // Pins the `state === "streaming"` guard: stop() still clears the working
     // state, but must NOT overwrite a non-streaming activeResponse (dropping the

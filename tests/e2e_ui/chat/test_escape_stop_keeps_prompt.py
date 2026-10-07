@@ -1,103 +1,236 @@
-"""E2E: pressing Esc to stop a running turn must KEEP the just-sent prompt.
+"""UI journey: stopping a running agent keeps the prompt that started it.
 
-Journey: type a prompt, press Enter (it renders immediately as a user bubble
-and the agent starts running), then press Escape to stop the agent — the
-just-sent prompt must stay in the chat, matching the composer Stop button.
+On a claude-native session the just-sent prompt is still an optimistic bubble
+when the composer's Interrupt (Stop) affordance appears: the prompt only
+commits after the terminal round-trip. Stopping the turn in that window, with
+Esc or the Stop button, must leave the bubble in the chat until the server
+reconciles it, and a reload must still show it.
 
-Why this drives a native (claude-native) session rather than a plain SDK one:
-the composer's Escape shortcut fires the interrupt only once the server
-reports the session working (``sessionStatus`` running/waiting). On the SDK
-path the user message is promoted to a committed transcript bubble
-(``session.input.consumed``) before that point, so it survives a stop. On the
-native path the prompt is committed only after the terminal round-trip, so
-there is a real window where it is still an optimistic ``pendingUserMessages``
-entry while the session is already working — pressing Esc promptly wins that
-race, and a stop that wipes pending messages deletes the bubble for the rest
-of the live session (only a page reload re-fetches it).
+Journey, against the real SPA + live server + real ``claude`` CLI on the mock
+provider (its reply is delayed so the agent is observably running):
+
+1. open a fresh claude-native session, wait for the terminal to attach, switch
+   to the Chat view,
+2. type a sentinel prompt and press Enter; wait for the Interrupt button,
+3. press Esc in the composer and sample the sentinel bubble for 12 s,
+4. reload and count the sentinel bubble again,
+5. control: send a second sentinel, click the Interrupt button instead, sample,
+   reload.
 """
 
 from __future__ import annotations
 
+import logging
 import time
-from urllib.parse import urlparse
+import uuid
+from typing import Any
 
 import pytest
-from playwright.sync_api import Page, Request, expect
+from playwright.sync_api import Page, Route, expect
 
-from tests.e2e_ui.conftest import configure_mock_llm, set_fallback_mock_llm
-from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view
+from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
+from tests.e2e_ui.messages.test_message_render_parity import _select_view_mode
 from tests.e2e_ui.messages.test_native_claude_render_parity import (
     _CLAUDE_MOCK_MODEL,
     _open_terminal_view,
     _wait_terminal_connected,
 )
 
+_log = logging.getLogger(__name__)
+
+_USER = '[data-testid="message-bubble"][data-role="user"]'
 _COMPOSER_LABEL = "Message the agent"
-# Distinctive so the user bubble is unambiguous in the transcript.
-_PROMPT = "sentinel prompt keep me when Esc stops the agent"
-_USER_BUBBLE = '[data-testid="message-bubble"][data-role="user"]'
+
+# Mock reply delay that keeps the agent running until the user stops it.
+_REPLY_DELAY_S = 30
+# Sample the sentinel bubble from the stop action through the settled state.
+_WATCH_S = 12.0
+_WATCH_STEP_MS = 500
+# Re-send if the prompt had already committed when the stop control was used.
+_MAX_ARM_ATTEMPTS = 3
+_SESSION_LOAD_TIMEOUT_MS = 60_000
 
 
-@pytest.mark.timeout(300)
-def test_escape_stop_keeps_the_just_sent_prompt(
+def _composer(page: Page):
+    composer = page.get_by_label(_COMPOSER_LABEL)
+    expect(composer).to_be_visible(timeout=30_000)
+    return composer
+
+
+def _send_from_composer(page: Page, text: str) -> None:
+    composer = _composer(page)
+    composer.click()
+    composer.fill(text)
+    composer.press("Enter")
+
+
+def _sentinel_bubbles(page: Page, sentinel: str):
+    return page.locator(_USER, has_text=sentinel)
+
+
+def _bubble_id(page: Page, sentinel: str) -> str | None:
+    bubble = _sentinel_bubbles(page, sentinel).first
+    if bubble.count() == 0:
+        return None
+    return bubble.evaluate(
+        "el => (el.closest('[data-user-message-id]')"
+        " ?? el.querySelector('[data-user-message-id]'))"
+        "?.getAttribute('data-user-message-id') ?? null"
+    )
+
+
+def _arm_delayed_reply(mock_url: str, sentinel: str) -> None:
+    configure_mock_llm(
+        mock_url,
+        [{"text": f"ast-{sentinel}", "delay": _REPLY_DELAY_S}] * 3,
+        match=sentinel,
+    )
+
+
+def _reload_to_chat(page: Page) -> None:
+    page.reload()
+    expect(page.get_by_test_id("view-mode-toggle")).to_be_visible(timeout=_SESSION_LOAD_TIMEOUT_MS)
+    _select_view_mode(page, "Chat")
+    _composer(page)
+
+
+def _count_after_reload(page: Page, sentinel: str) -> int:
+    try:
+        expect(_sentinel_bubbles(page, sentinel)).to_have_count(1, timeout=30_000)
+        return 1
+    except AssertionError:
+        return _sentinel_bubbles(page, sentinel).count()
+
+
+def _stop_running_turn(
     page: Page,
+    sentinel: str,
+    interrupt_posts: list[str],
+    *,
+    control: str,
+) -> dict[str, Any]:
+    """Stop the running turn with *control* (``"escape"`` or ``"button"``).
+
+    Returns what was observed: whether the sentinel bubble was still optimistic
+    (``pend_*``) at the keypress/click, whether an interrupt was POSTed, the
+    sentinel bubble count sampled every 0.5 s from the stop action onwards, and
+    when (if ever) the Interrupt button reverted to Send during that window.
+    """
+    interrupt_button = page.get_by_role("button", name="Interrupt", exact=True)
+    expect(_sentinel_bubbles(page, sentinel).first).to_be_visible(timeout=30_000)
+    expect(interrupt_button).to_be_visible(timeout=60_000)
+    id_at_stop = _bubble_id(page, sentinel)
+
+    interrupt_posts.clear()
+    if control == "escape":
+        composer = _composer(page)
+        composer.focus()
+        composer.press("Escape")
+    else:
+        interrupt_button.click()
+
+    counts: list[int] = []
+    reverted_at_s: float | None = None
+    started = time.monotonic()
+    while True:
+        counts.append(_sentinel_bubbles(page, sentinel).count())
+        elapsed = time.monotonic() - started
+        if reverted_at_s is None and interrupt_button.count() == 0:
+            reverted_at_s = round(elapsed, 1)
+        if elapsed >= _WATCH_S:
+            break
+        page.wait_for_timeout(_WATCH_STEP_MS)
+    result = {
+        "control": control,
+        "sentinel": sentinel,
+        "bubble_id_at_stop": id_at_stop,
+        "optimistic_at_stop": bool(id_at_stop and id_at_stop.startswith("pend_")),
+        "interrupt_posted": bool(interrupt_posts),
+        "interrupt_button_reverted_at_s": reverted_at_s,
+        "counts_from_stop": counts,
+    }
+    _log.info("stop via %s: %s", control, result)
+    return result
+
+
+@pytest.mark.timeout(480)
+def test_escape_stop_keeps_prompt(
+    request: pytest.FixtureRequest,
     native_claude_mock_session: tuple[str, str],
     mock_llm_server_url: str,
 ) -> None:
-    """Esc-to-stop must not delete the prompt the user just sent."""
     base_url, session_id = native_claude_mock_session
-
-    # A slow reply for the sentinel turn keeps the session "working" (so Esc
-    # arms) long enough to interrupt before the terminal round-trip commits
-    # the prompt. A short fallback answers Claude's own background requests.
+    reset_mock_llm(mock_llm_server_url)
     set_fallback_mock_llm(mock_llm_server_url, "default", "ok")
     set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, "ok")
-    configure_mock_llm(
-        mock_llm_server_url,
-        [{"text": "slow sentinel reply", "delay": 12}],
-        match="sentinel prompt",
-    )
+
+    # Create the recorded page only after non-browser setup.
+    page: Page = request.getfixturevalue("page")
 
     interrupt_posts: list[str] = []
 
-    def record(request: Request) -> None:
-        if request.method != "POST":
-            return
-        if urlparse(request.url).path != f"/v1/sessions/{session_id}/events":
-            return
-        body = request.post_data_json
-        if isinstance(body, dict) and body.get("type") == "interrupt":
-            interrupt_posts.append("interrupt")
+    def _record_interrupts(route: Route) -> None:
+        body = route.request.post_data or ""
+        if route.request.method == "POST" and '"interrupt"' in body:
+            interrupt_posts.append(body)
+        route.continue_()
 
-    page.on("request", record)
+    page.route("**/v1/sessions/*/events", _record_interrupts)
 
     page.goto(f"{base_url}/c/{session_id}")
     _open_terminal_view(page)
     _wait_terminal_connected(page)
-    _ensure_chat_view(page)
+    _select_view_mode(page, "Chat")
+    _composer(page)
+    expect(page.locator(_USER)).to_have_count(0)
 
-    composer = page.get_by_label(_COMPOSER_LABEL)
-    expect(composer).to_be_visible(timeout=30_000)
-    prompt_bubble = page.locator(_USER_BUBBLE, has_text=_PROMPT)
+    # --- Esc while the agent is running. ---
+    esc: dict[str, Any] = {}
+    for attempt in range(1, _MAX_ARM_ATTEMPTS + 1):
+        sentinel = f"sentinel-{uuid.uuid4().hex[:8]}"
+        _arm_delayed_reply(mock_llm_server_url, sentinel)
+        _send_from_composer(page, f"{sentinel} keep me when Esc stops the agent")
+        esc = _stop_running_turn(page, sentinel, interrupt_posts, control="escape")
+        if esc["optimistic_at_stop"]:
+            break
+        _log.info("attempt %d: prompt already committed before Esc; re-sending", attempt)
 
-    # Type the prompt and press Enter — it renders as a user bubble and the
-    # agent starts running.
-    composer.fill(_PROMPT)
-    composer.press("Enter")
-    expect(prompt_bubble).to_be_visible(timeout=30_000)
+    _reload_to_chat(page)
+    esc_after_reload = _count_after_reload(page, esc["sentinel"])
+    _log.info("Esc sentinel bubbles after reload: %d", esc_after_reload)
 
-    # Press Esc to stop the running agent, as promptly as a user would. The
-    # composer shortcut fires the interrupt only once the session is working,
-    # so tap Esc until the interrupt POST is observed (bounded).
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline and not interrupt_posts:
-        composer.press("Escape")
-        page.wait_for_timeout(50)
-    assert interrupt_posts, "Esc never triggered an interrupt (session never armed the stop)"
+    # --- Control: the Stop button on a second running turn. ---
+    control_sentinel = f"sentinel-{uuid.uuid4().hex[:8]}"
+    _arm_delayed_reply(mock_llm_server_url, control_sentinel)
+    _send_from_composer(page, f"{control_sentinel} keep me when Stop is clicked")
+    button = _stop_running_turn(page, control_sentinel, interrupt_posts, control="button")
 
-    # Let the post-interrupt transcript settle.
-    page.wait_for_timeout(3_000)
+    _reload_to_chat(page)
+    button_after_reload = _count_after_reload(page, control_sentinel)
+    _log.info("Stop sentinel bubbles after reload: %d", button_after_reload)
 
-    # Contract: the just-sent prompt must survive the Esc-stop, matching the
-    # Stop button's behavior.
-    expect(prompt_bubble).to_be_visible(timeout=4_000)
+    failures: list[str] = []
+    if not esc["interrupt_posted"]:
+        failures.append("Esc did not interrupt the running agent (no interrupt event POSTed)")
+    if esc["counts_from_stop"] != [1] * len(esc["counts_from_stop"]):
+        failures.append(
+            "Esc removed the just-sent prompt from the chat: sentinel bubble counts sampled "
+            f"every 0.5s from the keypress = {esc['counts_from_stop']} (bubble id at keypress "
+            f"{esc['bubble_id_at_stop']!r}; bubbles after reload = {esc_after_reload})"
+        )
+    if esc_after_reload < 1:
+        failures.append("the prompt stopped with Esc is missing after a reload")
+    if not button["interrupt_posted"]:
+        failures.append("control: Stop button did not interrupt (no interrupt event POSTed)")
+    if button["counts_from_stop"] != [1] * len(button["counts_from_stop"]):
+        failures.append(
+            "control: the Stop button also removed the just-sent prompt: sentinel bubble "
+            f"counts sampled every 0.5s from the click = {button['counts_from_stop']} (bubble "
+            f"id at click {button['bubble_id_at_stop']!r}; bubbles after reload = "
+            f"{button_after_reload})"
+        )
+    if button_after_reload < 1:
+        failures.append(
+            "control: the prompt stopped with the Stop button is missing after a reload"
+        )
+    assert not failures, "\n".join(failures)
