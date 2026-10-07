@@ -20,6 +20,7 @@ provider (its reply is delayed so the agent is observably running):
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -119,16 +120,19 @@ def _stop_running_turn(
     interrupt_button = page.get_by_role("button", name="Interrupt", exact=True)
     expect(_sentinel_bubbles(page, sentinel).first).to_be_visible(timeout=30_000)
     expect(interrupt_button).to_be_visible(timeout=60_000)
-    id_at_stop = _bubble_id(page, sentinel)
 
     # Attribute only interrupts POSTed from here on. A prior turn's interrupt was
     # already recorded before this baseline, avoiding the clear()/route-append race.
     posts_before = len(interrupt_posts)
+    # Snapshot the bubble id as the last read before the stop fires, so a native
+    # round-trip that commits the prompt can't widen the window we call optimistic.
     if control == "escape":
         composer = _composer(page)
         composer.focus()
+        id_at_stop = _bubble_id(page, sentinel)
         composer.press("Escape")
     else:
+        id_at_stop = _bubble_id(page, sentinel)
         interrupt_button.click()
 
     counts: list[int] = []
@@ -173,6 +177,11 @@ def _arm_and_stop(
         result = _stop_running_turn(page, sentinel, interrupt_posts, control=control)
         if result["optimistic_at_stop"]:
             return result
+        # Let the interrupted turn settle so the next attempt stops the new turn,
+        # not a stale Interrupt button still showing from this one.
+        expect(page.get_by_role("button", name="Interrupt", exact=True)).to_have_count(
+            0, timeout=30_000
+        )
         _log.info("attempt %d: prompt committed before %s stop; re-sending", attempt, control)
     return result
 
@@ -195,7 +204,11 @@ def test_escape_stop_keeps_prompt(
 
     def _record_interrupts(route: Route) -> None:
         body = route.request.post_data or ""
-        if route.request.method == "POST" and '"interrupt"' in body:
+        try:
+            is_interrupt = json.loads(body).get("type") == "interrupt"
+        except (ValueError, AttributeError):
+            is_interrupt = False
+        if route.request.method == "POST" and is_interrupt:
             interrupt_posts.append(body)
         route.continue_()
 
@@ -246,7 +259,7 @@ def test_escape_stop_keeps_prompt(
             failures.append(f"{leg}: did not interrupt the running agent (no interrupt POSTed)")
         if result["counts_from_stop"] != [1] * len(result["counts_from_stop"]):
             failures.append(
-                f"{leg}: removed the just-sent prompt from the chat; sentinel bubble counts "
+                f"{leg}: sentinel bubble count deviated from 1 (removed or duplicated); counts "
                 f"sampled every 0.5s from the stop = {result['counts_from_stop']} (bubble id "
                 f"at stop {result['bubble_id_at_stop']!r}; bubbles after reload = {after_reload})"
             )

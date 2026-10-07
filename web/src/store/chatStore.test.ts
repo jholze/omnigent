@@ -5898,10 +5898,10 @@ describe("chatStore — stop", () => {
   });
 
   it("lets the server's terminal status settle a bubble that stop kept (non-native)", () => {
-    // On a non-native (SDK) session a prompt the server never consumed is dropped
-    // by the terminal status edge, not by the local stop.
+    // Cleanup authority is the terminal status edge, never the local stop.
     useChatStore.setState({
       conversationId: "conv_abc",
+      isNativeTerminalSession: false,
       pendingUserMessages: [
         {
           tempId: "pend_dangling",
@@ -5944,6 +5944,7 @@ describe("chatStore — stop", () => {
 
     const state = useChatStore.getState();
     expect(state.pendingUserMessages).toHaveLength(1);
+    expect(state.pendingUserMessages[0]?.tempId).toBe("pend_1");
     expect(state.status).toBe("idle");
     expect(state.sessionStatus).toBe("idle");
     // Untouched — the guard skipped the cancelled overwrite.
