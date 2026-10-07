@@ -35,7 +35,7 @@ async def catchall_client(
 
 
 def _rpc_error(
-    status_name: str, implementation: str = "vendored", details: str = _DENIAL_DETAILS
+    status_name: str, implementation: str = "vendored", details_text: str = _DENIAL_DETAILS
 ) -> Exception:
     if implementation == "grpcio":
         grpc = pytest.importorskip("grpc")
@@ -51,9 +51,9 @@ def _rpc_error(
             return status
 
         def details(self) -> str:
-            return details
+            return details_text
 
-    return BackendRpcError(details)
+    return BackendRpcError(details_text)
 
 
 @pytest.mark.parametrize("implementation", ["vendored", "grpcio"])
@@ -141,7 +141,7 @@ async def test_resource_exhausted_maps_to_retryable_503(
 
     exhausted.assert_called()
     assert response.status_code == 503, response.text
-    assert response.headers.get("Retry-After", "").isdigit(), dict(response.headers)
+    assert response.headers.get("Retry-After") == "1", dict(response.headers)
     assert response.json()["error"]["code"] == ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED
     (record,) = [r for r in caplog.records if r.name == "omnigent.server.app"]
     assert record.levelno == logging.WARNING
