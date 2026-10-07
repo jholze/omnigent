@@ -217,13 +217,23 @@ async function startFakeFrontDoor({ idp, upstreamUrl }) {
   };
 
   const proxy = (req, res) => {
-    const target = new URL(req.url, upstreamUrl);
+    const base = new URL(upstreamUrl);
+    const incoming = new URL(req.url, base);
     const headers = {};
     for (const [name, value] of Object.entries(req.headers)) {
       if (!HOP_BY_HOP.has(name)) headers[name] = value;
     }
-    headers.host = target.host;
-    const upstream = http.request(target, { method: req.method, headers }, (upstreamRes) => {
+    headers.host = base.host;
+    // Pin the destination to the upstream host; the request only supplies the path.
+    const options = {
+      protocol: base.protocol,
+      hostname: base.hostname,
+      port: base.port,
+      path: `${incoming.pathname}${incoming.search}`,
+      method: req.method,
+      headers,
+    };
+    const upstream = http.request(options, (upstreamRes) => {
       const out = {};
       for (const [name, value] of Object.entries(upstreamRes.headers)) {
         if (!HOP_BY_HOP.has(name)) out[name] = value;
