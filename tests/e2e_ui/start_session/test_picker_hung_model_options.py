@@ -9,6 +9,7 @@ import re
 import time
 from pathlib import Path
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Route, async_playwright, expect
 
 from tests._helpers.async_thread import run_in_fresh_loop
@@ -54,7 +55,7 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
                 # The host accepted the request but never answers it; by teardown the
                 # client has already given up on it, so aborting may find nothing to abort.
                 await release.wait()
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(PlaywrightError):
                     await route.abort()
 
             async def worktrees(route: Route) -> None:
@@ -122,6 +123,11 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
             await expect(loading).to_have_count(0)
 
             await asyncio.wait_for(models_polled.wait(), timeout=_NEXT_POLL_TIMEOUT_S)
+            # Let React commit the poll's state change before checking the picker held.
+            await page.evaluate(
+                "() => new Promise(resolve => "
+                "requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+            )
             await expect(picker).to_be_visible()
             await expect(loading).to_have_count(0)
             await page.screenshot(path=output / "landing-picker-rendered.png")

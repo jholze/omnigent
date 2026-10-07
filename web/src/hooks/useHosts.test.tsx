@@ -419,7 +419,7 @@ describe("useHostModelOptions", () => {
   });
 
   it("settles a hung model-options request within a bounded deadline", async () => {
-    // The deadline itself is the requirement; the fake-clock steps below only echo it.
+    // Pin the UX deadline so changes to it are deliberate.
     expect(MODEL_OPTIONS_TIMEOUT_MS).toBe(30_000);
     fetchMock.mockReturnValue(new Promise<Response>(() => {}));
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -527,26 +527,30 @@ describe("useHostModelOptions", () => {
     }
   });
 
-  it("keeps a failed catalog settled after switching harness and back", async () => {
+  it.each([
+    { dimension: "harness", other: { hostId: "host_1", harness: "codex-native" } },
+    { dimension: "host", other: { hostId: "host_2", harness: "claude-native" } },
+  ])("keeps a failed catalog settled after switching $dimension and back", async ({ other }) => {
+    const failing = { hostId: "host_1", harness: "claude-native" };
     fetchMock.mockImplementation((url: string) =>
-      url === "/v1/hosts/host_1/harnesses/codex-native/model-options"
-        ? Promise.resolve(mockResponse({ models: [{ id: "gpt-5-codex" }] }))
-        : new Promise<Response>(() => {}),
+      url === "/v1/hosts/host_1/harnesses/claude-native/model-options"
+        ? new Promise<Response>(() => {})
+        : Promise.resolve(mockResponse({ models: [{ id: "other-model" }] })),
     );
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { result, rerender } = renderHook(
-        ({ harness }) => useHostModelOptions("host_1", harness),
-        { wrapper, initialProps: { harness: "claude-native" } },
+        ({ hostId, harness }) => useHostModelOptions(hostId, harness),
+        { wrapper, initialProps: failing },
       );
       await vi.advanceTimersByTimeAsync(MODEL_OPTIONS_TIMEOUT_MS + 1_000);
       await waitFor(() => expect(result.current.isError).toBe(true));
 
-      rerender({ harness: "codex-native" });
+      rerender(other);
       await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
       // Back on the failed catalog, its data-less refetch must not spin again.
-      rerender({ harness: "claude-native" });
+      rerender(failing);
       await waitFor(() => expect(result.current.isFetching).toBe(true));
       expect(result.current.isLoading).toBe(false);
       expect(result.current.isError).toBe(true);
