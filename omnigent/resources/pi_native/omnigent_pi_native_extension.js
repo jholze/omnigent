@@ -1721,10 +1721,10 @@ module.exports = function (pi) {
   function persistCumulativeUsage() {
     const statePath = usageStatePath();
     if (!statePath) return;
+    // Per-pid temp name: an exiting Pi process and its relaunched successor
+    // can flush concurrently, and a shared temp path could persist a torn file.
+    const tmp = `${statePath}.${process.pid}.tmp`;
     try {
-      // Per-pid temp name: an exiting Pi process and its relaunched successor
-      // can flush concurrently, and a shared temp path could persist a torn file.
-      const tmp = `${statePath}.${process.pid}.tmp`;
       fs.writeFileSync(
         tmp,
         JSON.stringify({
@@ -1737,7 +1737,11 @@ module.exports = function (pi) {
       fs.renameSync(tmp, statePath);
     } catch (_err) {
       // Best-effort: a failed persist only risks a one-time undercount on the
-      // next relaunch, never a crash or a wrong (clawed-back) total.
+      // next relaunch, never a crash or a wrong (clawed-back) total. Drop the
+      // temp file so a failed rename does not strand it in the bridge dir.
+      try {
+        fs.unlinkSync(tmp);
+      } catch (_cleanupErr) {}
     }
   }
 

@@ -130,11 +130,16 @@ def _wait_for_model_input(base_url: str, session_id: str, model: str, expected: 
     deadline = time.monotonic() + 15
     seen: object = None
     while time.monotonic() < deadline:
-        response = httpx.get(
-            f"{base_url}/v1/sessions/{session_id}",
-            params={"include_usage": "true"},
-            timeout=10,
-        )
+        try:
+            response = httpx.get(
+                f"{base_url}/v1/sessions/{session_id}",
+                params={"include_usage": "true"},
+                timeout=10,
+            )
+        except httpx.HTTPError:
+            # A transient transport error while the server settles is "not yet".
+            time.sleep(0.25)
+            continue
         if response.status_code != 200:
             # A transient non-2xx while the server settles is "not yet", not fatal.
             time.sleep(0.25)
