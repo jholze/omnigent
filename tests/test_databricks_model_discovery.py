@@ -366,10 +366,8 @@ def test_discover_codex_models_filters_non_codex_and_ranks_curated_first() -> No
 def test_discover_codex_models_ranks_uncurated_major_only_tier_by_generation() -> None:
     """A major-only tiered id outside the curated table ranks with its generation.
 
-    Codex's id grammar makes the minor version optional (``gpt-6-terra``), so
-    such an id belongs in the versioned tier — newest generation first, an
-    untiered id ahead of a same-generation tier — not in the unranked name
-    tail below every older versioned GPT (and below kimi by name).
+    Codex makes the minor version optional, so an untiered id sorts ahead of a
+    same-generation tier rather than falling into the unranked name tail.
     """
     servable = _discover_codex(
         [

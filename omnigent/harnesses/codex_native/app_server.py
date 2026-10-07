@@ -1587,11 +1587,11 @@ def mark_launch_default(rows: list[_JsonObject], pinned_model: str | None) -> li
         if codex_default_index is None and row.get("isDefault") is True:
             codex_default_index = index
         for spelling in (row.get("id"), row.get("model")):
-            if (
-                isinstance(spelling, str)
-                and comparable_model_id(spelling) in omnigent_default_keys
-            ):
-                rank = omnigent_default_keys.index(comparable_model_id(spelling))
+            if not isinstance(spelling, str):
+                continue
+            key = comparable_model_id(spelling)
+            if key in omnigent_default_keys:
+                rank = omnigent_default_keys.index(key)
                 if rank < omnigent_default_rank:
                     omnigent_default_rank, omnigent_default_index = rank, index
         if pinned_index is None and pinned_key is not None:

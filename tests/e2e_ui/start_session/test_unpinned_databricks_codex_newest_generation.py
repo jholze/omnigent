@@ -157,19 +157,28 @@ def _wait_healthy(
                 f"Server log:\n{server_log.read_text()[-3000:]}\n"
                 f"Runner log:\n{runner_log.read_text()[-3000:]}"
             )
+        # A child that already exited can never become healthy; fail fast with
+        # its log instead of spinning until the deadline.
         if proc.poll() is not None:
-            last_error = f"server exited with {proc.returncode}"
-        elif runner_proc.poll() is not None:
-            last_error = f"runner exited with {runner_proc.returncode}"
-        else:
-            try:
-                if httpx.get(f"{base_url}/health", timeout=2).status_code == 200:
-                    status = httpx.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
-                    if status.status_code == 200 and status.json()["online"] is True:
-                        return
-                    last_error = f"runner status {status.status_code}: {status.text[:200]}"
-            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+            raise RuntimeError(
+                f"server exited with {proc.returncode} before becoming healthy.\n"
+                f"Server log:\n{server_log.read_text()[-3000:]}"
+            )
+        if runner_proc.poll() is not None:
+            raise RuntimeError(
+                f"runner exited with {runner_proc.returncode} before becoming healthy.\n"
+                f"Runner log:\n{runner_log.read_text()[-3000:]}"
+            )
+        try:
+            if httpx.get(f"{base_url}/health", timeout=2).status_code == 200:
+                status = httpx.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
+                if status.status_code == 200 and status.json().get("online") is True:
+                    return
+                last_error = f"runner status {status.status_code}: {status.text[:200]}"
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        except json.JSONDecodeError as exc:
+            last_error = f"runner status returned non-JSON: {exc}"
         time.sleep(_HEALTH_POLL_INTERVAL_S)
 
 
@@ -190,15 +199,19 @@ def dedicated_databricks_codex_stack(
     artifact_dir = server_tmp / "artifacts"
     for path in (config_home, source_codex_home, home_dir, state_dir, artifact_dir):
         path.mkdir(parents=True, exist_ok=True)
-    # tmux.sock must fit the ~108-char unix socket limit the pytest basetemp tree exceeds.
-    tmp_dir = Path(tempfile.mkdtemp(prefix="codexgpt6-"))
-
-    workspace = MockWorkspace(model_ids)
-    workspace_thread = threading.Thread(target=workspace.serve_forever, daemon=True)
+    tmp_dir: Path | None = None
+    workspace: MockWorkspace | None = None
+    workspace_thread: threading.Thread | None = None
+    serving = False
     proc: subprocess.Popen[bytes] | None = None
     runner_proc: subprocess.Popen[bytes] | None = None
     try:
+        # tmux.sock must fit the ~108-char unix socket limit the pytest basetemp tree exceeds.
+        tmp_dir = Path(tempfile.mkdtemp(prefix="codexgpt6-"))
+        workspace = MockWorkspace(model_ids)
+        workspace_thread = threading.Thread(target=workspace.serve_forever, daemon=True)
         workspace_thread.start()
+        serving = True
         _write_databricks_provider_config(config_home)
         _write_databrickscfg(home_dir, workspace.url)
 
@@ -276,10 +289,15 @@ def dedicated_databricks_codex_stack(
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=5)
-        workspace.shutdown()
-        workspace_thread.join(timeout=5)
-        workspace.server_close()
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # shutdown() blocks until serve_forever is running, so skip it if the
+        # thread never started; server_close still frees the bound socket.
+        if serving and workspace is not None and workspace_thread is not None:
+            workspace.shutdown()
+            workspace_thread.join(timeout=5)
+        if workspace is not None:
+            workspace.server_close()
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _launch_candidates(model_ids: tuple[str, ...]) -> dict[str, str]:
@@ -289,13 +307,35 @@ def _launch_candidates(model_ids: tuple[str, ...]) -> dict[str, str]:
     }
 
 
+#: Startup lines that merely name the model a launch could not reach. Matching a
+#: candidate on such a line would read a failure banner as a successful launch.
+_LAUNCH_ERROR_RE = re.compile(
+    r"\b(error|unavailable|failed|not found|invalid|rejected)\b", re.IGNORECASE
+)
+
+
 def _launched_model(pane_text: str, candidates: dict[str, str]) -> str | None:
     # The TUI paints the model as ``model: <id>`` or as an ``<id> <effort>``
-    # footer depending on the codex version, so match any token folding to a candidate.
-    for token in re.findall(r"[A-Za-z0-9._/\[\]-]+", pane_text):
-        if comparable_model_id(token) in candidates:
-            return token
+    # footer depending on the codex version, so match any token folding to a
+    # candidate, but skip error lines so a startup failure that names a model
+    # does not count as that model launching.
+    for line in pane_text.splitlines():
+        if _LAUNCH_ERROR_RE.search(line):
+            continue
+        for token in re.findall(r"[A-Za-z0-9._/\[\]-]+", line):
+            if comparable_model_id(token) in candidates:
+                return token
     return None
+
+
+def test_launched_model_ignores_startup_error_naming_the_model() -> None:
+    """A startup error naming a model is not a successful launch banner."""
+    candidates = _launch_candidates(_ADVERTISED_MODEL_IDS)
+    assert _launched_model("ERROR: model gpt-6-luna unavailable", candidates) is None
+    assert (
+        _launched_model("  system.ai.gpt-6-luna  default · /repo", candidates)
+        == "system.ai.gpt-6-luna"
+    )
 
 
 @pytest.fixture
@@ -348,13 +388,18 @@ def test_unpinned_databricks_codex_session_launches_newest_advertised_generation
     deadline = time.monotonic() + _TUI_BANNER_TIMEOUT_MS / 1000
     pane_text = ""
     launched: str | None = None
+    previous: str | None = None
     while time.monotonic() < deadline:
         pane_text = _codex_pane_text(stack.tmp_dir)
-        launched = _launched_model(pane_text, candidates)
-        if launched is not None:
+        current = _launched_model(pane_text, candidates)
+        # Require the same model across two consecutive polls so a transient
+        # mid-boot banner never settles the launch model under test.
+        if current is not None and current == previous:
+            launched = current
             # Let the SPA terminal mirror the banner so a recording ends on the outcome.
             page.wait_for_timeout(3_000)
             break
+        previous = current
         page.wait_for_timeout(1_000)
 
     listed = ", ".join(_ADVERTISED_MODEL_IDS)
