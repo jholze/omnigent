@@ -106,12 +106,8 @@ def token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @dataclass
 class _FakeLoginProcess:
-    """Stand-in for the ``databricks auth login`` ``Popen`` handle.
-
-    :param stalls: How many ``wait`` calls time out before the login finishes.
-    :param returncode: Exit code reported once it finishes.
-    :param wait_timeouts: The ``timeout`` each ``wait`` call was given, in order.
-    """
+    """Stand-in for the ``databricks auth login`` ``Popen`` handle: the first ``stalls``
+    ``wait`` calls time out, then it exits with ``returncode``."""
 
     stalls: int = 0
     returncode: int = 0
@@ -609,13 +605,7 @@ def _apps_login_responses() -> _FakeHttpx:
 def test_login_explains_callback_when_browser_login_stalls(
     monkeypatch: pytest.MonkeyPatch, token_dir: Path
 ) -> None:
-    """A browser login still running after the hint delay gets the callback explained.
-
-    ``databricks auth login`` prints nothing while it waits for the browser to
-    reach ``localhost:8020``, and its own timeout is an hour. When the browser
-    is on another machine the user must be told to forward the port — and the
-    login must keep waiting so that forward can still complete it.
-    """
+    """A login still running after the hint delay gets the callback explained and continues."""
     process = _FakeLoginProcess(stalls=1)
     login_calls = _patch_login_env(
         monkeypatch,

@@ -1,12 +1,6 @@
-"""A fake Databricks workspace, over HTTPS, for driving the real ``databricks auth login``.
-
-Serves the OIDC endpoints the CLI drives (discovery, ``/oidc/v1/authorize``
-redirecting straight back to the CLI's ``redirect_uri`` with a code, and
-``/oidc/v1/token``) plus the ``/api/2.0/omnigent`` mount, whose anonymous
-``/v1/me`` answers the ``DatabricksRealm`` challenge and accepts minted bearers.
-TLS comes from a throwaway CA minted in-process with ``cryptography`` and trusted
-via ``SSL_CERT_FILE``/``REQUESTS_CA_BUNDLE``.
-"""
+"""Fake Databricks workspace over HTTPS for driving the real ``databricks auth login``:
+OIDC discovery/authorize/token plus the ``/api/2.0/omnigent`` mount's ``DatabricksRealm``
+challenge, served with a throwaway CA minted in-process (``cryptography``)."""
 
 from __future__ import annotations
 
@@ -71,10 +65,8 @@ def _write_pem(path: Path, data: bytes) -> Path:
 
 
 def make_ca_and_server_cert(directory: Path) -> tuple[Path, Path, Path]:
-    """Generate a throwaway CA and a ``localhost``/``127.0.0.1`` leaf it signs.
-
-    :returns: ``(ca_pem, cert_pem, key_pem)``.
-    """
+    """Mint a throwaway CA and a ``localhost``/``127.0.0.1`` leaf it signs.
+    Returns ``(ca_pem, cert_pem, key_pem)``."""
     directory.mkdir(parents=True, exist_ok=True)
     now = dt.datetime.now(dt.UTC)
     not_before, not_after = now - dt.timedelta(minutes=5), now + dt.timedelta(days=2)
@@ -150,12 +142,8 @@ class RequestRecord:
 
 @dataclass
 class FakeDatabricksWorkspace:
-    """A running fake workspace; use as a context manager.
-
-    :param cert_dir: Where the CA/leaf PEMs are written.
-    :param stall_token_exchange: Hold every ``/oidc/v1/token`` request open until
-        :attr:`release_token_exchange` is set.
-    """
+    """A running fake workspace (context manager); ``stall_token_exchange`` holds every
+    ``/oidc/v1/token`` request until :attr:`release_token_exchange` is set."""
 
     cert_dir: Path
     stall_token_exchange: bool = False
@@ -215,12 +203,8 @@ class FakeDatabricksWorkspace:
         browser_shim_dir: Path,
         browser_url_file: Path,
     ) -> dict[str, str]:
-        """Environment for an Omnigent/Databricks CLI subprocess logging in to this workspace.
-
-        Isolated ``HOME``/state, no ambient credentials or proxies, the throwaway CA
-        trusted by every client, and *browser_shim_dir* first on ``PATH`` so the
-        CLI's ``xdg-open`` lands in :func:`write_browser_shim`'s recorder.
-        """
+        """Environment for a CLI subprocess logging in here: isolated ``HOME``, no ambient
+        credentials or proxies, the throwaway CA trusted, *browser_shim_dir* first on ``PATH``."""
         env = os.environ.copy()
         for key in ENV_TO_CLEAR:
             env.pop(key, None)
@@ -370,13 +354,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def write_browser_shim(directory: Path, url_file: Path | None = None) -> Path:
-    """Install an ``xdg-open`` that records the URL instead of opening a browser.
-
-    The Databricks CLI opens the authorize URL through ``xdg-open`` on Linux; the
-    recorded URL is what a journey driver then navigates. The target file comes
-    from ``OMNI_E2E_BROWSER_URL_FILE`` unless *url_file* pins it (for shells that
-    do not inherit the driver's environment). Returns *directory*.
-    """
+    """Install an ``xdg-open`` that records the URL in *url_file* (default
+    ``$OMNI_E2E_BROWSER_URL_FILE``) instead of opening a browser; returns *directory*."""
     directory.mkdir(parents=True, exist_ok=True)
     shim = directory / "xdg-open"
     target = (
@@ -400,11 +379,7 @@ def wait_for_browser_url(url_file: Path, *, timeout: float) -> str:
 
 
 class BlackHoleListener:
-    """Accepts TCP connections and never answers them.
-
-    Stands in for a loopback port that something owns but nothing serves, so a
-    browser hitting it sees a request that stays pending.
-    """
+    """Accepts TCP connections and never answers: a port something owns but nothing serves."""
 
     def __init__(self, address: str, port: int) -> None:
         self.address, self.port = address, port

@@ -12664,15 +12664,9 @@ def _in_ssh_session() -> bool:
 
 
 def _wait_for_browser_login(proc: subprocess.Popen[bytes], *, guidance_shown: bool) -> int:
-    """Wait for ``databricks auth login``, explaining the callback once it looks stuck.
-
-    :param proc: The running CLI.
-    :param guidance_shown: Whether :func:`_browser_login_callback_guidance`
-        was already printed, so the stall notice does not repeat it.
-    :returns: The CLI's exit code.
-    :raises click.ClickException: When the login does not finish within
-        :data:`_BROWSER_LOGIN_TIMEOUT_S`; the CLI is terminated first.
-    """
+    """Wait for ``databricks auth login`` and return its exit code, explaining the callback
+    once the wait looks stuck (unless *guidance_shown*); after ``_BROWSER_LOGIN_TIMEOUT_S``
+    the CLI is terminated and ``click.ClickException`` raised."""
     minutes = int(_BROWSER_LOGIN_TIMEOUT_S // 60)
     try:
         return proc.wait(timeout=_BROWSER_LOGIN_HINT_DELAY_S)

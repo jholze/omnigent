@@ -1,16 +1,6 @@
-"""Databricks-fronted login whose browser callback never reaches the CLI.
-
-``omnigent start --server <workspace-hosted omnigent>`` on a terminal with no
-cached grant shells out to ``databricks auth login``, which listens on
-``http://localhost:8020`` and waits silently (up to an hour) for the browser's
-redirect. When that redirect cannot reach the listener (browser on another
-machine, or something else owning its port 8020) the terminal must explain the
-callback and how to forward it, or give up, instead of hanging.
-
-The real Databricks CLI and a real Chromium drive the fake HTTPS workspace in
-``_fake_databricks_workspace``; the browser's ``localhost`` resolves to a
-loopback listener that accepts connections and never answers.
-"""
+"""``omnigent start`` against a Databricks-fronted server when the browser's ``localhost:8020``
+callback cannot reach ``databricks auth login`` (browser on another machine): the terminal must
+explain the callback and how to forward it, or give up, instead of hanging silently."""
 
 from __future__ import annotations
 
@@ -77,10 +67,7 @@ class LoginSession:
         return wait_for_browser_url(self.url_file, timeout=HANDOFF_TIMEOUT_S)
 
     def collect_output(self, seconds: float, *, until: re.Pattern[str] | None = None) -> str:
-        """Read what the terminal prints during the next *seconds*.
-
-        Stops early once *until* matches the output so far, or the process exits.
-        """
+        """Read the terminal for *seconds*; stop early on *until* or when the process exits."""
         deadline = time.monotonic() + seconds
         chunks: list[str] = []
         while time.monotonic() < deadline:
@@ -146,12 +133,8 @@ def callback_origin(authorize_url: str) -> tuple[str, int]:
 
 @dataclass(eq=False)
 class BrowserDrive(threading.Thread):
-    """Open *authorize_url* in Chromium and record what happens to the callback.
-
-    :param resolve_localhost_to: Make the browser resolve ``localhost`` to this
-        address instead of the CLI's loopback — the "browser on another machine"
-        emulation. ``None`` keeps normal resolution.
-    """
+    """Open *authorize_url* in Chromium and record what happens to the callback;
+    *resolve_localhost_to* points the browser's ``localhost`` elsewhere ("another machine")."""
 
     authorize_url: str
     callback_prefix: str
