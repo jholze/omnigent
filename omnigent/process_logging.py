@@ -495,6 +495,41 @@ def _unlink_if_empty(path: Path) -> None:
             path.unlink()
 
 
+def ensure_stdio_survives_unencodable_output() -> None:
+    """Keep stdio writes from aborting when the stream encoding is legacy.
+
+    A legacy non-UTF-8 stdio encoding (a Windows ANSI code page like cp1252,
+    a C/latin-1 locale, or an explicit ``PYTHONIOENCODING``) hands Python
+    streams that can't encode Omnigent's decorative glyphs (emoji, ``✓``,
+    ``⚠``, …), so a plain ``print`` raises ``UnicodeEncodeError`` -- mid-command
+    in the CLI, or inside the connection loop of a background daemon whose
+    stdio is its log file. Reconfigure such streams so the unencodable
+    character degrades to a stand-in instead of killing the process: on
+    Windows switch to UTF-8 outright (modern terminals render it, the process
+    log files are UTF-8 anyway, and it preserves the glyphs); elsewhere keep
+    the stream's own encoding and only relax the error handler, so output
+    stays in the encoding the consumer asked for. ``PYTHONUTF8`` can't help
+    here since PEP 540 reads it only at interpreter startup.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("_", "-")
+        if encoding in {"utf-8", "utf8"}:
+            continue
+        # Trade-off: errors="replace" is process-wide, so any genuinely
+        # unencodable output (not just decorative glyphs) degrades to "?"
+        # instead of raising — acceptable for human-facing stdio and logs.
+        # Detached/replaced streams (or a test's capture object) can't be
+        # reconfigured; the glyph fallback still guards the actual writes.
+        with contextlib.suppress(ValueError, OSError):
+            if sys.platform == "win32":
+                reconfigure(encoding="utf-8", errors="replace")
+            else:
+                reconfigure(errors="replace")
+
+
 def configure_process_logging(
     destination: str,
     *,
