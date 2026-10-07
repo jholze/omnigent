@@ -1215,10 +1215,9 @@ def create_runner_app(
     # every spec-derived read (native-vs-SDK checks above all) still answers
     # with the harness the spec declared, which a routed session is not on.
     _session_harness_overrides: dict[str, str] = {}
-    # Sessions that are generic side-chat forks (stamped at init from the
-    # init-envelope labels). The composed-instruction harnesses build the
-    # prompt per turn, long after the init envelope is gone, so the flag has to
-    # outlive it to gate the side-conversation boundary instruction.
+    # Generic side-chat forks, stamped at init from the envelope labels. The
+    # composed-instruction harnesses rebuild the prompt per turn after the
+    # envelope is gone, so the flag has to outlive it.
     _side_chat_sessions: set[str] = set()
     # session_id → revision of the agent bundle its caches were built from
     _session_agent_revisions: dict[str, str] = {}
