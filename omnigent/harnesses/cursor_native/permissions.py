@@ -157,6 +157,20 @@ async def _send_cursor_keys(bridge_dir: Path, session_id: str, *keys: str) -> bo
     return True
 
 
+async def _deliver_verdict_keys(bridge_dir: Path, session_id: str, *keys: str) -> bool:
+    """Send a verdict's keys to completion even if the task is cancelled midway.
+
+    A half-sent sequence can strand the TUI (a decline needs its Enter to close
+    the reason prompt), so cancellation waits for the keys already owed.
+    """
+    delivery = asyncio.ensure_future(_send_cursor_keys(bridge_dir, session_id, *keys))
+    try:
+        return await asyncio.shield(delivery)
+    except asyncio.CancelledError:
+        await delivery
+        raise
+
+
 async def _run_one_approval(
     client: httpx.AsyncClient,
     *,
@@ -180,7 +194,7 @@ async def _run_one_approval(
         return
     action = result.get("action")
     if action == "accept":
-        await _send_cursor_keys(bridge_dir, session_id, prompt.accept_key)
+        await _deliver_verdict_keys(bridge_dir, session_id, prompt.accept_key)
     elif action in {"decline", "cancel"}:
         # Cursor's tool-reject doesn't dismiss on the decline key alone — it
         # opens a "Reason for rejection (Enter to submit, Esc to cancel)"
@@ -189,7 +203,7 @@ async def _run_one_approval(
         # the TUI parked at the reason input (which the user then has to clear
         # by hand). The settle pause before Enter (see _send_cursor_keys) gives
         # the reason prompt time to render first.
-        await _send_cursor_keys(bridge_dir, session_id, prompt.decline_key, "Enter")
+        await _deliver_verdict_keys(bridge_dir, session_id, prompt.decline_key, "Enter")
 
 
 async def _run_one_question(
@@ -230,11 +244,11 @@ async def _run_one_question(
         _logger.debug(
             "cursor question accept; session=%s content=%r keys=%r", session_id, content, keys
         )
-        await _send_cursor_keys(bridge_dir, session_id, *keys)
+        await _deliver_verdict_keys(bridge_dir, session_id, *keys)
     elif action in {"decline", "cancel"}:
         # The question picker's "Esc to skip" dismisses cleanly (no rejection-
         # reason sub-prompt like the tool-approval gate has), so a single key.
-        await _send_cursor_keys(bridge_dir, session_id, _TRANSCRIPT_DECLINE_KEY)
+        await _deliver_verdict_keys(bridge_dir, session_id, _TRANSCRIPT_DECLINE_KEY)
     else:
         _logger.warning(
             "cursor question verdict: unexpected action=%r; session=%s", action, session_id
@@ -909,10 +923,12 @@ async def supervise_cursor_transcript_elicitations(
                         # Release the card while its hook request is still parked so
                         # the server clears it now; a severed request instead waits
                         # out the server's re-park grace and reads as unanswered.
-                        await _post_external_elicitation_resolved(
-                            client, session_id, str(entry["elicitation_id"])
-                        )
-                        await _cancel_cursor_elicitation_tasks((task,))
+                        try:
+                            await _post_external_elicitation_resolved(
+                                client, session_id, str(entry["elicitation_id"])
+                            )
+                        finally:
+                            await _cancel_cursor_elicitation_tasks((task,))
                 # Calls that vanished before settling were auto-approved — drop
                 # their debounce timer silently (no card was ever shown).
                 for tool_call_id in [tcid for tcid in first_seen if tcid not in seen_ids]:
