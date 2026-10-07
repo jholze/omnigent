@@ -637,10 +637,9 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
 ) -> None:
     """Obsolete parked verdicts are cancelled before a late web verdict can type.
 
-    A prompt answered in the terminal is released while its hook request is
-    still parked, so the server clears the card at once instead of holding it
-    through the severed-request grace; then the task is cancelled. A stopping
-    supervisor cancels its parked tasks outright.
+    A terminal-answered prompt is released while its hook request is still parked
+    (so the server clears the card at once), then cancelled; a stopping supervisor
+    cancels its parked tasks outright.
     """
     pending = [CursorPendingToolCall("call_cleanup", tool_name, {})]
     posts, sent = _install_supervisor_fakes(
