@@ -444,8 +444,9 @@ def routed_prompt_block_reason(model: str) -> str:
 def is_routed_prompt_block_reason(text: str) -> bool:
     """Report whether *text* is a reason written by :func:`routed_prompt_block_reason`.
 
-    The codex forwarder pairs this with :func:`pending_replay_owed` to tell
-    the routing handoff apart from a hook that rejected the prompt.
+    The codex forwarder pairs this with :func:`pending_replay_owed` and
+    :func:`turn_routing_marker_present` to tell the routing handoff apart from
+    a hook that rejected the prompt.
 
     :param text: One hook output entry, e.g. the block reason.
     :returns: ``True`` only for the full reason shape, never for a bare prefix.

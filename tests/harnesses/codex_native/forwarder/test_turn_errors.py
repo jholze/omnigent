@@ -18,10 +18,12 @@ from omnigent.harnesses.codex_native.bridge import (
     write_bridge_state,
 )
 from omnigent.runner.turn_routing import (
+    MARKER_FILE,
     ROUTED_PROMPT_BLOCK_PREFIX,
     clear_pending_replay,
     routed_prompt_block_reason,
     write_pending_replay,
+    write_turn_routing_marker,
 )
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
@@ -796,7 +798,8 @@ def test_terminal_error_from_hook_run_exempts_routing_handoff_only_while_replay_
     The runner records the replay before the route-turn hook blocks and clears
     it once delivered, so the reason text alone (another hook could print it)
     never hides a block, nor does a record left by another session or one
-    already delivered.
+    already delivered. The hook's own session marker stands in for a replay
+    record whose write failed.
     """
     routed = _hook_run_params(
         status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
@@ -812,6 +815,12 @@ def test_terminal_error_from_hook_run_exempts_routing_handoff_only_while_replay_
     assert _hook_run_error(routed, tmp_path) is None
     clear_pending_replay(tmp_path)
     assert _hook_run_error(routed, tmp_path) is not None
+
+    assert write_turn_routing_marker(tmp_path, session_id="conv_other", decision_id="decision_1")
+    assert _hook_run_error(routed, tmp_path) is not None
+    assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
+    assert _hook_run_error(routed, tmp_path) is None
+    (tmp_path / MARKER_FILE).unlink()
 
     _owe_replay(tmp_path)
     for entries in (

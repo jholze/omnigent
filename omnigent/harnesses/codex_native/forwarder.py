@@ -69,6 +69,7 @@ from omnigent.native._native_post_delivery import (
 from omnigent.runner.turn_routing import (
     is_routed_prompt_block_reason,
     pending_replay_owed,
+    turn_routing_marker_present,
 )
 from omnigent.util.json_types import JsonObject as _JsonObject
 
@@ -1150,16 +1151,16 @@ def _terminal_error_from_hook_run(
     ``turn/completed``, so this notification is the only carrier of the reason
     the TUI prints as "Blocked by hook" plus the hook's output. Other hook
     events and statuses leave the turn running and yield ``None``, as does
-    Smart Routing's own block: the runner records the replay it owes before
-    the route-turn hook blocks, and the hook attaches a fixed-shape reason, so
-    a run carrying only that reason while this session's replay is pending is
-    the handoff, and the ordinary ``turn/completed`` boundary must stay in
-    charge.
+    Smart Routing's own block: the runner records the replay it owes and the
+    route-turn hook writes the session's marker before that hook blocks, and
+    the hook attaches a fixed-shape reason, so a run carrying only that reason
+    while one of those Omnigent-written records names this session is the
+    handoff, and the ordinary ``turn/completed`` boundary must stay in charge.
 
     :param run: The ``run`` summary of a ``hook/completed`` event, from
         :func:`_hook_run_from_params`.
-    :param bridge_dir: Native Codex bridge directory holding the replay record.
-    :param session_id: Omnigent session the replay record must name.
+    :param bridge_dir: Native Codex bridge directory holding those records.
+    :param session_id: Omnigent session the records must name.
     :returns: Generic-classified error naming the outcome, the hook's output
         text, and the hook file, or ``None`` when the run did not halt the prompt.
     """
@@ -1178,10 +1179,14 @@ def _terminal_error_from_hook_run(
         and isinstance(entry.get("text"), str)
         and entry["text"].strip()
     ]
+    # The marker stands in for a replay record whose disk write failed.
     if (
         texts
         and all(is_routed_prompt_block_reason(text) for text in texts)
-        and pending_replay_owed(bridge_dir, session_id)
+        and (
+            pending_replay_owed(bridge_dir, session_id)
+            or turn_routing_marker_present(bridge_dir, session_id)
+        )
     ):
         return None
     detail = "\n".join(texts)

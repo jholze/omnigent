@@ -18,6 +18,7 @@ import contextlib
 import json
 import os
 import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -133,13 +134,12 @@ def hook_blocked_native_codex_session(
     missing_script = runner_tmp / "missing-plugin" / "activate.py"
     codex_home = runner_tmp / "codex-home"
     codex_home.mkdir()
+    hook_command = f"python3 {shlex.quote(str(missing_script))}"
     (codex_home / "hooks.json").write_text(
         json.dumps(
             {
                 "hooks": {
-                    "UserPromptSubmit": [
-                        {"hooks": [{"type": "command", "command": f"python3 {missing_script}"}]}
-                    ]
+                    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": hook_command}]}]
                 }
             }
         ),
