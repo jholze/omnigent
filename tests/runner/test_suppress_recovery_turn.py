@@ -249,17 +249,17 @@ async def test_suppress_recovery_turn_prevents_recovery_turn_from_history(
 
 
 @pytest.mark.asyncio
-async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
+async def test_recovery_turn_from_history_absorbs_the_forward_of_the_resumed_item(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Without suppress_recovery_turn the runner starts a recovery turn from history.
+    """Without suppress_recovery_turn the recovery turn runs the persisted message once.
 
-    This documents the pre-fix behaviour: when the session-init envelope does
-    NOT carry suppress_recovery_turn=True, the runner sees the persisted user
-    message in history and starts a recovery turn immediately.  A subsequent
-    forward then finds an active turn and buffers the message.  After the
-    recovery turn finishes, _check_and_start_next_turn processes the buffered
-    message as a second turn, so the harness is called twice.
+    When the session-init envelope does NOT carry suppress_recovery_turn=True,
+    the runner sees the persisted user message in history and starts a
+    recovery turn immediately. The server may still forward that same message
+    afterwards (it repeats a forward whose tunnel dropped mid-flight once the
+    runner re-registers); the runner recognizes the item it already resumed
+    and acknowledges the forward instead of running the prompt a second time.
     """
     app, _pm, harness = _build_sdk_app(_HistoryServerClient())
     caplog.set_level(logging.INFO, logger="omnigent.runner.app")
@@ -282,10 +282,7 @@ async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
         _assert_browser_tools_hidden(harness.posted_bodies[0])
         assert _init_rows(caplog)[0]["recovery_turn"] == "history_resume"
 
-        # Now forward the message: since the recovery turn already ran and
-        # _active_turns is now empty, the forward triggers a second turn.
-        # (In the original bug, the forward would have been buffered _during_
-        # the recovery turn and then replayed after it, resulting in two turns.)
+        # The server's forward of the item the recovery turn already ran.
         forward_resp = await client.post(
             f"/v1/sessions/{SESSION_ID}/events",
             params={"stream": "true"},
@@ -293,20 +290,34 @@ async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
                 "type": "message",
                 "role": "user",
                 "agent_id": AGENT_ID,
-                "content": [{"type": "input_text", "text": "hello"}],
+                "content": [{"type": "input_text", "text": "hello from history"}],
                 "persisted_item_id": "msg_001",
             },
         )
-        assert forward_resp.status_code == 200, (
+        assert forward_resp.status_code == 202, (
             f"Message forward returned {forward_resp.status_code}: {forward_resp.text}"
         )
-        _ = forward_resp.text  # drain
-
-        # Second turn ran — harness called twice total.
-        assert len(harness.posted_bodies) == 2, (
-            "Expected two harness calls total (recovery turn + forward-triggered turn); "
-            f"got {len(harness.posted_bodies)}"
+        assert forward_resp.json()["status"] == "accepted"
+        assert len(harness.posted_bodies) == 1, (
+            "The forward of an item the recovery turn already resumed must not run again; "
+            f"got {len(harness.posted_bodies)} harness calls"
         )
+
+        # A different persisted item is new input and runs as usual.
+        next_resp = await client.post(
+            f"/v1/sessions/{SESSION_ID}/events",
+            params={"stream": "true"},
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": AGENT_ID,
+                "content": [{"type": "input_text", "text": "and this"}],
+                "persisted_item_id": "msg_002",
+            },
+        )
+        assert next_resp.status_code == 200, next_resp.text
+        _ = next_resp.text  # drain
+        assert len(harness.posted_bodies) == 2
 
 
 @pytest.mark.asyncio

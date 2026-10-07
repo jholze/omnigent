@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -11942,6 +11943,133 @@ async def test_message_forward_failure_surfaces_runner_unavailable(
             f"Expected 503 RUNNER_UNAVAILABLE when runner forward fails, "
             f"got {resp.status_code}: {resp.text}"
         )
+
+
+@pytest.mark.parametrize("drop_kind", ["tunnel_closed", "runner_offline"])
+async def test_message_forward_repeats_after_the_runner_tunnel_reconnects(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    drop_kind: str,
+) -> None:
+    """
+    A forward cut by a runner tunnel drop waits for the runner and is repeated, not failed.
+
+    The runner behind a dropped tunnel is usually alive and re-registers within
+    seconds, and the server replays the persisted message on reconnect anyway.
+    Answering the send with 503 ``runner_unavailable`` on the drop therefore
+    showed the user a delivery failure for a message that went through. Both
+    shapes the tunnel transport raises qualify: the bare ``ConnectionError`` of
+    a drop under the in-flight request and the ``httpx.ConnectError`` of a
+    runner already deregistered when the request is sent.
+    """
+    from omnigent.runner.routing import RunnerRouter
+    from omnigent.server.routes._sessions import orchestration as orchestration_module
+    from omnigent.server.routes.sessions import routes_events
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    SqlAlchemyConversationStore(db_uri).replace_runner_id(session["id"], "sdk-runner")
+    forwards: list[dict[str, Any]] = []
+
+    def runner(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            forwards.append(json.loads(request.content))
+            if len(forwards) > 1:
+                return httpx.Response(202, json={"status": "accepted"})
+            if drop_kind == "tunnel_closed":
+                # What WSTunnelTransport raises when the tunnel dies under the request.
+                raise ConnectionError("tunnel closed before request completed")
+            raise httpx.ConnectError("runner 'sdk-runner' is offline", request=request)
+        return httpx.Response(200, json={})
+
+    wait_for_runner = AsyncMock(return_value=True)
+    monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
+    # A MockTransport runner never emits the relay's ready heartbeat; the relay
+    # has its own coverage.
+    monkeypatch.setattr(routes_events, "_ensure_runner_relay_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
+    caplog.set_level(logging.INFO, logger="omnigent.server.routes.sessions")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(runner), base_url="http://runner"
+    ) as fake_runner:
+        _route_to_runner(monkeypatch, fake_runner)
+        resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "deliver this across the recycle"}],
+                },
+            },
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["queued"] is True
+    wait_for_runner.assert_awaited_once_with(
+        "sdk-runner", timeout_s=orchestration_module._RUNNER_FORWARD_RECONNECT_GRACE_S
+    )
+    # The repeat carries the same persisted item, which the runner uses to dedupe it.
+    assert [forward["persisted_item_id"] for forward in forwards] == [resp.json()["item_id"]] * 2
+    items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
+    assert [item["type"] for item in items] == ["message"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Message forward lost the runner tunnel" in message for message in messages)
+    assert not any("Forward to runner failed" in message for message in messages)
+
+
+async def test_message_forward_fails_when_the_runner_tunnel_stays_down(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner that never re-registers within the grace still fails the send as before."""
+    from omnigent.runner.routing import RunnerRouter
+    from omnigent.server.routes._sessions import orchestration as orchestration_module
+    from omnigent.server.routes.sessions import routes_events
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    SqlAlchemyConversationStore(db_uri).replace_runner_id(session["id"], "sdk-runner")
+    forwards = 0
+
+    def runner(request: httpx.Request) -> httpx.Response:
+        nonlocal forwards
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            forwards += 1
+            raise ConnectionError("tunnel closed before request completed")
+        return httpx.Response(200, json={})
+
+    wait_for_runner = AsyncMock(return_value=False)
+    monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
+    monkeypatch.setattr(routes_events, "_ensure_runner_relay_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(runner), base_url="http://runner"
+    ) as fake_runner:
+        _route_to_runner(monkeypatch, fake_runner)
+        resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            },
+        )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"]["code"] == "runner_unavailable"
+    wait_for_runner.assert_awaited_once_with(
+        "sdk-runner", timeout_s=orchestration_module._RUNNER_FORWARD_RECONNECT_GRACE_S
+    )
+    # No second attempt against a runner that never came back; the persisted
+    # message remains for the reconnect replay.
+    assert forwards == 1
+    items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
+    assert [item["type"] for item in items] == ["message"]
 
 
 async def test_message_forward_rejection_surfaces_failed_with_reason(

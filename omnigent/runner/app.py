@@ -20,7 +20,7 @@ import re
 import tempfile
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -409,6 +409,9 @@ _STRANDED_WAKE_RETRY_DELAYS_S = (2.0, 5.0, 10.0, 30.0)
 # the Databricks Apps ingress) can drop the long-lived HTTP connection.
 # Matches the AP-side ``_SESSION_STREAM_HEARTBEAT_INTERVAL_S``.
 _SESSION_STREAM_HEARTBEAT_S = 15.0
+# Server item ids of recently taken forwards remembered per session, so a
+# forward the server repeats after a tunnel drop is acknowledged, not re-run.
+_ACCEPTED_FORWARD_IDS_PER_SESSION = 64
 
 # How long a required-terminal exit waits for the session's in-flight turn
 # stream to converge before releasing the harness subprocess. The harness
@@ -1408,6 +1411,7 @@ def create_runner_app(
 
     _session_histories = _session_histories_ref
     _last_server_item_id: dict[str, str] = {}
+    _accepted_forward_item_ids: dict[str, deque[str]] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
     _session_inboxes = _session_inboxes_ref
@@ -3010,6 +3014,8 @@ def create_runner_app(
             ):
                 recovery_turn = "history_resume"
                 _begin_turn_slot(session_id)
+                # The resumed trailing item may still be forwarded by the server.
+                _accept_forwarded_item(session_id, _last_server_item_id.get(session_id))
                 _publish_turn_status(session_id, "running")
                 msg_body = {
                     "agent_id": agent_id,
@@ -3324,6 +3330,7 @@ def create_runner_app(
         # Clear all desync/turn state so a recreated same-id session starts clean.
         _turn_bind_epoch.pop(session_id, None)
         _recovery_turn_ids.pop(session_id, None)
+        _accepted_forward_item_ids.pop(session_id, None)
         _desync_terminalized.pop(session_id, None)
         _desynced_sessions.discard(session_id)
         _required_terminal_exit_errors.pop(session_id, None)
@@ -3745,6 +3752,17 @@ def create_runner_app(
         """
         _active_turns[conv_id] = None
         _turn_bind_epoch[conv_id] = next(_turn_epoch_seq)
+
+    def _forward_already_accepted(conv_id: str, item_id: object) -> bool:
+        """Whether a forwarded message with this server item id was already taken."""
+        return isinstance(item_id, str) and item_id in _accepted_forward_item_ids.get(conv_id, ())
+
+    def _accept_forwarded_item(conv_id: str, item_id: object) -> None:
+        """Remember a forwarded message's server item id once this runner has taken it."""
+        if isinstance(item_id, str) and item_id:
+            _accepted_forward_item_ids.setdefault(
+                conv_id, deque(maxlen=_ACCEPTED_FORWARD_IDS_PER_SESSION)
+            ).append(item_id)
 
     def _release_live_turn_markers(conv_id: str) -> None:
         """Clear ``_live_response_id`` and the process-manager in-flight marker atomically.
@@ -6272,6 +6290,24 @@ def create_runner_app(
                 while _ingest_now_serving.get(conversation_id, 0) != _seq:
                     await _cond.wait()
             try:
+                _persisted_item_id = message_body.get("persisted_item_id")
+                if _forward_already_accepted(conversation_id, _persisted_item_id):
+                    # The server repeats a forward whose tunnel dropped before the
+                    # response arrived; the message is already queued or running.
+                    _logger.info(
+                        "post_session_events: message %s already accepted for conv=%s; "
+                        "not running it again",
+                        _persisted_item_id,
+                        conversation_id,
+                        extra={"session_id": conversation_id},
+                    )
+                    return JSONResponse(
+                        status_code=202,
+                        content={
+                            "status": "accepted",
+                            "detail": "Message already accepted; not run again.",
+                        },
+                    )
                 _raw_content = message_body.get("content")
                 if isinstance(_raw_content, list):
                     message_body["content"] = await _resolve_forwarded_message_content(
@@ -6335,6 +6371,7 @@ def create_runner_app(
                                 exc_info=True,
                                 extra={"session_id": conversation_id},
                             )
+                    _accept_forwarded_item(conversation_id, _persisted_item_id)
                     return JSONResponse(
                         status_code=202,
                         content={
@@ -6360,6 +6397,7 @@ def create_runner_app(
                             message_body
                         )
                         _start_claude_prompt_waiter(conversation_id, pending_bridge_dir)
+                        _accept_forwarded_item(conversation_id, _persisted_item_id)
                         _logger.info(
                             "post_session_events: buffering message for pending Claude prompt "
                             "conv=%s",
@@ -6391,6 +6429,7 @@ def create_runner_app(
                     _session_histories[conversation_id] = loaded
 
                 _begin_turn_slot(conversation_id)
+                _accept_forwarded_item(conversation_id, _persisted_item_id)
                 _logger.info(
                     "post_session_events: starting background turn conv=%s",
                     conversation_id,
