@@ -179,10 +179,6 @@ class ErrorCode:
         §Elicitation completion invariant.
     :cvar RUNNER_UNAVAILABLE: No online runner can serve the
         requested dispatch (HTTP 503).
-    :cvar RESOURCE_EXHAUSTED: A backing service reported transient
-        quota/concurrency exhaustion (e.g. a gRPC ``RESOURCE_EXHAUSTED``
-        from a store's per-read ACL gate) while serving the request.
-        Retry-able after a short backoff (HTTP 503).
     :cvar WRONG_REPLICA: The session's bound runner exists but its
         tunnel is not registered on the replica that served this request
         (HTTP 400). When replicas are sharded by host, a request keyed for
@@ -230,6 +226,13 @@ class ErrorCode:
         access there or the service dropped its auth context is decided
         upstream, so it must not read as our own authorization layer
         rejecting the request.
+    :cvar UPSTREAM_RESOURCE_EXHAUSTED: A backing upstream call (e.g. a
+        workspace-hierarchy gRPC dependency gating a store read) was refused
+        with ``RESOURCE_EXHAUSTED``: the dependency's concurrent-request
+        budget is saturated by in-flight calls. HTTP 503 with a
+        ``Retry-After`` hint — the budget frees as those calls complete, so
+        a short client retry is expected to succeed. Not a server fault, and
+        unlike ``RUNNER_UNAVAILABLE`` nothing on the host has to change.
     :cvar STALE_CURSOR: A pagination cursor (``after``/``before``)
         references a row that no longer exists — typically deleted
         between two page fetches (HTTP 400). Without a distinct signal
@@ -248,7 +251,6 @@ class ErrorCode:
     INTERNAL_ERROR = "internal_error"
     HARNESS_PROTOCOL_VIOLATION = "harness_protocol_violation"
     RUNNER_UNAVAILABLE = "runner_unavailable"
-    RESOURCE_EXHAUSTED = "resource_exhausted"
     WRONG_REPLICA = "wrong_replica"
     RUNNER_CAPABILITY_MISMATCH = "runner_capability_mismatch"
     # Keep the string equal to frames.HARNESS_NOT_CONFIGURED_ERROR_CODE —
@@ -258,6 +260,7 @@ class ErrorCode:
     SESSION_AGENT_MISSING = "session_agent_missing"
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
+    UPSTREAM_RESOURCE_EXHAUSTED = "upstream_resource_exhausted"
     STALE_CURSOR = "stale_cursor"
 
 
@@ -282,9 +285,6 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # can fix them; investigation needed in the harness wrap).
     ErrorCode.HARNESS_PROTOCOL_VIOLATION: 500,
     ErrorCode.RUNNER_UNAVAILABLE: 503,
-    # Transient upstream exhaustion clears as in-flight calls complete, so
-    # a retry is expected to succeed: 503, never an internal 500.
-    ErrorCode.RESOURCE_EXHAUSTED: 503,
     # 400, not 503: the request reached a replica that can't serve it, but the
     # request is valid — the fix is to re-address it (reissue without the key),
     # not to wait and retry. A 4xx also keeps this expected routing event out of
@@ -309,6 +309,10 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # a server fault; the distinct code keeps it separable from our own authz
     # FORBIDDEN in dashboards and client handling.
     ErrorCode.UPSTREAM_PERMISSION_DENIED: 403,
+    # 503: the dependency's saturated request budget frees as its in-flight
+    # calls finish, so a short retry is expected to succeed; the response
+    # carries a Retry-After hint. Never a bare 500: the fault is not ours.
+    ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED: 503,
     # 400: the referenced cursor row is gone, so this exact request can never
     # succeed — the fix is to restart the enumeration without the cursor. The
     # distinct code is what a paging client keys that restart off.
@@ -347,10 +351,11 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     ErrorCode.SESSION_AGENT_MISSING: ErrorCategory.USER,
     # A dependency tore down the in-flight call; the fix (if any) is upstream.
     ErrorCode.UPSTREAM_CANCELLED: ErrorCategory.UPSTREAM,
-    ErrorCode.RESOURCE_EXHAUSTED: ErrorCategory.UPSTREAM,
     # A dependency refused the call; whether the user lacks access there or
     # the service lost its auth context is decided upstream, not here.
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorCategory.UPSTREAM,
+    # A dependency's request budget is saturated; relieving it is upstream work.
+    ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED: ErrorCategory.UPSTREAM,
     # A stale reference: the cursor row was deleted (often by the same user
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
@@ -384,12 +389,12 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.WORKSPACE_MISSING: ErrorImpact.BLOCKING,
     ErrorCode.SESSION_AGENT_MISSING: ErrorImpact.BLOCKING,
     # Self-healing: a session state that resumes on reconnect, a routing
-    # artifact the client re-addresses, and an upstream cancellation a retry
-    # outlives. No progress is lost.
+    # artifact the client re-addresses, and an upstream cancellation or
+    # saturated request budget a retry outlives. No progress is lost.
     ErrorCode.RUNNER_UNAVAILABLE: ErrorImpact.TRANSIENT,
     ErrorCode.WRONG_REPLICA: ErrorImpact.TRANSIENT,
     ErrorCode.UPSTREAM_CANCELLED: ErrorImpact.TRANSIENT,
-    ErrorCode.RESOURCE_EXHAUSTED: ErrorImpact.TRANSIENT,
+    ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED: ErrorImpact.TRANSIENT,
     # A single rejected request; the session stays healthy and usable.
     ErrorCode.FORBIDDEN: ErrorImpact.BENIGN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorImpact.BENIGN,
@@ -432,11 +437,11 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.SESSION_AGENT_MISSING: ErrorPhase.HARNESS_SETUP,
     ErrorCode.HARNESS_PROTOCOL_VIOLATION: ErrorPhase.TURN,
     ErrorCode.INTERNAL_ERROR: ErrorPhase.UNKNOWN,
-    # Context-driven: a backing call can be cancelled or denied while serving
-    # any stage.
+    # Context-driven: a backing call can be cancelled, denied, or throttled
+    # while serving any stage.
     ErrorCode.UPSTREAM_CANCELLED: ErrorPhase.UNKNOWN,
-    ErrorCode.RESOURCE_EXHAUSTED: ErrorPhase.UNKNOWN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
+    ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
 }
 
@@ -687,6 +692,20 @@ def is_permission_denied_rpc_error(exc: BaseException) -> bool:
     return _rpc_error_status_name(exc) == "PERMISSION_DENIED"
 
 
+def is_resource_exhausted_rpc_error(exc: BaseException) -> bool:
+    """Whether *exc* is a gRPC call refused with ``RESOURCE_EXHAUSTED``.
+
+    E.g. a workspace-hierarchy service rejecting a call above its concurrent
+    request budget (``details = "REQUEST_LIMIT_EXCEEDED: Workspace ... exceeded
+    the concurrent limit of 60 requests."``).
+
+    :param exc: The exception to inspect.
+    :returns: ``True`` only for a resource-exhausted RPC error (matched
+        structurally, see :func:`_rpc_error_status_name`).
+    """
+    return _rpc_error_status_name(exc) == "RESOURCE_EXHAUSTED"
+
+
 # EDQUOT is POSIX-only; Windows reports a full disk as ENOSPC.
 _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)})
 
@@ -706,6 +725,9 @@ def classify_exception(exc: BaseException) -> tuple[ErrorCategory, ErrorImpact]:
     - A permission-denied gRPC call (see :func:`is_permission_denied_rpc_error`)
       is upstream-owned too, but benign rather than transient: the dependency
       refused one call, and a bare retry does not self-heal a denial.
+    - A resource-exhausted gRPC call (see :func:`is_resource_exhausted_rpc_error`)
+      is a transient upstream blip: the dependency's request budget frees as
+      its in-flight calls complete, so a retry is expected to succeed.
     - A full disk or exhausted quota (``ENOSPC`` / ``EDQUOT``) is the host
       machine's fault and blocks whatever tried to write.
     - Anything else is genuinely unattributed: UNKNOWN on both axes rather than a
@@ -730,4 +752,6 @@ def classify_exception(exc: BaseException) -> tuple[ErrorCategory, ErrorImpact]:
         return ErrorCategory.UPSTREAM, ErrorImpact.TRANSIENT
     if is_permission_denied_rpc_error(exc):
         return ErrorCategory.UPSTREAM, ErrorImpact.BENIGN
+    if is_resource_exhausted_rpc_error(exc):
+        return ErrorCategory.UPSTREAM, ErrorImpact.TRANSIENT
     return ErrorCategory.UNKNOWN, ErrorImpact.UNKNOWN
