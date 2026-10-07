@@ -3070,8 +3070,7 @@ def test_billed_but_empty_turn_still_fails_loud() -> None:
                 )
             )
 
-        # Retried once (both empty), then failed loud — billed tokens do
-        # not buy a silent empty turn.
+        # Retried once (both empty), then failed loud.
         assert len(_FakeRunner.last_calls) == 2, (
             f"Expected 2 run_streamed calls before fail-loud, got {len(_FakeRunner.last_calls)}"
         )
@@ -3405,12 +3404,12 @@ def test_empty_turn_retry_rewinds_sdk_session() -> None:
 def test_exhausted_empty_turn_rewinds_before_failing_loud() -> None:
     """
     When every attempt is empty, the SDK session is rewound before the
-    fail-loud error is yielded, so the policy's external retry re-runs
-    from the pre-turn state like the in-loop retries do.
+    fail-loud error is yielded, so the persisted session is left at its
+    pre-turn state like the in-loop retries leave it.
 
     What breaks if this fails: the last attempt's stray empty assistant
-    item survives into the next run_turn, so the external retry re-runs
-    with a polluted session that accumulates an empty turn each time.
+    item survives in the session and pollutes the next turn in the same
+    conversation, accumulating an empty turn each time.
     """
 
     async def _t() -> None:

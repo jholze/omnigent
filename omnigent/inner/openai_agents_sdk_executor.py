@@ -1826,8 +1826,8 @@ class OpenAIAgentsSDKExecutor(Executor):
         # usage plays no part because a completed-but-empty response still bills.
         assert result is not None
         if _is_empty_turn(final_text, saw_tool_activity, result.new_items):
-            # Drop the last attempt's stray empty item so the policy's external
-            # retry re-runs from the same clean state as the in-loop retries.
+            # Drop the last attempt's stray empty item, as the in-loop retries do,
+            # so the persisted session does not carry it into later turns.
             await self._rewind_sdk_session(state, current_item_count)
             logger.error(
                 "OpenAIAgentsSDKExecutor: empty completion after %d attempts",
