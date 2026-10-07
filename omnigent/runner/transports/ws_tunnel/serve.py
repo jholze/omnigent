@@ -19,6 +19,7 @@ import contextlib
 import logging
 import os
 import random
+import shlex
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -520,7 +521,8 @@ async def serve_tunnel(
                         f"(redirect to non-WebSocket URL {redirect_url} "
                         f"persisted across {login_redirect_streak} attempts); "
                         "the server likely requires auth — "
-                        f"run `{cli_invocation()} login {display_server_url(server_url)}` or "
+                        f"run `{cli_invocation()} login "
+                        f"{shlex.quote(display_server_url(server_url))}` or "
                         f"`{cli_invocation()} setup` to configure credentials"
                     ) from exc
                 retry_reason = (
@@ -540,11 +542,13 @@ async def serve_tunnel(
                             # itself — unlike a raw `databricks auth login
                             # --host`, which would need the workspace host,
                             # not the server URL (for workspace-hosted
-                            # servers the API mount is the wrong --host).
+                            # servers the API mount is the wrong --host). Quoted so
+                            # the `?o=` selector survives zsh globbing when pasted.
                             from omnigent.util.server_url import display_server_url
 
                             login_hint = (
-                                f"run `omnigent login {display_server_url(server_url)}` "
+                                f"run `{cli_invocation()} login "
+                                f"{shlex.quote(display_server_url(server_url))}` "
                                 "to re-authenticate"
                             )
                         else:

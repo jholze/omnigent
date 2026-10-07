@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import ssl
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from websockets.exceptions import (
 from websockets.frames import Close
 from websockets.http11 import Response
 
+from omnigent.cli_invocation import WRAPPER_COMMAND_ENV
 from omnigent.runner.identity import (
     OMNIGENT_INTERNAL_WS_ORIGIN,
     RUNNER_TUNNEL_TOKEN_HEADER,
@@ -364,6 +366,9 @@ async def test_serve_tunnel_fails_loud_on_http_auth_rejection(
 ) -> None:
     """HTTP 401 without a factory retries up to the streak cap then fails.
 
+    The fatal message carries a login hint the user pastes into a shell, so it
+    must spell the configured CLI wrapper and quote the ``?o=`` display URL.
+
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
     """
@@ -371,6 +376,7 @@ async def test_serve_tunnel_fails_loud_on_http_auth_rejection(
         _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS,
     )
 
+    monkeypatch.setenv(WRAPPER_COMMAND_ENV, "isaac omni")
     attempt = 0
 
     async def _serve_once(
@@ -408,16 +414,26 @@ async def test_serve_tunnel_fails_loud_on_http_auth_rejection(
     monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
     monkeypatch.setattr(serve_module.asyncio, "sleep", _sleep)
 
-    with pytest.raises(RuntimeError, match="HTTP 401"):
+    with pytest.raises(RuntimeError, match="HTTP 401") as exc_info:
         await serve_tunnel(
             _noop_app,
-            server_url="https://example.databricksapps.com",
+            server_url="https://example.databricks.com/api/2.0/omnigent?o=123",
             runner_id="runner_auth_rejected",
             runner_version="0.1.0",
             auth_token="tok-expired",
         )
 
     assert attempt == _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
+    message = str(exc_info.value)
+    hint = re.search(r"run `([^`]+)` to re-authenticate", message)
+    assert hint, message
+    command = hint.group(1)
+    assert command.startswith("isaac omni login "), command
+    assert "https://example.databricks.com/omnigent?o=123" in command
+    # Every glob metacharacter must sit inside quotes (or be escaped) so the
+    # command pastes into a nomatch shell such as zsh unchanged.
+    unquoted = re.sub(r"\\.|'[^']*'|\"[^\"]*\"", "", command)
+    assert not any(ch in unquoted for ch in "?*["), command
 
 
 def test_websocket_auth_redirect_url_detects_https_redirect() -> None:
@@ -535,11 +551,12 @@ async def test_serve_tunnel_fails_loud_on_auth_redirect(
     monkeypatch.setattr(serve_module.asyncio, "sleep", _sleep)
     # Pin jitter to 0 so sleep delays are the unjittered backoff curve.
     monkeypatch.setattr(serve_module.random, "uniform", lambda *_args, **_kw: 0.0)
+    monkeypatch.delenv(WRAPPER_COMMAND_ENV, raising=False)
 
     with pytest.raises(RuntimeError) as exc_info:
         await serve_tunnel(
             _noop_app,
-            server_url="https://example.databricksapps.com",
+            server_url="https://example.databricks.com/api/2.0/omnigent?o=123",
             runner_id="runner_redirected",
             runner_version="0.1.0",
             on_reconnect=_on_reconnect,
@@ -558,7 +575,9 @@ async def test_serve_tunnel_fails_loud_on_auth_redirect(
     # The actual redirect target shows up so the user can see
     # what the server is asking for.
     assert login_url in message
-    # User-actionable next step.
+    # User-actionable next steps; the display URL is quoted so its `?o=`
+    # pastes into zsh unexpanded.
+    assert "run `omnigent login 'https://example.databricks.com/omnigent?o=123'` or " in message
     assert "omnigent setup" in message
 
 
