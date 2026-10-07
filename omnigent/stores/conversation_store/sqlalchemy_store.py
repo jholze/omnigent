@@ -100,6 +100,7 @@ from omnigent.stores.conversation_store import (
     FORK_SOURCE_LABEL_KEY,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    SIDE_CHAT_LABEL_KEY,
     ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationStore,
@@ -3990,6 +3991,26 @@ class SqlAlchemyConversationStore(ConversationStore):
                 decoded = None
             statuses.append((session_id, decoded))
         return statuses
+
+    def list_side_chat_conversation_ids(self, source_conversation_id: str) -> list[str]:
+        """Return the side-chat forks of ``source_conversation_id`` in ascending id order."""
+        workspace_id = current_workspace_id()
+        forked_from_source = select(SqlConversationLabel.conversation_id).where(
+            SqlConversationLabel.workspace_id == workspace_id,
+            SqlConversationLabel.key == FORK_SOURCE_LABEL_KEY,
+            SqlConversationLabel.value == source_conversation_id,
+        )
+        statement = (
+            select(SqlConversationLabel.conversation_id)
+            .where(
+                SqlConversationLabel.workspace_id == workspace_id,
+                SqlConversationLabel.key == SIDE_CHAT_LABEL_KEY,
+                SqlConversationLabel.conversation_id.in_(forked_from_source),
+            )
+            .order_by(SqlConversationLabel.conversation_id)
+        )
+        with self._conv_session("list_side_chat_conversation_ids") as ap_sess:
+            return [row.conversation_id for row in ap_sess.execute(statement).all()]
 
     def list_conversations_by_runner_id(
         self,

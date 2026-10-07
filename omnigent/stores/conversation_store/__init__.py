@@ -1633,6 +1633,23 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def list_side_chat_conversation_ids(self, source_conversation_id: str) -> list[str]:
+        """
+        Return the side-chat forks opened from ``source_conversation_id``.
+
+        A side chat is a top-level fork carrying :data:`SIDE_CHAT_LABEL_KEY`,
+        not a sub-agent child, so its only link back to the session it was
+        opened from is :data:`FORK_SOURCE_LABEL_KEY`. Stopping that session
+        uses this to reach the runners it never shared with the side chats.
+
+        :param source_conversation_id: The session the side chats were forked
+            from, e.g. ``"conv_abc123"``.
+        :returns: Side-chat conversation ids in ascending id order; empty when
+            the session has none.
+        """
+        ...
+
+    @abstractmethod
     def set_host_id(
         self,
         conversation_id: str,

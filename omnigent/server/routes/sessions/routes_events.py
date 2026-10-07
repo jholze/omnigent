@@ -244,6 +244,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _resolve_elicitation,
     _runner_live_on_another_replica_from_conversations,
     _stop_host_runner_intentionally,
+    _stop_side_chats_of_parent,
     _wait_for_host_bound_runner_client,
     _wait_for_host_reconnect,
     ensure_runner_connected,
@@ -1465,6 +1466,17 @@ def register_events_routes(
                     getattr(request.app.state, "host_registry", None),
                     conversation_store,
                 )
+            # Side chats are forks with runners of their own (a hosted parent's
+            # host launches one per side chat), so the stop above never reaches
+            # them. Stop them after the parent; a side chat still alive is
+            # reported below once the parent's own stop has fully settled.
+            unstopped_side_chats = await _stop_side_chats_of_parent(
+                session_id,
+                stop_conv.runner_id if stop_conv is not None else None,
+                conversation_store,
+                runner_router,
+                getattr(request.app.state, "host_registry", None),
+            )
             if not stop_delivered:
                 # False-success backstop. The stop reached NO live runner
                 # (``_stop_session_via_runner`` returned False, so there was
@@ -1523,6 +1535,17 @@ def register_events_routes(
                 )
             except Exception:
                 pass
+            if unstopped_side_chats:
+                count = len(unstopped_side_chats)
+                raise OmnigentError(
+                    (
+                        "The session's side chat could not be stopped"
+                        if count == 1
+                        else f"{count} of the session's side chats could not be stopped"
+                    )
+                    + "; stop the session again to retry.",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
             return {"queued": False}
         if body.type == _APPROVAL_TYPE:
             # Deliver the verdict through the shared resolver: it

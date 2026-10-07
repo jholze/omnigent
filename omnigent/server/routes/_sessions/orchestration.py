@@ -840,6 +840,94 @@ async def _stop_host_runner_intentionally(
         return acknowledged
 
 
+async def _stop_side_chats_of_parent(
+    parent_id: str,
+    parent_runner_id: str | None,
+    conversation_store: ConversationStore,
+    runner_router: Any,
+    host_registry: Any,
+) -> list[str]:
+    """Stop the side chats opened from a session that is being stopped.
+
+    A side chat is a top-level fork, not a sub-agent, and a hosted parent's
+    host launches a separate runner for it. Neither the parent's own stop nor
+    the shared-runner intent marking reaches that runner, so each side chat is
+    stopped on its own session id and its dedicated runner is torn down the
+    way the parent's is. A runner already gone from every replica is left to
+    the disconnect sweep.
+
+    :param parent_id: The session being stopped.
+    :param parent_runner_id: The parent's runner; a side chat sharing it is
+        already covered by the parent's runner teardown.
+    :param conversation_store: Store for side-chat and connectivity lookups.
+    :param runner_router: The ``RunnerRouter`` for runner-client resolution,
+        or ``None`` in tests / in-process setups.
+    :param host_registry: The ``HostRegistry`` tracking live host tunnels, or
+        ``None`` when host support is not wired.
+    :returns: Side chats whose runner refused or could not receive the stop,
+        so the caller can report that they are still alive.
+    """
+    try:
+        side_chat_ids = await asyncio.to_thread(
+            conversation_store.list_side_chat_conversation_ids, parent_id
+        )
+        connectivity = await asyncio.to_thread(
+            conversation_store.get_session_connectivity, side_chat_ids
+        )
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "Cannot list the side chats of stopped session %s; their runners may linger",
+            parent_id,
+            exc_info=True,
+            extra={"session_id": parent_id},
+        )
+        return []
+    undelivered: list[str] = []
+    for side_chat_id in side_chat_ids:
+        conn = connectivity.get(side_chat_id)
+        if conn is None or conn.runner_id is None:
+            continue
+        # Same fence a direct stop of the side chat installs; the runner stops
+        # just this session, so a shared runner still needs the forward.
+        _interrupt_fenced_sessions.add(side_chat_id)
+        delivered = False
+        try:
+            delivered = await _stop_session_via_runner(side_chat_id, runner_router)
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Could not stop side chat %s of stopped session %s",
+                side_chat_id,
+                parent_id,
+                exc_info=True,
+                extra={"session_id": side_chat_id},
+            )
+            undelivered.append(side_chat_id)
+        if not delivered:
+            _interrupt_fenced_sessions.discard(side_chat_id)
+        if (
+            not conn.host_id
+            or conn.runner_id == parent_runner_id
+            or not (delivered or runner_seen_is_fresh(conn.runner_last_seen))
+        ):
+            continue
+        try:
+            await _stop_host_runner_intentionally(
+                side_chat_id,
+                conn.host_id,
+                conn.runner_id,
+                host_registry,
+                conversation_store,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Side-chat host-runner teardown failed for %s",
+                side_chat_id,
+                exc_info=True,
+                extra={"session_id": side_chat_id},
+            )
+    return undelivered
+
+
 async def _archive_stop(
     session_id: str,
     conversation_store: ConversationStore,
@@ -12472,6 +12560,7 @@ __all__ = [
     "_spawn_native_approval_popup_forward",
     "_spawn_native_blocked_notice_forward",
     "_stop_host_runner_intentionally",
+    "_stop_side_chats_of_parent",
     "_wait_for_host_bound_runner_client",
     "_wait_for_host_reconnect",
     "_wake_parent_for_blocked_child",

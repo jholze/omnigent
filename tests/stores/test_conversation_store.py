@@ -33,6 +33,7 @@ from omnigent.session_import import (
     IMPORT_SOURCE_LABEL_KEY,
 )
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -3427,6 +3428,34 @@ def test_list_conversations_by_runner_id_hydrates_labels(
         "omnigent.fork.carry_history": "1",
         "omnigent.fork.source_external_session_id": "src-claude-sid",
     }
+
+
+def test_list_side_chat_conversation_ids_lists_only_the_source_side_chats(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Stop reaches a hosted session's side chats only through this lookup.
+
+    A side chat is a top-level fork, so neither a parent/child walk nor the
+    runner binding links it to its source; the fork-source label does. The
+    lookup must return every side chat forked from the source and nothing
+    else: plain forks, and side chats of other sessions, stay out.
+    """
+    source = conversation_store.create_conversation(workspace="/Users/corey/projects/myapp")
+    other = conversation_store.create_conversation(workspace="/Users/corey/projects/other")
+    side_chats = [
+        conversation_store.fork_conversation(source.id, extra_labels={SIDE_CHAT_LABEL_KEY: "1"})
+        for _ in range(2)
+    ]
+    plain_fork = conversation_store.fork_conversation(source.id)
+    other_side_chat = conversation_store.fork_conversation(
+        other.id, extra_labels={SIDE_CHAT_LABEL_KEY: "1"}
+    )
+
+    assert conversation_store.list_side_chat_conversation_ids(source.id) == sorted(
+        side_chat.id for side_chat in side_chats
+    )
+    assert conversation_store.list_side_chat_conversation_ids(other.id) == [other_side_chat.id]
+    assert conversation_store.list_side_chat_conversation_ids(plain_fork.id) == []
 
 
 # ── Host id ─────────────────────────────────────────

@@ -23,6 +23,7 @@ import logging
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -1385,6 +1386,213 @@ async def test_stop_session_stops_host_launched_runner(
         f"host should be told to stop the session's bound runner "
         f"{session['runner_id']!r}, got {stopped_runner_id!r}"
     )
+
+
+async def _fork_hosted_side_chat(
+    client: httpx.AsyncClient, comm: ApplicationCommunicator, parent_id: str
+) -> dict[str, str]:
+    """Open a side chat on a hosted parent the way the Workspace rail does.
+
+    Forks the parent with ``side_chat: true`` and launches the fork's own
+    runner through ``POST /v1/hosts/{host_id}/runners``, answering the host's
+    stat and launch round-trips, so the side chat carries ``host_id`` and a
+    token-bound ``runner_id`` of its own.
+
+    :param client: Test HTTP client bound to the host-wired app.
+    :param comm: Connected host communicator.
+    :param parent_id: The hosted parent session, e.g.
+        ``"d1f9214d74c38b9f9a9db17ed8352dc4"``.
+    :returns: ``{"id": <side chat id>, "runner_id": <token-bound id>}``.
+    """
+    fork_resp = await client.post(
+        f"/v1/sessions/{parent_id}/fork", json={"title": "Side chat", "side_chat": True}
+    )
+    assert fork_resp.status_code == 201, fork_resp.text
+    side_chat_id = fork_resp.json()["id"]
+    launch_responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    launch_resp = await client.post(
+        f"/v1/hosts/{_HOST_ID}/runners",
+        json={"session_id": side_chat_id, "workspace": _WORKSPACE},
+    )
+    await launch_responder
+    assert launch_resp.status_code == 200, launch_resp.text
+    return {"id": side_chat_id, "runner_id": launch_resp.json()["runner_id"]}
+
+
+async def _stop_session_capturing_teardown(
+    client: httpx.AsyncClient,
+    comm: ApplicationCommunicator,
+    session_id: str,
+    *,
+    expected_stop_frames: int,
+    runner_status_for: Callable[[str], int] | None = None,
+) -> tuple[httpx.Response, list[str], list[str]]:
+    """POST ``stop_session`` and capture everything it tears down.
+
+    Installs a fake global runner client that records which sessions the
+    ``stop_session`` forward reached (answering with ``runner_status_for`` or
+    204) and serves ``expected_stop_frames`` host ``stop_runner`` round-trips.
+
+    :param client: Test HTTP client.
+    :param comm: Connected host communicator.
+    :param session_id: Session to stop.
+    :param expected_stop_frames: How many runners the host must be asked to
+        stop before the call returns.
+    :param runner_status_for: Status the fake runner answers a session's
+        ``stop_session`` forward with, keyed by session id; ``None`` 204s all.
+    :returns: The HTTP response, the runner ids the host was told to stop (in
+        order), and the session ids the forward reached (in order).
+    """
+    from omnigent.runtime import set_runner_client
+
+    forwarded: list[str] = []
+
+    def _runner_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            target = request.url.path.split("/")[3]
+            forwarded.append(target)
+            if runner_status_for is not None:
+                return httpx.Response(runner_status_for(target))
+        return httpx.Response(204)
+
+    fake_runner = httpx.AsyncClient(
+        transport=httpx.MockTransport(_runner_handler), base_url="http://runner"
+    )
+    set_runner_client(fake_runner)
+    try:
+
+        async def _serve_stops() -> list[str]:
+            return [await _serve_one_stop(comm) for _ in range(expected_stop_frames)]
+
+        responder = asyncio.create_task(_serve_stops())
+        resp = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "stop_session", "data": {}},
+        )
+        stopped_runner_ids = await responder
+    finally:
+        await fake_runner.aclose()
+        set_runner_client(None)
+    return resp, stopped_runner_ids, forwarded
+
+
+async def _saw_stop_frame(comm: ApplicationCommunicator, *, budget_s: float) -> bool:
+    """Whether the host receives another ``stop_runner`` within *budget_s*.
+
+    :param comm: Connected host communicator.
+    :param budget_s: Seconds to wait on each receive before concluding no
+        further stop is coming, e.g. ``1.0``.
+    :returns: ``True`` if a stop frame arrived, ``False`` otherwise.
+    """
+    try:
+        for _ in range(40):
+            output = await comm.receive_output(timeout=budget_s)
+            if output["type"] != "websocket.send":
+                continue
+            if isinstance(decode_host_frame(output["text"]), HostStopRunnerFrame):
+                return True
+    except asyncio.TimeoutError:
+        return False
+    return False
+
+
+async def test_stop_session_stops_hosted_side_chat_runners(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """Stopping a hosted parent also stops its side chats' own runners.
+
+    The Workspace rail forks a side chat and launches a SEPARATE runner for
+    it on the parent's host, so the parent's pane kill and runner teardown
+    never reach it. The Stop handler must forward ``stop_session`` to the
+    side chat and ask the host to stop the side chat's runner too, with the
+    same intentional-stop marker, so the side chat settles idle instead of
+    failing as a crash.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    comm = await _connect_host(app)
+    parent = await _inline_launch_session(client, comm)
+    side_chat = await _fork_hosted_side_chat(client, comm, parent["id"])
+    assert side_chat["runner_id"] != parent["runner_id"]
+
+    try:
+        resp, stopped, forwarded = await _stop_session_capturing_teardown(
+            client, comm, parent["id"], expected_stop_frames=2
+        )
+        assert resp.status_code == 202, resp.text
+        assert forwarded == [parent["id"], side_chat["id"]]
+        assert stopped == [parent["runner_id"], side_chat["runner_id"]]
+        assert (
+            sessions_module._intentional_stop_sessions.get(side_chat["id"])
+            == side_chat["runner_id"]
+        )
+    finally:
+        for session_id in (parent["id"], side_chat["id"]):
+            sessions_module._intentional_stop_sessions.pop(session_id, None)
+
+
+async def test_stop_side_chat_leaves_hosted_parent_running(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """Closing one side chat stops only that side chat.
+
+    The rail's close action sends ``stop_session`` to the side chat itself;
+    the parent's runner must stay untouched so the main chat keeps working.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    comm = await _connect_host(app)
+    parent = await _inline_launch_session(client, comm)
+    side_chat = await _fork_hosted_side_chat(client, comm, parent["id"])
+
+    try:
+        resp, stopped, forwarded = await _stop_session_capturing_teardown(
+            client, comm, side_chat["id"], expected_stop_frames=1
+        )
+        assert resp.status_code == 202, resp.text
+        assert forwarded == [side_chat["id"]]
+        assert stopped == [side_chat["runner_id"]]
+        assert not await _saw_stop_frame(comm, budget_s=1.0)
+    finally:
+        sessions_module._intentional_stop_sessions.pop(side_chat["id"], None)
+
+
+async def test_stop_session_reports_side_chat_its_runner_would_not_stop(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """A side chat whose runner refuses the stop is reported, not hidden.
+
+    The parent is still stopped (pane kill forwarded, host asked to stop its
+    runner), but the response is a 503 naming the side chat so the Stop
+    dialog does not report success while the side chat keeps working. The
+    host is not asked to stop a runner the stop never reached.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    comm = await _connect_host(app)
+    parent = await _inline_launch_session(client, comm)
+    side_chat = await _fork_hosted_side_chat(client, comm, parent["id"])
+
+    try:
+        resp, stopped, forwarded = await _stop_session_capturing_teardown(
+            client,
+            comm,
+            parent["id"],
+            expected_stop_frames=1,
+            runner_status_for=lambda target: 503 if target == side_chat["id"] else 204,
+        )
+        assert resp.status_code == 503, resp.text
+        assert "side chat" in resp.text
+        assert forwarded == [parent["id"], side_chat["id"]]
+        assert stopped == [parent["runner_id"]]
+        assert not await _saw_stop_frame(comm, budget_s=1.0)
+        assert side_chat["id"] not in sessions_module._interrupt_fenced_sessions
+    finally:
+        for session_id in (parent["id"], side_chat["id"]):
+            sessions_module._intentional_stop_sessions.pop(session_id, None)
 
 
 async def test_stopped_host_session_writes_no_label_and_host_stays_online(
