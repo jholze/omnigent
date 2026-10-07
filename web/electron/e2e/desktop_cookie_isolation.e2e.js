@@ -51,28 +51,6 @@ async function setActive(window, conversationId) {
   assert.equal(result.ok, true, `activate ${conversationId} failed: ${result.error}`);
 }
 
-async function clickBrowserMenu(desktop, id) {
-  await desktop.electronApp.evaluate(async ({ Menu, dialog, BrowserWindow }, menuId) => {
-    const item = Menu.getApplicationMenu().getMenuItemById(menuId);
-    const showMessageBox = dialog.showMessageBox;
-    dialog.showMessageBox = async () => ({ response: 0 });
-    try {
-      await item.click(item, BrowserWindow.getFocusedWindow());
-    } finally {
-      dialog.showMessageBox = showMessageBox;
-    }
-  }, id);
-  // Electron's click wrapper does not return the async handler's promise.
-  await desktop.window.waitForFunction(
-    async () => (await window.omnigentDesktop.browserClose("storage-test-idle-probe")).ok,
-    null,
-    { timeout: 10_000 },
-  );
-  return desktop.electronApp.evaluate(
-    ({ Menu }) => Menu.getApplicationMenu().getMenuItemById("remember_browser_logins").checked,
-  );
-}
-
 // Cookie updates can reach sibling renderers after the writer returns.
 async function waitForIdentityCookie(window, conversationId, expected) {
   await window.waitForFunction(
@@ -268,7 +246,22 @@ describe(
         const first = "conv_A";
         const second = "browser-tab:conv_B:first";
         let desktop;
+        const rememberLogins = (checked) =>
+          desktop.window.getByRole("switch", {
+            name: "Remember logins across sessions",
+            exact: true,
+            checked,
+          });
+        const settings = async (remembered) => {
+          await desktop.window.goto(`${server.serverUrl}/settings/general`);
+          await rememberLogins(remembered).waitFor({ state: "visible" });
+        };
         const open = async (id) => {
+          // Settings can suppress native browser views until we leave the route.
+          if (new URL(desktop.window.url()).pathname === "/settings/general") {
+            await desktop.window.goto(server.serverUrl);
+            await desktop.window.getByText("What should we build?").waitFor({ state: "visible" });
+          }
           const result = await openView(desktop.window, id, site);
           assert.equal(result.ok, true, `open ${id} failed: ${result.error}`);
           await waitForViewOnOrigin(desktop.window, id, server.serverUrl);
@@ -285,14 +278,9 @@ describe(
         };
         try {
           desktop = await launchDesktop({ recordDir, serverUrl: server.serverUrl, userDataDir });
-          assert.equal(
-            await desktop.electronApp.evaluate(
-              ({ Menu }) =>
-                Menu.getApplicationMenu().getMenuItemById("remember_browser_logins").checked,
-            ),
-            false,
-          );
-          assert.equal(await clickBrowserMenu(desktop, "remember_browser_logins"), true);
+          await settings(false);
+          await rememberLogins(false).click();
+          await rememberLogins(true).waitFor({ state: "visible" });
           await open(first);
           const signIn = await execInView(
             desktop.window,
@@ -339,13 +327,7 @@ describe(
 
           // Reuse the profile without reseeding settings.json.
           desktop = await launchDesktop({ recordDir, userDataDir });
-          assert.equal(
-            await desktop.electronApp.evaluate(
-              ({ Menu }) =>
-                Menu.getApplicationMenu().getMenuItemById("remember_browser_logins").checked,
-            ),
-            true,
-          );
+          await settings(true);
           await open(first);
           assert.deepEqual(await storage(first), ["agent_identity=alice", "alice"]);
           await execInView(
@@ -355,7 +337,9 @@ describe(
           );
           await desktop.window.waitForTimeout(1_500);
 
-          assert.equal(await clickBrowserMenu(desktop, "remember_browser_logins"), false);
+          await settings(true);
+          await rememberLogins(true).click();
+          await rememberLogins(false).waitFor({ state: "visible" });
           await open(first);
           assert.deepEqual(await storage(first), ["", null]);
           const privateLogin = await execInView(
@@ -368,8 +352,22 @@ describe(
           await open(second);
           assert.deepEqual(await storage(second), ["", null]);
 
-          await clickBrowserMenu(desktop, "clear_saved_browser_data");
-          assert.equal(await clickBrowserMenu(desktop, "remember_browser_logins"), true);
+          await settings(false);
+          await desktop.electronApp.evaluate(({ dialog }) => {
+            const showMessageBox = dialog.showMessageBox;
+            dialog.showMessageBox = async () => {
+              dialog.showMessageBox = showMessageBox;
+              return { response: 0 };
+            };
+          });
+          await desktop.window
+            .getByRole("button", { name: "Clear saved browser data", exact: true })
+            .click();
+          await desktop.window
+            .getByRole("button", { name: "Clear saved browser data", exact: true, disabled: false })
+            .waitFor({ state: "visible" });
+          await rememberLogins(false).click();
+          await rememberLogins(true).waitFor({ state: "visible" });
           await open(first);
           assert.deepEqual(await storage(first), ["", null]);
           await execInView(

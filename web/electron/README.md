@@ -471,18 +471,20 @@ sequenceDiagram
 
 ### Remembering browser logins
 
-Choose **Browser → Remember Logins Across Sessions** in the desktop menu to
-share site logins across conversations and windows. Cookies and site storage
+Open Settings with **Cmd/Ctrl+,** or the **sidebar gear**, then go to
+**General → Browser** and enable **Remember logins across sessions** to share
+site logins across conversations and windows. Cookies and site storage
 stay on this device across app restarts, subject to each site's expiry rules.
 This includes browser tabs opened by agents and sessions on other connected
 servers or Omnigent accounts in the same desktop profile. The profile is
 separate from the app's own sign-in and your external browser.
 
-The setting is off by default. Changing it takes effect immediately and closes
-open browser pages; after enabling, sign into your sites once in the shared
-browser. Disabling returns to temporary storage per conversation and keeps
-the saved profile available for later. **Browser → Clear Saved Browser Data…**
-deletes its cookies, site storage, and cache, including while the setting is
+The setting is off by default. Changing it takes effect immediately without a
+popup and closes open browser pages; after enabling, sign into your sites once
+in the shared browser. Disabling returns to temporary storage per conversation
+and keeps the saved profile available for later. In **Settings → General →
+Browser**, **Clear saved browser data** asks for native confirmation before
+deleting its cookies, site storage, and cache, including while the setting is
 off. Signing out of an Omnigent server does not clear this shared profile.
 
 ### Local network permission

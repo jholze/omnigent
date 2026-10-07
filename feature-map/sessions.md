@@ -38,9 +38,9 @@ the header menu), and each place is a separate entry point.
 - `recent-switcher`: the desktop app opens the five most recent sessions with
   Control+Tab; Tab and Shift+Tab cycle, releasing Control switches, and Escape cancels.
 - `browser-storage`: browser soft tabs, including one opened by the agent, share
-  cookies within a session by default. The desktop Browser menu can remember
-  logins across sessions and app restarts, or clear saved data. Navigation stays
-  per-tab.
+  cookies within a session by default. Desktop **Settings → General → Browser**
+  can remember logins across sessions and app restarts, or clear saved data.
+  Navigation stays per-tab.
 
 ## How to get to it (user POV)
 
@@ -82,9 +82,10 @@ control is a separate action that leaves the session connected.
 **Desktop browser:** choose **+ → Browser** in the Workspace panel or press
 ⌘/Ctrl+Alt+B. Agent browser requests and chat links with in-app opening enabled
 create or select a closable Browser soft tab automatically.
-Choose **Browser → Remember Logins Across Sessions** in the desktop app menu
-to share saved logins across all sessions and windows. Choose **Browser → Clear
-Saved Browser Data…** to sign out of sites in that shared profile.
+Open Settings with **Cmd/Ctrl+,** or the **sidebar gear**, then go to
+**General → Browser**. Enable **Remember logins across sessions** to share saved
+logins across all sessions and windows. Choose **Clear saved browser data** and
+accept the native confirmation to sign out of sites in that shared profile.
 
 **Desktop recent sessions:** hold Control and press Tab to open the five most
 recent sessions. Continue pressing Tab (or Shift+Tab) to cycle, release Control
@@ -207,17 +208,18 @@ plain `uv run pytest`, which starts a private server for the test.
   `web/electron/e2e/desktop_cookie_isolation.e2e.js`. Sign into a site in one
   tab, open it in another tab and the agent browser, and confirm both are signed
   in. Another session should be signed out. Log out and refresh the same-session
-  tabs; all should be signed out. Enable **Browser → Remember Logins Across
-  Sessions**; the checkbox changes immediately without a popup. Sign in once
-  and verify another session and an app restart keep the login. Disable it to
-  restore isolation; clear saved browser data and re-enable it to verify the
-  saved login is gone. These menu flows are covered
-  by the same Electron test.
+  tabs; all should be signed out. In **Settings → General → Browser**, enable
+  **Remember logins across sessions**; the switch changes immediately without a
+  popup. Sign in once and verify another session and an app restart keep the
+  login. Disable it to restore isolation; choose **Clear saved browser data**,
+  accept the native confirmation, and re-enable it to verify the saved login
+  is gone. The same Electron test drives the Settings controls. Manually check
+  both Settings entry points: **Cmd/Ctrl+,** and the **sidebar gear**.
 
 ## Gotchas
 
 - Default browser storage is limited to one session, desktop window, and app
-  run. **Remember Logins Across Sessions** shares it across windows and keeps
+  run. **Remember logins across sessions** shares it across windows and keeps
   persistent site data after restarting. Closing a tab does not clear storage.
   The opt-in shared profile includes agents and other servers/accounts on this
   desktop installation; signing out of Omnigent does not clear it. Sites can
