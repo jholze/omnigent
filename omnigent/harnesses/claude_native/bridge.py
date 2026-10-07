@@ -2318,17 +2318,20 @@ def build_hook_settings(
 
     observer_hook = hook_settings(bridge_dir, python, "omnigent.harnesses.claude_native.hook")
     observer_python = _pin_runner_tmpdir(cast(str, observer_hook["command"]))
-    # Claude blocks on every PostToolUse hook, so the observer is a bare curl to
-    # the relay like the policy hook below; before the relay advertises itself or
-    # when curl fails, the same stdin replays into the Python observer as before.
+    # Claude blocks on every PostToolUse hook; the observer delivers via a one-second
+    # curl to the relay like the policy hook (the relay finishes recording in the
+    # background). The Python observer replays only when curl can't reach the relay
+    # (missing, no env, or connection refused); a replay after delivery double-records.
     relay_env_quoted = shlex.quote(str(bridge_dir / _TOOL_RELAY_ENV_FILE))
     observer_hook["command"] = (
         "p=$(cat); "
-        f"if [ -r {relay_env_quoted} ]; then . {relay_env_quoted}; "
-        "printf '%s' \"$p\" | curl -s -o /dev/null --max-time 1 "
+        f"if [ -r {relay_env_quoted} ] && command -v curl >/dev/null 2>&1; then "
+        f". {relay_env_quoted}; "
+        "printf '%s' \"$p\" | curl -sf -o /dev/null --max-time 1 "
         '-H "Authorization: Bearer $OMNIGENT_RELAY_TOKEN" '
         "-H 'Content-Type: application/json' --data-binary @- "
-        '"$OMNIGENT_RELAY_URL/hook/observe-tool" 2>/dev/null && exit 0; fi; '
+        '"$OMNIGENT_RELAY_URL/hook/observe-tool" 2>/dev/null; '
+        "[ $? -ne 7 ] && exit 0; fi; "
         f"printf '%s' \"$p\" | {observer_python}"
     )
     hooks["PostToolUse"].append({"hooks": [observer_hook]})

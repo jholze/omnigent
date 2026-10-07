@@ -22,6 +22,9 @@ from omnigent.harnesses.claude_native.bridge import build_hook_settings, prepare
 # on an interpreter this slow is user-visible latency on every tool call.
 _SLOW_INTERPRETER_S = 2.0
 _HOOK_BUDGET_S = 1.0
+# A relay that records the observation but answers only after the hook's one-second
+# curl budget; the hook must stop waiting at the budget, not after this.
+_SLOW_RELAY_S = _HOOK_BUDGET_S + 1.0
 _PAYLOAD: dict[str, Any] = {
     "session_id": "claude-session",
     "tool_name": "Bash",
@@ -48,8 +51,15 @@ def _trust_tmp_bridge_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 
 @pytest.fixture
-def relay() -> Iterator[_Relay]:
-    """Stand-in tool relay that allows every policy call and records each POST."""
+def relay(request: pytest.FixtureRequest) -> Iterator[_Relay]:
+    """Stand-in tool relay that allows every policy call and records each POST.
+
+    Indirect params tune the response for the delivered-but-unhelpful cases:
+    ``response_delay_s`` holds the answer back and ``status`` returns a non-2xx.
+    """
+    options: dict[str, Any] = getattr(request, "param", {})
+    response_delay_s: float = options.get("response_delay_s", 0.0)
+    status: int = options.get("status", 200)
     received: list[_Request] = []
 
     class _Handler(BaseHTTPRequestHandler):
@@ -58,12 +68,18 @@ def relay() -> Iterator[_Relay]:
             received.append(
                 _Request(self.path, self.headers.get("Authorization"), json.loads(raw))
             )
+            if response_delay_s:
+                time.sleep(response_delay_s)
             body = json.dumps({"result": "POLICY_ACTION_ALLOW"}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except OSError:
+                # curl closed the connection at --max-time; the POST already landed.
+                pass
 
         def log_message(self, *_: object) -> None:
             return
@@ -202,3 +218,39 @@ def test_observer_hook_falls_back_to_the_python_observer(
     ]
     assert json.loads(stdin_log.read_text()) == {**_PAYLOAD, "hook_event_name": "PostToolUse"}
     assert relay.received == []
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the hooks' fast path needs curl")
+@pytest.mark.parametrize(
+    "relay",
+    [
+        pytest.param({"response_delay_s": _SLOW_RELAY_S}, id="slow-response"),
+        pytest.param({"status": 500}, id="http-error"),
+    ],
+    indirect=True,
+)
+def test_delivered_observation_is_not_replayed_by_the_python_observer(
+    tmp_path: Path, relay: _Relay
+) -> None:
+    """A reachable relay owns the observation: once curl hands off the payload, a
+    slow or error response must not fall back to the interpreter-spawning Python
+    observer, which would respawn the interpreter and double-record the call."""
+    bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
+    ran_marker = tmp_path / "python-observer.ran"
+    fake_python = _fake_python(tmp_path, f"cat >/dev/null; : > {shlex.quote(str(ran_marker))}")
+    settings = build_hook_settings(bridge_dir, python_executable=str(fake_python))
+    [command] = [
+        c for c in _every_tool_call_commands(settings, "PostToolUse") if "observe-tool" in c
+    ]
+
+    started = time.monotonic()
+    proc = _run_hook(command, "PostToolUse")
+    elapsed = time.monotonic() - started
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    # The hook returns at curl's budget rather than waiting out the relay's response.
+    assert elapsed < _SLOW_RELAY_S
+    # The relay recorded the observation once and the Python observer never replayed it.
+    assert [request.path for request in relay.received] == ["/hook/observe-tool"]
+    assert not ran_marker.exists()
