@@ -2,11 +2,9 @@
 Tests for output-policy DENY enforcement at the runner relay's text flush.
 
 Runner-relayed (scaffold) harnesses stream assistant text as id-less
-``output_text.delta`` events; the relay buffers them and persists the
-joined text at the terminal event. That flush is the single point where
-the streamed text becomes a durable assistant message, so it is where an
-output-policy DENY must substitute the ``[Denied by policy: ...]``
-sentinel:
+``output_text.delta`` events; the relay buffers each segment and persists
+it before tool calls and at the terminal event. Each nonempty flush must
+substitute the ``[Denied by policy: ...]`` sentinel on an output-policy DENY:
 
 - A ``PHASE_LLM_RESPONSE`` DENY is computed on the server (the policy
   evaluate route) but only reaches the harness *after* the text already
@@ -14,7 +12,7 @@ sentinel:
   ``_llm_response_denied_turns`` and the relay consumes it here.
 - A ``Phase.RESPONSE`` policy is otherwise unreachable in the runner
   topology (nothing POSTs the assistant message back through
-  ``POST .../events``), so the terminal flush evaluates it directly.
+  ``POST .../events``), so each nonempty text flush evaluates it directly.
 
 Production breakage these catch: the denied assistant text persisting
 as a normal message (the "silently advisory output policies" bug) —
@@ -180,8 +178,10 @@ async def test_flush_evaluates_response_phase_at_terminal() -> None:
         *,
         actor: Any = None,
         engine: Any = None,
+        turn_final: bool | None = None,
     ) -> dict[str, Any]:
         captured["text"] = body.data["content"][0]["text"]
+        captured["turn_final"] = turn_final
         return {"verdict": "deny", "reason": "output gated", "_denied_body": None}
 
     with _relay_policy_pipeline(_fake_output_policy):
@@ -192,13 +192,40 @@ async def test_flush_evaluates_response_phase_at_terminal() -> None:
             "resp_2",
             "test-agent",
             evaluate_response_phase=True,
+            turn_final=True,
         )
 
     assert captured["text"] == _DENIED_TEXT, "the policy must see the full joined text"
+    assert captured["turn_final"] is True, "the terminal flush must report turn_final=True"
     texts = _persisted_texts(store)
     assert texts == ["[Denied by policy: output gated]"], (
         f"expected the deny sentinel, got {texts!r}"
     )
+
+
+@pytest.mark.parametrize("text_acc", [[], [""], [" ", "\n"]])
+@pytest.mark.parametrize("turn_final", [False, True])
+async def test_empty_flush_skips_response_phase(text_acc: list[str], turn_final: bool) -> None:
+    """Empty segments never invoke policies, including at the end of a turn."""
+    text_acc = list(text_acc)
+    store = _FakeConversationStore()
+
+    with patch(
+        "omnigent.server.routes._sessions.helpers._relay_response_policy_deny_reason",
+    ) as evaluate:
+        await _flush_relay_text(
+            store,  # type: ignore[arg-type]
+            "conv_empty",
+            text_acc,
+            "resp_empty",
+            "test-agent",
+            evaluate_response_phase=True,
+            turn_final=turn_final,
+        )
+
+    evaluate.assert_not_awaited()
+    assert not text_acc
+    assert not _persisted_texts(store)
 
 
 async def test_flush_response_phase_allow_persists_unmodified() -> None:
@@ -319,10 +346,11 @@ class _ScriptedEngine:
     def __init__(self, result: PolicyResult) -> None:
         self.result = result
         self.evaluations = 0
+        self.turn_finals: list[bool | None] = []
 
     async def evaluate(self, ctx: Any) -> PolicyResult:
-        del ctx
         self.evaluations += 1
+        self.turn_finals.append(ctx.turn_final)
         return self.result
 
     def apply_label_writes(self, labels: dict[str, str]) -> None:
@@ -380,7 +408,10 @@ def _fail_open_records(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
-async def test_flush_response_phase_retries_throttled_conversation_read() -> None:
+@pytest.mark.parametrize("turn_final", [False, True])
+async def test_flush_response_phase_retries_throttled_conversation_read(
+    turn_final: bool,
+) -> None:
     """A throttled conversation lookup is retried, so the retry's DENY still gates the text."""
     store = _ThrottledConversationStore(throttled_reads=1)
     engine = _deny_engine("gated after throttle")
@@ -393,6 +424,7 @@ async def test_flush_response_phase_retries_throttled_conversation_read() -> Non
             "resp_7",
             "test-agent",
             evaluate_response_phase=True,
+            turn_final=turn_final,
         )
 
     texts = _persisted_texts(store)
@@ -401,6 +433,7 @@ async def test_flush_response_phase_retries_throttled_conversation_read() -> Non
     )
     assert store.reads == 2, "the throttled lookup must be retried"
     assert engine.evaluations == 1
+    assert engine.turn_finals == [turn_final]
 
 
 @pytest.mark.parametrize("throttle", _THROTTLE_ERRORS)
@@ -671,8 +704,10 @@ async def test_mid_turn_boundary_flush_gates_response_phase() -> None:
     flush's evaluation (the policy-bypass path for multi-segment turns).
     """
     store = _FakeConversationStore()
+    turn_finals: list[bool | None] = []
 
     async def _deny(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        turn_finals.append(kwargs["turn_final"])
         return {"verdict": "deny", "reason": "gated segment", "_denied_body": None}
 
     with (
@@ -687,9 +722,48 @@ async def test_mid_turn_boundary_flush_gates_response_phase() -> None:
             "resp_5",
             "test-agent",
             evaluate_response_phase=True,
+            turn_final=False,
         )
 
+    assert turn_finals == [False]
     assert _persisted_texts(store) == ["[Denied by policy: gated segment]"]
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled", "incomplete"])
+async def test_relay_only_completed_text_is_final(db_uri: str, outcome: str) -> None:
+    """Unsuccessful turns still gate their text without triggering final-response actions."""
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes._sessions.orchestration import _relay_runner_stream_once
+
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+    response = {"id": "resp_final", "model": "test-agent"}
+    events = [
+        {"type": "response.in_progress", "response": response},
+        {"type": "response.output_text.delta", "delta": _DENIED_TEXT},
+        {"type": f"response.{outcome}", "response": {**response, "status": outcome}},
+    ]
+    release = asyncio.Event()
+    release.set()
+    runner = _ScriptedRunnerClient(release, events)
+
+    try:
+        with patch(
+            "omnigent.server.routes._sessions.helpers._relay_response_policy_deny_reason",
+            return_value="output gated",
+        ) as evaluate:
+            await _relay_runner_stream_once(session_id, runner, store)  # type: ignore[arg-type]
+
+        evaluate.assert_awaited_once_with(
+            store, session_id, _DENIED_TEXT, turn_final=outcome == "completed"
+        )
+        messages = [item for item in store.list_items(session_id).data if item.type == "message"]
+        assert len(messages) == 1
+        assert messages[0].to_api_dict()["content"] == [
+            {"type": "output_text", "text": "[Denied by policy: output gated]"}
+        ]
+    finally:
+        session_stream.close(session_id)
 
 
 async def test_relay_consumes_deny_marker_and_persists_sentinel(db_uri: str) -> None:

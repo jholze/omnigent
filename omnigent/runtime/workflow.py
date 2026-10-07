@@ -38,6 +38,7 @@ from omnigent.errors import (
     StaleCursorError,
     restart_on_stale_cursor,
 )
+from omnigent.harness_aliases import is_claude_sdk_harness_name
 from omnigent.inner.model_egress import (
     UCODE_SIGNER_BINDING_ID,
     registered_model_provider_binding,
@@ -45,6 +46,7 @@ from omnigent.inner.model_egress import (
 from omnigent.llms import Client as LLMClient
 from omnigent.models.model_catalog import resolve_catalog_model
 from omnigent.models.model_resolver import ModelResolutionError
+from omnigent.onboarding.ambient import claude_managed_gateway
 from omnigent.onboarding.databricks_config import (
     get_workspace_url_for_profile,
 )
@@ -1127,7 +1129,10 @@ def _resolve_provider_for_build(
        builders thread the key themselves).
     4. The per-family global default (``providers: … default: true``), then an
        ambient-detected default.
-    5. (``for_launch`` only) the first credential that can serve the family even
+    5. For claude-sdk, a configured Claude CLI subscription backed by managed
+       credentials. The CLI owns its auth and default model, even when the
+       subscription detection was deduplicated against a saved entry.
+    6. (``for_launch`` only) the first credential that can serve the family even
        though it is not marked default — so a launch credentials the head (e.g.
        Debby's codex head with only a never-defaulted Databricks workspace)
        rather than failing with "Invalid API key". Off for the readout / cost
@@ -1138,7 +1143,7 @@ def _resolve_provider_for_build(
     :param for_launch: ``True`` for the spawn-env builders (permissive: fold
         legacy Databricks credentials into the provider path and fall back to
         the first available credential). ``False`` (readout / cost / native)
-        keeps strict, config-only resolution with no synthesis or fallback.
+        omits legacy synthesis and the arbitrary first-available fallback.
     :param actual_harness: Preserve a native harness identity when its transport
         reuses an SDK provider adapter.
     :returns: The :class:`ProviderEntry` to route through, or ``None``.
@@ -1159,6 +1164,14 @@ def _resolve_provider_for_build(
         # ambient detections, so a spec may name a detected provider too.
         providers = load_providers(effective_config_with_detected(explicit_config))
         entry = providers.get(auth.name)
+        if entry is None and os.environ.get("OMNIGENT_INFERENCE_CONFIG"):
+            # The managed-sandbox overlay replaces the local providers block, so an
+            # explicitly named provider from ~/.omnigent/config.yaml would vanish.
+            # Server bindings already won above; fall back to the local config.
+            from omnigent.onboarding.provider_config import _load_config
+
+            local_providers = load_providers(effective_config_with_detected(_load_config()))
+            entry = local_providers.get(auth.name)
         if entry is None:
             raise OmnigentError(
                 f"executor.auth references provider {auth.name!r}, but no such provider is "
@@ -1210,6 +1223,16 @@ def _resolve_provider_for_build(
     ambient_default = default_provider_for_harness(effective, harness)
     if ambient_default is not None:
         return ambient_default
+    # A saved CLI subscription suppresses its ambient detection. Keep managed
+    # Claude auth/model ahead of unrelated, unselected saved API keys.
+    if (
+        harness_type == "claude-sdk"
+        and is_claude_sdk_harness_name(identity)
+        and claude_managed_gateway()[1]
+    ):
+        for entry in load_providers(effective).values():
+            if entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
+                return entry
     # Launch-only last resort: no default anywhere, but a credential that serves
     # this family is configured (e.g. a Databricks workspace the user added but
     # never set as the default). The runner is the one chokepoint every head
@@ -2173,6 +2196,10 @@ def _build_cursor_spawn_env(
     harness falls back to an inherited ``CURSOR_API_KEY`` — a ``DatabricksAuth``
     profile does not apply to cursor and is ignored.
 
+    Model: ``executor.model`` wins. When unset (common for Polly/Debby brain
+    overrides), ``cursor.model`` then global ``model`` from config are used so
+    the SDK does not fall through to ``auto-smart``.
+
     :param spec: The agent spec.
     :param workdir: The bundle's on-disk path, threaded as
         ``HARNESS_CURSOR_BUNDLE_DIR``.
@@ -2181,6 +2208,20 @@ def _build_cursor_spawn_env(
     """
     env: dict[str, str] = {}
     model = _resolve_spec_model(spec)
+    if model is None:
+        # Brain-picker sessions (Polly/Debby) often leave executor.model unset;
+        # without a fallback the Cursor SDK defaults to auto-smart, which many
+        # API keys reject. Prefer cursor.model, then global model.
+        cfg = load_config()
+        cursor_block = cfg.get("cursor")
+        if isinstance(cursor_block, dict):
+            cursor_model = cursor_block.get("model")
+            if isinstance(cursor_model, str) and cursor_model.strip():
+                model = cursor_model.strip()
+        if model is None:
+            global_model = cfg.get("model")
+            if isinstance(global_model, str) and global_model.strip():
+                model = global_model.strip()
     if model is not None:
         env["HARNESS_CURSOR_MODEL"] = model
     # Session workspace (the selected working folder), not the bundle workdir.
@@ -2354,12 +2395,24 @@ def _build_antigravity_spawn_env(spec: AgentSpec) -> dict[str, str]:
     vertex/project/location, independent of the key path. A ``DatabricksAuth`` is
     unsupported — warned and ignored.
 
+    Model: ``executor.model`` wins. When unset, ``antigravity.model`` from
+    config is threaded so brain-picker sessions do not inherit an unintended
+    SDK default.
+
     :param spec: The agent spec.
     :returns: Env-var overrides; may be empty (the wrap then uses the SDK's
         ambient creds and default model).
     """
     env: dict[str, str] = {}
     model = _resolve_spec_model(spec)
+    if model is None:
+        # Brain-picker sessions often omit executor.model; honor antigravity.model
+        # from config so the SDK does not pick an unintended provider default.
+        agy_block = load_config().get("antigravity")
+        if isinstance(agy_block, dict):
+            agy_model = agy_block.get("model")
+            if isinstance(agy_model, str) and agy_model.strip():
+                model = agy_model.strip()
     if model is not None:
         env["HARNESS_ANTIGRAVITY_MODEL"] = model
 
