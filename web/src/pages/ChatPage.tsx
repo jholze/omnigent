@@ -2391,12 +2391,10 @@ function ComposerImpl(
   // "Attach to agent" button). Drained into ``mentionedItems`` below, then
   // cleared from the store so they aren't re-applied.
   const pendingComposerAttachments = useChatStore((s) => s.pendingComposerAttachments);
-  // Text + attachments handed back by a send that failed before the server
-  // took ownership. Drained below so the message can be retried.
+  // A first message the user stopped before dispatch, handed back so the
+  // composer can restore it (drained by the effect below). A send that FAILED
+  // is retained in the transcript instead (see `failedUserMessages`).
   const failedSendDraft = useChatStore((s) => s.failedSendDraft);
-  // A restored failed-send draft whose fate is still unknown — flips to
-  // `delivered` when the send turns out to have reached the server, so the
-  // retraction effect below can empty the composer.
   const hasPendingInitialMessage = useChatStore((s) =>
     s.pendingUserMessages.some((message) => message.initialDraft !== undefined),
   );

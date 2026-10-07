@@ -257,29 +257,17 @@ def test_unacknowledged_send_is_not_reoffered_and_not_duplicated(
     )
     page.wait_for_timeout(3_000)
 
-    reoffered = composer.input_value() == _DEDUPE_PROMPT
-    retained = page.locator(_FAILED_SEND).filter(has_text=_DEDUPE_PROMPT)
-    retry = retained.get_by_role("button", name="Retry", exact=True)
-    if reoffered:
-        page.get_by_role("button", name="Send", exact=True).click()
-    elif retry.count() > 0:
-        retry.click()
-    if reoffered or retry.count() > 0:
-        _wait_until(
-            page,
-            lambda: (
-                page.locator(_USER_BUBBLE).filter(has_text=_DEDUPE_PROMPT).count() >= 2
-                or page.locator(_ASSISTANT_BUBBLE).filter(has_text=_DEDUPE_REPLY_TWO).count() >= 1
-            ),
-            _TURN_TIMEOUT_MS,
-        )
-        page.wait_for_timeout(3_000)
-
+    # The runner acknowledged the send over the stream before its POST response
+    # was dropped, so delivery is proven. Nothing may linger to resend: the
+    # composer must not re-offer the prompt and no card (Retry or Check) may
+    # appear, so the send is never dispatched a second time.
     committed = _committed_user_messages(base_url, session_id, _DEDUPE_PROMPT)
     user_bubbles = page.locator(_USER_BUBBLE).filter(has_text=_DEDUPE_PROMPT).count()
     second_turn = page.locator(_ASSISTANT_BUBBLE).filter(has_text=_DEDUPE_REPLY_TWO).count()
-    assert not reoffered, "the delivered message was handed back for a blind resend"
-    expect(retained).to_have_count(0)
+    assert composer.input_value() != _DEDUPE_PROMPT, (
+        "the delivered message was handed back to the composer for a blind resend"
+    )
+    expect(page.locator(_FAILED_SEND).filter(has_text=_DEDUPE_PROMPT)).to_have_count(0)
     assert committed == 1 and user_bubbles == 1 and second_turn == 0, (
         f"duplicate dispatch: committed={committed}, bubbles={user_bubbles}, "
         f"second_turn={second_turn}"

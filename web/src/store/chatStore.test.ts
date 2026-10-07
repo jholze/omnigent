@@ -5696,6 +5696,34 @@ describe("chatStore — retained failed sends", () => {
     expect(eventsPostCount()).toBe(1);
   });
 
+  it("keeps a retained /compact when a busy codex-native session rejects the retry", async () => {
+    const stableId = "d".repeat(32);
+    seedSession("conv_existing", []);
+    await useChatStore.getState().switchTo("conv_existing");
+    // Mid-turn: a /compact is rejected before it is posted.
+    useChatStore.setState({
+      sessionHarness: "codex-native",
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    retain(stableId, { text: "/compact" });
+    const toastError = vi.spyOn(toast, "error").mockReturnValue("compact-busy");
+    onTestFinished(() => toastError.mockRestore());
+
+    await useChatStore.getState().retryFailedMessage(stableId);
+
+    // The busy guard fires before send's try/catch, so nothing is posted — and
+    // the card, the only copy of the message, must survive the rejected retry.
+    expect(eventsPostCount()).toBe(0);
+    expect(toastError).toHaveBeenCalledExactlyOnceWith(
+      "Compact is disabled while a chat is in progress",
+      { richColors: true },
+    );
+    expect(useChatStore.getState().failedUserMessages).toMatchObject([
+      { text: "/compact", stableId },
+    ]);
+  });
+
   /**
    * Fail the events POST on the network while a reconnect snapshot has already
    * put the send's item in the transcript, and answer the follow-up snapshot

@@ -2227,9 +2227,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (found === undefined || found.message.unsettled === true) return;
     const { entry, message } = found;
     retriedFailedMessages.set(stableId, message);
-    entry.setState((s) => ({
-      failedUserMessages: s.failedUserMessages.filter((m) => m.stableId !== stableId),
-    }));
+    // Keep the card until `send` commits the dispatch (it drops the card at the
+    // optimistic-bubble push). Removing it here would lose the only copy when
+    // `send` bails before its try/catch — a busy `/compact` is rejected first.
     try {
       await get().send(message.text, message.agentId, message.files, {
         stableId,
@@ -2402,6 +2402,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
                 ...(selfAuthor !== null ? { author: selfAuthor } : {}),
               },
             ],
+        // Dispatch is committed, so hand back any retained card for this id: a
+        // retry drops its card here, not before `send`, so a pre-dispatch bail
+        // keeps the message and any later failure re-retains it (catch below).
+        failedUserMessages: s.failedUserMessages.filter((m) => m.stableId !== stableId),
         // A new turn does NOT supersede the background-shell tally: shells
         // launched in an earlier turn keep running across the turn boundary, so
         // the composer pill must stay lit alongside the "Working…" shimmer rather
