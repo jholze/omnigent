@@ -3404,12 +3404,13 @@ def test_empty_turn_retry_rewinds_sdk_session() -> None:
 def test_exhausted_empty_turn_rewinds_before_failing_loud() -> None:
     """
     When every attempt is empty, the SDK session is rewound before the
-    fail-loud error is yielded, so the persisted session is left at its
-    pre-turn state like the in-loop retries leave it.
+    fail-loud error is yielded, so it is left at its pre-turn state like
+    the in-loop retries leave it between attempts.
 
     What breaks if this fails: the last attempt's stray empty assistant
-    item survives in the session and pollutes the next turn in the same
-    conversation, accumulating an empty turn each time.
+    item survives in the session. The default chat path discards the
+    executor after this error, but a caller that reuses the session would
+    inherit that item instead of a clean pre-turn state.
     """
 
     async def _t() -> None:
