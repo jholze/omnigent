@@ -1,8 +1,6 @@
-// Unit tests for the terminal's predictive local echo.
-//
-// The reconciliation logic is isolated from a real xterm via LocalEchoTerminal,
-// so these drive the full predict -> confirm / diverge / backstop paths with a
-// fake terminal, an injected clock, and a controllable backstop timer.
+// Unit tests for the terminal's predictive local echo. The reconciliation logic
+// is isolated from a real xterm via LocalEchoTerminal, so these drive the full
+// predict -> confirm / diverge / backstop paths with a fake terminal and clock.
 
 import { describe, expect, it } from "vitest";
 import {

@@ -1,22 +1,6 @@
-// Predictive local echo for the web terminal.
-//
-// When the runner is on a remote host, every keystroke round-trips
-// browser -> server -> runner-tunnel -> PTY and back before the typed
-// character paints, so typing lags by the full link latency (~0.5-1 s on a
-// WAN link). This renders a printable keystroke optimistically at the cursor
-// and reconciles it against the authoritative PTY echo when it arrives:
-// a confirmed echo is suppressed (no repaint/flicker), and a divergence rolls
-// the prediction back so the server output always wins.
-//
-// Safety is structural. Prediction is confined to a plain line-editing prompt
-// (primary screen, no mouse tracking, a single printable ASCII char that will
-// not wrap) and is "confidence-gated": the client only predicts after it has
-// seen the shell echo a keystroke verbatim, and it drops that confidence on
-// every submission or non-printable key. A password prompt is reached by
-// submitting a command, so the client is never confident when the first hidden
-// character is typed and nothing is drawn locally. A backstop timer rolls back
-// and disables prediction if an echo never returns, bounding the exotic case
-// where echo is disabled mid-line without a newline.
+// Predictive local echo for the web terminal: when the runner is remote, a
+// printable keystroke is drawn optimistically and reconciled against the PTY
+// echo (confirmed echo suppressed, divergence rolled back) so typing is instant.
 
 const PRINTABLE_MIN = 0x20;
 const PRINTABLE_MAX = 0x7e;
@@ -33,10 +17,7 @@ const BACKSTOP_MAX_MS = 5000;
 /** Erase one already-rendered cell and leave the cursor where it started. */
 const ERASE_ONE = "\b \b";
 
-/**
- * The slice of xterm the echo logic reads and writes. Narrowed to a handful
- * of members so the reconciliation can be unit-tested without a real terminal.
- */
+/** The slice of xterm the echo logic reads/writes, narrowed for unit testing. */
 export interface LocalEchoTerminal {
   write: (data: string | Uint8Array) => void;
   readonly cols: number;
@@ -66,14 +47,9 @@ function isSinglePrintableAscii(data: string): boolean {
   return code >= PRINTABLE_MIN && code <= PRINTABLE_MAX;
 }
 
-/**
- * Tracks optimistic keystroke echoes and reconciles them with PTY output.
- *
- * ``onInput`` is called for every outbound keystroke (before it is sent) and
- * decides whether to draw it locally. ``reconcile`` is called for every inbound
- * PTY frame and returns the bytes the caller should still write — the confirmed
- * echo of a predicted character is stripped so it is not painted twice.
- */
+// Tracks optimistic keystroke echoes and reconciles them with PTY output: a
+// confirmed echo is stripped and a divergence is rolled back. Confidence-gated,
+// so a password prompt (reached by submitting) never predicts a hidden char.
 export class TerminalLocalEcho {
   private readonly term: LocalEchoTerminal;
   private readonly now: () => number;
@@ -99,11 +75,9 @@ export class TerminalLocalEcho {
     this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as never));
   }
 
-  /**
-   * Handle an outbound keystroke. Draws a safe printable character locally and
-   * records it for reconciliation; any other input stops prediction so a
-   * submission, edit, or control sequence is never echoed speculatively.
-   */
+  // Handle an outbound keystroke: draw a safe printable char locally and record
+  // it for reconciliation; any other input stops prediction so a submission or
+  // control sequence is never echoed speculatively.
   onInput(data: string): void {
     if (this.disposed) return;
     if (!isSinglePrintableAscii(data)) {
@@ -128,12 +102,9 @@ export class TerminalLocalEcho {
     if (wasEmpty) this.armBackstop();
   }
 
-  /**
-   * Reconcile an inbound PTY frame against outstanding predictions. Returns the
-   * bytes the caller should still write: a confirmed echo prefix is stripped
-   * (already on screen), and a divergence rolls predictions back first so the
-   * returned authoritative bytes land on a clean line.
-   */
+  // Reconcile an inbound PTY frame against outstanding predictions and return
+  // the bytes the caller should still write: a confirmed echo prefix is
+  // stripped, and a divergence rolls predictions back onto a clean line.
   reconcile(bytes: Uint8Array): Uint8Array {
     if (this.disposed || (this.pending.length === 0 && this.awaitingEcho === null)) {
       return bytes;
