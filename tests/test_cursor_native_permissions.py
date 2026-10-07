@@ -702,7 +702,8 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
         assert cancelled.is_set()
         assert all(task.cancelled() for task in verdict_tasks)
         late_verdict.set()
-        await asyncio.sleep(0)
+        for _ in range(10):
+            await asyncio.sleep(0)
         assert sent == []
     finally:
         await _stop(supervisor)
@@ -725,6 +726,8 @@ async def test_supervisor_observes_verdict_failure_without_restarting_it(
     try:
         assert await _wait_for(lambda: "cursor elicitation task failed" in caplog.text)
         assert "invalid verdict" in caplog.text
+        # A few more polls, so a restarted task would show up in the count.
+        await asyncio.sleep(0.05)
         assert not supervisor.done()
         assert failures == ["failed"]
     finally:
@@ -766,7 +769,8 @@ async def test_supervisor_cancels_obsolete_verdict_when_release_fails(
         assert await _wait_for(cancelled.is_set)
         assert not supervisor.done()
         late_verdict.set()
-        await asyncio.sleep(0)
+        for _ in range(10):
+            await asyncio.sleep(0)
         assert keys_sent == []
     finally:
         await _stop(supervisor)
