@@ -972,7 +972,11 @@ describe("remembered session PR", () => {
     renderPanel();
     expect(picker()).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Link a PR" })).toBeInTheDocument();
-    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, enabled: true });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", {
+      poll: true,
+      enabled: true,
+      notifyOnChangeProps: "all",
+    });
     expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBe(open);
   });
 

@@ -840,9 +840,14 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
     !info.data &&
     !(info.error instanceof RunnerOfflineError) &&
     !cachedAssociations;
+  // This recovery query shares the session-default cache key, so a PR
+  // attach/unlink that writes that key would re-render the panel from here too.
+  // Stay silent until recovery is actually needed, so the normal flow keeps a
+  // single live metadata observer and never re-requests a just-unlinked PR.
   const defaultInfo = useGithubInfo(conversationId, {
     poll: true,
     enabled: restorationUnrecoverable,
+    notifyOnChangeProps: restorationUnrecoverable ? "all" : [],
   });
   // Switching the metadata query must not unmount the session's PR controls.
   const associations = info.data ?? defaultInfo.data ?? cachedAssociations;

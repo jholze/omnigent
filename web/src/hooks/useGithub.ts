@@ -275,7 +275,7 @@ export function computeGithubPollInterval(info: GithubInfo | undefined): number 
  */
 export function useGithubInfo(
   rawConversationId: string | undefined,
-  options?: { poll?: boolean; prUrl?: string; enabled?: boolean },
+  options?: { poll?: boolean; prUrl?: string; enabled?: boolean; notifyOnChangeProps?: "all" | [] },
 ) {
   // A `temp:*` id (navigate-first new-chat window) has no server session.
   const conversationId = isTempConvId(rawConversationId) ? undefined : rawConversationId;
@@ -298,6 +298,7 @@ export function useGithubInfo(
             : computeGithubPollInterval(query.state.data)
       : false,
     refetchIntervalInBackground: false,
+    notifyOnChangeProps: options?.notifyOnChangeProps,
   });
 }
 
