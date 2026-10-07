@@ -1,20 +1,12 @@
-"""``omnigent start`` must register its host daemon when the daemon's stdio is a legacy code page.
+"""``omnigent start`` must register its host daemon under legacy-code-page stdio.
 
-The background daemon's stdout/stderr are redirected to its host log, so on a
-Windows ANSI-code-page (cp1252) machine Python opens them with
-``errors="strict"`` and the daemon's ``✓ Connected as`` banner raises
-``UnicodeEncodeError`` inside the tunnel loop. The host reconnects forever and
-``omnigent start`` fails with "did not register within 30s".
-
-The test drives the real journey on any OS: a ``sitecustomize.py`` on the
-daemon's ``PYTHONPATH`` (forwarded by the daemon env allowlist, unlike
-``PYTHONIOENCODING``) gives non-tty stdio the Windows cp1252 configuration,
-then the actual ``omnigent start --server <live server> --no-open
---non-interactive`` process runs.
-
-Run with::
-
-    python -m pytest tests/e2e/test_host_daemon_legacy_stdio_e2e.py -v
+The background daemon's stdout/stderr are its host log, so on a Windows cp1252
+machine Python opens them with ``errors="strict"`` and the daemon's
+``✓ Connected as`` banner raises ``UnicodeEncodeError`` inside the tunnel loop;
+the host reconnects forever and ``omnigent start`` fails with "did not register
+within 30s". This drives the real journey on any OS by giving the daemon cp1252
+stdio through a ``sitecustomize.py`` on its ``PYTHONPATH`` (forwarded by the
+daemon env allowlist, unlike ``PYTHONIOENCODING``).
 """
 
 from __future__ import annotations
