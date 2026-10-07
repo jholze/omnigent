@@ -173,6 +173,8 @@ export interface SendOptions {
    * retry of a send it already persisted instead of storing a second copy.
    */
   stableId?: string;
+  /** Creation order of a retried retained message, so a re-failure keeps its oldest-first slot. */
+  retainSeq?: number;
   /**
    * Reuse the optimistic bubble already on the target entry (pushed by
    * `beginLocalConversation`) instead of pushing a fresh one, so the navigate-
@@ -551,6 +553,8 @@ export interface FailedUserMessage {
   agentId: string;
   text: string;
   files: File[];
+  /** Monotonic creation order, so a card re-retained after a failed retry keeps its oldest-first slot. */
+  seq?: number;
   replyDraft?: StoredReplyDraft;
   /** The failure as shown to the user: the server's reason when it answered. */
   reason: string;
@@ -1342,6 +1346,7 @@ export function releaseConversation(id: string): void {
 const racedNativeModelOptions = new Map<string, NativeModelOption[]>();
 let pendingSeq = 0;
 let queueSeq = 0;
+let failedSeq = 0;
 // When a send last latched local `status` to "streaming". Stamped on the way in
 // and never cleared on the way out: after a normal turn `status` settles to
 // "idle" on its own, so a leftover value is inert — only a `status` still
@@ -2234,6 +2239,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       await get().send(message.text, message.agentId, message.files, {
         stableId,
         pinnedConversationId: entry.id,
+        ...(message.seq !== undefined ? { retainSeq: message.seq } : {}),
         ...(message.replyDraft ? { replyDraft: message.replyDraft } : {}),
       });
     } finally {
@@ -2241,6 +2247,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }
   },
   editFailedMessage: (stableId, text, files) => {
+    // A retry already handed this message to `send`; editing it now would mint a
+    // new id the in-flight dispatch no longer matches, double-posting the body.
+    if (retriedFailedMessages.has(stableId)) return;
     const found = findFailedMessage(stableId);
     if (found === undefined || found.message.unsettled === true) return;
     if (text.trim() === "" && files.length === 0) return;
@@ -2280,6 +2289,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }));
   },
   discardFailedMessage: (stableId) => {
+    // A retry already handed this message to `send`; its failure path re-retains
+    // the card, so a discard here cannot stick until that retry has settled.
+    if (retriedFailedMessages.has(stableId)) return;
     findFailedMessage(stableId)?.entry.setState((s) => ({
       failedUserMessages: s.failedUserMessages.filter((m) => m.stableId !== stableId),
     }));
@@ -2617,6 +2629,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           agentId,
           text,
           files: files ?? [],
+          seq: opts?.retainSeq ?? (failedSeq += 1),
           reason: message,
           serverRefused,
           ...(unsettled ? { unsettled: true } : {}),
@@ -2626,7 +2639,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           failedUserMessages: [
             ...s.failedUserMessages.filter((m) => m.stableId !== stableId),
             failed,
-          ],
+          ].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)),
         }));
       }
       // Settle the conversation this send targeted, wherever the user is now:
@@ -2651,12 +2664,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           // — mark it failed so the error rides on that bubble.
           finalizeActive(failSet, "failed", message, null);
         } else if (!callerHandlesError && !retained) {
-          // No response bubble to carry the failure — the turn never started
-          // (e.g. the runner never came online, so POST /events 503'd). Append
-          // a standalone error block so the user sees WHY nothing happened
-          // instead of being left on a silent, empty composer. Skipped when the
-          // retained message shows the reason itself, or the caller owns the
-          // error UX (it surfaces the failure elsewhere).
+          // No response bubble to carry the failure (turn never started, e.g. a
+          // 503 before the runner came online): append a standalone error block,
+          // skipped when the retained message or caller's onError shows why.
           failSet((s) => ({ blocks: [...s.blocks, makeClientErrorBlock(message, code)] }));
         }
         failSet({
@@ -2666,13 +2676,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           backgroundTasks: [],
         });
       } else {
-        // Sent alongside an already-streaming turn (or a stranded latch): the
-        // bubble is rolled back above, so without a block the message vanishes
-        // with no trace — the failure mode that makes this class of bug so hard
-        // to see. Surface it WITHOUT touching the turn lifecycle: finalizeActive
-        // would fail a live response, and settling status would end a turn that
-        // is still running. Skipped when the retained message shows the reason
-        // itself, or the caller owns the error UX.
+        // Sent alongside a LIVE turn: roll back the bubble (done above) but
+        // don't end the turn (finalizeActive/settling would kill it); surface
+        // via a block, skipped when the retained message or onError shows why.
         if (!callerHandlesError && !retained) {
           failSet((s) => ({ blocks: [...s.blocks, makeClientErrorBlock(message, code)] }));
         }
@@ -2933,12 +2939,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     let unsentOnRebind: PendingUserMessage[] = [];
     let failedOnRebind: FailedUserMessage[] = [];
     if (!wasLive) {
-      // Drop any retained-but-dead entry so `acquire` builds a fresh one. A
-      // re-bind has to start from the initial state: `bindStream` PREPENDS its
-      // snapshot to whatever `blocks` already holds, so re-binding onto a dead
-      // entry's stale transcript would duplicate and mis-order it. Unsent
-      // bubbles and retained failed sends are the one thing worth keeping — the
-      // server can't replay what it was never told about.
+      // Re-bind from the initial state: `bindStream` PREPENDS its snapshot, so a
+      // stale transcript would duplicate. Keep only unsent bubbles and retained
+      // failed sends — the server can't replay what it was never told about.
       const stale = conversationRegistry.peek(conversationId)?.getState();
       unsentOnRebind = stale?.pendingUserMessages.filter((p) => p.posted !== true) ?? [];
       failedOnRebind = stale?.failedUserMessages ?? [];

@@ -6,6 +6,7 @@ A send whose POST reached the server but lost its response must not be re-offere
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -39,9 +40,12 @@ def _events_url(session_id: str) -> str:
 
 
 def _is_message_post(route: Route) -> bool:
-    return route.request.method == "POST" and '"type":"message"' in (
-        route.request.post_data or ""
-    ).replace(" ", "")
+    if route.request.method != "POST":
+        return False
+    try:
+        return json.loads(route.request.post_data or "").get("type") == "message"
+    except (ValueError, AttributeError):
+        return False
 
 
 def _hold_message_post(page: Page, session_id: str) -> list[Route]:
@@ -257,10 +261,8 @@ def test_unacknowledged_send_is_not_reoffered_and_not_duplicated(
     )
     page.wait_for_timeout(3_000)
 
-    # The runner acknowledged the send over the stream before its POST response
-    # was dropped, so delivery is proven. Nothing may linger to resend: the
-    # composer must not re-offer the prompt and no card (Retry or Check) may
-    # appear, so the send is never dispatched a second time.
+    # Delivery was acknowledged over the stream before the POST response dropped,
+    # so nothing may be re-offered (composer, Retry/Check card) or resent.
     committed = _committed_user_messages(base_url, session_id, _DEDUPE_PROMPT)
     user_bubbles = page.locator(_USER_BUBBLE).filter(has_text=_DEDUPE_PROMPT).count()
     second_turn = page.locator(_ASSISTANT_BUBBLE).filter(has_text=_DEDUPE_REPLY_TWO).count()

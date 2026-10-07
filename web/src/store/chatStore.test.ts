@@ -2941,11 +2941,9 @@ describe("chatStore — send (first-send ordering)", () => {
   });
 
   it("retains the message with friendly copy when the runner is unavailable (503)", async () => {
-    // The fresh-send failure mode: POST /events 503s because a host-bound
-    // runner never came online. Before this, finalizeActive was a no-op (no
-    // activeResponse) so the user was left on a silent, empty composer. Now
-    // the failure must stay visible on the retained message, explaining what
-    // happened.
+    // A 503 from a runner that never came online (no activeResponse to carry
+    // it) must stay visible on the retained message, not vanish into a silent,
+    // empty composer.
     useChatStore.setState({
       conversationId: "conv_existing",
       abortController: new AbortController(),
@@ -5377,6 +5375,7 @@ describe("chatStore — send (file attachments)", () => {
         agentId: "agent_xyz",
         text: "summarize these photos",
         files: [zip],
+        seq: expect.any(Number),
         reason: expect.stringContaining("Unsupported attachment type 'application/zip'"),
         // A 415 carries no Omnigent error code: the message was never sent.
         serverRefused: false,
@@ -5528,6 +5527,7 @@ describe("chatStore — retained failed sends", () => {
         agentId: "agent_xyz",
         text: "summarize the deploy status",
         files: [],
+        seq: expect.any(Number),
         reason: "Failed to fetch",
         serverRefused: false,
       },
@@ -5547,6 +5547,23 @@ describe("chatStore — retained failed sends", () => {
       "message B destined to fail",
     ]);
     expect(retained[0]!.stableId).not.toBe(retained[1]!.stableId);
+  });
+
+  it("keeps a re-failed retry in its original oldest-first slot", async () => {
+    answerEventsPost(runnerRefusal);
+
+    await useChatStore.getState().send("message A destined to fail", "agent_xyz");
+    await useChatStore.getState().send("message B destined to fail", "agent_xyz");
+    const idA = useChatStore.getState().failedUserMessages[0]!.stableId;
+
+    // A's retry fails again: it must return to its slot ahead of B, not jump to
+    // the end of the oldest-first list.
+    await useChatStore.getState().retryFailedMessage(idA);
+
+    expect(useChatStore.getState().failedUserMessages.map((m) => m.text)).toEqual([
+      "message A destined to fail",
+      "message B destined to fail",
+    ]);
   });
 
   it("drops the retained send when its message commits under the send's stable id", async () => {
@@ -5722,6 +5739,40 @@ describe("chatStore — retained failed sends", () => {
     expect(useChatStore.getState().failedUserMessages).toMatchObject([
       { text: "/compact", stableId },
     ]);
+  });
+
+  it("ignores edit and discard while a failed message's retry is in flight", async () => {
+    const stableId = "e".repeat(32);
+    seedSession("conv_existing", []);
+    await useChatStore.getState().switchTo("conv_existing");
+    // Mid-turn: the retry's /compact is rejected before send's try/catch runs,
+    // so the card stays put while `retriedFailedMessages` still holds the id.
+    useChatStore.setState({
+      sessionHarness: "codex-native",
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    retain(stableId, { text: "/compact" });
+    const toastError = vi.spyOn(toast, "error").mockReturnValue("compact-busy");
+    onTestFinished(() => toastError.mockRestore());
+
+    const retry = useChatStore.getState().retryFailedMessage(stableId);
+    // An edit would otherwise mint a new id the in-flight dispatch no longer
+    // matches, and a discard would be undone by the retry's re-retention.
+    useChatStore.getState().editFailedMessage(stableId, "a sneaky edit", []);
+    useChatStore.getState().discardFailedMessage(stableId);
+    expect(useChatStore.getState().failedUserMessages).toMatchObject([
+      { text: "/compact", stableId },
+    ]);
+
+    await retry;
+
+    // Once the retry has settled, the card is editable and discardable again.
+    expect(useChatStore.getState().failedUserMessages).toMatchObject([
+      { text: "/compact", stableId },
+    ]);
+    useChatStore.getState().discardFailedMessage(stableId);
+    expect(useChatStore.getState().failedUserMessages).toEqual([]);
   });
 
   /**

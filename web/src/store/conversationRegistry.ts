@@ -357,18 +357,9 @@ function rekeyFailedMessages(
 }
 
 /**
- * Whether an entry holds work the server has no record of.
- *
- * Three shapes of client-only work, each existing nowhere but this tab, so
- * evicting the entry would lose it outright — the cases where dropping an entry
- * is NOT equivalent to a cold load (the hazard `pendingByConversation` was built
- * to survive; pinning replaces that stash):
- *
- *   - an unsettled optimistic bubble (`send`'s POST hasn't returned);
- *   - a retained failed send (`failedUserMessages`) — it rolled its bubble back,
- *     so the entry is the sole surviving copy of the user's text and files; and
- *   - a `failedSendDraft` — a stopped first message held until the composer
- *     restores it on return; evicting first drops it.
+ * Prevent eviction while an entry owns client-only work the server has no record
+ * of: an unacknowledged optimistic bubble, a retained failed send, or a stopped
+ * first message. Each exists only in this tab, so eviction would lose it.
  */
 function hasUnsentWork(state: ConversationState): boolean {
   return (

@@ -2920,17 +2920,15 @@ function ComposerImpl(
     // setMentionedItems is a stable useState setter (from useMentionBrowser).
   }, [pendingComposerAttachments, setMentionedItems]);
 
-  // Restore a first message the user stopped before it was dispatched, so they
-  // can fix and resend instead of retyping. Only fill an empty composer: text
-  // typed meanwhile wins. Files are re-validated on the way in. A send that
-  // FAILED is retained in the transcript instead (see `failedUserMessages`).
+  // Restore a first message the user stopped before dispatch so they can fix
+  // and resend; files are re-validated on the way in. A send that FAILED is
+  // retained in the transcript instead (see `failedUserMessages`).
   useEffect(() => {
     if (failedSendDraft === null) return;
     if (failedSendDraft.conversationId !== conversationId) return;
-    // Wait for the draft-restore effect to settle this conversation's text
-    // into value/files. Reading the refs mid-switch would see the PREVIOUS
-    // conversation's draft and wrongly conclude the user is mid-sentence,
-    // dropping the message on the way back to the session it belongs to.
+    // Wait for the draft-restore effect to settle this conversation's text into
+    // value/files: reading the refs mid-switch would see the PREVIOUS session's
+    // draft and wrongly drop this message as the user being mid-sentence.
     if (settledConversationId !== conversationId) return;
     useChatStore.setState({ failedSendDraft: null });
     // The user started something new meanwhile — their in-progress text wins

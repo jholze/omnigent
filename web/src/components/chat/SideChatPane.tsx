@@ -22,6 +22,7 @@ import {
   shouldShowWorkingIndicator,
   stripGatedSubagentRoutingChips,
 } from "@/components/chat/chatBubbleParts";
+import { FailedSendMessages } from "@/components/chat/FailedSendMessage";
 import { ChatComposer, ComposerSendButton } from "@/components/composer/ChatComposer";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
@@ -134,6 +135,7 @@ export function SideChatPane({
     activeResponse,
     interruptedResponseIds,
     pendingUserMessages,
+    failedUserMessages,
     subagentRoutingOverride,
     sessionStatus,
     sessionHarness,
@@ -240,7 +242,15 @@ export function SideChatPane({
   }, [bubbles.length, activeResponse]);
 
   const loadFailed = !pending && conversationLoadError !== null && bubbles.length === 0;
-  const isEmpty = bubbles.length === 0 && !loadingConversation && !loadFailed && !showsWorking;
+  // Retained failed sends keep the transcript shown even before any bubble so a
+  // live pane never hides them behind the empty state; a dead fork can't recover.
+  const hasRetainedFailures = !readOnly && failedUserMessages.length > 0;
+  const isEmpty =
+    bubbles.length === 0 &&
+    !hasRetainedFailures &&
+    !loadingConversation &&
+    !loadFailed &&
+    !showsWorking;
 
   const startSideChat = async (text: string) => {
     if (!onStart) return;
@@ -293,6 +303,10 @@ export function SideChatPane({
                   recoveryDisabled={readOnly}
                 />
               ))}
+              {/* Sends that failed in this side chat stay below its transcript
+              with their own Retry, matching the main pane — a live pane can
+              still recover them; a dead fork can't, so it hides them. */}
+              {!readOnly && <FailedSendMessages messages={failedUserMessages} />}
               {shouldShowWorkingIndicator(showsWorking, bubbles) && <WorkingIndicator />}
               <div ref={bottomRef} />
             </div>
