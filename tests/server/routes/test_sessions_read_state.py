@@ -1,16 +1,6 @@
-"""Tests for the per-user read-state feature:
-
-  * ``PUT /v1/sessions/{session_id}/read-state`` — set the caller's
-    read-state for one session (returns ``204``).
-  * ``viewer_last_seen`` / ``viewer_unread`` embedded per-user in the
-    ``GET /v1/sessions`` list items (built by ``_build_session_list_item``).
-
-Read state is per-user and in-memory on the server (module-level dicts in
-``omnigent.server.routes.sessions``); each test resets those globals so
-state doesn't leak between cases. Runs without auth (``permission_store``
-is ``None``), so the caller is the single-user ``None`` identity and the
-PUT's access check short-circuits.
-"""
+"""Per-user read-state API tests: the ``PUT .../read-state`` write and the
+``viewer_*`` fields embedded in ``GET /v1/sessions`` items. State is in-memory
+and reset per test; auth is off, so the caller is the single-user ``None``."""
 
 from __future__ import annotations
 
@@ -148,12 +138,9 @@ def test_list_item_embeds_viewer_read_state() -> None:
 
 
 def test_read_state_revision_advances_on_each_write() -> None:
-    """Every read-state write stamps a strictly-newer epoch-µs revision.
-
-    This monotonic revision is what lets a second device adopt a fresh
-    cross-device "Mark as unread" (newer) while ignoring a stale replica
-    serving an older value.
-    """
+    """Every read-state write stamps a strictly-newer epoch-µs revision, so a
+    second device adopts a fresh cross-device "Mark as unread" (newer) while
+    ignoring a stale replica serving an older value."""
     client = TestClient(_build_app())
     client.put("/v1/sessions/conv_a/read-state", json={"last_seen": 10, "unread": False})
     _, _, rev1 = sessions_mod._read_state_entry(None, "conv_a")

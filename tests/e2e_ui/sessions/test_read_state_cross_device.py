@@ -1,10 +1,6 @@
-"""Browser e2e: reading a session on one client clears its unread state on the
-user's other, already-open clients.
-
-Two Chromium contexts stand in for one user's devices: a desktop browser and
-the mobile app (Pixel 7 profile plus an Android bridge stub that records the
-badge count pushed through ``setBadgeCount``).
-"""
+"""Browser e2e: cross-device session read/unread state syncs to a user's other
+open clients. Two Chromium contexts stand in as desktop and mobile (Pixel 7
+profile with an Android bridge stub that records ``setBadgeCount``)."""
 
 from __future__ import annotations
 
@@ -49,18 +45,9 @@ _UNSEEN_DOT = '[data-testid="session-state-badge"][data-state="unseen"]'
 _UNREAD_ROW = '[data-testid="inbox-unread"]'
 _SIDEBAR = 'aside[aria-label="Conversations"]'
 
-_ANDROID_SHELL_INIT_SCRIPT = """
-window.__badgeCalls = [];
-window.omnigentNative = {
-  kind: "android",
-  setBadgeCount: function (count, activation) {
-    window.__badgeCalls.push({ count: count, activation: activation || null });
-  },
-  notify: function () { return Promise.resolve(false); },
-  onNotificationActivated: function () { return function () {}; },
-  onNativeInsets: function () { return function () {}; },
-};
-"""
+_ANDROID_SHELL_INIT_SCRIPT = """window.__badgeCalls = [];
+window.omnigentNative = { kind: "android" };
+window.omnigentNative.setBadgeCount = (count) => window.__badgeCalls.push({ count });"""
 
 
 @pytest.fixture
@@ -68,12 +55,7 @@ def three_sessions(
     live_server: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[str, list[str]]]:
-    """Three runner-bound ``hello_world`` sessions, deleted on teardown.
-
-    :param live_server: Spawned (or prepared) server fixture.
-    :param tmp_path_factory: Pytest temp path factory (for a runner respawn log).
-    :returns: ``(base_url, [session_id, ...])``.
-    """
+    """Three runner-bound ``hello_world`` sessions, deleted on teardown."""
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     ids: list[str] = []
@@ -105,14 +87,9 @@ def _unread_dot(row: Locator) -> Locator:
 
 
 def _open_session(page: Page, session_id: str) -> None:
-    """Click the sidebar row for *session_id* and wait until its page is open.
-
-    Rows re-sort and resize as replies land, so a click can hit a neighbouring
-    row after Playwright's hit check; verify the URL and retry. The URL changes
-    before the transcript re-binds, so also wait for the main pane to carry this
-    session's id, otherwise a following read of ``.last`` can hit the previous
-    session's transcript mid-swap.
-    """
+    """Click the row for *session_id*, retrying until the URL and ``main`` pane both
+    carry this id. Rows re-sort as replies land (a click can hit a neighbour) and
+    the URL changes before the transcript re-binds, so a naive click races both."""
     link = _row(page, session_id).locator(f'a[href="/c/{session_id}"]')
     for attempt in range(3):
         link.click()
@@ -205,12 +182,9 @@ class _ListObserver:
 def _wait_for_list_refresh(
     page: Page, observer: _ListObserver, session_ids: list[str], floor: int
 ) -> bool:
-    """Wait until the client has received the server's read-state for every session.
-
-    Returns whether every session reached *floor* within the refresh window, so
-    the caller can assert the mobile's own list — not some other path — carried
-    the desktop read before checking that the UI cleared.
-    """
+    """Wait until *observer* has the server read-state (``>= floor``) for every
+    session, so the caller can assert the mobile's own list carried the desktop
+    read before checking the UI; returns whether every session reached *floor*."""
     deadline = time.monotonic() + _LIST_REFRESH_TIMEOUT_S
     while time.monotonic() < deadline:
         if observer.synced(session_ids, floor):
@@ -221,12 +195,9 @@ def _wait_for_list_refresh(
 
 
 def _wait_for_unread_flag(page: Page, observer: _ListObserver, session_id: str) -> bool:
-    """Wait until the client received ``viewer_unread`` true for *session_id*.
-
-    Lets the caller assert the mobile's own list carried the desktop's
-    "Mark as unread" before checking the UI, so a surfaced (or missing) dot can
-    only be the client's handling of it, not a dropped refresh.
-    """
+    """Wait until *observer* received ``viewer_unread`` true for *session_id*, so a
+    surfaced (or missing) dot can only be the client's handling of the list, not a
+    dropped refresh; returns whether the flag arrived within the refresh window."""
     deadline = time.monotonic() + _LIST_REFRESH_TIMEOUT_S
     while time.monotonic() < deadline:
         if observer.unread_flagged(session_id):
@@ -256,19 +227,9 @@ def test_read_on_desktop_clears_unread_on_open_mobile_client(
     mock_llm_server_url: str,
     output_path: str,
 ) -> None:
-    """Reading sessions on desktop clears them on an already-open mobile client.
-
-    Desktop makes three sessions unread on both clients, then opens two and uses
-    "Mark as read" on the third. Once the mobile list has refreshed, and without
-    a reload, it must show no Inbox "Unread" rows, no unread pill, badge 0 and
-    no sidebar dots.
-
-    :param playwright: Device registry for the phone profile.
-    :param browser: Shared browser; two contexts stand in for two devices.
-    :param three_sessions: ``(base_url, [ids])`` runner-bound sessions.
-    :param mock_llm_server_url: Mock model to script delayed replies.
-    :param output_path: Per-test artifact directory for evidence screenshots.
-    """
+    """Reading sessions on desktop clears them on an already-open mobile client:
+    desktop makes three unread, opens two and marks the third read, then without a
+    reload the mobile shows no Inbox unread rows, no pill, badge 0 and no dots."""
     base_url, session_ids = three_sessions
     markers = {sid: f"xdev-{uuid.uuid4().hex[:8]}" for sid in session_ids}
     for i, sid in enumerate(session_ids, start=1):
@@ -359,20 +320,9 @@ def test_mark_unread_on_desktop_surfaces_on_open_mobile_client(
     mock_llm_server_url: str,
     output_path: str,
 ) -> None:
-    """Marking a read session unread on desktop surfaces it on an open mobile client.
-
-    Desktop sends a message to one session and reads it, so both clients show it
-    read. Desktop then uses "Mark as unread". Without a reload the mobile client
-    must surface that one session as unread -- one Inbox "Unread" row, a
-    "1 unread" pill, badge 1 and its sidebar dot -- while the other two stay
-    read, and a reload must still agree.
-
-    :param playwright: Device registry for the phone profile.
-    :param browser: Shared browser; two contexts stand in for two devices.
-    :param three_sessions: ``(base_url, [ids])`` runner-bound sessions.
-    :param mock_llm_server_url: Mock model to script a delayed reply.
-    :param output_path: Per-test artifact directory for evidence screenshots.
-    """
+    """Marking a read session unread on desktop surfaces it on an open mobile client:
+    after both show it read, desktop marks it unread and without a reload the mobile
+    surfaces only that session (row, "1 unread" pill, badge 1, dot); a reload agrees."""
     base_url, session_ids = three_sessions
     target = session_ids[0]
     others = session_ids[1:]

@@ -3,24 +3,17 @@ import type * as UseUnseenConversationsModule from "./useUnseenConversations";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// `authenticatedFetch` is mocked so we can assert the read-state PUT
-// round-trips without a server (the read path is the conversation list, fed
-// directly via seedReadState). Declared via vi.hoisted so the (hoisted)
-// vi.mock factory can reference it.
+// `authenticatedFetch` is mocked (via vi.hoisted so the hoisted vi.mock factory
+// can reference it) to assert the read-state PUT round-trips without a server;
+// the read path is the conversation list, fed directly via seedReadState.
 const { authFetch } = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: authFetch }));
 
 type Mod = typeof UseUnseenConversationsModule;
 
-/**
- * The module keeps its read-state mirror in module-level singletons
- * (lastSeenMap / explicitlyUnread / seeded / hydrated), so each test
- * re-imports a fresh copy to reset that state. The mirror is also
- * localStorage-durable by design (dots survive reloads), so a fresh
- * *browser* additionally means clearing storage before the module
- * hydrates — tests that want the durability keep storage intact and
- * re-import via {@link reloadKeepingStorage}. PUTs resolve 204.
- */
+// Fresh module copy with cleared storage. The read-state mirror lives in
+// module-level singletons and is localStorage-durable, so a fresh browser also
+// clears storage ({@link reloadKeepingStorage} keeps it). PUTs resolve 204.
 async function loadFresh(): Promise<Mod> {
   localStorage.clear();
   return reloadKeepingStorage();
@@ -85,10 +78,9 @@ describe("seedReadState", () => {
   });
 
   it("keeps the mark-seen gate closed while the list is still loading (undefined)", async () => {
-    // useSeedReadState(undefined) — the query hasn't loaded — must NOT flip
-    // `hydrated`, or an automatic mark-seen on a deep-link/reload would write
-    // a 'seen' baseline before the server's viewer_* arrives (clobbering a
-    // cross-device unread). Only a loaded list (even empty []) releases it.
+    // useSeedReadState(undefined) (list not loaded) must NOT flip `hydrated`, or
+    // an automatic mark-seen on deep-link/reload would write a 'seen' baseline
+    // before viewer_* arrives (clobbering a cross-device unread); [] releases it.
     const mod = await loadFresh();
     vi.useFakeTimers({ now: 5_000_000 });
     const { rerender } = renderHook(
@@ -533,10 +525,9 @@ describe("useMarkConversationSeen", () => {
 
 describe("pod-independent read-state (replica sharding)", () => {
   it("seeds a read-as-of-load baseline when the server has no read-state", async () => {
-    // Under replica sharding the list can be served by a pod that never
-    // saw this user's read-state PUT (viewer_last_seen: null). The seed
-    // falls back to the row's updated_at, so a turn finishing AFTER load
-    // still lights the dot — previously the null seed froze the dot off.
+    // A pod that never saw this user's read-state PUT serves viewer_last_seen:
+    // null; the seed falls back to the row's updated_at so a turn finishing AFTER
+    // load still lights the dot (previously the null seed froze the dot off).
     const mod = await loadFresh();
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: null, updated_at: 1_000 }]);
     expect(mod.isConversationUnseen("conv-1", 1_000, "idle")).toBe(false); // read as of load
