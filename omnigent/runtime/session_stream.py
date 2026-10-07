@@ -189,6 +189,8 @@ def _sse_safe_attributes(event: dict[str, Any]) -> dict[str, object]:
         attrs["response_id"] = event["response_id"]
     item = event.get("item")
     if isinstance(item, dict):
+        if "response_id" not in attrs and isinstance(item.get("response_id"), str):
+            attrs["response_id"] = item["response_id"]
         if isinstance(item.get("id"), str):
             attrs["item_id"] = item["id"]
         if isinstance(item.get("type"), str):
@@ -205,6 +207,16 @@ def _sse_safe_attributes(event: dict[str, Any]) -> dict[str, object]:
             source = item.get("source")
             if isinstance(source, str) and len(source) <= 32:
                 attrs["item_source"] = source
+    if event.get("type") == "session.input.consumed":
+        data = event.get("data")
+        if isinstance(data, dict):
+            for key in ("item_id", "cleared_pending_id"):
+                value = data.get(key)
+                if isinstance(value, str) and len(value) <= 256:
+                    attrs[key] = value
+    from omnigent.native.input_diagnostics import input_attributes
+
+    attrs.update(input_attributes(event))
     error = event.get("error")
     if not isinstance(error, dict) and isinstance(response, dict):
         error = response.get("error")

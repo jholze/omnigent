@@ -27,6 +27,7 @@ from omnigent.harnesses.codex_native.bridge import (
 from omnigent.inner.codex_native_executor import CodexNativeExecutor
 from omnigent.inner.executor import ExecutorConfig, ExecutorError, TurnComplete
 from omnigent.inner.native_attachments import attachment_cache_dir
+from omnigent.native.input_diagnostics import input_delivery_scope
 
 # A 1x1 transparent PNG, base64-encoded — a real decodable image small
 # enough to embed, used to prove image blocks are materialized to disk
@@ -153,6 +154,44 @@ def _collect_turn_events(executor: CodexNativeExecutor, text: str) -> list[Any]:
         return events
 
     return asyncio.run(run())
+
+
+@pytest.mark.parametrize("active_turn_id", [None, "turn_existing"])
+def test_codex_delivery_records_input_and_accepted_native_turn(
+    active_turn_id: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient", _FakeCodexNativeClient
+    )
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    caplog.set_level(logging.INFO, logger=codex_native_executor.__name__)
+    identity = {
+        "input_stable_id": "a" * 32,
+        "pending_id": "pending_" + "b" * 32,
+        "delivery_attempt_id": "c" * 32,
+        "input_enqueued_at_ms": 12345,
+    }
+    with input_delivery_scope(identity, response_id="resp_delivery"):
+        events = _collect_turn_events(CodexNativeExecutor(bridge_dir=tmp_path), "private prompt")
+    assert isinstance(events[0], TurnComplete)
+    [record] = [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "codex_native_delivery_finished"
+    ]
+    attrs = record.attributes
+    assert {key: attrs[key] for key in identity} == identity
+    assert attrs["response_id"] == "resp_delivery"
+    assert attrs["native_turn_id"] == ("turn_steered" if active_turn_id else "turn_1")
+    assert attrs["stage"] == ("turn_steer" if active_turn_id else "turn_start")
+    assert attrs["outcome"] == "rpc_accepted"
+    assert "private prompt" not in json.dumps(attrs)
 
 
 def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
@@ -976,7 +1015,8 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     _seed_bridge(tmp_path, active_turn_id="turn_maybe_active")
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
-    events = _collect_turn_events(executor, "do not duplicate")
+    with input_delivery_scope({"input_stable_id": "a" * 32}, response_id="resp_delivery"):
+        events = _collect_turn_events(executor, "do not duplicate")
 
     assert [type(event) for event in events] == [ExecutorError]
     assert [method for method, _params in _FailingSteerClient.requests] == ["turn/steer"]
@@ -997,6 +1037,9 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     attrs = row["attributes"]
     assert row["turn_id"] == "turn_maybe_active"
     assert attrs["thread_id"] == state.thread_id
+    assert attrs["input_stable_id"] == "a" * 32
+    assert attrs["response_id"] == "resp_delivery"
+    assert attrs["outcome"] == "error"
     if isinstance(error, CodexAppServerResponseError):
         assert attrs["rpc_error_code"] == "-32600"
     else:

@@ -26,10 +26,43 @@ route tests; this file tests the module in isolation.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 
 from omnigent.runtime import pending_inputs
+
+
+@pytest.mark.parametrize("hold", [True, False])
+def test_delivery_identity_and_original_enqueue_time_survive_retry_and_restore(
+    hold: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 100.0
+    monkeypatch.setattr(
+        pending_inputs, "time", SimpleNamespace(time=lambda: now, monotonic=lambda: now)
+    )
+    first = pending_inputs.record("conv", [_text_block("private first")], stable_id="a" * 32)
+    original = pending_inputs.delivery_attributes_for("conv", first)
+    now = 101.0
+    assert (
+        pending_inputs.record("conv", [_text_block("private first")], stable_id="a" * 32) == first
+    )
+    pending_inputs.mark_delivery_stage("conv", first, "forward_accepted")
+    pending_inputs.record("conv", [_text_block("second")], stable_id="b" * 32)
+    match = pending_inputs.resolve_matching_text("conv", " second  ", hold=hold)
+    assert match.match_method == "normalized_text"
+    [skipped] = match.skipped
+    assert skipped.pending_id == first
+    now = 105.0
+    pending_inputs.restore("conv", skipped)
+    restored = pending_inputs.delivery_attributes_for("conv", first)
+    assert restored == {
+        **original,
+        "pending_age_ms": 5000,
+        "last_delivery_stage": "forward_accepted",
+    }
+    assert restored["input_enqueued_at_ms"] == 100000
+    assert "private first" not in repr(restored)
 
 
 @pytest.fixture(autouse=True)

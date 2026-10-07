@@ -172,6 +172,9 @@ class DrainedInput:
     created_by: str | None = None
     stable_id: str | None = None
     background_titles_enabled: bool = True
+    input_enqueued_at_ms: int | None = None
+    delivery_attempt_id: str | None = None
+    last_delivery_stage: str = "unknown"
 
 
 @dataclass
@@ -192,6 +195,7 @@ class MatchedDrain:
     matched: DrainedInput | None
     skipped: list[DrainedInput]
     uncertain: list[DrainedInput] = field(default_factory=list)
+    match_method: str | None = None
 
 
 @dataclass
@@ -233,6 +237,9 @@ class _Entry:
     created_at: float = field(default_factory=lambda: _now())
     held: bool = False
     uncertain: bool = False
+    input_enqueued_at_ms: int | None = field(default_factory=lambda: int(time.time() * 1000))
+    delivery_attempt_id: str | None = field(default_factory=lambda: uuid.uuid4().hex)
+    last_delivery_stage: str = "server_queued"
 
 
 # Per-conversation mapping conversation_id → {pending_id: entry}. The
@@ -368,6 +375,43 @@ def pending_id_for_stable_id(conversation_id: str, stable_id: str) -> str | None
     return None
 
 
+def delivery_attributes(entry: DrainedInput | _Entry) -> dict[str, object]:
+    """Return correlation and age without exposing the queued content or author."""
+    from omnigent.native.input_diagnostics import input_attributes
+
+    attrs: dict[str, object] = dict(
+        input_attributes(
+            {
+                "input_stable_id": entry.stable_id,
+                "pending_id": entry.pending_id,
+                "delivery_attempt_id": entry.delivery_attempt_id,
+                "input_enqueued_at_ms": entry.input_enqueued_at_ms,
+            }
+        )
+    )
+    attrs["last_delivery_stage"] = entry.last_delivery_stage
+    if entry.input_enqueued_at_ms is not None:
+        attrs["pending_age_ms"] = max(0, int(time.time() * 1000) - entry.input_enqueued_at_ms)
+    return attrs
+
+
+def delivery_attributes_for(conversation_id: str, pending_id: str) -> dict[str, object]:
+    """Read one pending input's diagnostics without draining or changing its TTL."""
+    with _lock:
+        entry = _pending.get(conversation_id, {}).get(pending_id)
+        return delivery_attributes(entry) if entry is not None else {}
+
+
+def mark_delivery_stage(conversation_id: str, pending_id: str, stage: str) -> None:
+    """Remember the latest server-observed stage while an input is still pending."""
+    if stage not in {"forward_requested", "forward_accepted"}:
+        return
+    with _lock:
+        entry = _pending.get(conversation_id, {}).get(pending_id)
+        if entry is not None:
+            entry.last_delivery_stage = stage
+
+
 def resolve(conversation_id: str, pending_id: str) -> DrainedInput | None:
     """
     Drop a pending entry by id and return it.
@@ -480,6 +524,9 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
         created_by=drained.created_by,
         stable_id=drained.stable_id,
         background_titles_enabled=drained.background_titles_enabled,
+        input_enqueued_at_ms=drained.input_enqueued_at_ms,
+        delivery_attempt_id=drained.delivery_attempt_id,
+        last_delivery_stage=drained.last_delivery_stage,
     )
     with _lock:
         entries = _pending.get(conversation_id, {})
@@ -552,6 +599,7 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
         # of the text, so drop exactly that many from the mirror and compare
         # with the entry's own text — typed marker-like text still counts.
         match_index = _first_match(texts, exact_needle)
+        match_method = "normalized_text"
         if match_index is None:
             for index, (_pid, entry) in enumerate(ordered):
                 attachments = _attachment_count(entry.content)
@@ -562,6 +610,7 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
                     == texts[index]
                 ):
                     match_index = index
+                    match_method = "attachment_normalized_text"
                     break
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
@@ -580,6 +629,7 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
             _pending.pop(conversation_id, None)
         return MatchedDrain(
             matched=_drained_input(matched_entry),
+            match_method=match_method,
             skipped=[
                 _drained_input(entry)
                 for _pending_id, entry in skipped_entries
@@ -654,6 +704,9 @@ def _drained_input(entry: _Entry) -> DrainedInput:
         created_by=entry.created_by,
         stable_id=entry.stable_id,
         background_titles_enabled=entry.background_titles_enabled,
+        input_enqueued_at_ms=entry.input_enqueued_at_ms,
+        delivery_attempt_id=entry.delivery_attempt_id,
+        last_delivery_stage=entry.last_delivery_stage,
     )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
@@ -755,6 +756,10 @@ async def test_claude_native_message_forwards_to_runner_without_persisting(
         ("POST", "/v1/sessions/64a784c3aa907d1774f44313546947c6/resources/terminals"),
         ("POST", "/v1/sessions/64a784c3aa907d1774f44313546947c6/events"),
     ]
+    forwarded = fake_runner.post_json_calls[1][1]
+    assert re.fullmatch(r"[0-9a-f]{32}", forwarded["delivery_attempt_id"])
+    assert isinstance(forwarded["input_enqueued_at_ms"], int)
+    assert forwarded["input_enqueued_at_ms"] > 0
     assert fake_runner.post_json_calls == [
         (
             "/v1/sessions/64a784c3aa907d1774f44313546947c6/resources/terminals",
@@ -776,6 +781,9 @@ async def test_claude_native_message_forwards_to_runner_without_persisting(
                 # Forwarded so the runner resolves the harness spec on the
                 # first message (before POST /v1/sessions caches it).
                 "agent_id": "087b7cb7ac30abf4debfaa578d052ec6",
+                "pending_id": body["pending_id"],
+                "delivery_attempt_id": forwarded["delivery_attempt_id"],
+                "input_enqueued_at_ms": forwarded["input_enqueued_at_ms"],
             },
         ),
     ]
@@ -4737,7 +4745,9 @@ async def test_native_dispatch_fast_fails_and_consumes_message_on_terminal_error
 
 
 @pytest.mark.asyncio
-async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
+async def test_kiro_native_dispatch_forwards_without_persisting(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Kiro web-chat input is mirrored by Kiro's session forwarder."""
     from omnigent.runtime import pending_inputs
     from omnigent.server.routes.sessions import _dispatch_session_event_to_runner
@@ -4749,8 +4759,13 @@ async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
     client = _FakeRunnerClient()
     body = SessionEventInput(
         type="message",
-        data={"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        data={
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}],
+            "stable_id": "a" * 32,
+        },
     )
+    caplog.set_level("INFO")
 
     try:
         result = await _dispatch_session_event_to_runner(
@@ -4779,6 +4794,34 @@ async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
         forwarded = client.post_json_calls[1][1]
         assert forwarded["agent_id"] == "2c515637c67d0717ad0bebc2747b71bc"
         assert forwarded["model"] == "kiro-native-ui"
+        assert forwarded["input_stable_id"] == "a" * 32
+        assert forwarded["pending_id"] == result.pending_id
+        assert len(forwarded["delivery_attempt_id"]) == 32
+        assert forwarded["input_enqueued_at_ms"] > 0
+        repeated = await _dispatch_session_event_to_runner(
+            conv.id,
+            conv,
+            body,
+            store,
+            client,  # type: ignore[arg-type]
+            agent_name="kiro-native-ui",
+            file_store=None,
+            artifact_store=None,
+            created_by="alice@example.com",
+        )
+        assert repeated.pending_id == result.pending_id
+        assert len([call for call in client.post_json_calls if call[0].endswith("/events")]) == 1
+        events = {getattr(r, "event_name", None): r for r in caplog.records}
+        for event_name in (
+            "native_input_enqueued",
+            "turn_dispatched",
+            "native_input_retry_deduplicated",
+        ):
+            attrs = events[event_name].attributes
+            assert attrs["input_stable_id"] == "a" * 32
+            assert attrs["pending_id"] == result.pending_id
+            assert attrs["delivery_attempt_id"] == forwarded["delivery_attempt_id"]
+            assert "hello" not in repr(attrs)
     finally:
         pending_inputs.reset_for_tests()
 

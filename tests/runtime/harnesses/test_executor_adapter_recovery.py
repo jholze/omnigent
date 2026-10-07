@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from omnigent.errors import ElicitationDeclinedError
 from omnigent.inner.executor import (
     Executor,
     ExecutorConfig,
@@ -18,6 +19,7 @@ from omnigent.inner.executor import (
     ToolSpec,
     TurnComplete,
 )
+from omnigent.native.input_diagnostics import current_input_attributes
 from omnigent.runtime.harnesses._executor_adapter import (
     _ORPHAN_RESYNC_THRESHOLD,
     ExecutorAdapter,
@@ -90,6 +92,103 @@ def _ctx(response_id: str) -> TurnContext:
 
 def _request() -> CreateResponseRequest:
     return CreateResponseRequest(model="agent", input="hi")
+
+
+async def test_main_turn_and_steering_use_their_own_input_identity() -> None:
+    observed: list[dict[str, object]] = []
+    gate = asyncio.Event()
+    ctx = _ctx("resp_delivery")
+
+    def begin() -> None:
+        observed.append(current_input_attributes())
+        ctx._push_injection(
+            CreateResponseRequest(model="agent", input="second", input_stable_id="b" * 32)
+        )
+        ctx._push_injection(_request())
+
+    class RecordingExecutor(_FakeExecutor):
+        async def enqueue_session_message(self, session_key: str, content: Any) -> bool:
+            observed.append(current_input_attributes())
+            if len(observed) == 3:
+                gate.set()
+            return True
+
+    executor = RecordingExecutor(
+        events=[TurnComplete(response="done")], on_iter=begin, block_event=gate
+    )
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    await asyncio.wait_for(
+        adapter.run_turn(
+            CreateResponseRequest(model="agent", input="first", input_stable_id="a" * 32), ctx
+        ),
+        timeout=3,
+    )
+    assert observed == [
+        {"input_stable_id": "a" * 32, "response_id": "resp_delivery"},
+        {"input_stable_id": "b" * 32, "response_id": "resp_delivery"},
+        {},
+    ]
+    assert current_input_attributes() == {}
+
+
+@pytest.mark.parametrize("declined", [False, True])
+async def test_native_delivery_records_exit_without_a_terminal_event(
+    declined: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    def begin() -> None:
+        if declined:
+            raise ElicitationDeclinedError("user declined")
+
+    executor = _FakeExecutor(on_iter=begin)
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    ctx = _ctx("resp_exit")
+    caplog.set_level(logging.INFO, logger=_ADAPTER_LOGGER)
+    await adapter.run_turn(
+        CreateResponseRequest(model="agent", input="hello", input_stable_id="a" * 32), ctx
+    )
+    if adapter._abandoned_executor_cleanup is not None:
+        await adapter._abandoned_executor_cleanup
+    [record] = [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "native_input_execution_finished"
+    ]
+    assert record.attributes["input_stable_id"] == "a" * 32
+    assert record.attributes["response_id"] == "resp_exit"
+    assert record.attributes["outcome"] == ("cancelled" if declined else "executor_stream_ended")
+    assert ctx.cancelled.is_set() == declined
+    assert current_input_attributes() == {}
+
+
+async def test_cancelled_native_delivery_keeps_identity_and_does_not_leak_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    started = asyncio.Event()
+    executor = _FakeExecutor(on_iter=started.set, block_event=asyncio.Event())
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    caplog.set_level(logging.INFO, logger=_ADAPTER_LOGGER)
+    task = asyncio.create_task(
+        adapter.run_turn(
+            CreateResponseRequest(model="agent", input="private prompt", input_stable_id="a" * 32),
+            _ctx("resp_cancelled"),
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    if adapter._abandoned_executor_cleanup is not None:
+        await adapter._abandoned_executor_cleanup
+    [record] = [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "native_input_execution_finished"
+    ]
+    assert record.attributes["input_stable_id"] == "a" * 32
+    assert record.attributes["response_id"] == "resp_cancelled"
+    assert record.attributes["outcome"] == "cancelled"
+    assert "private prompt" not in repr(record.attributes)
+    assert current_input_attributes() == {}
 
 
 async def test_stale_finally_does_not_clear_newer_ctx() -> None:

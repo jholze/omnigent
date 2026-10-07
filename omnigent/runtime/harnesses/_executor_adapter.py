@@ -42,6 +42,12 @@ from omnigent.inner.executor import (
     TurnComplete,
 )
 from omnigent.inner.tracing import TracingContext, is_tracing_enabled
+from omnigent.native.input_diagnostics import (
+    INPUT_FIELDS,
+    input_attributes,
+    input_delivery_scope,
+    log_input_event,
+)
 from omnigent.policies.types import FAIL_CLOSED_PHASES
 from omnigent.runtime.harnesses._scaffold import HarnessApp, PolicyVerdictPayload, TurnContext
 from omnigent.runtime.tool_output import cap_tool_output
@@ -246,6 +252,8 @@ class ExecutorAdapter(HarnessApp):
         # Set True before each genuine-completion return so the finally can schedule a
         # bounded interrupt only on abnormal exits (CancelledError, ExecutorError, etc.).
         clean_exit = False
+        input_identity = input_attributes(request.model_dump(include=set(INPUT_FIELDS)))
+        input_outcome_logged = False
         self._dispatched_call_ids.clear()
         self._observed_tool_calls.clear()
         self._pr_tool_calls.clear()
@@ -278,7 +286,15 @@ class ExecutorAdapter(HarnessApp):
                     trace_cm = trace_context_for_response(response_id=ctx.response_id)
                 except Exception:
                     _logger.debug("trace_context_for_response unavailable", exc_info=True)
-            with session_scope(turn_session_id), phase_scope(ErrorPhase.TURN), trace_cm:
+            with (
+                session_scope(turn_session_id),
+                phase_scope(ErrorPhase.TURN),
+                trace_cm,
+                input_delivery_scope(input_identity, response_id=ctx.response_id),
+            ):
+                log_input_event(
+                    _logger, "native_input_execution_started", session_id=turn_session_id
+                )
                 if tctx is not None:
                     agent_span = tctx.start_agent_span(
                         agent_name=request.model or "unknown",
@@ -294,6 +310,13 @@ class ExecutorAdapter(HarnessApp):
                     config=config,
                 ):
                     if ctx.cancelled.is_set():
+                        log_input_event(
+                            _logger,
+                            "native_input_execution_finished",
+                            session_id=turn_session_id,
+                            outcome="cancelled",
+                        )
+                        input_outcome_logged = True
                         if tctx is not None and agent_span is not None:
                             from omnigent.runtime.telemetry import record_cancellation
 
@@ -333,12 +356,26 @@ class ExecutorAdapter(HarnessApp):
                     # --- End tracing ---
                     self._translate_event(event, ctx)
                     if isinstance(event, TurnComplete):
+                        log_input_event(
+                            _logger,
+                            "native_input_execution_finished",
+                            session_id=turn_session_id,
+                            outcome="executor_returned",
+                        )
+                        input_outcome_logged = True
                         if tctx is not None and agent_span is not None:
                             tctx.end_agent_span(agent_span, response=response_text)
                             agent_span = None
                         clean_exit = True
                         return
                     if isinstance(event, TurnCancelled):
+                        log_input_event(
+                            _logger,
+                            "native_input_execution_finished",
+                            session_id=turn_session_id,
+                            outcome="cancelled",
+                        )
+                        input_outcome_logged = True
                         ctx.cancelled.set()
                         if tctx is not None and agent_span is not None:
                             from omnigent.runtime.telemetry import record_cancellation
@@ -349,6 +386,16 @@ class ExecutorAdapter(HarnessApp):
                         clean_exit = True
                         return
                     if isinstance(event, ExecutorError):
+                        log_input_event(
+                            _logger,
+                            "native_input_execution_finished",
+                            session_id=turn_session_id,
+                            outcome="reported_undelivered" if event.undelivered else "error",
+                            error_code=event.code
+                            if event.code and len(event.code) <= 64
+                            else None,
+                        )
+                        input_outcome_logged = True
                         clean_exit = event.preserve_session
                         if tctx is not None and agent_span is not None:
                             tctx.end_agent_span(
@@ -378,7 +425,23 @@ class ExecutorAdapter(HarnessApp):
                                 undelivered=event.undelivered,
                             )
                         raise RuntimeError(f"inner executor error: {detail}")
+                log_input_event(
+                    _logger,
+                    "native_input_execution_finished",
+                    session_id=turn_session_id,
+                    outcome="executor_stream_ended",
+                )
         except ElicitationDeclinedError:
+            if input_identity:
+                log_input_event(
+                    _logger,
+                    "native_input_execution_finished",
+                    session_id=turn_session_id,
+                    attributes=input_identity,
+                    response_id=ctx.response_id,
+                    outcome="cancelled",
+                    cancellation_reason="elicitation_declined",
+                )
             # Fallback for non-SDK executors; SDK-based paths use ctx.cancelled.set() instead.
             _logger.info(
                 "elicitation explicitly declined for response %s — aborting turn",
@@ -392,7 +455,17 @@ class ExecutorAdapter(HarnessApp):
             ctx.cancelled.set()
             if self._executor is not None:
                 await self._executor.interrupt_session(self._session_key)
-        except BaseException:
+        except BaseException as exc:
+            if input_identity and not input_outcome_logged:
+                log_input_event(
+                    _logger,
+                    "native_input_execution_finished",
+                    session_id=turn_session_id,
+                    attributes=input_identity,
+                    response_id=ctx.response_id,
+                    outcome="cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                    exception_type=type(exc).__name__,
+                )
             # Close the span so it doesn't leak on the OTel provider.
             if tctx is not None and agent_span is not None:
                 tctx.end_agent_span(agent_span, response=None, error="unhandled exception")
@@ -564,7 +637,31 @@ class ExecutorAdapter(HarnessApp):
             if ctx.cancelled.is_set():
                 return
             try:
-                accepted = await executor.enqueue_session_message(self._session_key, text)
+                with input_delivery_scope(
+                    injection.model_dump(include=set(INPUT_FIELDS)), response_id=ctx.response_id
+                ):
+                    log_input_event(
+                        _logger, "native_input_steering_started", session_id=ctx.session_id
+                    )
+                    try:
+                        accepted = await executor.enqueue_session_message(self._session_key, text)
+                    except BaseException as exc:
+                        log_input_event(
+                            _logger,
+                            "native_input_steering_finished",
+                            session_id=ctx.session_id,
+                            outcome="cancelled"
+                            if isinstance(exc, asyncio.CancelledError)
+                            else "error",
+                            exception_type=type(exc).__name__,
+                        )
+                        raise
+                    log_input_event(
+                        _logger,
+                        "native_input_steering_finished",
+                        session_id=ctx.session_id,
+                        outcome="executor_accepted" if accepted else "executor_refused",
+                    )
             except Exception:
                 _logger.exception(
                     "inner executor.enqueue_session_message failed; in-band injection lost"
