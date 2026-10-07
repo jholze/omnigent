@@ -564,6 +564,111 @@ function launchExtension() {
     _run_extension_script(node, extension_path, script)
 
 
+def test_session_start_readiness_not_blocked_by_hung_usage_post(
+    tmp_path: Path,
+) -> None:
+    """A stalled baseline re-assertion POST must not wedge session startup.
+
+    ``session_start`` restores a persisted baseline and re-asserts it to the
+    server, but does so only after ``input_ready`` is written and the inbox
+    poller is armed. A server that accepts the connection and never responds can
+    therefore stall that POST without blocking readiness: ``input_ready`` still
+    appears, so queued messages can be delivered.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+    extension_path = (
+        Path(__file__).resolve().parents[3]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-hang-"));
+const bridgeDir = path.join(root, "bridge");
+const inboxDir = path.join(root, "inbox");
+fs.mkdirSync(bridgeDir, { recursive: true });
+fs.mkdirSync(inboxDir, { recursive: true });
+
+// A persisted baseline the resumed process must re-assert, so postSessionUsage
+// actually fires a POST instead of returning early on zero totals.
+fs.writeFileSync(
+  path.join(bridgeDir, "cumulative_usage.json"),
+  JSON.stringify({
+    cumulative_input_tokens: 150000,
+    cumulative_output_tokens: 30000,
+    cumulative_cache_read_input_tokens: 0,
+    model: "databricks-claude-sonnet-4-6",
+  }),
+);
+
+const configPath = path.join(root, "config.json");
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "session-1",
+    inboxDir,
+    bridgeDir,
+    authHeaders: { authorization: "Bearer test" },
+  }),
+);
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+// The usage re-assertion POST never settles; every other startup POST resolves.
+let usagePostAttempted = false;
+global.fetch = async (_url, request) => {
+  const body = JSON.parse(request.body);
+  if (body.type === "external_session_usage") {
+    usagePostAttempted = true;
+    return new Promise(() => {});
+  }
+  return { ok: true };
+};
+global.setInterval = () => ({ fakeInterval: true });
+
+const handlers = {};
+const pi = {
+  registerCommand() {},
+  on(eventName, handler) {
+    handlers[eventName] = handler;
+  },
+};
+require(extensionPath)(pi);
+
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
+};
+
+(async () => {
+  // Fire session_start WITHOUT awaiting: its final re-assertion POST never
+  // resolves, but readiness must already be established by then.
+  const starting = handlers.session_start({}, ctx);
+  starting.catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(
+    fs.existsSync(path.join(bridgeDir, "input_ready")),
+    "input_ready must be written before the baseline POST so a hung POST cannot wedge startup",
+  );
+  assert.ok(usagePostAttempted, "the baseline re-assertion POST should have been attempted");
+  process.exit(0);
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});"""
+    _run_extension_script(node, extension_path, script)
+
+
 def test_agent_end_dedupes_real_shaped_messages_by_timestamp(
     tmp_path: Path,
 ) -> None:

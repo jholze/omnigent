@@ -2005,9 +2005,6 @@ module.exports = function (pi) {
   pi.on("session_start", async (_event, ctx) => {
     rememberContext(ctx);
     restoreCumulativeUsage();
-    // Re-assert the restored baseline so an idle resume reaches the server even
-    // when the pre-exit flush failed; a no-op for a fresh or already-held total.
-    await postSessionUsage();
     registerTaskToolIfMissing();
     restoreTaskList(ctx);
     if (taskList.length) await publishTaskList();
@@ -2067,6 +2064,10 @@ module.exports = function (pi) {
         data: { model: startupModel },
       });
     }
+    // Re-assert the restored baseline last, after input_ready and the inbox
+    // poller are up, so a hung usage POST cannot delay readiness; the grow-only
+    // clamp makes re-posting an already-held baseline a no-op.
+    await postSessionUsage();
     // Readiness is not turn completion: a queued prompt may already be running.
     // Only agent_end publishes idle so startup cannot complete a child task.
   });

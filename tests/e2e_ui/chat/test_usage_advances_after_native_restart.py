@@ -228,9 +228,12 @@ def test_restart_reasserts_persisted_baseline_server_never_recorded(
 
     # The restore raises input and output together, so a regression that
     # re-asserted input while dropping output would pass the check above.
-    usage = httpx.get(
+    response = httpx.get(
         f"{base_url}/v1/sessions/{session_id}",
         params={"include_usage": "true"},
         timeout=10,
-    ).json()
-    assert (usage.get("usage_by_model") or {})[_MODEL]["output_tokens"] == 32_000
+    )
+    response.raise_for_status()
+    model_usage = (response.json().get("usage_by_model") or {}).get(_MODEL)
+    assert model_usage is not None, f"server reported no usage for {_MODEL}"
+    assert model_usage["output_tokens"] == 32_000
