@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+from collections.abc import Callable
 
 import pytest
 
@@ -329,18 +330,28 @@ def test_is_cancelled_rpc_error_ignores_other_statuses() -> None:
     assert is_cancelled_rpc_error(_make_rpc_error(None)) is False
 
 
-def test_is_cancelled_rpc_error_requires_rpc_error_ancestry() -> None:
-    """A non-RpcError exception never matches, even with a cancelled code()."""
+@pytest.mark.parametrize(
+    "detector,status_name",
+    [
+        (is_cancelled_rpc_error, "CANCELLED"),
+        (is_permission_denied_rpc_error, "PERMISSION_DENIED"),
+        (is_resource_exhausted_rpc_error, "RESOURCE_EXHAUSTED"),
+    ],
+)
+def test_rpc_error_detectors_require_rpc_error_ancestry(
+    detector: Callable[[BaseException], bool], status_name: str
+) -> None:
+    """A non-RpcError exception never matches, even with a matching code()."""
 
     class NotAnRpcFailure(Exception):
         def code(self) -> object:
             class _Status:
-                name = "CANCELLED"
+                name = status_name
 
             return _Status()
 
-    assert is_cancelled_rpc_error(NotAnRpcFailure("nope")) is False
-    assert is_cancelled_rpc_error(ValueError("nope")) is False
+    assert detector(NotAnRpcFailure("nope")) is False
+    assert detector(ValueError("nope")) is False
 
 
 def test_is_cancelled_rpc_error_tolerates_broken_status_readers() -> None:
@@ -377,20 +388,6 @@ def test_is_permission_denied_rpc_error_ignores_other_statuses() -> None:
     assert is_permission_denied_rpc_error(_make_rpc_error("CANCELLED")) is False
     assert is_permission_denied_rpc_error(_make_rpc_error(None)) is False
     assert is_cancelled_rpc_error(_make_rpc_error("PERMISSION_DENIED")) is False
-
-
-def test_is_permission_denied_rpc_error_requires_rpc_error_ancestry() -> None:
-    """A non-RpcError exception never matches, even with a denied code()."""
-
-    class NotAnRpcFailure(Exception):
-        def code(self) -> object:
-            class _Status:
-                name = "PERMISSION_DENIED"
-
-            return _Status()
-
-    assert is_permission_denied_rpc_error(NotAnRpcFailure("nope")) is False
-    assert is_permission_denied_rpc_error(ValueError("nope")) is False
 
 
 def test_classify_exception_cancelled_rpc_is_transient_upstream() -> None:
@@ -437,20 +434,6 @@ def test_is_resource_exhausted_rpc_error_ignores_other_statuses() -> None:
     assert is_resource_exhausted_rpc_error(_make_rpc_error(None)) is False
     assert is_cancelled_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
     assert is_permission_denied_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
-
-
-def test_is_resource_exhausted_rpc_error_requires_rpc_error_ancestry() -> None:
-    """A non-RpcError exception never matches, even with an exhausted code()."""
-
-    class NotAnRpcFailure(Exception):
-        def code(self) -> object:
-            class _Status:
-                name = "RESOURCE_EXHAUSTED"
-
-            return _Status()
-
-    assert is_resource_exhausted_rpc_error(NotAnRpcFailure("nope")) is False
-    assert is_resource_exhausted_rpc_error(ValueError("nope")) is False
 
 
 def test_classify_exception_resource_exhausted_rpc_is_transient_upstream() -> None:

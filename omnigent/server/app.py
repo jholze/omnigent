@@ -2510,11 +2510,16 @@ def create_app(
                     error_type=type(exc).__name__,
                 ),
             )
-            # Not routed through _handle_omnigent_error, which books every 5xx
-            # on the ERROR stream and cannot carry the Retry-After header.
+            # Answered directly: _handle_omnigent_error books every 5xx as ERROR and
+            # carries no headers, and the catch-all runs outside the request
+            # middleware, so Retry-After and the correlation id are set here.
+            headers = {"Retry-After": str(_UPSTREAM_RESOURCE_EXHAUSTED_RETRY_AFTER_S)}
+            request_id = getattr(request.state, "audit_request_id", None)
+            if isinstance(request_id, str):
+                headers["X-Request-Id"] = request_id
             return JSONResponse(
                 status_code=exhausted.http_status,
-                headers={"Retry-After": str(_UPSTREAM_RESOURCE_EXHAUSTED_RETRY_AFTER_S)},
+                headers=headers,
                 content={"error": {"code": exhausted.code, "message": exhausted.message}},
             )
         # UNKNOWN, not SERVER: an uncaught exception has no code that confirms the

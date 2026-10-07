@@ -150,6 +150,7 @@ async def test_resource_exhausted_maps_to_retryable_503(
     assert record.attributes["http_status"] == "503"
     assert record.attributes["error_category"] == ErrorCategory.UPSTREAM.value
     assert record.attributes["error_impact"] == ErrorImpact.TRANSIENT.value
+    assert response.headers.get("X-Request-Id") == record.attributes["request_id"]
 
 
 @pytest.mark.parametrize("status_name", ["UNAVAILABLE", "UNAUTHENTICATED"])
