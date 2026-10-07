@@ -147,4 +147,22 @@ describe("useMentionBrowser token replacement", () => {
     expect(screen.getByTestId("token").textContent).toBe("src/");
     expect(valueSetter).toHaveBeenCalledWith("@src/");
   });
+
+  it("falls back to the controlled rewrite when the editing command throws", () => {
+    const execCommand = installEditingCommandStub();
+    execCommand.mockImplementation(() => {
+      throw new Error("command refused");
+    });
+    const valueSetter = vi.spyOn(HTMLTextAreaElement.prototype, "value", "set");
+    render(<Harness entries={[REPORT]} />);
+    type("alpha @rep");
+    valueSetter.mockClear();
+
+    fireEvent.keyDown(draft(), { key: "Tab" });
+
+    expect(execCommand).toHaveBeenCalledWith("delete");
+    expect(draft().value).toBe("alpha ");
+    expect(screen.getByText("report.md")).toBeInTheDocument();
+    expect(valueSetter).toHaveBeenCalledWith("alpha ");
+  });
 });
