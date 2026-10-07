@@ -1237,6 +1237,32 @@ def create_runner_app(
     # background.
     _claude_model_options_rows: dict[str, tuple[float, list[dict[str, object]]]] = {}
 
+    def _session_spec_entry_for(
+        session_id: str,
+        agent_id: str | None,
+        sub_agent_name: str | None,
+    ) -> _SpecEntry | None:
+        """The session's cached bundle, when it is the one the caller wants.
+
+        Session init resolves the bundle once and caches the entry, already
+        swapped to the sub-agent's own spec; later readers in the same session
+        reuse it instead of re-fetching ``agent/contents``. Both identity
+        checks matter: a request naming a different agent, or a different
+        sub-agent than the cached entry was resolved for, still goes to the
+        resolver. An agent switch drops the cache outright.
+
+        :param session_id: Session/conversation identifier.
+        :param agent_id: Agent id the caller wants the spec for.
+        :param sub_agent_name: Sub-agent the caller wants the spec for, or
+            ``None`` for a top-level session.
+        :returns: The cached entry, or ``None`` when there is nothing to reuse.
+        """
+        if agent_id is None or _session_agent_ids.get(session_id) != agent_id:
+            return None
+        if _session_sub_agent_names.get(session_id) != sub_agent_name:
+            return None
+        return _session_spec_cache.get(session_id)
+
     async def _resolve_session_claude_launch_config(
         session_id: str,
     ) -> ClaudeNativeUcodeConfig | None:
@@ -2206,11 +2232,14 @@ def create_runner_app(
         sub_agent_name = body.sub_agent_name or await _recover_sub_agent_name(conversation_id)
         resolver_agent_id = body.agent_id or _session_agent_ids.get(conversation_id)
         resolver_cwd = await _session_runtime_cwd(conversation_id)
+        # Reuse the bundle resolved during session init; agent switches evict it.
+        cached_entry = _session_spec_entry_for(conversation_id, resolver_agent_id, sub_agent_name)
         try:
             effective_harness, spawn_env = await _resolve_harness_config(
                 resource_registry=resource_registry,
                 agent_id=resolver_agent_id,
                 spec_resolver=spec_resolver,
+                resolved_entry=cached_entry,
                 session_id=conversation_id,
                 model_override=body.model_override,
                 harness_override=body.harness_override,
@@ -2226,6 +2255,7 @@ def create_runner_app(
                     resource_registry=resource_registry,
                     agent_id=resolver_agent_id,
                     spec_resolver=spec_resolver,
+                    resolved_entry=cached_entry,
                     session_id=conversation_id,
                     model_override=body.model_override,
                     harness_override=resolver_harness,
@@ -2955,19 +2985,30 @@ def create_runner_app(
             else None
         )
         history: list[_JsonObject]
+        loaded_complete = False
         if is_native_harness(harness_name):
             await _seed_last_server_item_id(session_id)
             history = []
         else:
-            history = await _load_history_as_input(session_id)
+            _loaded = await _load_history_pages(session_id)
+            history = _loaded.items
+            loaded_complete = _loaded.complete
         execution_seen = (
             initially_active
             or _turn_bind_epoch.get(session_id) != initial_turn_epoch
             or resource_registry.session_activity_epoch(session_id) != initial_native_activity
         )
         recovery_turn = "none"
-        if history and not execution_seen and session_id not in _active_turns:
+        if (
+            not execution_seen
+            and not is_native_harness(harness_name)
+            and session_id not in _active_turns
+            and (loaded_complete or history)
+        ):
+            # Memoize a confirmed-empty history too. A failed empty read stays
+            # out so a later request can retry it.
             _session_histories[session_id] = history
+        if history and not execution_seen and session_id not in _active_turns:
             last = history[-1]
             last_type = last.get("type")
             last_role = last.get("role")
@@ -3699,6 +3740,7 @@ def create_runner_app(
     _extract_last_assistant_text = _session_history.extract_last_assistant_text
     _handle_harness_compaction = _session_history.handle_harness_compaction
     _load_history_as_input = _session_history.load_history_as_input
+    _load_history_pages = _session_history.load_history_pages
     _seed_last_server_item_id = _session_history.seed_last_server_item_id
 
     _sign_in_watch = build_sign_in_watch(
@@ -7628,6 +7670,7 @@ async def _resolve_harness_config(
     *,
     agent_id: str | None,
     spec_resolver: SpecResolver | None,
+    resolved_entry: _SpecEntry | None = None,
     session_id: str | None = None,
     model_override: str | None = None,
     harness_override: str | None = None,
@@ -7639,6 +7682,12 @@ async def _resolve_harness_config(
 
     :param agent_id: Agent id to resolve the spec for.
     :param spec_resolver: Resolver that returns the spec for *agent_id*.
+    :param resolved_entry: The session's already-resolved bundle, when the
+        caller holds one. Used in place of *spec_resolver*, which would
+        otherwise re-fetch ``agent/contents`` for a spec the session
+        already resolved. Session-cached entries are swapped to the
+        sub-agent's own spec at resolution time, so *sub_agent_name* does
+        not apply to one and the swap below is skipped.
     :param session_id: Session/conversation id, threaded to the resolver.
     :param model_override: Per-session ``/model`` override, applied to the
         spawn-env model so it takes effect on the SDK harnesses.
@@ -7661,8 +7710,10 @@ async def _resolve_harness_config(
         cannot be resolved. Callers catch this to surface a clean error
         rather than spawning an invalid harness subprocess.
     """
-    if agent_id and spec_resolver:
+    spec_entry: _SpecEntry | None = resolved_entry
+    if spec_entry is None and agent_id and spec_resolver:
         spec_entry = await spec_resolver(agent_id, session_id)
+    if spec_entry is not None:
         spec = _unwrap_resolved_spec(spec_entry)
         workdir = _resolved_spec_workdir(spec_entry)
         if spec is not None:
@@ -7674,7 +7725,7 @@ async def _resolve_harness_config(
             # The child's bundle dir comes from the same resolution, so the
             # spawn-env below advertises the child's bundle — not the
             # parent's, whose skills and tools the child has no claim to.
-            if sub_agent_name:
+            if sub_agent_name and resolved_entry is None:
                 sub_entry = _native_runtime._resolve_sub_agent_spec_entry(
                     spec_entry, sub_agent_name
                 )

@@ -29,6 +29,20 @@ class _LoadHistoryAsInputFn(Protocol):
 
 
 @dataclasses.dataclass(frozen=True)
+class LoadedHistory:
+    """History items plus whether every page request completed successfully."""
+
+    items: list[_JsonObject]
+    complete: bool
+
+
+class _LoadHistoryPagesFn(Protocol):
+    async def __call__(
+        self, session_id: str, drop_item_id: str | None = None
+    ) -> LoadedHistory: ...
+
+
+@dataclasses.dataclass(frozen=True)
 class SessionHistory:
     """Session-history helpers the rest of the runner app calls."""
 
@@ -37,6 +51,7 @@ class SessionHistory:
     extract_last_assistant_text: Callable[[str], str]
     handle_harness_compaction: Callable[[str, _JsonObject], Coroutine[Any, Any, None]]
     load_history_as_input: _LoadHistoryAsInputFn
+    load_history_pages: _LoadHistoryPagesFn
     seed_last_server_item_id: Callable[[str], Coroutine[Any, Any, None]]
 
 
@@ -97,6 +112,14 @@ def build_session_history(
         session_id: str,
         drop_item_id: str | None = None,
     ) -> list[_JsonObject]:
+        return (await _load_history_pages(session_id, drop_item_id)).items
+
+    async def _load_history_pages(
+        session_id: str,
+        drop_item_id: str | None = None,
+    ) -> LoadedHistory:
+        """Load and convert session items, retaining read-completeness state."""
+        complete = True
         all_items: list[_JsonObject] = []
         after_cursor: str | None = None
         while True:
@@ -119,6 +142,7 @@ def build_session_history(
                         session_id,
                         extra={"session_id": session_id},
                     )
+                    complete = False
                     break
             except httpx.HTTPError:
                 _logger.warning(
@@ -127,6 +151,7 @@ def build_session_history(
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
+                complete = False
                 break
             page = resp.json()
             page_items = page.get("data", [])
@@ -155,7 +180,7 @@ def build_session_history(
                     session_id=session_id,
                     server_client=server_client,
                 )
-        return converted
+        return LoadedHistory(items=converted, complete=complete)
 
     def _convert_raw_items_to_input(
         items: list[_JsonObject],
@@ -439,5 +464,6 @@ def build_session_history(
         extract_last_assistant_text=_extract_last_assistant_text,
         handle_harness_compaction=_handle_harness_compaction,
         load_history_as_input=_load_history_as_input,
+        load_history_pages=_load_history_pages,
         seed_last_server_item_id=_seed_last_server_item_id,
     )
