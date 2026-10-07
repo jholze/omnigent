@@ -361,15 +361,10 @@ def _native_failure_message(detail: str, *, borrowed: bool, classified_code: str
     """
     Choose the reason published for a native ``failed`` edge.
 
-    Text borrowed from the turn's persisted assistant message is kept only
-    when it reads as an error report: the classifier refined its code, or it
-    is Claude Code's own ``API Error`` line. A successful reply that merely
-    precedes an unexplained failure must not be presented as its reason.
-
-    :param detail: Stripped failure text, e.g. ``"API Error: 429 ..."``; empty
-        when neither the forwarder nor the store supplied any.
-    :param borrowed: Whether ``detail`` came from the stored assistant text
-        rather than the forwarder's own report.
+    :param detail: Stripped failure text, empty when nothing supplied one.
+    :param borrowed: Whether ``detail`` is the turn's persisted assistant text
+        rather than the forwarder's own report. Borrowed text is used only when
+        it reads as an error report, never a successful reply.
     :param classified_code: Code returned by :func:`classify_native_turn_error`.
     :returns: ``detail`` when it is a usable reason, else the detail-less message.
     """
