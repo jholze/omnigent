@@ -8250,8 +8250,7 @@ async def _relay_persist(
         )
 
 
-# Pause before each RESPONSE-evaluation retry after an upstream throttle
-# (e.g. a store's concurrent-request limit) rejected the attempt.
+# Backoff for throttled RESPONSE-policy preparation.
 _RESPONSE_POLICY_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 
 _UPSTREAM_THROTTLE_MARKERS = re.compile(
@@ -8297,19 +8296,9 @@ async def _relay_response_policy_deny_reason(
     evaluates these policies at each nonempty text flush, including
     tool-call boundaries, before the segment becomes durable.
 
-    Fails OPEN (returns ``None``) on an evaluation error, matching the LLM
+    Fails OPEN (returns ``None``) on any evaluation error, matching the LLM
     phases' advisory default: a policy-engine hiccup must not destroy the
-    narration the user already watched. The preparation stage (the
-    conversation row, the agent spec and the engine build) is retried on
-    the short :data:`_RESPONSE_POLICY_RETRY_DELAYS_S` schedule when an
-    upstream throttle (a store or gateway answering ``RESOURCE_EXHAUSTED``
-    / HTTP 429 under a burst) rejects it, so a momentary request-limit
-    rejection does not skip the gate. Repeating that stage is safe: its
-    only write is the engine build's seed of missing initial labels, an
-    UPSERT of absent keys. The evaluation itself is never retried: it
-    applies label and session-state writes, so repeating it after a
-    partial failure could double-apply a committed increment. The
-    fail-open log line names the upstream cause either way.
+    narration the user already watched.
 
     :param conversation_store: Store for the conversation/labels lookup.
     :param session_id: Session/conversation identifier.
@@ -8331,8 +8320,6 @@ async def _relay_response_policy_deny_reason(
             extra={"session_id": session_id},
         )
         return None
-    conv: Conversation | None = None
-    engine: PolicyEngine | None = None
     delays = _RESPONSE_POLICY_RETRY_DELAYS_S
     attempts = len(delays) + 1
     for attempt in range(1, attempts + 1):
@@ -8370,8 +8357,9 @@ async def _relay_response_policy_deny_reason(
                 extra={"session_id": session_id},
             )
             return None
-    if conv is None or engine is None:
-        # No guardrails, default policies, or policy store apply here.
+    else:
+        return None
+    if engine is None:
         return None
     body = SessionEventInput(
         type="message",
@@ -8380,9 +8368,10 @@ async def _relay_response_policy_deny_reason(
             "content": [{"type": "output_text", "text": text}],
         },
     )
-    # The relay has no HTTP caller: gate per-user policies on the
-    # turn-initiating human persisted at forward time (the same label
-    # the policy-evaluate route falls back to).
+    # The relay has no HTTP caller; the acting principal is the
+    # turn-initiating human persisted at forward time (same label the
+    # policy-evaluate route falls back to), so per-user policies gate
+    # on the correct actor.
     turn_actor = (conv.labels or {}).get(_TURN_ACTOR_LABEL)
     try:
         verdict = await _evaluate_output_policy(
@@ -8397,8 +8386,7 @@ async def _relay_response_policy_deny_reason(
             turn_final=turn_final,
         )
     except Exception as exc:  # noqa: BLE001 — fail open: output phases are advisory
-        # Never retried: the evaluation applies label and session-state
-        # writes, and a repeat could double-apply one that already landed.
+        # Retrying evaluation could double-apply committed state increments.
         _logger.exception(
             "Relay: RESPONSE-phase policy evaluation failed for session=%s "
             "during evaluation (%s); not retried because policy writes may "
@@ -9312,24 +9300,7 @@ async def _prepare_output_policy_engine(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
 ) -> PolicyEngine | None:
-    """
-    Resolve the session's spec and build its engine for an OUTPUT phase
-    evaluation.
-
-    Safe to repeat after a transient store failure: the spec lookup and
-    the cheap skip check only read, and the engine build's only write
-    seeds missing initial labels (an UPSERT of absent keys), so a retry
-    cannot double-apply anything.
-
-    :param session_id: Session/conversation identifier,
-        e.g. ``"conv_abc123"``.
-    :param conv: The session's :class:`Conversation` entity.
-    :param conversation_store: Store for label state.
-    :param agent_store: Store for agent spec lookups.
-    :returns: The engine, or ``None`` when no policy could fire for the
-        session (no spec, or no guardrails, default policies, or policy
-        store).
-    """
+    """Build an OUTPUT-policy engine, or return ``None`` when no policies apply."""
     # Resolve the agent spec off the event loop (blocking DB + cold-cache
     # bundle fetch). Spec only, so the cheap skip check below runs before
     # the more expensive engine build.
@@ -9375,9 +9346,7 @@ async def _evaluate_output_policy(
     :param actor: Authenticated principal, e.g.
         ``{"run_as": "alice@example.com"}``. ``None`` when
         identity is unknown.
-    :param engine: An engine already built by
-        :func:`_prepare_output_policy_engine` for this session;
-        ``None`` builds one here.
+    :param engine: Prepared engine; ``None`` builds one here.
     :param turn_final: Whether this segment ends a successfully completed
         turn. The relay passes ``False`` for intermediate or unsuccessful
         segments. ``None`` when the calling path doesn't distinguish.
@@ -9393,8 +9362,8 @@ async def _evaluate_output_policy(
         engine = await _prepare_output_policy_engine(
             session_id, conv, conversation_store, agent_store
         )
-        if engine is None:
-            return None
+    if engine is None:
+        return None
     ctx = EvaluationContext(
         phase=Phase.RESPONSE,
         content=assistant_text,
