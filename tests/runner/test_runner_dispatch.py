@@ -2369,6 +2369,76 @@ async def test_runner_failed_status_carries_setup_error_message(
     assert error["code"]
 
 
+@pytest.mark.asyncio
+async def test_runner_setup_failure_with_empty_message_still_names_a_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup failure whose exception stringifies empty must still name a cause.
+
+    A setup-phase exception with an empty ``str()`` (e.g. a bare
+    ``TimeoutError()``) used to publish ``turn setup failed: `` with nothing
+    after the colon. The published failure must name the cause instead.
+    """
+    conv = "conv_setup_failure_empty_message"
+
+    async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return AgentSpec(
+            spec_version=1,
+            name="claude-sdk-agent",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "claude-sdk"}),
+        )
+
+    def _raising_build(
+        spec: object, *, cwd: object = None, workdir: object = None
+    ) -> dict[str, str]:
+        del spec, cwd, workdir
+        # str(TimeoutError()) == "" — the empty-reason setup failure the ticket cites.
+        raise TimeoutError()
+
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._build_claude_sdk_spawn_env",
+        _raising_build,
+    )
+
+    app = create_runner_app(
+        process_manager=cast(
+            HarnessProcessManager,
+            _FakeProcessManager(_FakeHarnessClient([])),
+        ),
+        spec_resolver=_spec_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_test_client(app) as http:
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": "ag_claude_sdk",
+                "model": "x",
+                "content": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 202
+        await _await_bg_turn_task(conv)
+        failed_event = await _drain_failed_status_event(
+            app.state.session_event_queues, conv, timeout=2.0
+        )
+
+    assert failed_event is not None
+    error = failed_event.get("error")
+    assert isinstance(error, dict)
+    assert error["code"]
+    reason = error["message"].split("turn setup failed:", 1)[-1].strip()
+    assert reason, (
+        "the setup-failure reason was dropped — the runner published a bare "
+        f"{error['message']!r} with nothing after the colon"
+    )
+    assert "TimeoutError" in reason
+
+
 # ── Harness-stream failure → terminal session.status ────
 
 

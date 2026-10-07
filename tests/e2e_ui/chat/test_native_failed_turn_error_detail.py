@@ -121,10 +121,10 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
         message = error_pill.locator(_ERROR_MESSAGE)
         expect(message).to_be_visible(timeout=10_000)
 
-        # Persisted assistant prose must be labeled instead of reused verbatim.
-        assert message.inner_text().strip() != _SUCCESS_PROSE, (
-            "the failed turn's surfaced reason is the assistant's own successful "
-            "message verbatim; a successful reply must not be shown as the error"
+        # The successful reply must not appear in the failure reason at all.
+        assert _SUCCESS_PROSE not in message.inner_text(), (
+            "the failed turn's surfaced reason quotes the assistant's own successful "
+            "message; a successful reply must not be shown as the error"
         )
     finally:
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)

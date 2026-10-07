@@ -118,8 +118,8 @@ async def test_failed_status_reuses_the_assistants_own_output_as_error(
     details = _failed_turn_details(caplog, session_id)
     assert details, "expected a 'session turn failed' ERROR row for the failed turn"
     detail = details[-1]
-    assert detail != success_prose, (
-        "the failed turn's logged detail is the assistant's own successful "
+    assert success_prose not in detail, (
+        "the failed turn's logged detail quotes the assistant's own successful "
         f"message ({detail!r}); a successful turn's output must not be "
         "published/logged as the failure reason"
     )

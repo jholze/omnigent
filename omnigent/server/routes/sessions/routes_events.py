@@ -353,11 +353,33 @@ def _is_batchable_external_item(event: SessionEventInput) -> bool:
 _NATIVE_FAILURE_WITHOUT_DETAIL = (
     "The turn failed but the agent reported no detail. See the runner log for details."
 )
+# Codes the classifier leaves on text it does not recognize as an error.
+_UNCLASSIFIED_NATIVE_FAILURE_CODES = frozenset({"native_turn_error", "codex_turn_error"})
 
-# Distinguish persisted assistant text from a forwarder-reported reason.
-_NATIVE_FAILURE_ENRICHED_DETAIL_PREFIX = (
-    "The turn failed without a reported reason; the last assistant message was: "
-)
+
+def _native_failure_message(detail: str, *, borrowed: bool, classified_code: str) -> str:
+    """
+    Choose the reason published for a native ``failed`` edge.
+
+    Text borrowed from the turn's persisted assistant message is kept only
+    when it reads as an error report: the classifier refined its code, or it
+    is Claude Code's own ``API Error`` line. A successful reply that merely
+    precedes an unexplained failure must not be presented as its reason.
+
+    :param detail: Stripped failure text, e.g. ``"API Error: 429 ..."``; empty
+        when neither the forwarder nor the store supplied any.
+    :param borrowed: Whether ``detail`` came from the stored assistant text
+        rather than the forwarder's own report.
+    :param classified_code: Code returned by :func:`classify_native_turn_error`.
+    :returns: ``detail`` when it is a usable reason, else the detail-less message.
+    """
+    if not detail:
+        return _NATIVE_FAILURE_WITHOUT_DETAIL
+    if not borrowed or classified_code not in _UNCLASSIFIED_NATIVE_FAILURE_CODES:
+        return detail
+    if detail.casefold().startswith("api error:"):
+        return detail
+    return _NATIVE_FAILURE_WITHOUT_DETAIL
 
 
 def _event_body_too_large() -> HTTPException:
@@ -1886,14 +1908,11 @@ def register_events_routes(
                 detail = output.strip() if isinstance(output, str) else ""
                 wire_output = body.data.get("output")
                 wire_detail = wire_output.strip() if isinstance(wire_output, str) else ""
-                if not detail:
-                    message = _NATIVE_FAILURE_WITHOUT_DETAIL
-                elif wire_detail or detail.casefold().startswith("api error:"):
-                    # A forwarder reason or an explicit API error is already diagnostic.
-                    message = detail
-                else:
-                    # Label persisted assistant text so it is not mistaken for the reason.
-                    message = f"{_NATIVE_FAILURE_ENRICHED_DETAIL_PREFIX}{detail}"
+                failure_context = data.get("failure_context")
+                borrowed = (
+                    isinstance(failure_context, dict)
+                    and failure_context.get("detail_source") == "assistant_output_fallback"
+                )
                 # Native forwarders share the output and reauth fields.
                 # Codex-specific codes require a resolved Codex session.
                 if harness == "codex-native" and data.get("reauth_required") is True:
@@ -1911,7 +1930,9 @@ def register_events_routes(
                 )
                 status_error = ErrorDetail(
                     code=classified_code,
-                    message=message,
+                    message=_native_failure_message(
+                        detail, borrowed=borrowed, classified_code=classified_code
+                    ),
                     title=diagnosis.title if diagnosis else None,
                     cause=diagnosis.cause if diagnosis else None,
                     remediation=diagnosis.remediation if diagnosis else None,

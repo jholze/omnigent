@@ -5399,21 +5399,29 @@ async def test_post_external_session_status_idle_forwards_persisted_assistant_ou
 
 
 @pytest.mark.parametrize(
-    ("detail", "expected_code", "expected_message"),
+    ("detail", "expected_code", "shown_as_reason"),
     [
+        # A classified error report keeps its text and its refined code.
+        (
+            "API Error: 502 The upstream server returned an invalid response.",
+            "transient_upstream_error",
+            True,
+        ),
+        # Claude Code's own API error line is a reason even when unclassified.
+        (
+            'API Error: 400 {"type":"error","error":{"type":"invalid_request_error"}}',
+            "native_turn_error",
+            True,
+        ),
+        # Prose the classifier cannot recognize is not presented as the reason.
         (
             "There's an issue with the selected model (claude-3-5-sonnet-20241022). "
             "It may not exist or you may not have access to it.",
             "native_turn_error",
-            "The turn failed without a reported reason; the last assistant message was: "
-            "There's an issue with the selected model (claude-3-5-sonnet-20241022). "
-            "It may not exist or you may not have access to it.",
+            False,
         ),
-        (
-            "API Error: 502 The upstream server returned an invalid response.",
-            "transient_upstream_error",
-            "API Error: 502 The upstream server returned an invalid response.",
-        ),
+        # A successful reply must never be shown as the failure reason.
+        ("All conflicts resolved. Continue the sync:", "native_turn_error", False),
     ],
 )
 async def test_post_external_session_status_failed_forwards_persisted_assistant_output(
@@ -5421,18 +5429,20 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     monkeypatch: pytest.MonkeyPatch,
     detail: str,
     expected_code: str,
-    expected_message: str,
+    shown_as_reason: bool,
 ) -> None:
     """
-    A ``failed`` edge with no wire ``output`` still carries the persisted text.
+    A ``failed`` edge with no wire ``output`` still forwards the persisted text.
 
-    claude-native's ``StopFailure`` edge posts no ``output``, but the
-    harness's last assistant message is already persisted. The handler
-    attaches it so the parent inbox shows it instead of the generic
-    "Error: native sub-agent turn failed". The typed error keeps an explicit
-    API error verbatim and labels other persisted prose so it is not mistaken
-    for the failure reason.
+    A forwarder that posts a bare ``failed`` edge leaves the harness's last
+    assistant message as the only text, so the handler still attaches it for
+    the parent inbox instead of the generic "Error: native sub-agent turn
+    failed". The typed error only presents that text as the reason when it
+    reads as an error report; otherwise the edge carries the detail-less
+    message. Forwarders that report a reason themselves (``output`` or
+    ``failure_detail``) are unaffected.
     """
+    from omnigent.server.routes.sessions.routes_events import _NATIVE_FAILURE_WITHOUT_DETAIL
 
     forwarded: list[dict[str, Any]] = []
     published: list[tuple[str, dict[str, Any]]] = []
@@ -5506,7 +5516,11 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     error = failed_events[0]["error"]
     assert error is not None
     assert error["code"] == expected_code
-    assert error["message"] == expected_message
+    if shown_as_reason:
+        assert error["message"] == detail
+    else:
+        assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
+        assert detail not in error["message"]
 
 
 @pytest.mark.parametrize(
