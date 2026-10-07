@@ -861,9 +861,11 @@ def _resolve_tool_message_names(messages: Any) -> Any:  # type: ignore[explicit-
             continue
         if message.get("name"):
             continue
-        resolved = names_by_call_id.get(message.get("tool_call_id"))
-        if resolved:
-            message["name"] = resolved
+        call_id = message.get("tool_call_id")
+        if isinstance(call_id, str):
+            resolved = names_by_call_id.get(call_id)
+            if resolved:
+                message["name"] = resolved
     return messages
 
 
