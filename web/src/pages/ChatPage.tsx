@@ -899,11 +899,12 @@ export function ChatPage() {
     urlConvId,
     conversationsData !== undefined,
   );
-  const { reconnect, dialogOpen, setDialogOpen, localReconnect } = useSessionReconnect({
-    sessionId: urlConvId ?? null,
-    hostId: activeSession?.hostId ?? activeConv?.host_id ?? null,
-    isOwner: isOwnerLevel(permissionLevel),
-  });
+  const { reconnect, dialogOpen, setDialogOpen, localReconnect, arcaReconnect } =
+    useSessionReconnect({
+      sessionId: urlConvId ?? null,
+      hostId: activeSession?.hostId ?? activeConv?.host_id ?? null,
+      isOwner: isOwnerLevel(permissionLevel),
+    });
 
   const onSend = useCallback(
     (text: string, files?: File[], replyDraft?: StoredReplyDraft) => {
@@ -1173,6 +1174,7 @@ export function ChatPage() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         localReconnect={localReconnect}
+        arcaReconnect={arcaReconnect}
         conversationId={urlConvId}
         serverUrl={getCliServerUrl()}
         wrapper={activeConv?.labels?.["omnigent.wrapper"]}

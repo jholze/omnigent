@@ -33,7 +33,8 @@ the header menu), and each place is a separate entry point.
 - `clone`: copy a session into a new workspace, including a typed `~` path.
 - `reconnect`: a stopped or stranded session shows a reconnect affordance and a
   dialog with the command to run; the desktop app can reconnect a local host
-  itself. States: reconnecting (spinner), reconnect failed (retry), host offline.
+  itself or explicitly reconnect a remembered Arca host. States: reconnecting
+  (spinner), reconnect failed (retry), host offline.
 - `message-recovery`: a message racing initial runner binding or replacement
   reaches the available runner without a false failed turn. Native sessions
   initialize before delivery; SDK sub-agents reuse their loaded session state.
@@ -72,7 +73,9 @@ you remove them.
 **Reconnect:** in a session whose agent stopped, use the reconnect affordance
 in the chat; the dialog shows the command for this situation (for example
 `omnigent host` when the host is offline, or the harness's `--resume` command
-when a local session is stranded). In the desktop app, reconnect acts directly.
+when a local session is stranded). In the desktop app, reconnect acts directly
+for this machine; an Arca-hosted session offers an explicit **Reconnect Arca**
+action in the same dialog.
 
 **Message recovery:** send the first prompt while a runner is starting, or send
 another message after its runner restarts. Also open a sub-agent's conversation
