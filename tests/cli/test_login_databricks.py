@@ -107,10 +107,12 @@ def token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @dataclass
 class _FakeLoginProcess:
     """Stand-in for the ``databricks auth login`` ``Popen`` handle: the first ``stalls``
-    ``wait`` calls time out, then it exits with ``returncode``."""
+    ``wait`` calls time out, then it exits with ``returncode`` (or every ``wait`` raises
+    ``raise_on_wait``)."""
 
     stalls: int = 0
     returncode: int = 0
+    raise_on_wait: type[BaseException] | None = None
     wait_timeouts: list[float | None] = field(default_factory=list)
     terminated: bool = False
     killed: bool = False
@@ -124,6 +126,8 @@ class _FakeLoginProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         self.wait_timeouts.append(timeout)
+        if self.raise_on_wait is not None:
+            raise self.raise_on_wait()
         if self.terminated or self.killed or len(self.wait_timeouts) > self.stalls:
             return self.returncode
         raise subprocess.TimeoutExpired("databricks auth login", timeout or 0)
@@ -151,6 +155,7 @@ def _patch_login_env(
     default_workspace_id: str | None = None,
     login_process: _FakeLoginProcess | None = None,
     ssh_session: bool = False,
+    callback_forwarded: bool = False,
 ) -> list[str]:
     """Patch the login command's collaborators for a scripted run.
 
@@ -172,6 +177,8 @@ def _patch_login_env(
     :param ssh_session: Whether the command runs inside an SSH session
         (``SSH_CONNECTION`` set). The SSH vars are cleared otherwise so a
         developer's own SSH shell can't leak into the assertions.
+    :param callback_forwarded: Whether the sandbox bootstrap drives this login and
+        forwards the callback port itself (``OMNIGENT_LOGIN_CALLBACK_FORWARDED`` set).
     :returns: A list capturing each ``subprocess.Popen`` argv (the
         ``databricks auth login`` invocations).
     """
@@ -218,10 +225,17 @@ def _patch_login_env(
 
     monkeypatch.setattr(cli_mod.subprocess, "Popen", _fake_popen)
     monkeypatch.setattr(cli_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
-    for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+    for name in (
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "SSH_TTY",
+        cli_mod._BROWSER_LOGIN_CALLBACK_FORWARDED_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     if ssh_session:
         monkeypatch.setenv("SSH_CONNECTION", "203.0.113.5 50022 198.51.100.7 22")
+    if callback_forwarded:
+        monkeypatch.setenv(cli_mod._BROWSER_LOGIN_CALLBACK_FORWARDED_ENV, "1")
     return login_calls
 
 
@@ -622,6 +636,7 @@ def test_login_explains_callback_when_browser_login_stalls(
     assert "Still waiting for the browser login" in result.output
     assert "http://localhost:8020 on this machine" in result.output
     assert "ssh -L 8020:localhost:8020 -N <this-host>" in result.output
+    assert "use it in both places instead of 8020" in result.output
     assert not process.terminated and not process.killed
     assert "Logged in as alice@example.com" in result.output
 
@@ -672,6 +687,67 @@ def test_login_explains_callback_upfront_in_ssh_session(
     assert lines[opening + 1].startswith("This terminal is an SSH session.")
     assert "Still waiting for the browser login" in result.output
     assert result.output.count("ssh -L 8020:localhost:8020") == 1
+
+
+def test_login_omits_forwarding_advice_when_bootstrap_forwards_the_callback(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+) -> None:
+    """A bootstrap-driven in-sandbox login keeps the notice but not the forwarding advice."""
+    process = _FakeLoginProcess(stalls=1)
+    _patch_login_env(
+        monkeypatch,
+        fake_httpx=_apps_login_responses(),
+        cached_tokens=[None, "tok-fresh"],
+        login_process=process,
+        ssh_session=True,
+        callback_forwarded=True,
+    )
+
+    result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+
+    assert result.exit_code == 0, result.output
+    assert "Still waiting for the browser login" in result.output
+    assert "SSH session" not in result.output
+    assert "ssh -L" not in result.output
+
+
+def test_login_reports_databricks_cli_failure(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+) -> None:
+    """A CLI that exits non-zero still fails with the exit-code message, untouched."""
+    process = _FakeLoginProcess(returncode=7)
+    _patch_login_env(
+        monkeypatch,
+        fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
+        cached_tokens=[None],
+        login_process=process,
+    )
+
+    result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+
+    assert result.exit_code != 0
+    assert "failed (exit 7)" in result.output
+    assert "VPN / IP access lists" in result.output
+    assert not process.terminated and not process.killed
+
+
+def test_login_kills_databricks_cli_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+) -> None:
+    """Ctrl+C during the wait aborts the command and does not leave the CLI running."""
+    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt)
+    _patch_login_env(
+        monkeypatch,
+        fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
+        cached_tokens=[None],
+        login_process=process,
+    )
+
+    result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+
+    assert result.exit_code == 1
+    assert "Aborted!" in result.output
+    assert process.killed
 
 
 def test_foreign_subprocess_calls_stay_out_of_the_login_recorder(

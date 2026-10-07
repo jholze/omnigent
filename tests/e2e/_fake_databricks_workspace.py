@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -116,6 +116,7 @@ def make_ca_and_server_cert(directory: Path) -> tuple[Path, Path, Path]:
             ),
             critical=False,
         )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .sign(ca_key, hashes.SHA256())
     )
 
@@ -142,18 +143,12 @@ class RequestRecord:
 
 @dataclass
 class FakeDatabricksWorkspace:
-    """A running fake workspace (context manager); ``stall_token_exchange`` holds every
-    ``/oidc/v1/token`` request until :attr:`release_token_exchange` is set."""
+    """A running fake workspace (context manager) that records every request it serves."""
 
     cert_dir: Path
-    stall_token_exchange: bool = False
     host: str = "127.0.0.1"
     port: int = 0
     requests: list[RequestRecord] = field(default_factory=list)
-    authorize_requests: list[dict[str, str]] = field(default_factory=list)
-    token_requests: list[dict[str, str]] = field(default_factory=list)
-    token_exchange_started: threading.Event = field(default_factory=threading.Event)
-    release_token_exchange: threading.Event = field(default_factory=threading.Event)
     _server: ThreadingHTTPServer | None = None
     _thread: threading.Thread | None = None
     _minted: int = 0
@@ -161,6 +156,7 @@ class FakeDatabricksWorkspace:
     def __enter__(self) -> FakeDatabricksWorkspace:
         self.ca_pem, cert, key = make_ca_and_server_cert(self.cert_dir)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(certfile=str(cert), keyfile=str(key))
         server = ThreadingHTTPServer((self.host, self.port), _Handler)
         server.daemon_threads = True
@@ -173,7 +169,6 @@ class FakeDatabricksWorkspace:
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self.release_token_exchange.set()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -233,8 +228,8 @@ class FakeDatabricksWorkspace:
                         str(_REPO_ROOT),
                         str(_REPO_ROOT / "sdks" / "python-client"),
                         str(_REPO_ROOT / "sdks" / "ui"),
-                        env.get("PYTHONPATH", ""),
                     ]
+                    + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
                 ),
             }
         )
@@ -298,7 +293,6 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif path == "/oidc/v1/authorize":
             params = {k: v[0] for k, v in query.items()}
-            ws.authorize_requests.append(params)
             redirect_uri = params.get("redirect_uri", "")
             code = secrets.token_urlsafe(24)
             joiner = "&" if "?" in redirect_uri else "?"
@@ -309,11 +303,6 @@ class _Handler(BaseHTTPRequestHandler):
             )
             self._send(302, b"", {"Location": location, "Cache-Control": "no-store"})
         elif path == "/oidc/v1/token":
-            form = {k: v[0] for k, v in parse_qs(body.decode(), keep_blank_values=True).items()}
-            ws.token_requests.append(form)
-            ws.token_exchange_started.set()
-            if ws.stall_token_exchange:
-                ws.release_token_exchange.wait()
             self._json(
                 200,
                 {

@@ -286,13 +286,23 @@ def test_login_reports_when_browser_callback_cannot_reach_cli(tmp_path: Path) ->
                 "the emulated unreachable callback did not stall as intended: "
                 f"status={drive.callback_status} accepted={hole.accepted} events={drive.events}"
             )
-            assert GUIDANCE_RE.search(terminal_output) or not alive, (
+            # A silent exit is no better than a silent wait: the guidance must have been printed.
+            transcript = session.transcript()
+            assert GUIDANCE_RE.search(transcript), (
                 "Omnigent gave the user nothing to act on while the browser callback could not "
                 f"reach the CLI: {STALL_OBSERVATION_S:.0f}s after the browser hit "
                 f"{drive.final_url or 'the callback'} the terminal printed "
-                f"{terminal_output!r} and the process was still waiting.\n--- transcript ---\n"
-                f"{session.transcript()}"
+                f"{terminal_output!r} and the process "
+                f"{'was still waiting' if alive else 'had exited'}.\n--- transcript ---\n"
+                f"{transcript}"
             )
+            assert alive, f"the login gave up instead of waiting for the callback:\n{transcript}"
+            for expected in (
+                "Still waiting for the browser login",
+                "ssh -L",
+                "reload the browser tab",
+            ):
+                assert expected in transcript, f"guidance lacks {expected!r}:\n{transcript}"
         finally:
             if hole is not None:
                 hole.close()
