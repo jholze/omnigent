@@ -1,20 +1,11 @@
 """A fake Databricks workspace, over HTTPS, for driving the real ``databricks auth login``.
 
-Plays what a workspace-hosted Omnigent login touches:
-
-- the OIDC endpoints the Databricks CLI drives — ``/.well-known/databricks-config``,
-  ``/oidc/.well-known/oauth-authorization-server``, ``/oidc/v1/authorize`` (302
-  straight back to the CLI's ``redirect_uri`` with ``code`` + ``state``, no
-  sign-in page) and ``/oidc/v1/token``;
-- the ``/api/2.0/omnigent`` mount, whose anonymous ``/v1/me`` answers the
-  ``WWW-Authenticate: Bearer realm="DatabricksRealm"`` challenge
-  ``_databricks_workspace_login_target`` keys on, and 200 with a minted bearer.
-
-Served over TLS from a throwaway CA (generated in-process with ``cryptography``,
-so no ``openssl`` binary or system config is needed) that the Go CLI
-(``SSL_CERT_FILE``), the databricks-sdk (``REQUESTS_CA_BUNDLE``) and httpx
-(``SSL_CERT_FILE``) all trust. The token endpoint can be held open to observe
-when the CLI answers the browser's callback relative to its token exchange.
+Serves the OIDC endpoints the CLI drives (discovery, ``/oidc/v1/authorize``
+redirecting straight back to the CLI's ``redirect_uri`` with a code, and
+``/oidc/v1/token``) plus the ``/api/2.0/omnigent`` mount, whose anonymous
+``/v1/me`` answers the ``DatabricksRealm`` challenge and accepts minted bearers.
+TLS comes from a throwaway CA minted in-process with ``cryptography`` and trusted
+via ``SSL_CERT_FILE``/``REQUESTS_CA_BUNDLE``.
 """
 
 from __future__ import annotations

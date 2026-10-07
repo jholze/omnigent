@@ -1,25 +1,15 @@
 """Databricks-fronted login whose browser callback never reaches the CLI.
 
-Journey: ``omnigent start --server <workspace-hosted omnigent>`` (what the
-Databricks-internal ``isaac omni`` wraps) on an interactive terminal with no
-cached workspace grant. Omnigent shells out to ``databricks auth login``, which
-listens on ``http://localhost:8020`` and opens the browser at the workspace's
-``/oidc/v1/authorize``. When the browser's redirect to ``localhost:8020`` cannot
-reach that listener — the browser runs on a different machine than the CLI, or
-something else owns the browser machine's port 8020 — the tab spins on a
-pending request, and the Databricks CLI itself waits silently for up to an
-hour. Omnigent must not leave the terminal behind ``Opening browser to log in
-to ...`` with nothing to act on: within the observation window it has to
-explain the ``localhost`` callback (and how to forward it) or give up.
+``omnigent start --server <workspace-hosted omnigent>`` on a terminal with no
+cached grant shells out to ``databricks auth login``, which listens on
+``http://localhost:8020`` and waits silently (up to an hour) for the browser's
+redirect. When that redirect cannot reach the listener (browser on another
+machine, or something else owning its port 8020) the terminal must explain the
+callback and how to forward it, or give up, instead of hanging.
 
-The real Databricks CLI and a real Chromium drive the flow against the fake
-HTTPS workspace in ``_fake_databricks_workspace``. The unreachable callback is
-emulated by resolving ``localhost`` inside the browser to a loopback address
-where a listener accepts the connection and never answers.
-
-Usage::
-
-    python -m pytest tests/e2e/test_databricks_login_callback_unreachable.py -v
+The real Databricks CLI and a real Chromium drive the fake HTTPS workspace in
+``_fake_databricks_workspace``; the browser's ``localhost`` resolves to a
+loopback listener that accepts connections and never answers.
 """
 
 from __future__ import annotations
