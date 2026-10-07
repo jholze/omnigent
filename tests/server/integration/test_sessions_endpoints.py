@@ -5442,7 +5442,6 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     message. Forwarders that report a reason themselves (``output`` or
     ``failure_detail``) are unaffected.
     """
-    from omnigent.server.routes.sessions.routes_events import _NATIVE_FAILURE_WITHOUT_DETAIL
 
     forwarded: list[dict[str, Any]] = []
     published: list[tuple[str, dict[str, Any]]] = []
@@ -5519,8 +5518,10 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     if shown_as_reason:
         assert error["message"] == detail
     else:
-        assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
         assert detail not in error["message"]
+        from omnigent.server.routes.sessions.routes_events import _NATIVE_FAILURE_WITHOUT_DETAIL
+
+        assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
 
 
 @pytest.mark.parametrize(
@@ -5542,8 +5543,6 @@ async def test_post_external_session_status_failed_without_detail_still_carries_
     expected_code: str,
 ) -> None:
     """A failed edge with neither wire nor persisted detail still publishes a typed error."""
-    from omnigent.server.routes.sessions.routes_events import _NATIVE_FAILURE_WITHOUT_DETAIL
-
     published: list[tuple[str, dict[str, Any]]] = []
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(204)),
@@ -5566,6 +5565,8 @@ async def test_post_external_session_status_failed_without_detail_still_carries_
     error = failed_events[0]["error"]
     assert error is not None, "a failed status edge was published with no error detail"
     assert error["code"] == expected_code
+    from omnigent.server.routes.sessions.routes_events import _NATIVE_FAILURE_WITHOUT_DETAIL
+
     assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
 
     snapshot_resp = await client.get(f"/v1/sessions/{session['id']}")
