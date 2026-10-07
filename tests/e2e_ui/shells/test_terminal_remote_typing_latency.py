@@ -1,27 +1,6 @@
-"""E2E: terminal typing stays responsive when the runner is on a remote host.
-
-Reproduces OMNI-11653 (Linear): with a session whose runner is reached over a
-high-latency browser<->runner link, every keystroke in the Terminal view only
-appears ~0.5-1 s after it is pressed, because the web terminal had no local
-echo -- each character round-trips browser -> server -> runner-tunnel -> tmux
-PTY and back before it renders.
-
-Faithful stand-in for the reported environment: the real macOS desktop app
-against a genuinely remote arca host is not available in CI, so this drives the
-same xterm.js terminal the desktop app embeds and models the remote link by
-delaying the real terminal-attach WebSocket's outbound frames and inbound
-messages by 450 ms each way (a ~900 ms round-trip). The injection is purely
-test-side (an init script that wraps ``window.WebSocket`` for ``/attach``
-sockets only) and is identical on the unfixed and fixed builds; only the web
-client's echo behavior differs between them.
-
-Observation: xterm renders to a WebGL canvas, so typed text never reaches the
-DOM. xterm does keep its hidden ``.xterm-helper-textarea`` aligned to the
-cursor cell (it repositions on every cursor move), so the time from the
-keydown to that element moving measures when the character actually rendered.
-Without local echo the cursor only advances once the remote PTY echo returns
-(~900 ms); with local echo it advances immediately.
-"""
+"""E2E for OMNI-11653: terminal typing on a high-latency link. Stand-in for the
+macOS-desktop/remote-arca environment (not in CI): same xterm.js terminal with a
+~900 ms round-trip injected on the attach socket, identical on both builds."""
 
 from __future__ import annotations
 
@@ -33,16 +12,14 @@ from playwright.sync_api import Locator, Page, expect
 
 from tests.e2e_ui.conftest import open_right_rail
 
-# Milliseconds of one-way latency injected on the terminal-attach WebSocket.
-# ~900 ms round-trip reproduces the reporter's ~0.5-1 s per-keystroke lag.
+# One-way latency injected on the attach WebSocket; ~900 ms round-trip
+# reproduces the reporter's ~0.5-1 s per-keystroke lag.
 ATTACH_LATENCY_MS = 450
-# Interactive budget: a keystroke must render well under this. The unfixed
-# build renders at ~round-trip latency (~900 ms), far above it.
+# A keystroke must render well under this; the unfixed build renders at
+# ~round-trip latency.
 INTERACTIVE_BUDGET_MS = 300
 
-# Wraps window.WebSocket so only terminal-attach sockets are delayed, in both
-# directions, without touching the app or any other socket. Message events are
-# re-dispatched after the delay; equal-delay timers preserve frame order.
+# Delay only /attach sockets, both directions, preserving frame order.
 _LATENCY_INIT_SCRIPT = """
 (() => {
   const DELAY = %d;
@@ -101,12 +78,9 @@ def _connected_shell_textarea(page: Page) -> Locator:
 
 
 def _await_shell_ready(page: Page, textarea: Locator, tmp_path: Path) -> None:
-    """Prove the PTY shell accepts and executes input before measuring.
-
-    The attach WS connects before bash finishes starting, so early keystrokes
-    can be swallowed. Typing a ``touch`` and waiting for its file (retried)
-    guarantees the shell is at a prompt and echoing by the time we measure.
-    """
+    """Prove the PTY shell is at a prompt and echoing before measuring; early
+    keystrokes can be swallowed before bash starts, so type a ``touch`` and
+    wait (retried) for its file to appear."""
     ready = tmp_path / "shell_ready.txt"
     for _ in range(6):
         textarea.focus()
@@ -121,14 +95,9 @@ def _await_shell_ready(page: Page, textarea: Locator, tmp_path: Path) -> None:
 
 
 def _await_char_render(page: Page, textarea: Locator, char: str, timeout_ms: int) -> None:
-    """Type one printable char and block until this terminal's cursor advances.
-
-    Used to prime steady-state typing: the client only predicts a keystroke
-    after it has seen the shell echo one verbatim, so the first key after a
-    settled prompt always costs a full round-trip. Waiting for that first key to
-    paint guarantees the client is in its confident, predicting state before the
-    measured keystroke.
-    """
+    """Type one printable char and block until the cursor advances. Primes
+    steady-state typing: the client predicts only after seeing the shell echo a
+    key, so the first key after a settled prompt costs a full round-trip."""
     textarea.focus()
     textarea.evaluate(
         """(ta) => {
@@ -150,24 +119,15 @@ def _await_char_render(page: Page, textarea: Locator, char: str, timeout_ms: int
 
 
 def _measure_echo_latency_ms(page: Page, textarea: Locator) -> float:
-    """Return milliseconds from a steady-state keystroke to it rendering.
-
-    Records this terminal's cursor-aligned helper textarea position, types one
-    printable character, and times how long until that position changes. The
-    timing runs in the page so the keydown and the render are read off one clock.
-    """
+    """Return milliseconds from a steady-state keystroke to it rendering. Times
+    how long the cursor-aligned helper textarea takes to move after one key; the
+    timing runs in-page so keydown and render share one clock."""
     page.wait_for_timeout(1_000)  # let any prompt redraw settle
-    # Prime one keystroke so the client is confidently predicting (see
-    # _await_char_render); this primer itself still costs a full round-trip.
     _await_char_render(page, textarea, "e", timeout_ms=8_000)
     textarea.focus()
-    # Bind the cursor observer to this exact textarea element: the page can hold
-    # more than one terminal view, so a document-wide query might watch a
-    # different terminal's cursor than the one that receives the keystroke.
-    # Capture the keydown on the document in the capture phase -- xterm's own
-    # keydown handler on the textarea stops propagation, so a bubble-phase
-    # listener there would never fire. Anchor the start position at keydown so
-    # any residual prompt settling is not mistaken for the echo.
+    # Bind the observer to this exact textarea (the page may hold several) and
+    # capture keydown in the capture phase (xterm's handler stops propagation);
+    # anchor start at keydown so prompt settling is not counted as the echo.
     textarea.evaluate(
         """(ta) => {
           const posStr = () => ta.style.left + '|' + ta.style.top;
@@ -206,24 +166,12 @@ def _measure_echo_latency_ms(page: Page, textarea: Locator) -> float:
 def test_remote_terminal_typing_echoes_within_interactive_budget(
     request: pytest.FixtureRequest, terminal_session: tuple[str, str], tmp_path: Path
 ) -> None:
-    """A steady-state keystroke renders within the interactive budget over a link.
-
-    Journey: open a shell on a session whose terminal-attach WebSocket has a
-    ~900 ms round-trip injected (stand-in for a remote host), prime one keystroke
-    so the client is confidently predicting, then type a character and assert it
-    appears well under ``INTERACTIVE_BUDGET_MS``. The unfixed build has no local
-    echo, so every character renders only once the remote PTY echo returns
-    (~900 ms) and this fails; predictive local echo renders it immediately.
-
-    Stand-in: CI cannot run the real macOS desktop app against a remote arca
-    host, so this drives the same embedded xterm.js terminal over an injected
-    high-latency attach socket. The injection is identical on both builds; only
-    the client's echo behavior differs.
-    """
+    """A steady-state keystroke renders within the interactive budget over a
+    link. The unfixed build renders only when the remote PTY echo returns
+    (~900 ms) and fails this; predictive local echo renders immediately."""
     base_url, session_id = terminal_session
-    # Create the recorded page only after the session/runner setup above, so a
-    # recording of this journey opens on the terminal view rather than on blank
-    # setup frames.
+    # Create the recorded page only after session/runner setup, so a recording
+    # opens on the terminal view rather than blank setup frames.
     page = request.getfixturevalue("page")
     page.add_init_script(_LATENCY_INIT_SCRIPT)
     page.goto(f"{base_url}/c/{session_id}")
