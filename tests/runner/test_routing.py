@@ -86,12 +86,18 @@ def _conversation(
     )
 
 
-def _hello(*, harnesses: list[str], capabilities: list[str] | None = None) -> HelloFrame:
+def _hello(
+    *,
+    harnesses: list[str],
+    capabilities: list[str] | None = None,
+    dedup_epoch: str | None = None,
+) -> HelloFrame:
     """
     Build a runner hello frame.
 
     :param harnesses: Harness kinds advertised by the runner.
     :param capabilities: Hello capability tokens advertised by the runner.
+    :param dedup_epoch: Per-process forward-dedup epoch, or ``None``.
     :returns: A :class:`HelloFrame`.
     """
     return HelloFrame(
@@ -100,6 +106,7 @@ def _hello(*, harnesses: list[str], capabilities: list[str] | None = None) -> He
         harnesses=harnesses,
         envs=["os_sandbox"],
         capabilities=capabilities or [],
+        dedup_epoch=dedup_epoch,
     )
 
 
@@ -217,6 +224,25 @@ async def test_runner_router_runner_supports_reflects_hello_capabilities() -> No
         assert router.runner_supports("runner_new", FORWARD_DEDUP_CAPABILITY) is True
         assert router.runner_supports("runner_old", FORWARD_DEDUP_CAPABILITY) is False
         assert router.runner_supports("runner_absent", FORWARD_DEDUP_CAPABILITY) is False
+    finally:
+        await router.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_router_runner_dedup_epoch_reflects_hello() -> None:
+    """``runner_dedup_epoch`` returns the connected runner's advertised epoch."""
+    registry = TunnelRegistry()
+    registry.register(
+        "runner_new",
+        _FakeWebSocket(),
+        _hello(harnesses=["codex"], capabilities=[FORWARD_DEDUP_CAPABILITY], dedup_epoch="boot-1"),
+    )
+    registry.register("runner_old", _FakeWebSocket(), _hello(harnesses=["codex"]))
+    router = RunnerRouter(registry=registry, conversation_store=_ConversationStore({}))  # type: ignore[arg-type]
+    try:
+        assert router.runner_dedup_epoch("runner_new") == "boot-1"
+        assert router.runner_dedup_epoch("runner_old") is None
+        assert router.runner_dedup_epoch("runner_absent") is None
     finally:
         await router.aclose()
 

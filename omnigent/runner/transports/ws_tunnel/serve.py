@@ -993,6 +993,7 @@ async def _serve_tunnel_once(
             direct_attach_port=direct_attach_port,
             direct_attach_token=direct_attach_token,
             connection_id=connection_id,
+            dedup_epoch=getattr(getattr(app, "state", None), "runner_dedup_epoch", None),
             event_dispatcher=event_dispatcher,
         )
         if event_dispatcher is not None:
@@ -1223,6 +1224,7 @@ async def _send_hello(
     direct_attach_port: int | None = None,
     direct_attach_token: str | None = None,
     connection_id: str | None = None,
+    dedup_epoch: str | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
 ) -> None:
     """Send the runner's opening hello frame.
@@ -1238,6 +1240,8 @@ async def _send_hello(
         travels only alongside *direct_attach_port*.
     :param connection_id: Runner-minted id for this connection attempt,
         echoed on both ends' debug-log rows.
+    :param dedup_epoch: Per-process token scoping this runner's message-forward
+        dedup cache; lets the server repeat a forward only to the same process.
     :returns: None.
     """
     # Signal host-side telemetry opt-out to the server so it can honour
@@ -1266,6 +1270,7 @@ async def _send_hello(
                 direct_attach_port=direct_attach_port,
                 direct_attach_token=direct_attach_token,
                 connection_id=connection_id,
+                dedup_epoch=dedup_epoch,
                 harnesses=[
                     "claude-native",
                     "claude-sdk",

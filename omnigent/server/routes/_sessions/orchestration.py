@@ -5218,12 +5218,11 @@ async def _post_across_runner_reconnect(
     repeat_requires_capability: str | None = None,
 ) -> httpx.Response:
     """
-    Send a runner request, repeating it once if its tunnel drops and the runner returns.
+    Wait through one tunnel reconnect and retry the request once.
 
     A runner behind a dropped tunnel is usually alive but stalled and
-    re-registers shortly, so failing the request on the drop reports a
-    failure the runner outlives. The repeated request must be idempotent on
-    the runner side.
+    re-registers shortly, so the request is retried rather than failed on the
+    drop. The retry must be idempotent on the runner side.
 
     :param post: Sends the request; called again once the runner re-registers.
     :param what: Request label for log lines, e.g. ``"Claude terminal ensure"``.
@@ -5234,14 +5233,22 @@ async def _post_across_runner_reconnect(
         ``None`` fails a drop immediately.
     :param grace_s: Maximum seconds to wait for the runner to re-register.
     :param repeat_requires_capability: When set, repeat only if the reconnected
-        runner advertised this ``HelloFrame`` capability. A runner that predates
-        it cannot dedup the repeat, so the original drop is raised instead.
+        runner still advertises this ``HelloFrame`` capability and carries the
+        same forward-dedup epoch it had before the drop. A runner that predates
+        the capability, or a replacement process whose dedup cache is empty,
+        cannot dedup the repeat, so the original drop is raised instead.
     :returns: The runner's response.
-    :raises httpx.HTTPError: When the request fails for another reason, the
-        runner never re-registers within *grace_s* (the original drop), or the
-        repeated request fails too.
+    :raises httpx.HTTPError: On another failure, when the runner never returns
+        within *grace_s* (the original drop), or when the retry fails too.
     :raises ConnectionError: Likewise for the tunnel transport's bare error.
     """
+    pre_drop_dedup_epoch: str | None = None
+    if (
+        repeat_requires_capability is not None
+        and runner_router is not None
+        and runner_id is not None
+    ):
+        pre_drop_dedup_epoch = runner_router.runner_dedup_epoch(runner_id)
     try:
         return await post()
     except (httpx.HTTPError, ConnectionError) as exc:
@@ -5265,6 +5272,19 @@ async def _post_across_runner_reconnect(
                 "Runner %s reconnected but lacks %s; not repeating %s for session=%s",
                 runner_id,
                 repeat_requires_capability,
+                what,
+                session_id,
+                extra={"session_id": session_id},
+            )
+            raise
+        if repeat_requires_capability is not None and (
+            pre_drop_dedup_epoch is None
+            or runner_router.runner_dedup_epoch(runner_id) != pre_drop_dedup_epoch
+        ):
+            _logger.warning(
+                "Runner %s reconnected as a different process (dedup epoch changed); "
+                "not repeating %s for session=%s",
+                runner_id,
                 what,
                 session_id,
                 extra={"session_id": session_id},
@@ -6903,9 +6923,9 @@ async def _forward_event_to_runner(
                     attempted_override=_overridden,
                 )
     except (httpx.HTTPError, ConnectionError) as exc:
-        # The runner did not outlive the tunnel drop, but the message is
-        # persisted and ``create_session`` replays the trailing user item as a
-        # recovery turn on reconnect, so publish ``idle`` to free the composer.
+        # The forward could not be (re)delivered across the reconnect (runner
+        # unreachable, timed out, or lacking dedup); the message is persisted and
+        # ``create_session`` replays it as a recovery turn, so publish ``idle``.
         _logger.exception(
             "Forward to runner failed for session=%s",
             session_id,

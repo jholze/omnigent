@@ -151,7 +151,7 @@ from omnigent.runner.resource_registry import (
     trim_terminal_output,
 )
 from omnigent.runner.resource_routes import register_resource_routes
-from omnigent.runner.session_history import build_session_history
+from omnigent.runner.session_history import build_session_history, trailing_user_item_id
 from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
     parse_runner_session_init_envelope,
@@ -1411,7 +1411,12 @@ def create_runner_app(
 
     _session_histories = _session_histories_ref
     _last_server_item_id: dict[str, str] = {}
+    _last_server_user_item_id: dict[str, str] = {}
     _accepted_forward_item_ids: dict[str, deque[str]] = {}
+    # Scope the forward-dedup cache above to this process: a restart gets a new
+    # epoch, so the server declines to repeat a forward whose accept marker died
+    # with the old process instead of re-running the turn against an empty cache.
+    app.state.runner_dedup_epoch = uuid.uuid4().hex
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
     _session_inboxes = _session_inboxes_ref
@@ -3014,8 +3019,14 @@ def create_runner_app(
             ):
                 recovery_turn = "history_resume"
                 _begin_turn_slot(session_id)
-                # The resumed trailing item may still be forwarded by the server.
-                _accept_forwarded_item(session_id, _last_server_item_id.get(session_id))
+                # The resumed trailing user item may still be forwarded by the
+                # server; dedup that repeat against the user message's own id.
+                _resume_forward_id = (
+                    _last_server_user_item_id.get(session_id)
+                    if last_type == "message" and last_role == "user"
+                    else None
+                )
+                _accept_forwarded_item(session_id, _resume_forward_id)
                 _publish_turn_status(session_id, "running")
                 msg_body = {
                     "agent_id": agent_id,
@@ -3024,7 +3035,7 @@ def create_runner_app(
                     "browser_renderer_available": False,
                 }
                 _turn_task = asyncio.create_task(
-                    _run_turn_bg(msg_body, session_id),
+                    _run_turn_bg(msg_body, session_id, forward_item_id=_resume_forward_id),
                     name=f"turn-recover-{session_id}",
                 )
                 _active_turns[session_id] = _turn_task
@@ -3410,6 +3421,7 @@ def create_runner_app(
             _binding.relay.close()
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
+        _last_server_user_item_id.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
         _session_inboxes.pop(session_id, None)
         _subagent_recovery_done.discard(session_id)
@@ -3722,6 +3734,7 @@ def create_runner_app(
     _session_history = build_session_history(
         _background_tasks=_background_tasks,
         _last_server_item_id=_last_server_item_id,
+        _last_server_user_item_id=_last_server_user_item_id,
         _persist_cancellation_items=_persist_cancellation_items,
         _session_histories=_session_histories,
         _session_spec_cache=_session_spec_cache,
@@ -4786,6 +4799,8 @@ def create_runner_app(
     async def _run_turn_bg(
         msg_body: _JsonObject,
         conv: str,
+        *,
+        forward_item_id: str | None = None,
     ) -> None:
         _subagent_wake_pending.discard(conv)
         # Capture our own task so the finally floor can identity-compare before
@@ -4801,7 +4816,7 @@ def create_runner_app(
         # context carries it for its lifetime). Coded errors keep their own phase.
         with phase_scope(ErrorPhase.TURN):
             try:
-                await _run_turn_bg_setup_and_stream(msg_body, conv)
+                await _run_turn_bg_setup_and_stream(msg_body, conv, forward_item_id)
             except _ContextWindowOverflow:
                 # Re-raise so the streaming-phase handler (which publishes the
                 # error event) is never shadowed by the generic except below.
@@ -4824,6 +4839,9 @@ def create_runner_app(
                     exc_info=True,
                     extra={"session_id": conv},
                 )
+                # Setup raised before the harness took the turn, so the message
+                # never ran; drop the accept marker so a repeated forward retries.
+                _forget_forwarded_item(conv, forward_item_id)
                 _on_proxy_stream_end(conv, error={"message": f"turn setup failed: {exc}"})
             finally:
                 # Permanent-wedge floor: guarantee _active_turns is never left stale,
@@ -4864,6 +4882,7 @@ def create_runner_app(
     async def _run_turn_bg_setup_and_stream(
         msg_body: _JsonObject,
         conv: str,
+        forward_item_id: str | None = None,
     ) -> None:
         _dispatched_agent_id = cast(str | None, msg_body.get("agent_id"))
         await _sync_session_agent(
@@ -5259,6 +5278,9 @@ def create_runner_app(
                 error["message"],
                 extra={"session_id": conv},
             )
+            # The harness rejected the dispatch, so no turn ran; drop the accept
+            # marker so a repeated forward retries instead of being deduped.
+            _forget_forwarded_item(conv, forward_item_id)
             _on_proxy_stream_end(conv, error=error)
 
     async def _drain_streaming_response(
@@ -6462,7 +6484,9 @@ def create_runner_app(
                     return response
 
                 _turn_task = asyncio.create_task(
-                    _run_turn_bg(message_body, conversation_id),
+                    _run_turn_bg(
+                        message_body, conversation_id, forward_item_id=_persisted_item_id
+                    ),
                     name=f"turn-{conversation_id}",
                 )
                 _active_turns[conversation_id] = _turn_task
@@ -7545,8 +7569,10 @@ def create_runner_app(
                 ):
                     _begin_turn_slot(session_id)
                     # Catch-up owns this trailing user item; the server may still
-                    # forward it after the reconnect, so dedup that repeat here.
-                    _accept_forwarded_item(session_id, _last_server_item_id.get(session_id))
+                    # forward it after the reconnect, so dedup that repeat against
+                    # the user message's own id.
+                    _catchup_forward_id = trailing_user_item_id(all_new)
+                    _accept_forwarded_item(session_id, _catchup_forward_id)
                     _publish_turn_status(session_id, "running")
                     agent_id = _session_agent_ids.get(session_id)
                     msg_body: _JsonObject = {
@@ -7556,7 +7582,7 @@ def create_runner_app(
                         "browser_renderer_available": False,
                     }
                     _turn_task = asyncio.create_task(
-                        _run_turn_bg(msg_body, session_id),
+                        _run_turn_bg(msg_body, session_id, forward_item_id=_catchup_forward_id),
                         name=f"turn-catchup-{session_id}",
                     )
                     _active_turns[session_id] = _turn_task

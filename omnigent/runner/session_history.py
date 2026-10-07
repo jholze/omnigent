@@ -22,6 +22,20 @@ from omnigent.util.json_types import JsonObject as _JsonObject
 _logger = logging.getLogger("omnigent.runner.app")
 
 
+def trailing_user_item_id(items: list[_JsonObject]) -> str | None:
+    """Server item id of the last persisted user message in ``items``.
+
+    This is the id the server repeat-forwards for an unacknowledged user turn,
+    so dedup must key on it rather than the last raw item, which may be a later
+    item the input conversion drops.
+    """
+    for item in reversed(items):
+        if item.get("type") == "message" and item.get("role") == "user":
+            item_id = item.get("id")
+            return item_id if isinstance(item_id, str) and item_id else None
+    return None
+
+
 class _LoadHistoryAsInputFn(Protocol):
     async def __call__(
         self, session_id: str, drop_item_id: str | None = None
@@ -44,6 +58,7 @@ def build_session_history(
     *,
     _background_tasks: set[asyncio.Task[Any]],
     _last_server_item_id: dict[str, str],
+    _last_server_user_item_id: dict[str, str],
     _persist_cancellation_items: Callable[[str, list[_JsonObject]], Coroutine[Any, Any, None]],
     _session_histories: dict[str, list[_JsonObject]],
     _session_spec_cache: dict[str, _SpecEntry | None],
@@ -139,6 +154,10 @@ def build_session_history(
             if not page.get("has_more", False):
                 break
             after_cursor = last_id
+
+        _trailing_user_id = trailing_user_item_id(all_items)
+        if _trailing_user_id is not None:
+            _last_server_user_item_id[session_id] = _trailing_user_id
 
         if drop_item_id is not None:
             all_items = [it for it in all_items if it.get("id") != drop_item_id]

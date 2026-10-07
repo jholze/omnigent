@@ -285,6 +285,23 @@ class RunnerRouter:
         session = self._registry.get(runner_id)
         return session is not None and capability in session.hello.capabilities
 
+    def runner_dedup_epoch(self, runner_id: str) -> str | None:
+        """
+        Return the connected *runner_id*'s forward-dedup epoch, or ``None``.
+
+        The epoch identifies the lifetime of a runner process's in-memory
+        message-forward dedup cache: it is stable across tunnel reconnects by
+        the same process and changes when the process restarts. A caller can
+        thus tell a reconnect apart from a replacement before repeating a
+        forward the old process may already have taken.
+
+        :param runner_id: Runner UUID, e.g. ``"runner_0123456789abcdef"``.
+        :returns: The advertised epoch, or ``None`` when the runner is offline
+            or predates the forward-dedup capability.
+        """
+        session = self._registry.get(runner_id)
+        return session.hello.dedup_epoch if session is not None else None
+
     async def wait_for_runner(self, runner_id: str, *, timeout_s: float) -> bool:
         """
         Wait until *runner_id* has a live tunnel or *timeout_s* elapses.
