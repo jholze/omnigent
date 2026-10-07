@@ -1268,10 +1268,7 @@ async def test_turn_error_posts_separate_reply_and_keeps_answer(tmp_path: Path) 
         context={"bot_user_id": "B1"},
     )
     stream = await _wait_for_stream_stop(slack)
-    for _ in range(50):
-        if slack.posts:
-            break
-        await asyncio.sleep(0.02)
+    await asyncio.wait_for(asyncio.gather(*service._turn_tasks), timeout=5)
     await service.shutdown()
 
     # The stream delivered the real answer, not the error.
@@ -1464,14 +1461,12 @@ async def test_stream_closed_then_error_continues_and_posts_failure(tmp_path: Pa
         client=slack,
         context={"bot_user_id": "B1"},
     )
-    # Wait until both the ack is deleted AND a durable post exists (the failure
-    # notice). _wait_for_posts(slack, 1) fires too early: it can return as soon as
-    # the transient "Working on it…" ack lands in posts, before streaming starts.
-    # Shutdown immediately after would cancel the in-flight turn, leaving
-    # slack.streamed_text empty. _wait_for_ack_deleted returns only after the ack
-    # has been deleted (which happens after streaming + reply.finalize completes)
-    # and the failure post is present, guaranteeing streamed_text is fully populated.
-    await _wait_for_ack_deleted(slack)
+    # Wait for the spawned turn task itself to finish. A new session can post its
+    # initial session-info message before the answer starts, and post-count / ack
+    # heuristics can fire too early while streaming is still in flight. Waiting on
+    # the turn task guarantees the reopened stream has delivered all text and the
+    # failure notice has been posted before shutdown.
+    await asyncio.wait_for(asyncio.gather(*service._turn_tasks), timeout=5)
     await service.shutdown()
 
     # Both deltas streamed live (across the reopened stream); nothing was lost.
@@ -3301,6 +3296,8 @@ async def test_post_answer_message_only_committed_is_not_dropped(tmp_path: Path)
         session_id=sid, elicitation_id=eid, verdict=Verdict(accepted=True, content={"store": "A"})
     )
     await _wait_for_resolved(omnigent)
+    # The verdict unblocks the answer stream; let it finish before cancelling tasks.
+    await asyncio.wait_for(asyncio.gather(*service._turn_tasks), timeout=5)
     await service.shutdown()
 
     # The post-answer text was delivered (in the post-seal segment), not dropped.
