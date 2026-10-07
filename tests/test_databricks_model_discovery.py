@@ -336,12 +336,14 @@ def test_discover_codex_models_filters_non_codex_and_ranks_curated_first() -> No
     (Claude) are dropped entirely.
     """
     servable = _discover_codex(
+        # Advertised in a scrambled order (Sol before Luna) so the result proves
+        # ranking by preference, not an echo of the listing order.
         [
-            {"name": "model-services/system.ai.gpt-6-luna"},
+            {"name": "model-services/system.ai.gpt-5-6-sol"},
             {"name": "model-services/system.ai.gpt-6-sol"},
             {"name": "model-services/system.ai.gpt-5-5"},
+            {"name": "model-services/system.ai.gpt-6-luna"},
             {"name": "model-services/system.ai.gpt-5-6-luna"},
-            {"name": "model-services/system.ai.gpt-5-6-sol"},
             {"name": "model-services/system.ai.gpt-6-1"},
             {"name": "model-services/system.ai.kimi-k2"},
             {"name": "model-services/system.ai.claude-opus-5"},

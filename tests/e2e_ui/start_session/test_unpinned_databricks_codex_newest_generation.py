@@ -1,12 +1,15 @@
-"""E2E: an unpinned Databricks Codex session launches on the newest advertised GPT.
+"""E2E: an unpinned Databricks Codex session launches on the newest advertised
+uncurated GPT.
 
 With a Unity Catalog model-services listing that advertises
-``system.ai.gpt-6-terra`` (a major-only tiered arm) next to older GPT-5.x ids,
-a new native Codex session that pins no model must launch on the newest
-advertised generation instead of lagging on a GPT-5.x id. The advertised arm
-is none of Omnigent's launch-default preference ids, so a launch that fell
-back to a static default instead of ranking the live listing would paint a
-different model and be caught here.
+``system.ai.gpt-6-terra`` (a major-only tiered arm) next to older, uncurated
+GPT-5.x ids, a new native Codex session that pins no model must launch on the
+newest advertised generation instead of lagging on a GPT-5.x id. Every
+advertised id is uncurated, so ranking turns purely on generation; under the
+retained curated-first policy an older curated arm would still outrank an
+uncurated GPT-6. The advertised arm is none of Omnigent's launch-default
+preference ids, so a launch that fell back to a static default instead of
+ranking the live listing would paint a different model and be caught here.
 """
 
 from __future__ import annotations
@@ -317,24 +320,29 @@ _LAUNCH_ERROR_RE = re.compile(
     r"\b(error|unavailable|failed|not found|invalid|rejected)\b", re.IGNORECASE
 )
 
+#: The TUI names the launched model as a ``model: <id>`` banner or an
+#: ``<id> <effort> · <cwd>`` footer; prose or an error line that merely mentions a
+#: model must not count as a launch.
+_LAUNCH_MODEL_RE = re.compile(r"model:\s*(?P<banner>[\w./-]+)|(?P<footer>[\w./-]+)(?:\s+\S+)?\s+·")
+
 
 def _launched_model(pane_text: str, candidates: dict[str, str]) -> str | None:
-    # The TUI paints the model as ``model: <id>`` or an ``<id> <effort>`` footer
-    # depending on the codex version; skip error lines so a startup failure
-    # naming a model does not count as that model launching.
     for line in pane_text.splitlines():
         if _LAUNCH_ERROR_RE.search(line):
             continue
-        for token in re.findall(r"[A-Za-z0-9._/\[\]-]+", line):
-            if comparable_model_id(token) in candidates:
+        for match in _LAUNCH_MODEL_RE.finditer(line):
+            token = match.group("banner") or match.group("footer")
+            if token and comparable_model_id(token) in candidates:
                 return token
     return None
 
 
-def test_launched_model_ignores_startup_error_naming_the_model() -> None:
-    """A startup error naming a model is not a successful launch banner."""
+def test_launched_model_counts_only_a_model_banner_or_footer() -> None:
+    """Only the model banner or footer counts as a launch, not an error or prose."""
     candidates = _launch_candidates(_ADVERTISED_MODEL_IDS)
     assert _launched_model("ERROR: model gpt-6-terra unavailable", candidates) is None
+    assert _launched_model("fetching catalog for system.ai.gpt-6-terra", candidates) is None
+    assert _launched_model("model: system.ai.gpt-6-terra", candidates) == "system.ai.gpt-6-terra"
     assert (
         _launched_model("  system.ai.gpt-6-terra  default · /repo", candidates)
         == "system.ai.gpt-6-terra"
@@ -396,8 +404,13 @@ def test_unpinned_databricks_codex_session_launches_newest_advertised_generation
         pane_text = _codex_pane_text(stack.tmp_dir)
         current = _launched_model(pane_text, candidates)
         # Require the same model across two consecutive polls so a transient
-        # mid-boot banner never settles the launch model under test.
-        if current is not None and current == previous:
+        # mid-boot banner never settles the launch model under test; fold the ids
+        # so a banner/footer respelling between polls still counts as stable.
+        if (
+            current is not None
+            and previous is not None
+            and comparable_model_id(current) == comparable_model_id(previous)
+        ):
             launched = current
             # Let the SPA terminal mirror the banner so a recording ends on the outcome.
             page.wait_for_timeout(3_000)
