@@ -421,9 +421,8 @@ def test_wrap_client_non_streaming_create_not_wrapped() -> None:
     assert isinstance(result, _FakeResult)
 
 
-def _capture_forwarded_messages(messages, *, databricks):
-    """Send *messages* through the chat-completions wrapper, return what it forwards."""
-    captured: dict = {}
+def _make_capture_client(captured: dict, *, base_url: str | None = None):
+    """Build a fake OpenAI-style client whose ``chat.completions.create`` records kwargs."""
 
     class _FakeCompletions:
         async def create(self, **kwargs) -> object:
@@ -440,13 +439,23 @@ def _capture_forwarded_messages(messages, *, databricks):
             raise AttributeError(name)
 
     class _FakeClient:
+        base_url: str | None = None
         chat = _FakeChat()
 
         def __getattr__(self, name: str) -> object:
             raise AttributeError(name)
 
+    client = _FakeClient()
+    client.base_url = base_url
+    return client
+
+
+def _capture_forwarded_messages(messages, *, databricks):
+    """Send *messages* through the chat-completions wrapper, return what it forwards."""
+    captured: dict = {}
+    client = _make_capture_client(captured)
+
     async def _run_inner() -> None:
-        client = _FakeClient()
         _wrap_client_for_reasoning_models(client, databricks=databricks)
         await client.chat.completions.create(messages=messages, stream=False)
 
@@ -474,6 +483,8 @@ def test_databricks_parallel_tool_results_get_resolvable_name() -> None:
     forwarded = _capture_forwarded_messages(messages, databricks=True)
     resolved = {m["tool_call_id"]: m.get("name") for m in forwarded if m.get("role") == "tool"}
     assert resolved == {"call_a": "get_weather", "call_b": "get_time"}
+    # The caller's original messages must stay untouched (no in-place mutation).
+    assert all("name" not in m for m in tool_messages)
 
 
 def test_non_databricks_tool_results_keep_no_name() -> None:
@@ -500,29 +511,9 @@ def test_non_databricks_tool_results_keep_no_name() -> None:
 def test_databricks_executor_wires_tool_name_resolution() -> None:
     """Constructing the executor against a gateway URL resolves forwarded tool names."""
     captured: dict = {}
-
-    class _FakeCompletions:
-        async def create(self, **kwargs) -> object:
-            captured.update(kwargs)
-            return object()
-
-        def __getattr__(self, name: str) -> object:
-            raise AttributeError(name)
-
-    class _FakeChat:
-        completions = _FakeCompletions()
-
-        def __getattr__(self, name: str) -> object:
-            raise AttributeError(name)
-
-    class _FakeClient:
-        base_url = "https://host.example.com/ai-gateway/openai/v1"
-        chat = _FakeChat()
-
-        def __getattr__(self, name: str) -> object:
-            raise AttributeError(name)
-
-    client = _FakeClient()
+    client = _make_capture_client(
+        captured, base_url="https://host.example.com/ai-gateway/openai/v1"
+    )
     executor = OpenAIAgentsSDKExecutor(client=client, use_responses=False)
     assert executor._databricks is True
 
@@ -585,6 +576,38 @@ def test_tool_names_resolve_from_nearest_preceding_assistant_call() -> None:
     forwarded = _capture_forwarded_messages(messages, databricks=True)
     names = [m.get("name") for m in forwarded if m.get("role") == "tool"]
     assert names == ["get_weather", "get_time"]
+
+
+def test_databricks_preserves_existing_tool_result_name() -> None:
+    """A tool result that already carries a name keeps it instead of being overwritten."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "name": "explicit_name", "content": "18C"},
+    ]
+    forwarded = _capture_forwarded_messages(messages, databricks=True)
+    tool_message = next(m for m in forwarded if m.get("role") == "tool")
+    assert tool_message["name"] == "explicit_name"
+
+
+def test_databricks_orphan_tool_result_forwarded_unchanged() -> None:
+    """A tool result with no matching assistant call is forwarded without a name."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "call_missing", "content": "orphaned"},
+    ]
+    forwarded = _capture_forwarded_messages(messages, databricks=True)
+    tool_message = next(m for m in forwarded if m.get("role") == "tool")
+    assert "name" not in tool_message
 
 
 class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
