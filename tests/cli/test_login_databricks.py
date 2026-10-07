@@ -603,7 +603,7 @@ def test_login_stale_retry_presents_the_profile_it_just_logged_into(
     user is re-prompted for nothing and still fails with the same 403. The
     record then names the accepted profile so later commands keep using it.
     """
-    from omnigent.cli_auth import load_databricks_profile, load_databricks_workspace_host
+    from omnigent.cli_auth import load_databricks_workspace_host
 
     cfg_path = tmp_path / "databrickscfg"
     cfg_path.write_text(f"[workspace-pat]\nhost = {_WORKSPACE}\ntoken = tok-stale\n")
@@ -646,6 +646,9 @@ def test_login_stale_retry_presents_the_profile_it_just_logged_into(
     assert result.exit_code == 0, result.output
     assert "Logged in as alice@example.com" in result.output
     assert load_databricks_workspace_host(_WORKSPACE_API_URL) == _WORKSPACE
+    # Imported last so an unfixed tree fails on the behavior above, not here.
+    from omnigent.cli_auth import load_databricks_profile
+
     assert load_databricks_profile(_WORKSPACE_API_URL) == _PROFILE
 
 
