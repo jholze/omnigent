@@ -15,6 +15,8 @@ app-rejects-token failure, and non-interference with accounts mode.
 from __future__ import annotations
 
 import json
+import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,6 +59,31 @@ class _FakeHttpx:
         auth = headers.get("Authorization") if isinstance(headers, dict) else None
         self.requests.append({"url": url, "authorization": auth, "params": kwargs.get("params")})
         return self.responses.pop(0)
+
+
+@dataclass
+class _WorkspaceHttpx:
+    """Bearer-aware ``httpx.get`` replacement for a workspace-hosted mount.
+
+    Anonymous requests get the ``DatabricksRealm`` challenge, the one
+    *accepted* bearer gets 200 with a user id, any other bearer gets 403.
+
+    :param accepted: The bearer the mount accepts, e.g. ``"tok-fresh"``.
+    :param requests: URLs and Authorization headers seen, in order.
+    """
+
+    accepted: str
+    requests: list[dict[str, str | None]] = field(default_factory=list)
+
+    def get(self, url: str, **kwargs: object) -> httpx.Response:
+        headers = kwargs.get("headers")
+        auth = headers.get("Authorization") if isinstance(headers, dict) else None
+        self.requests.append({"url": url, "authorization": auth, "params": kwargs.get("params")})
+        if auth is None:
+            return _response(401, headers={"www-authenticate": 'Bearer realm="DatabricksRealm"'})
+        if auth == f"Bearer {self.accepted}":
+            return _response(200, body={"user_id": "alice@example.com"})
+        return _response(403)
 
 
 def _response(
@@ -106,11 +133,13 @@ def token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _patch_login_env(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    fake_httpx: _FakeHttpx,
+    fake_httpx: _FakeHttpx | _WorkspaceHttpx,
     sdk_installed: bool = True,
     cached_tokens: list[str | None] | None = None,
     host_needs_selector: bool = False,
     default_workspace_id: str | None = None,
+    real_resolver: bool = False,
+    cli_responder: Callable[[list[str]], tuple[int, str]] | None = None,
 ) -> list[str]:
     """Patch the login command's collaborators for a scripted run.
 
@@ -127,8 +156,14 @@ def _patch_login_env(
     :param default_workspace_id: What ``_databricks_default_workspace_id``
         returns — the workspace the CLI recorded for the host. Defaults to
         ``None`` so tests never read the developer's real ``~/.databrickscfg``.
-    :returns: A list capturing each ``subprocess.run`` argv (the
-        ``databricks auth login`` invocations).
+    :param real_resolver: Leave ``_databricks_workspace_auth_info`` unpatched so
+        the real ``~/.databrickscfg`` resolver runs (point ``DATABRICKS_CONFIG_FILE``
+        at a temp file first); ``cached_tokens`` is then ignored.
+    :param cli_responder: Produces ``(returncode, stdout)`` for each databricks
+        CLI argv (binary dropped), e.g. to emulate ``auth login`` saving a
+        profile and ``auth token`` minting. Defaults to a silent success.
+    :returns: A list capturing each databricks CLI ``subprocess.run`` argv
+        (binary dropped), e.g. ``"auth login --host ... --profile ..."``.
     """
 
     monkeypatch.setattr(httpx, "get", fake_httpx.get)
@@ -149,30 +184,37 @@ def _patch_login_env(
     )
     tokens = list(cached_tokens if cached_tokens is not None else ["tok-cached"])
 
-    def _auth_info(workspace_host: str) -> cli_mod._DatabricksWorkspaceAuthInfo | None:
+    def _auth_info(
+        workspace_host: str, profile_name: str | None = None
+    ) -> cli_mod._DatabricksWorkspaceAuthInfo | None:
         token = tokens.pop(0)
         if token is None:
             return None
         return cli_mod._DatabricksWorkspaceAuthInfo(token=token, profile_name=None)
 
-    monkeypatch.setattr(cli_mod, "_databricks_workspace_auth_info", _auth_info)
+    if not real_resolver:
+        monkeypatch.setattr(cli_mod, "_databricks_workspace_auth_info", _auth_info)
 
     login_calls: list[str] = []
 
-    @dataclass
-    class _Completed:
-        returncode: int = 0
-
     real_run = cli_mod.subprocess.run
 
-    def _fake_run(argv: list[str], **kwargs: object) -> _Completed:
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[object]:
         # Patching ``cli_mod.subprocess`` swaps ``run`` on the module
         # itself, so background threads land here too. Anything that is
         # not the databricks CLI goes to the real runner.
         if Path(argv[0]).name != "databricks":
             return real_run(argv, **kwargs)
         login_calls.append(" ".join(argv[1:]))  # drop the binary path
-        return _Completed()
+        code, out = cli_responder(argv[1:]) if cli_responder is not None else (0, "")
+        text_mode = bool(
+            kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines")
+        )
+        stdout: object = out if text_mode else out.encode()
+        stderr: object = "" if text_mode else b""
+        if code and kwargs.get("check"):
+            raise subprocess.CalledProcessError(code, argv, stdout, stderr)
+        return subprocess.CompletedProcess(argv, code, stdout, stderr)
 
     monkeypatch.setattr(cli_mod.subprocess, "run", _fake_run)
     monkeypatch.setattr(cli_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -539,6 +581,65 @@ def test_login_stale_cached_grant_triggers_fresh_login_and_retry(
     # The retry verify presented the freshly minted token, not the stale one.
     assert fake.requests[-1]["authorization"] == "Bearer tok-fresh"
     assert load_databricks_workspace_host(_APPS_URL) == _WORKSPACE
+
+
+def test_login_stale_retry_presents_the_profile_it_just_logged_into(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, token_dir: Path
+) -> None:
+    """The retry after a forced re-login presents that login's credential.
+
+    Another ``~/.databrickscfg`` profile can match the workspace host — here a
+    static-token profile the mount rejects. Re-resolving host-wide after the
+    re-login must not hand that profile's credential back to the retry, or the
+    user is re-prompted for nothing and still fails with the same 403. The
+    record then names the accepted profile so later commands keep using it.
+    """
+    from omnigent.cli_auth import load_databricks_profile, load_databricks_workspace_host
+
+    cfg_path = tmp_path / "databrickscfg"
+    cfg_path.write_text(f"[workspace-pat]\nhost = {_WORKSPACE}\ntoken = tok-stale\n")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
+    for name in (
+        "DATABRICKS_CONFIG_PROFILE",
+        "DATABRICKS_HOST",
+        "DATABRICKS_TOKEN",
+        "DATABRICKS_CLI_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def _databricks_cli(argv: list[str]) -> tuple[int, str]:
+        if argv[:2] == ["auth", "login"]:
+            host = argv[argv.index("--host") + 1]
+            profile = argv[argv.index("--profile") + 1]
+            with cfg_path.open("a") as fh:
+                fh.write(f"\n[{profile}]\nhost = {host}\nauth_type = databricks-cli\n")
+            return 0, f"Profile {profile} was successfully saved\n"
+        if argv[:2] == ["auth", "token"]:
+            if "--profile" not in argv:
+                # Like the real CLI: a host-keyed lookup is ambiguous once two
+                # profiles share the host, so only the --profile mint succeeds.
+                return 1, ""
+            minted = {
+                "access_token": "tok-fresh",
+                "token_type": "Bearer",
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+            return 0, json.dumps(minted)
+        return 2, ""
+
+    fake = _WorkspaceHttpx(accepted="tok-fresh")
+    login_calls = _patch_login_env(
+        monkeypatch, fake_httpx=fake, real_resolver=True, cli_responder=_databricks_cli
+    )
+
+    result = CliRunner().invoke(cli_group, ["login", _WORKSPACE_API_URL])
+
+    assert f"auth login --host {_WORKSPACE} --profile {_PROFILE}" in login_calls
+    assert fake.requests[-1]["authorization"] == "Bearer tok-fresh", result.output
+    assert result.exit_code == 0, result.output
+    assert "Logged in as alice@example.com" in result.output
+    assert load_databricks_workspace_host(_WORKSPACE_API_URL) == _WORKSPACE
+    assert load_databricks_profile(_WORKSPACE_API_URL) == _PROFILE
 
 
 def test_foreign_subprocess_calls_stay_out_of_the_login_recorder(

@@ -232,6 +232,28 @@ def test_store_and_load_databricks_record(token_dir) -> None:
     )
 
 
+def test_databricks_record_remembers_the_profile_the_server_accepted(token_dir) -> None:
+    """The record names the cfg profile ``omnigent login`` verified.
+
+    Token minting for the server tries that profile first, so a login that
+    refreshed one of several host-matching profiles keeps presenting the
+    accepted credential. Rewrites that carry no profile keep the recorded one.
+    """
+    from omnigent.cli_auth import load_databricks_profile, store_databricks_auth
+
+    server = "https://myapp-123.aws.databricksapps.com"
+    assert load_databricks_profile(server) is None
+
+    store_databricks_auth(server, "https://example.databricks.com", profile_name="example")
+    assert load_databricks_profile(server) == "example"
+
+    store_databricks_auth(server, "https://example.databricks.com")
+    assert load_databricks_profile(server) == "example"
+
+    store_databricks_auth(server, "https://example.databricks.com", profile_name="example-2")
+    assert load_databricks_profile(server) == "example-2"
+
+
 def test_pointer_record_reads_as_absent_without_expiry_warning(
     token_dir, monkeypatch, caplog
 ) -> None:

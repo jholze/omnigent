@@ -3742,7 +3742,9 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
             )
         refreshed_probe = _verify_databricks_server_token(server, auth_info.token, org_id)
         if refreshed_probe.status_code == 200:
-            store_databricks_auth(server, workspace_host, org_id=org_id)
+            store_databricks_auth(
+                server, workspace_host, org_id=org_id, profile_name=auth_info.profile_name
+            )
             return
     # User-facing: show the display form (the workspace /omnigent URL, with
     # ?o= when known), not the internal API mount; it round-trips through
@@ -12489,8 +12491,9 @@ def _databricks_login(server: str, workspace_host: str, org_id: str | None = Non
     verification (e.g. a stale token-cache entry minted for a
     different workspace) triggers one fresh browser login and a
     re-verify before failing loud. On success, a pointer record is
-    stored in ``~/.omnigent/auth_tokens.json`` — no profile name is
-    created or consulted anywhere.
+    stored in ``~/.omnigent/auth_tokens.json`` naming the workspace and
+    the ``.databrickscfg`` profile the server accepted — no bearer is
+    stored.
 
     :param server: The server URL, e.g.
         ``"https://myapp-123.aws.databricksapps.com"``.
@@ -12539,16 +12542,15 @@ def _databricks_login(server: str, workspace_host: str, org_id: str | None = Non
         and _databricks_host_needs_org_selector(workspace_host)
     )
 
-    token = auth_info.token if auth_info is not None else None
     fresh_login_done = False
-    if token is None:
+    if auth_info is None:
         auth_info = _login_and_mint_workspace_auth_info(workspace_host, org_id)
-        token = auth_info.token
         fresh_login_done = True
         if org_id is None:
             org_id = _workspace_hosted_profile_org_id(
                 server, workspace_host, auth_info.profile_name
             )
+    token = auth_info.token
 
     # Inherit the workspace the CLI selected: the browser login (or a prior one)
     # auto-selected a workspace and recorded its id in the profile; replaying it
@@ -12602,6 +12604,8 @@ def _databricks_login(server: str, workspace_host: str, org_id: str | None = Non
         # and browser links append it. The login URL's selector wins; fall
         # back to the org id the workspace stamps on responses.
         org_id=org_id or verify.headers.get("x-databricks-org-id"),
+        # Later mints try this profile first: it is the one the server accepted.
+        profile_name=auth_info.profile_name,
     )
     who = f" as {user_id}" if user_id else ""
     click.echo(
@@ -12628,18 +12632,23 @@ def _login_and_mint_workspace_token(workspace_host: str, org_id: str | None = No
 def _login_and_mint_workspace_auth_info(
     workspace_host: str, org_id: str | None = None
 ) -> _DatabricksWorkspaceAuthInfo:
-    """Run the browser login and return the selected workspace auth info."""
-    _run_databricks_browser_login(workspace_host, org_id)
-    auth_info = _databricks_workspace_auth_info(workspace_host)
+    """Run the browser login and mint from the profile it wrote.
+
+    Re-resolving host-wide here would hand back whichever host-matching
+    profile authenticates first — possibly the credential the server just
+    rejected — so the mint is pinned to the login's own profile.
+    """
+    profile = _run_databricks_browser_login(workspace_host, org_id)
+    auth_info = _databricks_workspace_auth_info(workspace_host, profile_name=profile)
     if auth_info is None:
         raise click.ClickException(
-            f"Workspace login completed but no token resolves for {workspace_host}. "
-            f"Run `databricks auth token --host {workspace_host}` to debug."
+            f"Workspace login completed but no token resolves for {workspace_host} "
+            f"(profile {profile}). Run `databricks auth token --profile {profile}` to debug."
         )
     return auth_info
 
 
-def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None) -> None:
+def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None) -> str:
     """Run ``databricks auth login --host <workspace>`` (browser flow).
 
     :param workspace_host: The workspace host, e.g.
@@ -12649,6 +12658,7 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
         to ``--host`` so the CLI records ``workspace_id`` and binds the
         grant to that workspace (else the grant is account-scoped and
         the workspace rejects it).
+    :returns: The ``.databrickscfg`` profile name the login wrote.
     :raises click.ClickException: When the Databricks CLI binary is
         missing or the login exits non-zero.
 
@@ -12683,6 +12693,7 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
             f"(exit {result.returncode}). If the workspace is unreachable from "
             "this machine (VPN / IP access lists), resolve that and retry."
         )
+    return profile
 
 
 def _verify_databricks_server_token(
@@ -12722,15 +12733,29 @@ class _DatabricksWorkspaceAuthInfo:
     profile_name: str | None
 
 
-def _databricks_workspace_auth_info(workspace_host: str) -> _DatabricksWorkspaceAuthInfo | None:
-    """Mint a bearer and remember the Databricks profile that supplied it."""
+def _databricks_workspace_auth_info(
+    workspace_host: str, profile_name: str | None = None
+) -> _DatabricksWorkspaceAuthInfo | None:
+    """Mint a bearer and remember the Databricks profile that supplied it.
+
+    :param workspace_host: The workspace host, e.g.
+        ``"https://example.databricks.com"``.
+    :param profile_name: Mint from this ``.databrickscfg`` profile only (the
+        one ``databricks auth login`` just wrote). ``None`` walks every
+        profile pinned to the host in identity-preference order.
+    :returns: The bearer and its profile, or ``None`` when nothing resolves.
+    """
     from omnigent.inner.databricks_executor import (
         DatabricksAuthError,
         _resolve_databricks_auth,
+        _resolve_databricks_auth_for_profile,
     )
 
     try:
-        auth, _host = _resolve_databricks_auth(host=workspace_host)
+        if profile_name is None:
+            auth, _host = _resolve_databricks_auth(host=workspace_host)
+        else:
+            auth, _host = _resolve_databricks_auth_for_profile(profile_name, workspace_host)
         token = auth.current_token()
     except (DatabricksAuthError, ImportError, ValueError):
         return None

@@ -661,6 +661,7 @@ def _resolve_databricks_auth(
     profile: str | None = None,
     *,
     host: str | None = None,
+    preferred_profile: str | None = None,
 ) -> tuple[_DatabricksBearerAuth, str]:
     """Resolve Databricks credentials and return per-request auth + host.
 
@@ -680,6 +681,10 @@ def _resolve_databricks_auth(
         profile/env fallback is NOT attempted in this mode — the
         record asked for a specific workspace, so a credential miss
         fails loud.
+    :param preferred_profile: With ``host``, the ``~/.databrickscfg``
+        profile a pointer record names (the one ``omnigent login``
+        verified), tried before the host's other profiles. See
+        :func:`_resolve_databricks_auth_for_host`.
     :returns: ``(auth, host)`` — an httpx Auth for injection into
         ``httpx.Client``/``httpx.AsyncClient`` and the workspace URL,
         e.g. ``"https://example.cloud.databricks.com"``.
@@ -687,7 +692,8 @@ def _resolve_databricks_auth(
         authentication fails.
     :raises ImportError: When the ``databricks-sdk`` package is not
         installed.
-    :raises ValueError: When both ``profile`` and ``host`` are given.
+    :raises ValueError: When both ``profile`` and ``host`` are given, or
+        ``preferred_profile`` is given without ``host``.
     """
     try:
         from databricks.sdk.config import Config
@@ -700,7 +706,9 @@ def _resolve_databricks_auth(
     if host is not None:
         if profile is not None:
             raise ValueError("_resolve_databricks_auth takes profile or host, not both")
-        return _resolve_databricks_auth_for_host(host)
+        return _resolve_databricks_auth_for_host(host, preferred_profile=preferred_profile)
+    if preferred_profile is not None:
+        raise ValueError("_resolve_databricks_auth takes preferred_profile only with host")
 
     sdk_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
     cfg = None
@@ -782,7 +790,43 @@ def _sdk_config(**kwargs: str) -> Any:  # type: ignore[explicit-any]  # SDK Conf
     return Config(**kwargs)  # type: ignore[arg-type]
 
 
-def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth, str]:
+def _resolve_databricks_auth_for_profile(
+    profile_name: str, host: str
+) -> tuple[_DatabricksBearerAuth, str]:
+    """Resolve per-request auth for one ``~/.databrickscfg`` profile of *host*.
+
+    The SDK's credential chain for the profile runs first. A
+    ``databricks-cli`` profile can still fail there when several profiles
+    share the host (the CLI's host-keyed token lookup is ambiguous), so the
+    profile-pinned CLI mint (``databricks auth token --profile``) is the
+    fallback.
+
+    :param profile_name: The profile to authenticate, e.g. ``"example"``.
+    :param host: The workspace host the profile is pinned to, e.g.
+        ``"https://example.databricks.com"``.
+    :returns: ``(auth, host)`` — an httpx Auth and the workspace URL.
+    :raises DatabricksAuthError: When neither path mints a token.
+    """
+    try:
+        cfg = _sdk_config(profile=profile_name)
+        cfg.authenticate()
+    except Exception:  # noqa: BLE001 — fall back to the profile-pinned CLI mint
+        logger.debug("profile %r for host %s did not authenticate via SDK", profile_name, host)
+        try:
+            cfg = _DatabricksCliProfileAuthConfig(profile=profile_name, host=host)
+            cfg.authenticate()
+        except Exception as exc:
+            logger.debug("profile %r for host %s did not authenticate via CLI", profile_name, host)
+            raise DatabricksAuthError(
+                f"Databricks authentication failed for profile {profile_name!r}. "
+                f"Run: databricks auth login --host {host} --profile {profile_name}"
+            ) from exc
+    return _DatabricksBearerAuth(cfg, profile_name=profile_name), cfg.host or host
+
+
+def _resolve_databricks_auth_for_host(
+    host: str, *, preferred_profile: str | None = None
+) -> tuple[_DatabricksBearerAuth, str]:
     """Resolve per-request auth for a specific workspace host.
 
     Prefers a ``~/.databrickscfg`` profile pinned to *host*:
@@ -802,8 +846,15 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
     both a user login and an SP for the same workspace authenticates
     as the person, not the service principal.
 
+    *preferred_profile* — the profile a pointer record names because
+    ``omnigent login`` verified it against that server — is tried before
+    that ordering while it is still pinned to *host*. One that was
+    re-pointed, removed, or no longer mints falls back to the ordering.
+
     :param host: Workspace host, e.g.
         ``"https://example.databricks.com"``.
+    :param preferred_profile: The recorded profile name, e.g.
+        ``"example"``, or ``None`` for the plain ordering.
     :returns: ``(auth, host)`` — an httpx Auth and the workspace URL.
     :raises DatabricksAuthError: When no credential source resolves
         for the host.
@@ -820,28 +871,16 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
     # principal is then selected — otherwise the host would silently register
     # under the SP again, the exact wrong-identity symptom the ordering fixes.
     failed_user_profiles: list[str] = []
-    for profile_name in _order_profiles_by_identity_preference(matches, sp_sections):
+    ordered = _order_profiles_by_identity_preference(matches, sp_sections)
+    if preferred_profile is not None and preferred_profile in ordered:
+        ordered = [preferred_profile, *(name for name in ordered if name != preferred_profile)]
+    for profile_name in ordered:
         try:
-            cfg = _sdk_config(profile=profile_name)
-            cfg.authenticate()
-        except Exception:  # noqa: BLE001 — try the next matching profile
-            logger.debug(
-                "profile %r matched host %s but did not authenticate via SDK",
-                profile_name,
-                host,
-            )
-            try:
-                cfg = _DatabricksCliProfileAuthConfig(profile=profile_name, host=host)
-                cfg.authenticate()
-            except Exception:  # noqa: BLE001 — try the next matching profile
-                logger.debug(
-                    "profile %r matched host %s but did not authenticate via CLI",
-                    profile_name,
-                    host,
-                )
-                if profile_name not in sp_sections:
-                    failed_user_profiles.append(profile_name)
-                continue
+            auth, resolved_host = _resolve_databricks_auth_for_profile(profile_name, host)
+        except DatabricksAuthError:
+            if profile_name not in sp_sections:
+                failed_user_profiles.append(profile_name)
+            continue
         if profile_name in sp_sections and failed_user_profiles:
             logger.warning(
                 "Authenticating to %s as service principal %r because "
@@ -855,7 +894,7 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
                 ", ".join(repr(p) for p in failed_user_profiles),
                 host,
             )
-        return _DatabricksBearerAuth(cfg, profile_name=profile_name), cfg.host or host
+        return auth, resolved_host
     try:
         host_cfg = _sdk_config(host=host, auth_type="databricks-cli")
         host_cfg.authenticate()
@@ -867,25 +906,47 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
 class _ReusedDatabricksTokenSource:
     """Reuse SDK auth, re-resolving it after a token mint fails."""
 
-    def __init__(self, server_url: str | None = None, *, host: str | None = None) -> None:
+    def __init__(
+        self,
+        server_url: str | None = None,
+        *,
+        host: str | None = None,
+        profile: str | None = None,
+    ) -> None:
+        """
+        :param server_url: Server whose pointer record names the workspace
+            and the profile ``omnigent login`` verified; read on each resolve.
+        :param host: Workspace host to resolve directly instead.
+        :param profile: With ``host``, the recorded profile to try first.
+        """
         if server_url is not None and host is not None:
             raise ValueError("_ReusedDatabricksTokenSource takes server_url or host, not both")
+        if profile is not None and host is None:
+            raise ValueError("_ReusedDatabricksTokenSource takes profile only with host")
         self._server_url = server_url
         self._host = host
+        self._profile = profile
         self._auth: _DatabricksBearerAuth | None = None
 
     def _resolve(self) -> _DatabricksBearerAuth | None:
         """Resolve fresh SDK auth, returning ``None`` on credential failure."""
         try:
             if self._host is not None:
-                return _resolve_databricks_auth(host=self._host)[0]
-            from omnigent.cli_auth import load_databricks_workspace_host
+                return _resolve_databricks_auth(host=self._host, preferred_profile=self._profile)[
+                    0
+                ]
+            server_url = self._server_url
+            if server_url:
+                from omnigent.cli_auth import (
+                    load_databricks_profile,
+                    load_databricks_workspace_host,
+                )
 
-            workspace_host = (
-                load_databricks_workspace_host(self._server_url) if self._server_url else None
-            )
-            if workspace_host is not None:
-                return _resolve_databricks_auth(host=workspace_host)[0]
+                workspace_host = load_databricks_workspace_host(server_url)
+                if workspace_host is not None:
+                    return _resolve_databricks_auth(
+                        host=workspace_host, preferred_profile=load_databricks_profile(server_url)
+                    )[0]
             return _resolve_databricks_auth()[0]
         except (DatabricksAuthError, ImportError, ValueError):
             return None

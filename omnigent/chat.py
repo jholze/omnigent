@@ -774,14 +774,16 @@ def _stored_databricks_record_token(server_url: str) -> str | None:
     :returns: A bearer token, or ``None`` when no pointer record is
         stored or the workspace credentials don't resolve.
     """
-    from omnigent.cli_auth import load_databricks_workspace_host
+    from omnigent.cli_auth import load_databricks_profile, load_databricks_workspace_host
 
     workspace_host = load_databricks_workspace_host(server_url)
     if workspace_host is None:
         return None
     source = _databricks_auth_cache.get(server_url)
     if source is None:
-        source = _ReusedDatabricksTokenSource(host=workspace_host)
+        source = _ReusedDatabricksTokenSource(
+            host=workspace_host, profile=load_databricks_profile(server_url)
+        )
         _databricks_auth_cache[server_url] = source
     return source.current_token()
 

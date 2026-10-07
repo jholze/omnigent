@@ -6,12 +6,12 @@ keyed by server URL. Three record shapes live side by side:
 - **Session JWTs** from the browser-based OIDC / accounts login flow
   (``{"token": ..., "user_id": ..., "expires_at": ...}``).
 - **Databricks Apps pointer records**
-  (``{"auth_type": "databricks", "workspace_host": ...}``) written by
-  ``omnigent login <apps-url>``. These deliberately store NO token:
-  Databricks OAuth access tokens expire after ~1 hour, so the record
-  just names the workspace whose host-keyed Databricks CLI OAuth cache
-  (``databricks auth login --host <ws>``) mints fresh bearers on
-  demand.
+  (``{"auth_type": "databricks", "workspace_host": ..., "profile": ...}``)
+  written by ``omnigent login <apps-url>``. These deliberately store NO
+  token: Databricks OAuth access tokens expire after ~1 hour, so the
+  record just names the workspace whose host-keyed Databricks CLI OAuth
+  cache (``databricks auth login --host <ws>``) mints fresh bearers on
+  demand, plus the ``~/.databrickscfg`` profile the server accepted.
 - **Workspace routing selectors** (``{"org_id": ...}``) remembered while
   normalizing a managed URL. They may stand alone or augment either credential
   record so subprocesses route to the same workspace.
@@ -222,6 +222,7 @@ def store_databricks_auth(
     workspace_host: str,
     user_id: str | None = None,
     org_id: str | None = None,
+    profile_name: str | None = None,
 ) -> None:
     """Persist a Databricks Apps auth pointer record for a server.
 
@@ -241,6 +242,11 @@ def store_databricks_auth(
         ``x-databricks-org-id`` response header), e.g.
         ``"2850744067564480"``. Used to build workspace web-UI links
         (the ``?o=`` query param).
+    :param profile_name: The ``~/.databrickscfg`` profile whose credential
+        the server accepted, e.g. ``"example"``. Token minting for this
+        server tries it before any other profile matching the host, so
+        later commands present the credential the login verified.
+        ``None`` keeps a previously recorded profile.
     """
     entry: dict[str, str | float] = {
         "auth_type": "databricks",
@@ -254,6 +260,12 @@ def store_databricks_auth(
         existing_org_id = load_databricks_org_id(server_url)
         if existing_org_id is not None:
             entry["org_id"] = existing_org_id
+    if profile_name:
+        entry["profile"] = profile_name
+    else:
+        existing_profile = load_databricks_profile(server_url)
+        if existing_profile is not None:
+            entry["profile"] = existing_profile
     _store_entry(server_url, entry)
 
 
@@ -600,6 +612,22 @@ def load_databricks_workspace_host(server_url: str) -> str | None:
         return None
     host = entry.get("workspace_host")
     return host if isinstance(host, str) and host else None
+
+
+def load_databricks_profile(server_url: str) -> str | None:
+    """Load the ``~/.databrickscfg`` profile a Databricks pointer record names.
+
+    :param server_url: The server URL, e.g.
+        ``"https://myapp-123.aws.databricksapps.com"``.
+    :returns: The profile ``omnigent login`` verified for the server, e.g.
+        ``"example"``, or ``None`` when the stored record (if any) is not a
+        Databricks pointer record or predates profile tracking.
+    """
+    entry = _load_entry(server_url)
+    if entry is None or entry.get("auth_type") != "databricks":
+        return None
+    profile = entry.get("profile")
+    return profile if isinstance(profile, str) and profile else None
 
 
 def load_databricks_org_id(server_url: str) -> str | None:

@@ -2928,6 +2928,7 @@ def test_databricks_preflight_silent_sdk_refresh_skips_login(
         workspace: str,
         user_id: str | None = None,
         org_id: str | None = None,
+        profile_name: str | None = None,
     ) -> None:
         stored.append((server, workspace, org_id))
 
@@ -2949,7 +2950,7 @@ def test_databricks_preflight_uses_cli_workspace_id_for_workspace_mount(
 
     server = "https://example.databricks.com/api/2.0/omnigent"
     requests: list[dict[str, object]] = []
-    stored: list[tuple[str, str, str | None]] = []
+    stored: list[tuple[str, str, str | None, str | None]] = []
     cfg_path = tmp_path / "databrickscfg"
     cfg_path.write_text(
         "[expired]\n"
@@ -2996,8 +2997,9 @@ def test_databricks_preflight_uses_cli_workspace_id_for_workspace_mount(
         workspace: str,
         user_id: str | None = None,
         org_id: str | None = None,
+        profile_name: str | None = None,
     ) -> None:
-        stored.append((server, workspace, org_id))
+        stored.append((server, workspace, org_id, profile_name))
 
     monkeypatch.setattr(httpx, "get", _get)
     monkeypatch.setattr("omnigent.cli_auth.store_databricks_auth", _store)
@@ -3006,7 +3008,8 @@ def test_databricks_preflight_uses_cli_workspace_id_for_workspace_mount(
 
     assert requests[1]["headers"] == {"Authorization": "Bearer fresh-token"}
     assert requests[1]["params"] == {"o": "1965859176160743"}
-    assert stored == [(server, "https://example.databricks.com", "1965859176160743")]
+    # The profile the server accepted is recorded for later mints.
+    assert stored == [(server, "https://example.databricks.com", "1965859176160743", "fresh")]
 
 
 def test_databricks_preflight_refresh_handles_duplicate_workspace_profiles(
@@ -3080,6 +3083,7 @@ def test_databricks_preflight_refresh_handles_duplicate_workspace_profiles(
         workspace: str,
         user_id: str | None = None,
         org_id: str | None = None,
+        profile_name: str | None = None,
     ) -> None:
         stored.append((server, workspace, org_id))
 
@@ -3328,7 +3332,9 @@ def test_databricks_preflight_rejected_credential_recovers_via_sdk_refresh(
     )
     monkeypatch.setattr(
         "omnigent.cli_auth.store_databricks_auth",
-        lambda server, workspace, user_id=None, org_id=None: stored.append((server, workspace)),
+        lambda server, workspace, user_id=None, org_id=None, profile_name=None: stored.append(
+            (server, workspace)
+        ),
     )
 
     cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER, non_interactive=True)

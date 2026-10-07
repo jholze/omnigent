@@ -1864,6 +1864,108 @@ def test_resolve_auth_for_host_uses_profile_cli_when_sdk_is_ambiguous(
     ]
 
 
+def test_resolve_auth_for_host_tries_the_recorded_profile_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pointer record's profile outranks file order for the same host.
+
+    ``omnigent login`` records the profile the server accepted. Another
+    profile for the host — here a PAT the server rejects — may precede it in
+    ``~/.databrickscfg``; later mints must still present the recorded one.
+    """
+    from omnigent.inner import databricks_executor
+
+    cfg_path = tmp_path / "databrickscfg"
+    cfg_path.write_text(
+        "[workspace-pat]\n"
+        "host = https://example.databricks.com\n"
+        "token = tok-stale\n"
+        "[example]\n"
+        "host = https://example.databricks.com\n"
+        "auth_type = databricks-cli\n"
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+
+    constructed: list[dict[str, str]] = []
+
+    def _fake_sdk_config(**kwargs: str) -> _StubSdkConfig:
+        constructed.append(kwargs)
+        token = "tok-fresh" if kwargs == {"profile": "example"} else "tok-stale"
+        return _StubSdkConfig(host="https://example.databricks.com", token=token)
+
+    monkeypatch.setattr(databricks_executor, "_sdk_config", _fake_sdk_config)
+
+    auth, host = databricks_executor._resolve_databricks_auth(
+        host="https://example.databricks.com", preferred_profile="example"
+    )
+
+    assert auth.current_token() == "tok-fresh"
+    assert auth.profile_name == "example"
+    assert host == "https://example.databricks.com"
+    assert constructed == [{"profile": "example"}]
+
+
+@pytest.mark.parametrize(
+    "preferred",
+    [
+        pytest.param("elsewhere", id="re-pointed-to-another-host"),
+        pytest.param("example", id="grant-no-longer-mints"),
+        pytest.param("gone", id="section-removed"),
+    ],
+)
+def test_resolve_auth_for_host_falls_back_when_the_recorded_profile_is_unusable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preferred: str
+) -> None:
+    """A recorded profile that is unpinned, removed, or dead yields to the ordering."""
+    from omnigent.inner import databricks_executor
+
+    cfg_path = tmp_path / "databrickscfg"
+    cfg_path.write_text(
+        "[workspace-pat]\n"
+        "host = https://example.databricks.com\n"
+        "token = tok-pat\n"
+        "[example]\n"
+        "host = https://example.databricks.com\n"
+        "auth_type = databricks-cli\n"
+        "[elsewhere]\n"
+        "host = https://other.databricks.com\n"
+        "token = tok-other\n"
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+
+    attempts: list[tuple[str, object]] = []
+
+    def _fake_sdk_config(**kwargs: str) -> _StubSdkConfig:
+        attempts.append(("sdk", kwargs))
+        if kwargs == {"profile": "example"}:
+            raise ValueError("databricks-cli: no cached grant")
+        return _StubSdkConfig(host="https://example.databricks.com", token="tok-pat")
+
+    def _run_databricks(args: list[str], **kwargs: object) -> SimpleNamespace:
+        attempts.append(("cli", args))
+        return SimpleNamespace(returncode=1, stdout="", stderr="no grant")
+
+    monkeypatch.setattr(databricks_executor, "_sdk_config", _fake_sdk_config)
+    monkeypatch.setattr(databricks_executor.shutil, "which", lambda name: "/usr/bin/databricks")
+    monkeypatch.setattr(databricks_executor.subprocess, "run", _run_databricks)
+
+    auth, _host = databricks_executor._resolve_databricks_auth(
+        host="https://example.databricks.com", preferred_profile=preferred
+    )
+
+    assert auth.current_token() == "tok-pat"
+    assert auth.profile_name == "workspace-pat"
+    if preferred == "example":
+        # Tried first, failed via SDK and CLI, then the ordering took over.
+        assert attempts[0] == ("sdk", {"profile": "example"})
+        assert attempts[1][0] == "cli"
+        assert attempts[2] == ("sdk", {"profile": "workspace-pat"})
+    else:
+        assert attempts[0] == ("sdk", {"profile": "workspace-pat"})
+
+
 def test_profile_cli_auth_config_caches_until_token_nears_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2658,3 +2760,47 @@ def test_reused_token_source_retries_resolution_after_failure(monkeypatch):
     assert source.current_token() is None
     available["ok"] = True
     assert source.current_token() == "tok-late"
+
+
+def test_reused_token_source_prefers_the_profile_recorded_for_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server-keyed source hands the record's profile to host resolution.
+
+    This is the runner's path to a workspace token after ``omnigent login``;
+    without the profile it would walk every host-matching profile and could
+    present one the server already rejected.
+    """
+    from omnigent.cli_auth import store_databricks_auth
+    from omnigent.inner.databricks_executor import (
+        _DatabricksBearerAuth,
+        _ReusedDatabricksTokenSource,
+    )
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    server = "https://example.databricks.com/api/2.0/omnigent"
+    store_databricks_auth(server, "https://example.databricks.com", profile_name="example")
+
+    class _Cfg:
+        def authenticate(self) -> dict[str, str]:
+            return {"Authorization": "Bearer tok-fresh"}
+
+    resolved: list[dict[str, object]] = []
+
+    def _fake_resolve(
+        profile: str | None = None,
+        *,
+        host: str | None = None,
+        preferred_profile: str | None = None,
+    ) -> tuple[_DatabricksBearerAuth, str | None]:
+        resolved.append({"host": host, "preferred_profile": preferred_profile})
+        return _DatabricksBearerAuth(_Cfg(), profile_name=preferred_profile), host
+
+    monkeypatch.setattr(
+        "omnigent.inner.databricks_executor._resolve_databricks_auth", _fake_resolve
+    )
+
+    assert _ReusedDatabricksTokenSource(server).current_token() == "tok-fresh"
+    assert resolved == [{"host": "https://example.databricks.com", "preferred_profile": "example"}]
