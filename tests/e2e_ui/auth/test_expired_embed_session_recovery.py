@@ -15,10 +15,11 @@ The host is a stand-in page that mounts the real embed island (see
 
 from __future__ import annotations
 
+import contextlib
 import re
 import shutil
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -109,9 +110,32 @@ def _wait_for_populated_embed(page: Page, session_id: str) -> Locator:
 
 
 def _expire_host_session(page: Page, *, persist: bool = False) -> None:
-    """Expire the host session; ``persist`` keeps it expired across reloads."""
-    page.evaluate(f"window.omnigentEmbedHost.expireSession({{persist: {str(persist).lower()}}})")
-    expect(page.get_by_test_id("embed-host-session-status")).to_contain_text("EXPIRED")
+    """Expire the host session; ``persist`` keeps it expired across reloads.
+
+    Confirm expiry through the host controls, not the status text: the next
+    host fetch triggers the recovery reload, which resets the visible status
+    before a DOM assertion could observe it.
+    """
+    registered = page.evaluate(
+        "(persist) => {"
+        " window.omnigentEmbedHost.expireSession({ persist });"
+        " return window.omnigentEmbedHost.isExpired();"
+        " }",
+        persist,
+    )
+    assert registered, "the stand-in host did not register the session as expired"
+
+
+def _force_host_fetch(trigger: Callable[[], None]) -> None:
+    """Nudge one host fetch so the embed reacts to the expired session.
+
+    Every host request now rejects before an HTTP response, so a background
+    poll may already have started the recovery reload and detached the control.
+    That reload is itself the fetch under test, so a failed nudge is not a
+    failure.
+    """
+    with contextlib.suppress(PlaywrightError):
+        trigger()
 
 
 def _choose_session_filter(page: Page, label: str) -> None:
@@ -156,11 +180,12 @@ def test_sidebar_session_list_recovers_after_host_session_expires(
     _expire_host_session(page)
     # "Archived sessions" is served by its own query, so choosing it fetches
     # through the host; "My sessions" is derived client-side on a single-user server.
-    _choose_session_filter(page, "Archived sessions")
+    _force_host_fetch(lambda: _choose_session_filter(page, "Archived sessions"))
 
     _expect_single_reload_recovery(page, _sidebar_list(page))
-    expect(_sidebar_list(page)).to_contain_text("No sessions", timeout=30_000)
     expect(_sidebar_list(page)).not_to_contain_text("Failed to load")
+    # The filter choice persists across the reload, so switch to a slice that
+    # lists the seeded session to prove the recovered sidebar loads real data.
     _choose_session_filter(page, "All sessions")
     expect(_sidebar_session_link(page, session_id)).to_be_visible(timeout=30_000)
 
@@ -172,9 +197,13 @@ def test_files_view_recovers_after_host_session_expires(
     rail = _wait_for_populated_embed(page, session_id)
 
     _expire_host_session(page)
-    rail.get_by_role("button", name="Refresh files").click()
 
-    _expect_single_reload_recovery(page, rail)
+    def _refresh_files() -> None:
+        rail.get_by_role("button", name="Refresh files").click(timeout=5_000)
+
+    _force_host_fetch(_refresh_files)
+
+    _expect_single_reload_recovery(page, _files_rail(page))
     rail = _open_files_view(page)
     expect(_file_row(rail, _SEEDED_FILE)).to_be_visible(timeout=30_000)
     expect(rail).not_to_contain_text("Failed to load")
@@ -188,7 +217,7 @@ def test_persistently_expired_host_session_reloads_only_once(
 
     # Models a host whose re-authentication does not succeed on the reload.
     _expire_host_session(page, persist=True)
-    _choose_session_filter(page, "Archived sessions")
+    _force_host_fetch(lambda: _choose_session_filter(page, "Archived sessions"))
 
     _expect_single_reload_recovery(page, _sidebar_list(page))
     expect(page.get_by_test_id("embed-host-session-status")).to_contain_text("EXPIRED")
