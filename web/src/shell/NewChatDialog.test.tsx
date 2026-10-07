@@ -3592,6 +3592,53 @@ describe("NewChatLandingScreen", () => {
     }
 
     it.each([false, true])(
+      "waits for the new workspace's worktree discovery before starting with a drafted branch (auto-seeded: %s)",
+      async (autoSeeded) => {
+        let nextDiscovered = false;
+        useHostWorktreesMock.mockImplementation(
+          (_host, path) =>
+            (path === nextWorkspace && !nextDiscovered
+              ? { ...PENDING_QUERY_STATE, data: undefined }
+              : {
+                  ...SUCCESS_QUERY_STATE,
+                  data:
+                    path === gitWorkspace || path === nextWorkspace
+                      ? [{ ...mainWorktree, path }]
+                      : [],
+                  isPlaceholderData: false,
+                }) as ReturnType<typeof useHostWorktrees>,
+        );
+        const worktree = await selectNewWorktree(autoSeeded);
+        const requestedBranch = autoSeeded ? worktree.textContent : branchName;
+        selectWorkspace(nextWorkspace);
+        const input = screen.getByTestId("new-chat-landing-input");
+        fireEvent.change(input, { target: { value: "continue on the drafted branch" } });
+        const submit = screen.getByTestId("new-chat-landing-submit");
+        // Starting now would silently drop the drafted worktree.
+        expect(submit).toBeDisabled();
+        fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
+        expect(await screen.findByRole("tooltip")).toHaveTextContent(
+          "Loading session configuration",
+        );
+
+        nextDiscovered = true;
+        fireEvent.change(input, { target: { value: "continue on the drafted branch now" } });
+        await waitFor(() => expect(submit).toBeEnabled());
+        fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+
+        await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+        const [, init] = authenticatedFetchMock.mock.calls[0];
+        const body = JSON.parse((init as RequestInit).body as string) as {
+          workspace?: string;
+          git?: { branch_name: string; base_branch?: string | null };
+        };
+        expect(body.workspace).toBe(nextWorkspace);
+        expect(body.git?.branch_name).toBe(requestedBranch);
+        expect(body.git?.base_branch).toBe("release");
+      },
+    );
+
+    it.each([false, true])(
       "clears a named worktree when the new workspace is confirmed non-git (auto-seeded: %s)",
       async (autoSeeded) => {
         await selectNewWorktree(autoSeeded);
@@ -4938,6 +4985,85 @@ describe("NewChatLandingScreen", () => {
     // (e.g. dropped the workspace gate), the blank cases above would have
     // enabled too.
     expect(submit.disabled).toBe(false);
+  });
+
+  it("starts the session while the host's worktree discovery is still pending", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    useHostWorktreesMock.mockReturnValue({
+      ...PENDING_QUERY_STATE,
+      data: undefined,
+    } as ReturnType<typeof useHostWorktrees>);
+    renderLanding();
+    // The directory control keeps reporting the pending discovery.
+    expect(await screen.findByRole("status", { name: "Loading working directory" })).toBeVisible();
+    const submit = screen.getByTestId("new-chat-landing-submit");
+    fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Enter a message to get started");
+
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "set up the project" },
+    });
+    expect(submit).toBeEnabled();
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      host_id?: string;
+      workspace?: string;
+      git?: unknown;
+    };
+    expect(body.host_id).toBe("host_1");
+    expect(body.workspace).toBe("/Users/corey/repo");
+    expect(body).not.toHaveProperty("git");
+  });
+
+  it("waits for worktree discovery when the always-use-worktree default needs it", async () => {
+    localStorage.setItem("omnigent:always-use-worktree", "true");
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    let discovered = false;
+    useHostWorktreesMock.mockImplementation(
+      (_host, path) =>
+        (path === null
+          ? DISABLED_QUERY_RESULT
+          : discovered
+            ? {
+                ...SUCCESS_QUERY_STATE,
+                data: [{ path, branch: "main", is_main: true, detached: false }],
+              }
+            : { ...PENDING_QUERY_STATE, data: undefined }) as ReturnType<typeof useHostWorktrees>,
+    );
+    renderLanding();
+    const input = screen.getByTestId("new-chat-landing-input");
+    fireEvent.change(input, { target: { value: "set up the project" } });
+    const submit = screen.getByTestId("new-chat-landing-submit");
+    // The seeded branch needs the discovery result, so the start waits for it.
+    expect(submit).toBeDisabled();
+    fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Loading session configuration");
+
+    discovered = true;
+    fireEvent.change(input, { target: { value: "set up the project in a worktree" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-branch-chip")).toHaveTextContent(
+        /^worktree-[0-9a-f]{8}$/,
+      ),
+    );
+    expect(submit).toBeEnabled();
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      git?: { branch_name: string };
+    };
+    expect(body.git?.branch_name).toMatch(/^worktree-[0-9a-f]{8}$/);
   });
 
   it("keeps the disabled reason tooltip on the new-chat submit button", async () => {

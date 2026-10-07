@@ -1,6 +1,6 @@
 import { createElement, type ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type DefaultOptions, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useHostWorktrees } from "./useHostWorktrees";
@@ -16,8 +16,8 @@ function response(status: number, body: unknown) {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
 }
 
-function wrapper() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function wrapper(queries: DefaultOptions["queries"] = { retry: false }) {
+  const client = new QueryClient({ defaultOptions: { queries } });
   return ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client }, children);
 }
@@ -79,11 +79,32 @@ describe("useHostWorktrees", () => {
   it.each([401, 404, 409, 500])("surfaces HTTP %s without claiming non-git", async (status) => {
     authenticatedFetchMock.mockResolvedValue(response(status, { detail: "host unavailable" }));
     const { result } = renderHook(() => useHostWorktrees("host", "/repo"), {
-      wrapper: wrapper(),
+      wrapper: wrapper({ retryDelay: 0 }),
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
     expect(result.current.error?.message).toBe(`host worktrees fetch failed: HTTP ${status}`);
+  });
+
+  it("does not retry a 400 the host already answered", async () => {
+    authenticatedFetchMock.mockResolvedValue(
+      response(400, { detail: "worktree listing failed: git command timed out after 120s" }),
+    );
+    const { result } = renderHook(() => useHostWorktrees("host", "/repo"), {
+      wrapper: wrapper({ retryDelay: 0 }),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(authenticatedFetchMock).toHaveBeenCalledTimes(1);
+    expect(result.current.error?.message).toBe("host worktrees fetch failed: HTTP 400");
+  });
+
+  it("keeps retrying when the host could not be reached", async () => {
+    authenticatedFetchMock.mockResolvedValue(response(409, { detail: "host did not respond" }));
+    const { result } = renderHook(() => useHostWorktrees("host", "/repo"), {
+      wrapper: wrapper({ retryDelay: 0 }),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(authenticatedFetchMock.mock.calls.length).toBeGreaterThan(1);
   });
 
   it("preserves known git worktrees when a refresh fails", async () => {
