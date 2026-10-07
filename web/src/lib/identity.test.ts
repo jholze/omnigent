@@ -7,6 +7,7 @@
 // state into each other through the cached `currentUserId`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as HostModule from "./host";
 
 function mockJsonResponse(body: unknown, init?: { ok?: boolean; status?: number }): Response {
   return {
@@ -281,7 +282,8 @@ describe("authenticatedFetch", () => {
         setSessionHost("other-a", "host_modal");
         setSessionHost("other-b", "host_modal");
         if (mode === "known") setSessionHost("session-a", "host_target");
-        vi.doMock("./host", () => ({
+        vi.doMock("./host", async (importOriginal) => ({
+          ...(await importOriginal<typeof HostModule>()),
           getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
           hostFetch: fetchMock,
           isDatabricksWorkspace: vi.fn(() => true),
@@ -315,7 +317,8 @@ describe("authenticatedFetch", () => {
         resolveModalHost: vi.fn(),
         isModalHostResolved: vi.fn(() => true),
       }));
-      vi.doMock("./host", () => ({
+      vi.doMock("./host", async (importOriginal) => ({
+        ...(await importOriginal<typeof HostModule>()),
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
@@ -347,7 +350,8 @@ describe("authenticatedFetch", () => {
         resolveModalHost: vi.fn(),
         isModalHostResolved: vi.fn(() => true),
       }));
-      vi.doMock("./host", () => ({
+      vi.doMock("./host", async (importOriginal) => ({
+        ...(await importOriginal<typeof HostModule>()),
         getOmnigentHostConfig: vi.fn(() => ({})),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
@@ -373,7 +377,8 @@ describe("authenticatedFetch", () => {
         resolveModalHost: vi.fn(),
         isModalHostResolved: vi.fn(() => true),
       }));
-      vi.doMock("./host", () => ({
+      vi.doMock("./host", async (importOriginal) => ({
+        ...(await importOriginal<typeof HostModule>()),
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),
@@ -415,7 +420,8 @@ describe("authenticatedFetch", () => {
         const { setSessionHost, setSessionParent } = await import("./sessionHost");
         setSessionHost("parent", "host_parent");
         setSessionParent("child", "parent");
-        vi.doMock("./host", () => ({
+        vi.doMock("./host", async (importOriginal) => ({
+          ...(await importOriginal<typeof HostModule>()),
           getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
           hostFetch: fetchMock,
           isDatabricksWorkspace: vi.fn(() => true),
@@ -475,7 +481,8 @@ describe("authenticatedFetch", () => {
         resolveModalHost: vi.fn(),
         isModalHostResolved: vi.fn(() => true),
       }));
-      vi.doMock("./host", () => ({
+      vi.doMock("./host", async (importOriginal) => ({
+        ...(await importOriginal<typeof HostModule>()),
         getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
         hostFetch: fetchMock,
         isDatabricksWorkspace: vi.fn(() => true),

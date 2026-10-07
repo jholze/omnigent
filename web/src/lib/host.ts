@@ -173,7 +173,14 @@ let hostConfig: OmnigentHostConfig = {};
 let hostConfigGeneration = 0;
 let embedRoot: HTMLElement | null = null;
 let embedScopeRoot: HTMLElement | null = null;
+
+/** The identity probe (`GET /v1/me`); a success here re-arms expired-session recovery. */
+export const IDENTITY_PROBE_PATH = "/v1/me";
+// Per-tab guard: one automatic reload per expiry, until a later page load proves
+// the host session valid again, so a persistently expired host cannot loop.
 const HOST_SESSION_RECOVERY_KEY = "omnigent:host-session-recovery";
+// Wording the embedding host's fetcher rejects with once its user session lapsed.
+const EXPIRED_HOST_SESSION_RE = /fetch request failed due (?:to )?expired user session/i;
 let hostSessionRecoveryPending = false;
 
 export function getOmnigentServerIdentity(): string | null {
@@ -302,44 +309,59 @@ export function getThemeRoots(): HTMLElement[] {
   return typeof document !== "undefined" ? [document.documentElement] : [];
 }
 
+function isExpiredHostSessionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return EXPIRED_HOST_SESSION_RE.test(message);
+}
+
+/** Reload the current URL once per tab so the host can renew its user session. */
 function recoverExpiredHostSession(error: unknown): void {
-  if (
-    hostSessionRecoveryPending ||
-    !(error instanceof Error) ||
-    !/^Fetch request failed due (?:to )?expired user session\.?$/i.test(error.message)
-  ) {
-    return;
-  }
+  if (hostSessionRecoveryPending || !isExpiredHostSessionError(error)) return;
   try {
     if (window.sessionStorage.getItem(HOST_SESSION_RECOVERY_KEY)) return;
     window.sessionStorage.setItem(HOST_SESSION_RECOVERY_KEY, "1");
-    hostSessionRecoveryPending = true;
-    window.location.reload();
   } catch {
+    // Without a persistent guard, automatic recovery could loop indefinitely.
     return;
+  }
+  hostSessionRecoveryPending = true;
+  window.location.reload();
+}
+
+function rearmHostSessionRecovery(): void {
+  try {
+    window.sessionStorage.removeItem(HOST_SESSION_RECOVERY_KEY);
+  } catch {
+    // Storage unavailable: no reload was ever scheduled, so nothing to re-arm.
   }
 }
 
-/** Route embedded requests through the host and standalone requests through the base path. */
+/**
+ * Single network choke point. Delegates to the host fetcher when embedded,
+ * otherwise calls native `fetch` with the path unchanged (standalone).
+ *
+ * Embedded only: when the host fetcher rejects because the host's user session
+ * expired, the page reloads once so the host can renew it. The rejection still
+ * reaches the caller and the request is never replayed; a 401 `Response` is
+ * returned untouched because the host owns response-based auth.
+ */
 export async function hostFetch(path: string, init?: RequestInit): Promise<Response> {
-  if (hostConfig.fetcher) {
-    // The host owns path rebasing; `withBasePath` is standalone-only.
-    try {
-      const response = await hostConfig.fetcher(path, init);
-      if (path === "/v1/me" && response.ok && !hostSessionRecoveryPending) {
-        try {
-          window.sessionStorage.removeItem(HOST_SESSION_RECOVERY_KEY);
-        } catch {
-          return response;
-        }
-      }
-      return response;
-    } catch (error) {
-      recoverExpiredHostSession(error);
-      throw error;
-    }
+  if (!hostConfig.fetcher) return fetch(withBasePath(path), init);
+  // The host owns path rebasing (it proxies onto its own API surface), so
+  // the path is passed through untouched — `withBasePath` is standalone-only.
+  let response: Response;
+  try {
+    response = await hostConfig.fetcher(path, init);
+  } catch (error) {
+    recoverExpiredHostSession(error);
+    throw error;
   }
-  return fetch(withBasePath(path), init);
+  // Only a probe that completes before any reload is scheduled may re-arm the
+  // guard; a late success must not erase the guard the pending reload relies on.
+  if (path === IDENTITY_PROBE_PATH && response.ok && !hostSessionRecoveryPending) {
+    rearmHostSessionRecovery();
+  }
+  return response;
 }
 
 export function resolveWebSocketUrl(path: string): string {

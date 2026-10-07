@@ -137,6 +137,7 @@ describe("hostFetch session recovery", () => {
   it.each([
     "Fetch request failed due to expired user session",
     "Fetch request failed due expired user session",
+    "workspaceFetch: Fetch request failed due to expired user session (request 7f2a)",
   ])("reloads for %s and preserves the original error", async (message) => {
     const error = new Error(message);
     fetcher.mockRejectedValue(error);
@@ -145,6 +146,17 @@ describe("hostFetch session recovery", () => {
     await expect(hostFetch("/v1/sessions")).rejects.toBe(error);
 
     expect(reload).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("reloads when the host rejects with the bare message string", async () => {
+    fetcher.mockRejectedValue("Fetch request failed due to expired user session");
+    const { hostFetch } = await loadHost();
+
+    await expect(hostFetch("/v1/sessions")).rejects.toBe(
+      "Fetch request failed due to expired user session",
+    );
+
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it("coalesces concurrent failures without replaying writes", async () => {

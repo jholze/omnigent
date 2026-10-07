@@ -17,7 +17,12 @@
 
 import { stripBasePath, withBasePath } from "./basePath";
 import { getCachedServerInfo } from "./capabilities";
-import { getOmnigentHostConfig, hostFetch, isDatabricksWorkspace } from "./host";
+import {
+  getOmnigentHostConfig,
+  hostFetch,
+  IDENTITY_PROBE_PATH,
+  isDatabricksWorkspace,
+} from "./host";
 import {
   clearHostKeyless,
   getSessionHost,
@@ -337,7 +342,7 @@ export async function resolveIdentity(): Promise<string | null> {
   if (identityPromise) return identityPromise;
   identityPromise = (async () => {
     try {
-      const res = await hostFetch("/v1/me");
+      const res = await hostFetch(IDENTITY_PROBE_PATH);
       if (res.status === 401) {
         // OIDC / accounts mode: server requires authentication.
         // Redirect to the login URL provided in the response body —
