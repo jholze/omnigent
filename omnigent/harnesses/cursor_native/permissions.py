@@ -167,10 +167,18 @@ async def _deliver_verdict_keys(bridge_dir: Path, session_id: str, *keys: str) -
     try:
         return await asyncio.shield(delivery)
     except asyncio.CancelledError:
-        # A repeated cancel must not cut the sequence either; the task's own
-        # cancellation is what propagates, never a delivery error.
-        with suppress(asyncio.CancelledError, Exception):
-            await asyncio.shield(delivery)
+        # Repeated cancels must not abandon the owed keys; the task's own
+        # cancellation propagates once delivery has settled.
+        while not delivery.done():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(delivery)
+        if not delivery.cancelled() and (error := delivery.exception()) is not None:
+            _logger.error(
+                "cursor keystrokes %r failed while cancelling; session=%s",
+                keys,
+                session_id,
+                exc_info=error,
+            )
         raise
 
 

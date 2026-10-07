@@ -804,8 +804,44 @@ async def test_cancelled_verdict_task_finishes_its_key_sequence(
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert task.cancelled()
-    # Escape alone leaves cursor at its reason prompt; the owed Enter still goes out.
-    assert await _wait_for(lambda: sent == ["Escape", "Enter"])
+    # Escape alone leaves cursor at its reason prompt; the owed Enter went out
+    # before the task finished.
+    assert sent == ["Escape", "Enter"]
+
+
+async def test_cancelled_verdict_task_logs_a_failed_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A delivery that fails while its task is cancelled is logged, not lost."""
+    sent: list[str] = []
+
+    def send(_bridge: Path, key: str) -> None:
+        sent.append(key)
+        if key == "Enter":
+            raise ValueError("pane vanished")
+
+    monkeypatch.setattr(cnp, "send_cursor_pane_keys", send)
+    task = asyncio.create_task(
+        cnp._run_one_approval(
+            _QueueClient([httpx.Response(200, json={"action": "decline"})]),  # type: ignore[arg-type]
+            session_id="conv_cancel_failed_delivery",
+            bridge_dir=tmp_path,
+            prompt=CursorApprovalPrompt(
+                operation_type="shell",
+                message="Run this command?",
+                preview="rm -rf build",
+                accept_key="y",
+                decline_key="Escape",
+            ),
+            elicitation_id="elic_cancel_failed_delivery",
+        )
+    )
+    assert await _wait_for(lambda: sent == ["Escape"])
+    await cnp._cancel_cursor_elicitation_tasks((task,))
+    assert task.cancelled()
+    assert sent == ["Escape", "Enter"]
+    assert "failed while cancelling" in caplog.text
+    assert "pane vanished" in caplog.text
 
 
 async def test_supervise_transcript_yolo_auto_accepts_without_card(
