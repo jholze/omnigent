@@ -108,13 +108,19 @@ def _open_session(page: Page, session_id: str) -> None:
     """Click the sidebar row for *session_id* and wait until its page is open.
 
     Rows re-sort and resize as replies land, so a click can hit a neighbouring
-    row after Playwright's hit check; verify the URL and retry.
+    row after Playwright's hit check; verify the URL and retry. The URL changes
+    before the transcript re-binds, so also wait for the main pane to carry this
+    session's id, otherwise a following read of ``.last`` can hit the previous
+    session's transcript mid-swap.
     """
     link = _row(page, session_id).locator(f'a[href="/c/{session_id}"]')
     for attempt in range(3):
         link.click()
         try:
             expect(page).to_have_url(re.compile(rf"/c/{session_id}$"), timeout=5_000)
+            expect(page.locator(f'main[data-session-id="{session_id}"]')).to_be_visible(
+                timeout=5_000
+            )
             return
         except AssertionError:
             if attempt == 2:
@@ -215,8 +221,8 @@ def _send_and_leave(desktop: Page, session_id: str, text: str) -> None:
     composer.fill(text)
     composer.press("Enter")
     expect(
-        desktop.locator('[data-testid="message-bubble"][data-role="user"]').last
-    ).to_contain_text(text)
+        desktop.locator('[data-testid="message-bubble"][data-role="user"]').filter(has_text=text)
+    ).to_be_visible()
     desktop.locator(f'{_SIDEBAR} a[href="/inbox"]').first.click()
     expect(desktop).to_have_url(re.compile(r"/inbox$"))
 
