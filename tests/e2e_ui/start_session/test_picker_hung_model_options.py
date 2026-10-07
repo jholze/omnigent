@@ -33,6 +33,7 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
     async with async_playwright() as playwright:
         browser = await getattr(playwright, browser_name).launch()
         viewport = {"width": 1440, "height": 900}
+        # The e2e conftest adds record_video_dir when OMNIGENT_E2E_RECORD_DIR is set.
         context = await browser.new_context(viewport=viewport, record_video_size=viewport)
         page = await context.new_page()
         release = asyncio.Event()

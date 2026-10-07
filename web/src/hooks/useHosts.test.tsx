@@ -419,6 +419,8 @@ describe("useHostModelOptions", () => {
   });
 
   it("settles a hung model-options request within a bounded deadline", async () => {
+    // The deadline itself is the requirement; the fake-clock steps below only echo it.
+    expect(MODEL_OPTIONS_TIMEOUT_MS).toBe(30_000);
     fetchMock.mockReturnValue(new Promise<Response>(() => {}));
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -527,7 +529,7 @@ describe("useHostModelOptions", () => {
 
   it("keeps a failed catalog settled after switching harness and back", async () => {
     fetchMock.mockImplementation((url: string) =>
-      url.includes("/codex-native/")
+      url === "/v1/hosts/host_1/harnesses/codex-native/model-options"
         ? Promise.resolve(mockResponse({ models: [{ id: "gpt-5-codex" }] }))
         : new Promise<Response>(() => {}),
     );
@@ -549,6 +551,38 @@ describe("useHostModelOptions", () => {
       expect(result.current.isLoading).toBe(false);
       expect(result.current.isError).toBe(true);
       expect(result.current.status).toBe("error");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a fresh mount after a timed-out catalog as a new initial load", async () => {
+    fetchMock.mockReturnValue(new Promise<Response>(() => {}));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const shared = ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      );
+      const first = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper: shared,
+      });
+      await vi.advanceTimersByTimeAsync(MODEL_OPTIONS_TIMEOUT_MS + 1_000);
+      await waitFor(() => expect(first.result.current.isError).toBe(true));
+      first.unmount();
+
+      // Reopening the picker refetches the cached failure: it spins like any first
+      // load, and the retained message belongs to the instance that saw the failure.
+      const second = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper: shared,
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      expect(second.result.current.isLoading).toBe(true);
+      expect(second.result.current.isError).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(MODEL_OPTIONS_TIMEOUT_MS + 1_000);
+      await waitFor(() => expect(second.result.current.isError).toBe(true));
+      expect(second.result.current.isLoading).toBe(false);
     } finally {
       vi.useRealTimers();
     }
