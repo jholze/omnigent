@@ -499,3 +499,38 @@ def test_external_status_is_mailboxed_until_the_next_tick(tmp_path: Path) -> Non
     _write_session_file(sessions, pid=1, session_id="s", status="idle")
     poller.tick()
     assert published == [RUNNING]
+
+
+def test_resync_discards_a_stale_mailboxed_status(tmp_path: Path) -> None:
+    """A reconnect re-asserts the file over a pre-reconnect hook status.
+
+    A hook status mailboxed before the server recycled is stale: the resync
+    exists to republish the file's *current* value. If that pending status
+    survived into the drain it would re-adopt the old edge and dedup the file's
+    matching value back into silence, stranding the session again.
+    """
+    sessions = tmp_path / "sessions"
+    _write_session_file(sessions, pid=1, session_id="s", status="busy")
+    published: list[str] = []
+    poller = SessionStatusPoller(
+        on_status=lambda status, _reason: published.append(status),
+        pane_pid_getter=_StubPidGetter(1),
+        session_id_getter=lambda: "s",
+        config_dir=tmp_path,
+    )
+    poller.tick()  # busy → running
+    assert published == [RUNNING]
+
+    # A hook idle lands, then the turn genuinely ends and the server recycles.
+    poller.note_external_status(IDLE)
+    assert poller._pending_external_status == IDLE
+    _write_session_file(sessions, pid=1, session_id="s", status="idle")
+    poller.resync()
+    # The stale mailbox is dropped the moment the reconnect is requested.
+    assert poller._pending_external_status is None
+
+    # The next tick re-asserts the file's idle instead of the stale mailbox
+    # swallowing it as a duplicate of the adopted edge.
+    poller.tick()
+    assert published == [RUNNING, IDLE]
+    assert poller._last_edge == (IDLE, None)

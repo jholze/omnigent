@@ -240,14 +240,15 @@ async def record_subagent_activity(
                 store.set_labels, child.id, {CLAUDE_SUBAGENT_OUTCOME_LABEL: status}
             )
             lifecycle_status = "failed" if status == "failed" else "idle"
-            if lifecycle_status == "idle" and _session_status_cache.get(child.id) == "failed":
-                # A confirmed success or cancellation is authoritative and
-                # supersedes a speculative offline-sweep failure. Clear the
-                # error labels so the summary stops reporting failed, and drop
-                # the sticky failed cache so the idle edge below is not swallowed
-                # by _publish_status's failed→idle guard.
+            if lifecycle_status == "idle":
+                # A confirmed success or cancellation supersedes an offline-sweep
+                # failure; clear durable error labels unconditionally so a cold
+                # cache (eviction or restart) cannot leave the child Failed.
                 await _persist_session_status_error_labels(child.id, None, store)
-                _session_status_cache.pop(child.id, None)
+                if _session_status_cache.get(child.id) == "failed":
+                    # Drop the sticky failed cache so the idle edge below is not
+                    # swallowed by _publish_status's failed→idle guard.
+                    _session_status_cache.pop(child.id, None)
             unchanged = _session_status_cache.get(child.id) == lifecycle_status
             _publish_status(
                 child.id,

@@ -327,11 +327,13 @@ class SessionStatusPoller:
         self._last_mtime: float | None = None
         self._last_edge: tuple[str, str | None] | None = None
         self._last_status: SessionStatus | None = None
-        # One-slot mailbox for a hook's status, written from the event-loop
-        # thread and drained by the watcher thread in ``tick``. Guards the
-        # only cross-thread write so ``_last_edge`` stays single-threaded.
+        # One-slot mailbox for cross-thread signals (a hook's status and a
+        # reconnect resync), written from the event-loop thread and drained by
+        # the watcher thread in ``tick`` so ``_last_edge``/``_last_mtime`` stay
+        # single-threaded.
         self._external_lock = threading.Lock()
         self._pending_external_status: str | None = None
+        self._pending_resync = False
 
     @property
     def active(self) -> bool:
@@ -425,8 +427,12 @@ class SessionStatusPoller:
             self._path,
             extra={"session_id": self._omnigent_session_id},
         )
-        self._last_mtime = None
-        self._last_edge = None
+        with self._external_lock:
+            # Drop any pre-reconnect hook status so it cannot re-suppress the
+            # edge this resync re-asserts; the baseline reset itself happens on
+            # the watcher thread in ``_drain_external_status``.
+            self._pending_external_status = None
+            self._pending_resync = True
 
     def note_external_status(self, status: str) -> None:
         """Adopt a hook's status without replaying the file's older contents.
@@ -439,14 +445,21 @@ class SessionStatusPoller:
             self._pending_external_status = status
 
     def _drain_external_status(self) -> None:
-        """Apply a mailboxed hook status on the watcher thread.
+        """Apply mailboxed cross-thread signals on the watcher thread.
 
-        Keeps ``_last_edge`` single-threaded: the hook's thread only writes
-        the mailbox, and the baseline update happens here under the watcher.
+        Keeps ``_last_edge``/``_last_mtime`` single-threaded: other threads
+        only write the mailbox, and the baseline updates happen here. A
+        requested resync clears the baselines first so a mailboxed status
+        adopted in the same drain still wins.
         """
         with self._external_lock:
             pending = self._pending_external_status
+            pending_resync = self._pending_resync
             self._pending_external_status = None
+            self._pending_resync = False
+        if pending_resync:
+            self._last_mtime = None
+            self._last_edge = None
         if pending is not None:
             self._last_edge = (pending, None)
 

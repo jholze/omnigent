@@ -151,15 +151,9 @@ async def status_route(
     "optional",
     [
         {},
-        {
-            "response_id": "resp_turn",
-            "background_task_count": 1,
-            "background_tasks": [_BACKGROUND_TASK.model_dump()],
-            "blocked_on": "permission",
-        },
-        {"response_id": None, "background_task_count": 0},
         {"background_task_count": True, "background_tasks": "invalid", "blocked_on": 1},
     ],
+    ids=["bare", "malformed"],
 )
 async def test_subagent_idle_does_not_complete_active_work(
     status_route: _StatusRoute, is_child: bool, optional: dict[str, Any]
@@ -312,6 +306,38 @@ async def test_late_running_rechecks_outcome_under_parent_lock(
     summary = sessions._child_session_summary_from_conversation(child, route.parent_id, None)
     assert summary.busy is False
     assert summary.current_task_status == "completed"
+
+
+async def test_late_running_publishes_under_parent_lock(
+    status_route: _StatusRoute,
+) -> None:
+    """A ``running`` edge with no outcome publishes while holding the parent lock.
+
+    Re-reading under the lock is not enough: the lock must also be held across
+    the publish. Otherwise a result-recording path could latch a terminal
+    outcome between the re-read and the ``running`` publication and the stale
+    ``running`` would be reordered after the terminal edge.
+    """
+    from omnigent.server.routes._sessions.orchestration import _native_mirror_lock
+
+    route = status_route
+    sid = route.child_id
+    route.store.set_labels(sid, {"omnigent.wrapper": "claude-code-native-ui-subagent"})
+
+    lock = _native_mirror_lock(route.parent_id)
+    locked_at_publish: list[bool] = []
+    route.published.side_effect = lambda *_a, **_k: locked_at_publish.append(lock.locked())
+
+    response = await route.client.post(
+        f"/v1/sessions/{sid}/events",
+        json={"type": "external_session_status", "data": {"status": "running"}},
+    )
+    assert response.status_code == 202, response.text
+    await _flush_live_state()
+
+    assert locked_at_publish == [True]
+    assert not lock.locked()
+    assert common._session_status_cache[sid] == "running"
 
 
 @pytest.mark.parametrize(

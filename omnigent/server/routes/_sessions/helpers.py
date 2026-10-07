@@ -10739,6 +10739,10 @@ def _child_session_summary_from_conversation(
         if outcome in SUBAGENT_TERMINAL_STATUSES:
             busy = False
             current_task_status = outcome
+            if outcome != "failed":
+                # A confirmed success or cancellation supersedes a stale
+                # offline-sweep failure the in-memory cache could not clear.
+                last_task_error = None
         elif cached_status == "idle":
             # Older runners may still report transcript inactivity as idle.
             current_task_status = None

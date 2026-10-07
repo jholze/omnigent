@@ -478,6 +478,7 @@ async def test_only_confirmed_results_latch_claude_outcome(
     store = SqlAlchemyConversationStore(db_uri)
     parent = store.create_conversation()
     child = store.create_conversation(
+        kind="sub_agent",
         parent_conversation_id=parent.id,
         labels={"omnigent.wrapper": "claude-code-native-ui-subagent"},
     )
@@ -495,21 +496,26 @@ async def test_only_confirmed_results_latch_claude_outcome(
     await record_subagent_activity(
         child.id, "returned", store, status="completed", turn_id="native-call", confirmed=True
     )
-    assert store.get_conversation(child.id).labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+    refreshed = store.get_conversation(child.id)
+    assert refreshed.labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
     publish_parent.assert_called_once_with(child.id, "idle")
+    summary = helpers._child_session_summary_from_conversation(refreshed, parent.id, None)
+    assert not summary.busy
+    assert summary.current_task_status == "completed"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["sticky_failed", "cold"])
 async def test_confirmed_completion_clears_offline_sweep_failure(
-    db_uri: str, monkeypatch: pytest.MonkeyPatch
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, cache_state: str
 ) -> None:
     """A confirmed non-failed outcome supersedes a speculative offline-sweep failure.
 
-    An offline sweep can mark a child ``failed`` — sticky cache plus durable
-    error labels — before the parent's result arrives. When the confirmed
-    result latches ``completed``, that stale failure must clear: the summary
-    stops reading failed and the idle edge is not swallowed by the sticky
-    failed→idle guard, so it reaches the parent's Agents rail.
+    An offline sweep can mark a child ``failed`` — durable error labels, plus a
+    sticky ``failed`` cache entry while the sweeping process stays live. The
+    confirmed ``completed`` result must clear that stale failure whether or not
+    the cache still holds it (``cold`` models a restart or another replica), so
+    the summary stops reading failed and the idle edge reaches the parent's rail.
     """
     from omnigent.server.routes._sessions import common, helpers
     from omnigent.server.schemas import ErrorDetail
@@ -517,6 +523,7 @@ async def test_confirmed_completion_clears_offline_sweep_failure(
     store = SqlAlchemyConversationStore(db_uri)
     parent = store.create_conversation()
     child = store.create_conversation(
+        kind="sub_agent",
         parent_conversation_id=parent.id,
         labels={"omnigent.wrapper": "claude-code-native-ui-subagent"},
     )
@@ -525,24 +532,67 @@ async def test_confirmed_completion_clears_offline_sweep_failure(
         ErrorDetail(code="runner_disconnected", message="runner vanished mid-turn"),
         store,
     )
-    monkeypatch.setitem(common._session_status_cache, child.id, "failed")
-    failed = helpers._child_session_summary_from_conversation(
+    if cache_state == "sticky_failed":
+        common._session_status_cache[child.id] = "failed"
+    else:
+        common._session_status_cache.pop(child.id, None)
+    try:
+        failed = helpers._child_session_summary_from_conversation(
+            store.get_conversation(child.id), parent.id, None
+        )
+        assert failed.current_task_status == "failed"
+        assert failed.last_task_error is not None
+
+        publish_parent = Mock()
+        monkeypatch.setattr(helpers, "_publish_child_status_to_parent", publish_parent)
+        await record_subagent_activity(
+            child.id, "returned", store, status="completed", turn_id="native-call", confirmed=True
+        )
+
+        refreshed = store.get_conversation(child.id)
+        assert refreshed.labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
+        final = helpers._child_session_summary_from_conversation(refreshed, parent.id, None)
+        assert final.current_task_status == "completed"
+        assert final.last_task_error is None
+        assert not final.busy
+        assert common._session_status_cache[child.id] == "idle"
+        publish_parent.assert_called_once_with(child.id, "idle")
+    finally:
+        common._session_status_cache.pop(child.id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "cancelled"])
+async def test_child_summary_prefers_confirmed_outcome_over_stale_error(
+    db_uri: str, outcome: str
+) -> None:
+    """A confirmed non-failed outcome hides a stale offline-sweep error label.
+
+    A late offline sweep can re-persist ``last_task_error`` after the confirmed
+    outcome already latched. The child summary must still project that outcome
+    rather than reporting the superseded failure.
+    """
+    from omnigent.server.routes._sessions import helpers
+    from omnigent.server.schemas import ErrorDetail
+
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation()
+    child = store.create_conversation(
+        kind="sub_agent",
+        parent_conversation_id=parent.id,
+        labels={
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            CLAUDE_SUBAGENT_OUTCOME_LABEL: outcome,
+        },
+    )
+    await helpers._persist_session_status_error_labels(
+        child.id,
+        ErrorDetail(code="runner_disconnected", message="late offline sweep"),
+        store,
+    )
+    summary = helpers._child_session_summary_from_conversation(
         store.get_conversation(child.id), parent.id, None
     )
-    assert failed.current_task_status == "failed"
-    assert failed.last_task_error is not None
-
-    publish_parent = Mock()
-    monkeypatch.setattr(helpers, "_publish_child_status_to_parent", publish_parent)
-    await record_subagent_activity(
-        child.id, "returned", store, status="completed", turn_id="native-call", confirmed=True
-    )
-
-    refreshed = store.get_conversation(child.id)
-    assert refreshed.labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == "completed"
-    final = helpers._child_session_summary_from_conversation(refreshed, parent.id, None)
-    assert final.current_task_status == "completed"
-    assert final.last_task_error is None
-    assert not final.busy
-    assert common._session_status_cache[child.id] == "idle"
-    publish_parent.assert_called_once_with(child.id, "idle")
+    assert summary.current_task_status == outcome
+    assert summary.last_task_error is None
+    assert not summary.busy

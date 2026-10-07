@@ -104,6 +104,7 @@ from omnigent.server.routes._errors import session_not_found as _session_not_fou
 from omnigent.server.routes._sessions.common import (
     _ALLOWED_EVENT_TYPES,
     _APPROVAL_TYPE,
+    _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
     _CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY,
     _COMPACT_TYPE,
     _EXTERNAL_ACP_SUBAGENT_START_TYPE,
@@ -1768,24 +1769,15 @@ def register_events_routes(
             if body.type == _SUBAGENT_STATUS_TYPE:
                 # A quiet transcript can belong to a running tool; only a result ends the task.
                 return {"queued": False}
-            if (
+            # A late ``running`` edge for a claude-native child must not undo a
+            # terminal outcome the result path records concurrently, so it is
+            # re-read and published under the parent's mirror lock below.
+            native_running_edge = (
                 status == "running"
-                and conv.labels.get("omnigent.wrapper") == "claude-code-native-ui-subagent"
+                and conv.labels.get("omnigent.wrapper")
+                == _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE
                 and conv.parent_conversation_id is not None
-            ):
-                # Final child transcript chunks can arrive after the parent
-                # received its result. ``conv`` was read when the request
-                # started, so re-read the outcome under the parent's mirror
-                # lock to serialize against the result-recording path that
-                # writes it; a stale snapshot would let this ``running`` undo
-                # an already-recorded terminal outcome.
-                async with _native_mirror_lock(conv.parent_conversation_id):
-                    fresh = await asyncio.to_thread(
-                        conversation_store.get_conversation, session_id
-                    )
-                outcome = fresh.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL) if fresh else None
-                if outcome in SUBAGENT_TERMINAL_STATUSES:
-                    return {"queued": False}
+            )
             # ``None`` (field absent) = no information; leave the sticky
             # tally untouched (the PTY-activity ``idle`` carries none). An
             # explicit ``0`` from a ``Stop`` hook is authoritative and clears
@@ -1854,33 +1846,51 @@ def register_events_routes(
                     code=classify_native_turn_error(error_code, output),
                     message=output.strip(),
                 )
-            if status_error is not None:
-                failed_agent_name = await asyncio.to_thread(
-                    _response_agent_name_from_store, conversation_store, session_id, response_id
-                )
-                await _persist_session_status_error_labels(
+            async with contextlib.AsyncExitStack() as publish_guard:
+                if native_running_edge:
+                    assert conv.parent_conversation_id is not None
+                    await publish_guard.enter_async_context(
+                        _native_mirror_lock(conv.parent_conversation_id)
+                    )
+                    fresh = await asyncio.to_thread(
+                        conversation_store.get_conversation, session_id
+                    )
+                    outcome = fresh.labels.get(CLAUDE_SUBAGENT_OUTCOME_LABEL) if fresh else None
+                    if outcome in SUBAGENT_TERMINAL_STATUSES:
+                        return {"queued": False}
+                if status_error is not None:
+                    failed_agent_name = await asyncio.to_thread(
+                        _response_agent_name_from_store,
+                        conversation_store,
+                        session_id,
+                        response_id,
+                    )
+                    await _persist_session_status_error_labels(
+                        session_id,
+                        status_error,
+                        conversation_store,
+                        agent_name=failed_agent_name,
+                    )
+                elif status == "running":
+                    await _persist_session_status_error_labels(
+                        session_id, None, conversation_store
+                    )
+                _publish_status(
                     session_id,
+                    status,
                     status_error,
-                    conversation_store,
-                    agent_name=failed_agent_name,
+                    failure_origin="external_session_status",
+                    failure_context=data.get("failure_context"),
+                    response_id=response_id,
+                    background_task_count=bg_count,
+                    background_tasks=bg_tasks,
+                    blocked_on=blocked_on,
                 )
-            elif status == "running":
-                await _persist_session_status_error_labels(session_id, None, conversation_store)
-            _publish_status(
-                session_id,
-                status,
-                status_error,
-                failure_origin="external_session_status",
-                failure_context=data.get("failure_context"),
-                response_id=response_id,
-                background_task_count=bg_count,
-                background_tasks=bg_tasks,
-                blocked_on=blocked_on,
-            )
             if (
                 conv.parent_conversation_id is not None
                 and status in {"idle", "failed"}
-                and conv.labels.get("omnigent.wrapper") != "claude-code-native-ui-subagent"
+                and conv.labels.get("omnigent.wrapper")
+                != _CLAUDE_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE
             ):
                 harness = await asyncio.to_thread(
                     _resolve_harness,
