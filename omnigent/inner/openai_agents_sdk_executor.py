@@ -833,6 +833,40 @@ def _is_databricks_openai_client(client: AsyncOpenAIClient) -> bool:
     return "/ai-gateway/" in str(getattr(client, "base_url", ""))
 
 
+def _resolve_tool_message_names(messages: Any) -> Any:  # type: ignore[explicit-any]
+    """Stamp each chat ``role: tool`` message with its originating tool name.
+
+    OSS models on the Databricks AI Gateway reject a tool result with no
+    resolvable name when the preceding assistant issued parallel ``tool_calls``,
+    since results then have no unambiguous positional match. The openai-agents
+    converter omits the name, so resolve it from the assistant ``tool_calls`` by
+    ``tool_call_id``. *messages* is returned unchanged when not a list of dicts.
+    """
+    if not isinstance(messages, list):
+        return messages
+    names_by_call_id: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = tool_call.get("id")
+            function = tool_call.get("function")
+            name = function.get("name") if isinstance(function, dict) else None
+            if isinstance(call_id, str) and isinstance(name, str):
+                names_by_call_id[call_id] = name
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        if message.get("name"):
+            continue
+        resolved = names_by_call_id.get(message.get("tool_call_id"))
+        if resolved:
+            message["name"] = resolved
+    return messages
+
+
 class _ReasoningBlockFilterStream:
     """Async stream wrapper that converts list-type ``delta.content`` to ``None``.
 
@@ -899,18 +933,29 @@ class _ReasoningBlockFilterCompletions:
     :param completions: The real ``AsyncCompletions`` object.
     """
 
-    def __init__(self, completions: Any) -> None:  # type: ignore[explicit-any]
+    def __init__(
+        self,
+        completions: Any,  # type: ignore[explicit-any]
+        *,
+        databricks: bool = False,
+    ) -> None:
         self._completions = completions
+        self._databricks = databricks
 
     async def create(self, **kwargs: Any) -> Any:  # type: ignore[explicit-any]
         """
         Proxy ``create()``; wrap the result in
         :class:`_ReasoningBlockFilterStream` when streaming is enabled.
 
+        For the Databricks AI Gateway, also stamp a resolvable tool name on
+        each ``role: tool`` message so parallel tool results are accepted.
+
         :param kwargs: Forwarded verbatim to the underlying ``create()``.
         :returns: A :class:`_ReasoningBlockFilterStream` when ``stream=True``,
             otherwise the raw ``ChatCompletion`` response.
         """
+        if self._databricks and kwargs.get("messages") is not None:
+            kwargs["messages"] = _resolve_tool_message_names(kwargs["messages"])
         result = await self._completions.create(**kwargs)
         if kwargs.get("stream") and hasattr(result, "__anext__"):
             return _ReasoningBlockFilterStream(result)
@@ -926,17 +971,19 @@ class _ReasoningBlockFilterChat:
     :param chat: The real ``AsyncOpenAI.chat`` object.
     """
 
-    def __init__(self, chat: Any) -> None:  # type: ignore[explicit-any]
+    def __init__(self, chat: Any, *, databricks: bool = False) -> None:  # type: ignore[explicit-any]
         self._chat = chat
         self.completions: _ReasoningBlockFilterCompletions = _ReasoningBlockFilterCompletions(
-            chat.completions
+            chat.completions, databricks=databricks
         )
 
     def __getattr__(self, name: str) -> Any:  # type: ignore[explicit-any]
         return getattr(self._chat, name)
 
 
-def _wrap_client_for_reasoning_models(client: AsyncOpenAIClient) -> AsyncOpenAIClient:
+def _wrap_client_for_reasoning_models(
+    client: AsyncOpenAIClient, *, databricks: bool = False
+) -> AsyncOpenAIClient:
     """Wrap *client* so reasoning-model list content is filtered from streams.
 
     Replaces ``client.chat`` with a :class:`_ReasoningBlockFilterChat`
@@ -952,7 +999,9 @@ def _wrap_client_for_reasoning_models(client: AsyncOpenAIClient) -> AsyncOpenAIC
     # every ``client.chat.completions.create()`` call the SDK makes.
     # ``object.__setattr__`` bypasses both the OpenAI SDK's own ``__setattr__``
     # and any Pydantic frozen-instance guard on the client class.
-    object.__setattr__(client, "chat", _ReasoningBlockFilterChat(client.chat))
+    object.__setattr__(
+        client, "chat", _ReasoningBlockFilterChat(client.chat, databricks=databricks)
+    )
     return client
 
 
@@ -1105,15 +1154,18 @@ class OpenAIAgentsSDKExecutor(Executor):
         # The wrapper is a no-op for models that always return str content.
         # Only needed for the chat-completions path; the Responses API path
         # has its own event handling that doesn't go through ChatCmplStreamHandler.
+        databricks = _is_databricks_openai_client(raw_client)
         self._client = (
-            _wrap_client_for_reasoning_models(raw_client) if not use_responses else raw_client
+            _wrap_client_for_reasoning_models(raw_client, databricks=databricks)
+            if not use_responses
+            else raw_client
         )
         self._owns_client = client is None
         self._profile = profile
         self._use_responses = use_responses
         self._model_override = model
         self._reasoning_item_id_policy = reasoning_item_id_policy
-        self._databricks = _is_databricks_openai_client(self._client)
+        self._databricks = databricks
         self._tool_executor: ToolExecutor | None = None
         self._session_states: dict[str, _AgentsSessionState] = {}
 

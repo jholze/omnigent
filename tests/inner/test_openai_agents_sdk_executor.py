@@ -421,6 +421,82 @@ def test_wrap_client_non_streaming_create_not_wrapped() -> None:
     assert isinstance(result, _FakeResult)
 
 
+def _capture_forwarded_messages(messages, *, databricks):
+    """Send *messages* through the chat-completions wrapper, return what it forwards."""
+    captured: dict = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs) -> object:
+            captured.update(kwargs)
+            return object()
+
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    async def _run_inner() -> None:
+        client = _FakeClient()
+        _wrap_client_for_reasoning_models(client, databricks=databricks)
+        await client.chat.completions.create(messages=messages, stream=False)
+
+    _run(_run_inner())
+    return captured["messages"]
+
+
+def test_databricks_parallel_tool_results_get_resolvable_name() -> None:
+    """Parallel tool results sent to the Databricks gateway carry a resolvable name."""
+    from agents.models.chatcmpl_converter import Converter
+
+    # Build the wire messages with the SDK's own converter so the test tracks
+    # the real serialization rather than a hand-made shape.
+    responses_input = [
+        {"role": "user", "content": "look up two cities"},
+        {"type": "function_call", "call_id": "call_a", "name": "get_weather", "arguments": "{}"},
+        {"type": "function_call", "call_id": "call_b", "name": "get_time", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_a", "output": "18C"},
+        {"type": "function_call_output", "call_id": "call_b", "output": "22:00"},
+    ]
+    messages = Converter.items_to_messages(responses_input)
+    tool_messages = [m for m in messages if m.get("role") == "tool"]
+    assert tool_messages and all("name" not in m for m in tool_messages)
+
+    forwarded = _capture_forwarded_messages(messages, databricks=True)
+    resolved = {m["tool_call_id"]: m.get("name") for m in forwarded if m.get("role") == "tool"}
+    assert resolved == {"call_a": "get_weather", "call_b": "get_time"}
+
+
+def test_non_databricks_tool_results_keep_no_name() -> None:
+    """OpenAI chat tool results are forwarded without an added ``name``."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "content": "18C"},
+    ]
+    forwarded = _capture_forwarded_messages(messages, databricks=False)
+    tool_message = next(m for m in forwarded if m.get("role") == "tool")
+    assert "name" not in tool_message
+
+
 class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
     def test_close_closes_owned_client_but_not_injected_client(self):
         class _ClosableClient:
