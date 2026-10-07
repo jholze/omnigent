@@ -5831,47 +5831,15 @@ describe("chatStore — stop", () => {
     expect(controller.signal.aborted).toBe(false);
   });
 
-  it("clears local working state immediately while the interrupt ack is pending", () => {
+  it("keeps the POSTed prompt bubble while clearing local working state on stop", () => {
+    // A POSTed-but-unconsumed prompt is still optimistic; stop() (both the Stop
+    // button and composer Escape) must keep it unchanged while settling the
+    // local working state.
     useChatStore.setState({
       conversationId: "conv_abc",
       pendingUserMessages: [
         {
           tempId: "pend_1",
-          content: [{ type: "input_text", text: "stop me" }],
-        },
-      ],
-      activeResponse: { responseId: "resp_1", state: "streaming", error: null },
-      status: "streaming",
-      sessionStatus: "running",
-    });
-    seedConversationsCache([conv("conv_abc", "running")]);
-
-    useChatStore.getState().stop();
-
-    const state = useChatStore.getState();
-    // The still-pending prompt survives the stop: only `session.input.consumed`
-    // (promote) or a terminal `session.status` edge (dangling cleanup) may
-    // settle it — never the local stop itself.
-    expect(state.pendingUserMessages).toHaveLength(1);
-    expect(state.pendingUserMessages[0]?.tempId).toBe("pend_1");
-    expect(state.status).toBe("idle");
-    expect(state.sessionStatus).toBe("idle");
-    expect(state.activeResponse).toEqual({
-      responseId: "resp_1",
-      state: "cancelled",
-      error: null,
-    });
-    expect(readConversationRows()[0]?.status).toBe("idle");
-  });
-
-  it("keeps the just-sent prompt bubble when stop interrupts before input.consumed", () => {
-    // A POSTed-but-unconsumed prompt is still optimistic; stop() (both the Stop
-    // button and composer Escape) must keep it until the server reconciles it.
-    useChatStore.setState({
-      conversationId: "conv_abc",
-      pendingUserMessages: [
-        {
-          tempId: "pend_keep",
           content: [{ type: "input_text", text: "keep me visible after Esc" }],
           posted: true,
         },
@@ -5885,45 +5853,55 @@ describe("chatStore — stop", () => {
     useChatStore.getState().stop();
 
     const state = useChatStore.getState();
+    // Posted prompts remain pending until server reconciliation.
     expect(state.pendingUserMessages).toEqual([
       {
-        tempId: "pend_keep",
+        tempId: "pend_1",
         content: [{ type: "input_text", text: "keep me visible after Esc" }],
         posted: true,
       },
     ]);
-    // The stop itself still settles the local working state.
     expect(state.status).toBe("idle");
-    expect(state.activeResponse?.state).toBe("cancelled");
-  });
-
-  it("lets the server's terminal status settle a bubble that stop kept (non-native)", () => {
-    // Cleanup authority is the terminal status edge, never the local stop.
-    useChatStore.setState({
-      conversationId: "conv_abc",
-      isNativeTerminalSession: false,
-      pendingUserMessages: [
-        {
-          tempId: "pend_dangling",
-          content: [{ type: "input_text", text: "never consumed" }],
-          posted: true,
-        },
-      ],
-      activeResponse: { responseId: "resp_1", state: "streaming", error: null },
-      status: "streaming",
-      sessionStatus: "running",
+    expect(state.sessionStatus).toBe("idle");
+    expect(state.activeResponse).toEqual({
+      responseId: "resp_1",
+      state: "cancelled",
+      error: null,
     });
-    seedConversationsCache([conv("conv_abc", "running")]);
-
-    useChatStore.getState().stop();
-    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual([
-      "pend_dangling",
-    ]);
-
-    handleSessionEvent({ type: "session_status", conversationId: "conv_abc", status: "idle" });
-
-    expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    expect(readConversationRows()[0]?.status).toBe("idle");
   });
+
+  it.each(["idle", "failed", "waiting"] as const)(
+    "lets a %s session status settle a bubble that stop kept (non-native)",
+    (status) => {
+      // Cleanup authority is the server's turn-ending status edge, never the
+      // local stop.
+      useChatStore.setState({
+        conversationId: "conv_abc",
+        isNativeTerminalSession: false,
+        pendingUserMessages: [
+          {
+            tempId: "pend_dangling",
+            content: [{ type: "input_text", text: "never consumed" }],
+            posted: true,
+          },
+        ],
+        activeResponse: { responseId: "resp_1", state: "streaming", error: null },
+        status: "streaming",
+        sessionStatus: "running",
+      });
+      seedConversationsCache([conv("conv_abc", "running")]);
+
+      useChatStore.getState().stop();
+      expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual([
+        "pend_dangling",
+      ]);
+
+      handleSessionEvent({ type: "session_status", conversationId: "conv_abc", status });
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    },
+  );
 
   it("leaves a non-streaming activeResponse untouched on stop", () => {
     // Pins the `state === "streaming"` guard: stop() still clears the working

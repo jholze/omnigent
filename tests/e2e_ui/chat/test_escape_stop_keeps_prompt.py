@@ -70,14 +70,14 @@ def _sentinel_bubbles(page: Page, sentinel: str):
 
 
 def _bubble_id(page: Page, sentinel: str) -> str | None:
-    bubble = _sentinel_bubbles(page, sentinel).first
-    if bubble.count() == 0:
-        return None
-    return bubble.evaluate(
-        "el => (el.closest('[data-user-message-id]')"
+    # One evaluation over all matches avoids a count()-then-evaluate() race where
+    # the bubble detaches between the two reads.
+    ids = _sentinel_bubbles(page, sentinel).evaluate_all(
+        "els => els.map(el => (el.closest('[data-user-message-id]')"
         " ?? el.querySelector('[data-user-message-id]'))"
-        "?.getAttribute('data-user-message-id') ?? null"
+        "?.getAttribute('data-user-message-id') ?? null)"
     )
+    return ids[0] if ids else None
 
 
 def _arm_delayed_reply(mock_url: str, sentinel: str) -> None:
@@ -177,12 +177,13 @@ def _arm_and_stop(
         result = _stop_running_turn(page, sentinel, interrupt_posts, control=control)
         if result["optimistic_at_stop"]:
             return result
-        # Let the interrupted turn settle so the next attempt stops the new turn,
-        # not a stale Interrupt button still showing from this one.
-        expect(page.get_by_role("button", name="Interrupt", exact=True)).to_have_count(
-            0, timeout=30_000
-        )
-        _log.info("attempt %d: prompt committed before %s stop; re-sending", attempt, control)
+        if attempt < _MAX_ARM_ATTEMPTS:
+            # Let the interrupted turn settle so the next attempt stops the new
+            # turn, not a stale Interrupt button still showing from this one.
+            expect(page.get_by_role("button", name="Interrupt", exact=True)).to_have_count(
+                0, timeout=30_000
+            )
+            _log.info("attempt %d: prompt committed before %s stop; re-sending", attempt, control)
     return result
 
 
