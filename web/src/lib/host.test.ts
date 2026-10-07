@@ -120,7 +120,7 @@ describe("hostFetch session recovery", () => {
     originalLocation = window.location;
     Object.defineProperty(window, "location", {
       configurable: true,
-      value: { reload },
+      value: { ...originalLocation, reload },
     });
   });
 

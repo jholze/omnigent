@@ -171,7 +171,10 @@ def _expect_single_reload_recovery(page: Page, stuck_surface: Locator) -> None:
     page.wait_for_load_state()
     assert page.url == url_before
     page.wait_for_timeout(3_000)
-    assert _page_loads(page) == 2, "the embed kept reloading after recovering once"
+    final_loads = _page_loads(page)
+    assert final_loads == 2, (
+        f"the embed kept reloading after recovering once (page loads: {final_loads!r})"
+    )
 
 
 def test_sidebar_session_list_recovers_after_host_session_expires(
@@ -230,4 +233,7 @@ def test_persistently_expired_host_session_reloads_only_once(
         f"Failed to load: {EXPIRED_SESSION_MESSAGE}", timeout=30_000
     )
     page.wait_for_timeout(5_000)
-    assert _page_loads(page) == 2, "the embed reloaded again while the host stayed expired"
+    final_loads = _page_loads(page)
+    assert final_loads == 2, (
+        f"the embed reloaded again while the host stayed expired (page loads: {final_loads!r})"
+    )

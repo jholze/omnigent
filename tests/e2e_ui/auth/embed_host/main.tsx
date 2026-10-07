@@ -9,23 +9,17 @@ import { OmnigentApp, setOmnigentHostConfig } from "../src/embed";
 
 const BASENAME = "/embed-host";
 // Wording the embedding host uses when its user session has expired; the host
-// fetcher rejects with it before any HTTP response reaches the web UI.
+// fetcher rejects with it before any HTTP response reaches the web UI. Keep in
+// sync with EXPIRED_SESSION_MESSAGE in _embed_host.py (the persist test asserts it).
 const EXPIRED_SESSION_MESSAGE = "Fetch request failed due expired user session";
 const EXPIRED_KEY = "omnigent-e2e:host-session-expired";
 const PAGE_LOADS_KEY = "omnigent-e2e:host-page-loads";
 const SESSION_CHANGE_EVENT = "embed-host-session-change";
 
-interface HostFetchRecord {
-  path: string;
-  method: string;
-  outcome: "rejected" | number;
-}
-
 interface EmbedHostControls {
   expireSession: (options?: { persist?: boolean }) => void;
   restoreSession: () => void;
   isExpired: () => boolean;
-  fetches: () => HostFetchRecord[];
   pageLoads: () => number;
 }
 
@@ -35,7 +29,7 @@ declare global {
   }
 }
 
-const state = { expired: false, fetches: [] as HostFetchRecord[] };
+const state = { expired: false };
 
 function readStorage(key: string): string | null {
   try {
@@ -72,23 +66,21 @@ const controls: EmbedHostControls = {
     window.dispatchEvent(new Event(SESSION_CHANGE_EVENT));
   },
   isExpired: hostSessionExpired,
-  fetches: () => state.fetches.slice(),
   pageLoads: () => Number(readStorage(PAGE_LOADS_KEY) ?? "0"),
 };
 window.omnigentEmbedHost = controls;
 writeStorage(PAGE_LOADS_KEY, String(controls.pageLoads() + 1));
 
-async function hostFetcher(path: string, init?: RequestInit): Promise<Response> {
-  const method = init?.method ?? "GET";
+async function hostFetcher(
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
   if (hostSessionExpired()) {
-    state.fetches.push({ path, method, outcome: "rejected" });
     throw new Error(EXPIRED_SESSION_MESSAGE);
   }
   // The host transport is the one place that legitimately calls the real fetch.
   // oxlint-disable-next-line no-restricted-globals
-  const response = await fetch(path, init);
-  state.fetches.push({ path, method, outcome: response.status });
-  return response;
+  return fetch(path, init);
 }
 
 const hostConfig = { fetcher: hostFetcher, serverIdentity: "e2e-embed-host" };
@@ -118,7 +110,8 @@ function HostChrome() {
     >
       <span>Host application (stand-in) · Omnigent embedded below</span>
       <span data-testid="embed-host-session-status">
-        Host session: {expired ? "EXPIRED" : "valid"} · page loads: {controls.pageLoads()}
+        Host session: {expired ? "EXPIRED" : "valid"} · page loads:{" "}
+        {controls.pageLoads()}
       </span>
     </header>
   );

@@ -30,6 +30,8 @@ _DIST_INDEX = _DIST_DIR / ".e2e-embed-host" / "index.html"
 _VITE_BIN = _WEB_DIR / "node_modules" / ".bin" / "vite"
 
 EMBED_BASENAME = "/embed-host"
+# Must match EXPIRED_SESSION_MESSAGE in embed_host/main.tsx: the host fetcher
+# throws exactly this, and the persistent-expiry test asserts it in the UI.
 EXPIRED_SESSION_MESSAGE = "Fetch request failed due expired user session"
 
 
@@ -83,12 +85,13 @@ def build_embed_host() -> Path:
 def serve_embed_host(page: Page, base_url: str) -> None:
     """Fulfil ``<base_url>/embed-host/**`` from the built host page for this page."""
     dist_dir = build_embed_host()
+    dist_root = dist_dir.resolve()
     index_html = _DIST_INDEX.read_bytes()
 
     def handler(route: Route) -> None:
         relative = urlparse(route.request.url).path[len(EMBED_BASENAME) :].lstrip("/")
-        asset = dist_dir / relative
-        if relative.startswith("assets/") and asset.is_file():
+        asset = (dist_dir / relative).resolve()
+        if relative.startswith("assets/") and asset.is_relative_to(dist_root) and asset.is_file():
             content_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
             route.fulfill(status=200, body=asset.read_bytes(), content_type=content_type)
             return
