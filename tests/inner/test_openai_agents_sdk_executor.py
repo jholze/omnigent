@@ -3402,6 +3402,83 @@ def test_empty_turn_retry_rewinds_sdk_session() -> None:
     _run(_t())
 
 
+def test_exhausted_empty_turn_rewinds_before_failing_loud() -> None:
+    """
+    When every attempt is empty, the SDK session is rewound before the
+    fail-loud error is yielded, so the policy's external retry re-runs
+    from the pre-turn state like the in-loop retries do.
+
+    What breaks if this fails: the last attempt's stray empty assistant
+    item survives into the next run_turn, so the external retry re-runs
+    with a polluted session that accumulates an empty turn each time.
+    """
+
+    async def _t() -> None:
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = None
+
+        appended = {"stray": "empty-assistant-item"}
+
+        class _AppendingEmptyResult(_FakeResult):
+            def __init__(self, session):
+                super().__init__(
+                    events=[],
+                    final_output="",
+                    raw_responses=[_empty_raw_response()],
+                )
+                self._session = session
+
+            async def stream_events(self):
+                await self._session.add_items([dict(appended)])
+                for event in self._events:
+                    yield event
+
+        captured: dict[str, object] = {}
+
+        def _runner(agent, input, session, max_turns, run_config):
+            _FakeRunner.last_calls.append({"session": session})
+            captured["session"] = session
+            return _AppendingEmptyResult(session)
+
+        fake_sdk = _fake_agents_sdk()
+        fake_sdk.Runner = types.SimpleNamespace(run_streamed=_runner)
+        executor = _make_databricks_executor()
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=fake_sdk,
+        ):
+            events = await _collect(
+                executor.run_turn(
+                    [{"role": "user", "content": "hi", "session_id": "s1"}],
+                    [],
+                    "Be helpful.",
+                )
+            )
+
+        # Both attempts ran before giving up.
+        assert len(_FakeRunner.last_calls) == 2, (
+            f"Expected 2 run_streamed calls before fail-loud, got {len(_FakeRunner.last_calls)}"
+        )
+        _session = captured["session"]
+        if hasattr(_session, "underlying_session"):
+            _session = _session.underlying_session
+        underlying = _session._underlying
+        # One pop rewinds attempt 1 before the retry; the second pop rewinds
+        # attempt 2 before failing loud, leaving the session pre-turn clean.
+        assert underlying.pop_calls == 2, (
+            f"Expected 2 pops (in-loop + fail-loud rewind), got {underlying.pop_calls}"
+        )
+        assert not underlying.items, (
+            f"Session must be rewound to pre-turn state, got {underlying.items!r}"
+        )
+        errors = [e for e in events if isinstance(e, ExecutorError)]
+        assert len(errors) == 1, f"Expected exactly 1 ExecutorError, got {events!r}"
+        assert errors[0].retryable is True
+        assert not any(isinstance(e, TurnComplete) for e in events)
+
+    _run(_t())
+
+
 # ---------------------------------------------------------------------------
 # Tests: Compaction
 # ---------------------------------------------------------------------------
