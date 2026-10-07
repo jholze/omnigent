@@ -19,8 +19,9 @@ from omnigent.harnesses.codex_native.bridge import (
 )
 from omnigent.runner.turn_routing import (
     ROUTED_PROMPT_BLOCK_PREFIX,
+    clear_pending_replay,
     routed_prompt_block_reason,
-    write_turn_routing_marker,
+    write_pending_replay,
 )
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
@@ -673,6 +674,17 @@ def _hook_run_error(
     )
 
 
+def _owe_replay(bridge_dir: Path, session_id: str = "conv_x") -> None:
+    """Record the replay the runner owes *session_id*, as it does before the hook blocks."""
+    assert write_pending_replay(
+        bridge_dir,
+        session_id=session_id,
+        prompt="hello",
+        blocked_turn_id="turn_123",
+        model="gpt-5.6",
+    )
+
+
 def test_terminal_error_from_hook_run_blocked_prompt_carries_hook_output(tmp_path: Path) -> None:
     """A blocked ``userPromptSubmit`` run yields the TUI's label, the hook text, and the file."""
     error = _hook_run_error(
@@ -776,14 +788,15 @@ def test_terminal_error_from_hook_run_ignores_runs_that_leave_the_turn_running(
     assert _hook_run_error(params, tmp_path) is None
 
 
-def test_terminal_error_from_hook_run_exempts_routing_handoff_only_with_marker(
+def test_terminal_error_from_hook_run_exempts_routing_handoff_only_while_replay_owed(
     tmp_path: Path,
 ) -> None:
-    """Smart Routing's block is a handoff only when its reason and the session's marker agree.
+    """Smart Routing's block is a handoff only while its reason and the owed replay agree.
 
-    The route-turn hook writes the session-scoped marker before it blocks, so
-    the reason text alone (another hook could print it) never hides a block,
-    and a marker left by another session does not either.
+    The runner records the replay before the route-turn hook blocks and clears
+    it once delivered, so the reason text alone (another hook could print it)
+    never hides a block, nor does a record left by another session or one
+    already delivered.
     """
     routed = _hook_run_params(
         status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
@@ -793,10 +806,14 @@ def test_terminal_error_from_hook_run_exempts_routing_handoff_only_with_marker(
     assert error is not None
     assert error.message.startswith(f"Blocked by hook: {_ROUTING_HANDOFF_NOTICE}")
 
-    assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
+    _owe_replay(tmp_path, session_id="conv_other")
+    assert _hook_run_error(routed, tmp_path) is not None
+    _owe_replay(tmp_path)
     assert _hook_run_error(routed, tmp_path) is None
-    assert _hook_run_error(routed, tmp_path, session_id="conv_other") is not None
+    clear_pending_replay(tmp_path)
+    assert _hook_run_error(routed, tmp_path) is not None
 
+    _owe_replay(tmp_path)
     for entries in (
         [{"kind": "feedback", "text": f"{ROUTED_PROMPT_BLOCK_PREFIX}gpt-5.6"}],
         [
@@ -928,11 +945,11 @@ async def test_handle_event_smart_routing_block_does_not_fail_replayed_turn(
 
     The runner replays the prompt on the routed model and waits for the blocked
     turn's own ``turn/completed`` to clear the active turn, so the forwarder
-    must post no failed edge and leave that boundary intact. The hook wrote the
-    session's marker before blocking, as the real one does.
+    must post no failed edge and leave that boundary intact. The runner recorded
+    the replay it owes before the hook blocked, as it does for real.
     """
     _seed_active_turn(tmp_path, "turn_123")
-    assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
+    _owe_replay(tmp_path)
     client = _RecordingClient()
     usage_coalescer = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
     elicitation_tracker = fwd._CodexElicitationTaskTracker()

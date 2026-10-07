@@ -444,8 +444,8 @@ def routed_prompt_block_reason(model: str) -> str:
 def is_routed_prompt_block_reason(text: str) -> bool:
     """Report whether *text* is a reason written by :func:`routed_prompt_block_reason`.
 
-    The codex forwarder pairs this with :func:`turn_routing_marker_present` to
-    tell the routing handoff apart from a hook that rejected the prompt.
+    The codex forwarder pairs this with :func:`pending_replay_owed` to tell
+    the routing handoff apart from a hook that rejected the prompt.
 
     :param text: One hook output entry, e.g. the block reason.
     :returns: ``True`` only for the full reason shape, never for a bare prefix.
@@ -1077,6 +1077,21 @@ def clear_pending_replay(bridge_dir: Path) -> None:
     """
     with contextlib.suppress(OSError):
         (bridge_dir / PENDING_FILE).unlink()
+
+
+def pending_replay_owed(bridge_dir: Path, session_id: str) -> bool:
+    """Report whether *session_id* still owes a blocked prompt its replay.
+
+    ``True`` only between the routed verdict, recorded before the hook blocks,
+    and the replay's delivery; see :data:`PENDING_FILE`. A record left by
+    another session sharing the bridge dir reads as absent.
+
+    :param bridge_dir: Session bridge directory.
+    :param session_id: Session asking.
+    :returns: ``True`` only when the record names *session_id*.
+    """
+    pending = read_pending_replay(bridge_dir)
+    return pending is not None and pending.session_id == session_id
 
 
 # ── The replay ─────────────────────────────────────────────────────────────
