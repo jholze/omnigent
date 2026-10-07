@@ -112,11 +112,12 @@ ADVERTISEMENT_FILE = "turn_router.json"
 #: the pane fast-skip on a verdict that was never theirs. The session id (and
 #: the decision it belongs to) go INSIDE the file and a mismatch reads as
 #: absent; see :func:`turn_routing_marker_present`.
-#: Reason the codex route-turn hook attaches when it blocks the first prompt so
-#: the runner can replay it on the routed model. The forwarder recognizes this
-#: prefix so the handoff is not surfaced as a hook rejection.
-ROUTED_PROMPT_BLOCK_PREFIX = "Smart Routing selected "
 MARKER_FILE = "turn_routing_done"
+
+#: Start of the reason the codex route-turn hook attaches when it blocks the
+#: first prompt for a replay; see :func:`routed_prompt_block_reason`.
+ROUTED_PROMPT_BLOCK_PREFIX = "Smart Routing selected "
+_ROUTED_PROMPT_BLOCK_SUFFIX = "; rerunning your message on it."
 
 #: Bridge-dir file holding the prompt a routed verdict still owes a replay.
 #: Written before the hook blocks and removed once the prompt is delivered
@@ -428,6 +429,33 @@ def turn_routing_marker_present(bridge_dir: Path, session_id: str) -> bool:
     :returns: ``True`` only when the marker names *session_id*.
     """
     return turn_routing_marker_session(bridge_dir) == session_id
+
+
+def routed_prompt_block_reason(model: str) -> str:
+    """Return the reason the route-turn hook attaches when it blocks a prompt for *model*.
+
+    :param model: Routed model id, e.g. ``"gpt-5.6"``.
+    :returns: The user-facing block reason, e.g. ``"Smart Routing selected
+        gpt-5.6; rerunning your message on it."``.
+    """
+    return f"{ROUTED_PROMPT_BLOCK_PREFIX}{model}{_ROUTED_PROMPT_BLOCK_SUFFIX}"
+
+
+def is_routed_prompt_block_reason(text: str) -> bool:
+    """Report whether *text* is a reason written by :func:`routed_prompt_block_reason`.
+
+    The codex forwarder pairs this with :func:`turn_routing_marker_present` to
+    tell the routing handoff apart from a hook that rejected the prompt.
+
+    :param text: One hook output entry, e.g. the block reason.
+    :returns: ``True`` only for the full reason shape, never for a bare prefix.
+    """
+    reason = text.strip()
+    return (
+        reason.startswith(ROUTED_PROMPT_BLOCK_PREFIX)
+        and reason.endswith(_ROUTED_PROMPT_BLOCK_SUFFIX)
+        and len(reason) > len(ROUTED_PROMPT_BLOCK_PREFIX) + len(_ROUTED_PROMPT_BLOCK_SUFFIX)
+    )
 
 
 def _allow(reason: str, *, terminal: bool = False) -> TurnRouteDecision:

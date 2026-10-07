@@ -66,7 +66,10 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
     replay_dead_letters,
 )
-from omnigent.runner.turn_routing import ROUTED_PROMPT_BLOCK_PREFIX
+from omnigent.runner.turn_routing import (
+    is_routed_prompt_block_reason,
+    turn_routing_marker_present,
+)
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger(__name__)
@@ -1136,7 +1139,9 @@ def _hook_run_from_params(params: _JsonObject) -> _JsonObject:
     return run if isinstance(run, dict) else {}
 
 
-def _terminal_error_from_hook_run(params: _JsonObject) -> _CodexTerminalError | None:
+def _terminal_error_from_hook_run(
+    run: _JsonObject, *, bridge_dir: Path, session_id: str
+) -> _CodexTerminalError | None:
     """
     Return the failure carried by a ``hook/completed`` run that halted the prompt.
 
@@ -1145,14 +1150,19 @@ def _terminal_error_from_hook_run(params: _JsonObject) -> _CodexTerminalError | 
     ``turn/completed``, so this notification is the only carrier of the reason
     the TUI prints as "Blocked by hook" plus the hook's output. Other hook
     events and statuses leave the turn running and yield ``None``, as does
-    Smart Routing's own block: the runner replays that prompt on the routed
-    model, so the ordinary ``turn/completed`` boundary must stay in charge.
+    Smart Routing's own block: the route-turn hook writes this session's
+    turn-routing marker before it blocks and attaches a fixed-shape reason, so
+    a run carrying only that reason while the marker is present is the handoff
+    the runner replays, and the ordinary ``turn/completed`` boundary must stay
+    in charge.
 
-    :param params: Codex ``hook/completed`` params.
+    :param run: The ``run`` summary of a ``hook/completed`` event, from
+        :func:`_hook_run_from_params`.
+    :param bridge_dir: Native Codex bridge directory holding the marker.
+    :param session_id: Omnigent session the marker must name.
     :returns: Generic-classified error naming the outcome, the hook's output
         text, and the hook file, or ``None`` when the run did not halt the prompt.
     """
-    run = _hook_run_from_params(params)
     if run.get("eventName") != _CODEX_PROMPT_SUBMIT_HOOK_EVENT:
         return None
     status = run.get("status")
@@ -1168,7 +1178,11 @@ def _terminal_error_from_hook_run(params: _JsonObject) -> _CodexTerminalError | 
         and isinstance(entry.get("text"), str)
         and entry["text"].strip()
     ]
-    if any(text.startswith(ROUTED_PROMPT_BLOCK_PREFIX) for text in texts):
+    if (
+        texts
+        and all(is_routed_prompt_block_reason(text) for text in texts)
+        and turn_routing_marker_present(bridge_dir, session_id)
+    ):
         return None
     detail = "\n".join(texts)
     message = f"{label}: {detail}" if detail else label
@@ -3649,7 +3663,8 @@ async def _maybe_handle_turn_event(
         )
         return True
     if method == _CODEX_HOOK_COMPLETED_METHOD:
-        error = _terminal_error_from_hook_run(params)
+        run = _hook_run_from_params(params)
+        error = _terminal_error_from_hook_run(run, bridge_dir=bridge_dir, session_id=session_id)
         if error is not None:
             await _surface_turn_failure_ahead_of_boundary(
                 client,
@@ -3657,7 +3672,7 @@ async def _maybe_handle_turn_event(
                 bridge_dir=bridge_dir,
                 turn_id=_turn_id_from_payload(params),
                 error=error,
-                source=f"{method}:{_hook_run_from_params(params).get('status')}",
+                source=f"{method}:{run.get('status')}",
                 usage_coalescer=usage_coalescer,
                 delta_coalescer=delta_coalescer,
                 forwarder_state=forwarder_state,

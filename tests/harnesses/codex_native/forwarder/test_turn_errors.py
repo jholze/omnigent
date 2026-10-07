@@ -17,7 +17,11 @@ from omnigent.harnesses.codex_native.bridge import (
     read_bridge_state,
     write_bridge_state,
 )
-from omnigent.runner.turn_routing import ROUTED_PROMPT_BLOCK_PREFIX
+from omnigent.runner.turn_routing import (
+    ROUTED_PROMPT_BLOCK_PREFIX,
+    routed_prompt_block_reason,
+    write_turn_routing_marker,
+)
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
 )
@@ -657,15 +661,25 @@ def _hook_run_params(
 _MISSING_SCRIPT_FEEDBACK = (
     "python3: can't open file '/tmp/plugin/activate.py': [Errno 2] No such file or directory"
 )
-_ROUTING_HANDOFF_NOTICE = f"{ROUTED_PROMPT_BLOCK_PREFIX}gpt-5.6; rerunning your message on it."
+_ROUTING_HANDOFF_NOTICE = routed_prompt_block_reason("gpt-5.6")
 
 
-def test_terminal_error_from_hook_run_blocked_prompt_carries_hook_output() -> None:
+def _hook_run_error(
+    params: dict[str, object], bridge_dir: Path, session_id: str = "conv_x"
+) -> fwd._CodexTerminalError | None:
+    """Classify the hook run in *params* the way the forwarder does for *session_id*."""
+    return fwd._terminal_error_from_hook_run(
+        fwd._hook_run_from_params(params), bridge_dir=bridge_dir, session_id=session_id
+    )
+
+
+def test_terminal_error_from_hook_run_blocked_prompt_carries_hook_output(tmp_path: Path) -> None:
     """A blocked ``userPromptSubmit`` run yields the TUI's label, the hook text, and the file."""
-    error = fwd._terminal_error_from_hook_run(
+    error = _hook_run_error(
         _hook_run_params(
             status="blocked", entries=[{"kind": "feedback", "text": _MISSING_SCRIPT_FEEDBACK}]
-        )
+        ),
+        tmp_path,
     )
 
     assert error is not None
@@ -675,32 +689,60 @@ def test_terminal_error_from_hook_run_blocked_prompt_carries_hook_output() -> No
     assert error.kind == fwd._CODEX_ERROR_KIND_GENERIC
 
 
-def test_terminal_error_from_hook_run_stopped_prompt_uses_stop_reason() -> None:
+def test_terminal_error_from_hook_run_stopped_prompt_uses_stop_reason(tmp_path: Path) -> None:
     """A ``continue: false`` run reads as stopped, with its stop reason."""
-    error = fwd._terminal_error_from_hook_run(
+    error = _hook_run_error(
         _hook_run_params(
             status="stopped",
             entries=[{"kind": "stop", "text": "stopped by hook"}],
             source_path=None,
-        )
+        ),
+        tmp_path,
     )
 
     assert error is not None
     assert error.message == "Stopped by hook: stopped by hook"
 
 
-def test_terminal_error_from_hook_run_without_user_output_names_outcome() -> None:
+def test_terminal_error_from_hook_run_without_user_output_names_outcome(tmp_path: Path) -> None:
     """Model-addressed ``context`` entries are not user-facing; the label stands alone."""
-    error = fwd._terminal_error_from_hook_run(
+    error = _hook_run_error(
         _hook_run_params(
             status="blocked",
             entries=[{"kind": "context", "text": "for the model"}],
             source_path=None,
-        )
+        ),
+        tmp_path,
     )
 
     assert error is not None
     assert error.message == "Blocked by hook"
+
+
+def test_terminal_error_from_hook_run_mixed_entries_keep_user_facing_order(
+    tmp_path: Path,
+) -> None:
+    """``context`` stays hidden while the user-facing entries keep their order."""
+    error = _hook_run_error(
+        _hook_run_params(
+            status="blocked",
+            entries=[
+                {"kind": "context", "text": "for the model"},
+                {"kind": "warning", "text": "plugin cache is stale"},
+                {"kind": "error", "text": _MISSING_SCRIPT_FEEDBACK},
+                {"kind": "feedback", "text": "run the plugin sync and retry"},
+            ],
+            source_path=None,
+        ),
+        tmp_path,
+    )
+
+    assert error is not None
+    assert error.message == (
+        "Blocked by hook: plugin cache is stale\n"
+        f"{_MISSING_SCRIPT_FEEDBACK}\n"
+        "run the plugin sync and retry"
+    )
 
 
 @pytest.mark.parametrize(
@@ -723,21 +765,46 @@ def test_terminal_error_from_hook_run_without_user_output_names_outcome() -> Non
             id="pre-tool-use-block-denies-a-call-not-the-turn",
         ),
         pytest.param(
-            _hook_run_params(
-                status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
-            ),
-            id="smart-routing-handoff-is-replayed-not-rejected",
-        ),
-        pytest.param(
             {"threadId": "thread_123", "turnId": "turn_123", "run": "garbage"}, id="malformed"
         ),
     ],
 )
 def test_terminal_error_from_hook_run_ignores_runs_that_leave_the_turn_running(
-    params: dict[str, object],
+    params: dict[str, object], tmp_path: Path
 ) -> None:
     """Only a halted ``userPromptSubmit`` run is a turn failure."""
-    assert fwd._terminal_error_from_hook_run(params) is None
+    assert _hook_run_error(params, tmp_path) is None
+
+
+def test_terminal_error_from_hook_run_exempts_routing_handoff_only_with_marker(
+    tmp_path: Path,
+) -> None:
+    """Smart Routing's block is a handoff only when its reason and the session's marker agree.
+
+    The route-turn hook writes the session-scoped marker before it blocks, so
+    the reason text alone (another hook could print it) never hides a block,
+    and a marker left by another session does not either.
+    """
+    routed = _hook_run_params(
+        status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
+    )
+
+    error = _hook_run_error(routed, tmp_path)
+    assert error is not None
+    assert error.message.startswith(f"Blocked by hook: {_ROUTING_HANDOFF_NOTICE}")
+
+    assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
+    assert _hook_run_error(routed, tmp_path) is None
+    assert _hook_run_error(routed, tmp_path, session_id="conv_other") is not None
+
+    for entries in (
+        [{"kind": "feedback", "text": f"{ROUTED_PROMPT_BLOCK_PREFIX}gpt-5.6"}],
+        [
+            {"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE},
+            {"kind": "error", "text": "rejected by the team policy hook"},
+        ],
+    ):
+        assert _hook_run_error(_hook_run_params(status="blocked", entries=entries), tmp_path)
 
 
 @pytest.mark.asyncio
@@ -861,9 +928,11 @@ async def test_handle_event_smart_routing_block_does_not_fail_replayed_turn(
 
     The runner replays the prompt on the routed model and waits for the blocked
     turn's own ``turn/completed`` to clear the active turn, so the forwarder
-    must post no failed edge and leave that boundary intact.
+    must post no failed edge and leave that boundary intact. The hook wrote the
+    session's marker before blocking, as the real one does.
     """
     _seed_active_turn(tmp_path, "turn_123")
+    assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
     client = _RecordingClient()
     usage_coalescer = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
     elicitation_tracker = fwd._CodexElicitationTaskTracker()
