@@ -10,12 +10,8 @@ from pathlib import Path
 
 from playwright.async_api import Route, async_playwright, expect
 
-from tests.e2e_ui.start_session.test_start_session import (
-    _HOST_ID,
-    _agents_body,
-    _hosts_body,
-    _run_in_fresh_loop,
-)
+from tests._helpers.async_thread import run_in_fresh_loop
+from tests.e2e_ui.start_session.test_start_session import _HOST_ID, _agents_body, _hosts_body
 
 # Twice the client's 30 s request deadline: a bounded load has settled by then.
 _PICKER_DEADLINE_S = 60.0
@@ -29,7 +25,7 @@ def test_picker_renders_when_model_options_hang(
     live_server: str, browser_name: str, tmp_path: Path
 ) -> None:
     """A hung model-options request must not hide the picker behind the spinner."""
-    _run_in_fresh_loop(_drive(live_server, browser_name, tmp_path))
+    run_in_fresh_loop(_drive(live_server, browser_name, tmp_path))
 
 
 async def _drive(base_url: str, browser_name: str, output: Path) -> None:
@@ -80,7 +76,7 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
             await context.route(re.compile(r"/v1/agents(?:\?.*)?$"), agents)
             await context.route(re.compile(r"/v1/hosts(?:\?.*)?$"), hosts)
             await context.route("**/v1/hosts/*/harnesses/*/model-options", models)
-            await context.route("**/v1/hosts/*/worktrees?*", worktrees)
+            await context.route(re.compile(r"/v1/hosts/[^/]+/worktrees(?:\?.*)?$"), worktrees)
             await context.route("**/v1/info", info)
             await context.add_init_script(
                 f"""localStorage.setItem('omnigent:last-agent-id', 'ag_claude_e2e');
