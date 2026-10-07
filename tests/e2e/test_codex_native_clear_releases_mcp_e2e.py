@@ -11,7 +11,6 @@ import os
 import shutil
 import sys
 import tempfile
-import textwrap
 import time
 import uuid
 from pathlib import Path
@@ -50,7 +49,8 @@ _CODEX_HOME = Path(
     os.environ.setdefault("CODEX_HOME", tempfile.mkdtemp(prefix="omnigent-e2e-codex-home-"))
 )
 _SYSTEM_CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
-_STUB_NAME = "omnigent_e2e_mcp_stub.py"
+_STUB_MODULE = Path(__file__).resolve().parent / "_mcp_stub_server.py"
+_STUB_NAME = _STUB_MODULE.name
 _STUB_SERVERS = ("stub_a", "stub_b")
 # Codex unloads an idle, unsubscribed thread about 60s after its last subscriber leaves.
 _RELEASE_WINDOW_S = 120.0
@@ -67,54 +67,13 @@ pytestmark = [
     ),
 ]
 
-_STUB_SOURCE = textwrap.dedent(
-    """\
-    import json, os, sys, time
-
-    name, log = sys.argv[1], sys.argv[2]
-    with open(log, "a") as fh:
-        rec = {
-            "name": name,
-            "pid": os.getpid(),
-            "pgid": os.getpgid(0),
-            "ppid": os.getppid(),
-            "t": time.time(),
-        }
-        fh.write(json.dumps(rec) + "\\n")
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        method, mid = msg.get("method"), msg.get("id")
-        if method == "initialize":
-            result = {
-                "protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-03-26"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": name, "version": "0.0.1"},
-            }
-        elif method == "tools/list":
-            result = {"tools": []}
-        else:
-            result = {}
-        if mid is not None:
-            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}) + "\\n")
-            sys.stdout.flush()
-    time.sleep(600)
-    """
-)
-
 
 def _configure_stub_mcp_servers() -> Path:
     config_path = _CODEX_HOME / "config.toml"
     if config_path.exists() and _STUB_NAME not in config_path.read_text():
         pytest.skip(f"requires an isolated CODEX_HOME (existing config at {config_path})")
     _CODEX_HOME.mkdir(parents=True, exist_ok=True)
-    stub = _CODEX_HOME / _STUB_NAME
-    stub.write_text(_STUB_SOURCE)
+    stub = _STUB_MODULE
     log = _CODEX_HOME / "mcp_stub.log"
     log.write_text("")
     python = json.dumps(sys.executable)
