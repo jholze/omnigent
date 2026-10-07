@@ -2783,6 +2783,15 @@ class SessionListItem(BaseModel):
     :param viewer_unread: Whether the *requesting user* explicitly
         marked this session unread. Per-viewer; lifts the active-row
         dot suppression on the client. ``False`` by default.
+    :param viewer_read_state_at: Server-assigned monotonic revision
+        (epoch microseconds) stamped on the requesting user's most
+        recent read-state write for this session, or ``None`` when
+        they have never seen it. Lets a client order read-state across
+        its devices: it adopts an incoming ``viewer_last_seen`` /
+        ``viewer_unread`` only when this revision is strictly newer
+        than the one it last applied, so a fresh cross-device read or
+        "Mark as unread" wins while a stale replica's older value is
+        ignored. In-memory only — resets on a server restart.
     :param search_snippet: Excerpt of the chat content that matched the
         request's ``search_query``, centered on the match with ``…``
         marking elided ends, so the search UI can show *where* a session
@@ -2815,6 +2824,7 @@ class SessionListItem(BaseModel):
     comments_updated_at: int | None = None
     viewer_last_seen: int | None = None
     viewer_unread: bool = False
+    viewer_read_state_at: int | None = None
     search_snippet: str | None = None
     parent_session_id: str | None = None
     # First-class project this session is filed under, or ``None`` when

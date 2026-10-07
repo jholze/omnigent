@@ -633,6 +633,11 @@ _read_last_seen: WorkspaceScopedCache[str, dict[str, int]] = WorkspaceScopedCach
 _read_explicit_unread: WorkspaceScopedCache[str, set[str]] = WorkspaceScopedCache()
 
 
+# Monotonic epoch-us revision per read-state write (see now_epoch_us), so a
+# client adopts a strictly-newer cross-device action and ignores a stale replica.
+_read_state_at: WorkspaceScopedCache[str, dict[str, int]] = WorkspaceScopedCache()
+
+
 _interrupt_fenced_sessions: WorkspaceScopedSet[str] = WorkspaceScopedSet()
 
 
@@ -1222,6 +1227,7 @@ __all__ = [
     "_pushed_model_options_cache",
     "_read_explicit_unread",
     "_read_last_seen",
+    "_read_state_at",
     "_recent_mirrored_tool_calls",
     "_runner_relay_tasks",
     "_runner_status_probe_backoff",

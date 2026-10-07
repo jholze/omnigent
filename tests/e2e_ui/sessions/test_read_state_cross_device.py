@@ -153,9 +153,11 @@ def _walk_rows(node: Any) -> Iterator[dict[str, Any]]:
 
 @dataclass
 class _ListObserver:
-    """Highest per-session ``viewer_last_seen`` a client received from the server."""
+    """Read-state a client received from the server: the highest per-session
+    ``viewer_last_seen`` and the latest ``viewer_unread`` flag."""
 
     seen: dict[str, int] = field(default_factory=dict)
+    unread: dict[str, bool] = field(default_factory=dict)
 
     def attach(self, page: Page) -> None:
         page.on("response", self._on_response)
@@ -166,6 +168,8 @@ class _ListObserver:
             value = row.get("viewer_last_seen")
             if isinstance(value, int):
                 self.seen[row["id"]] = max(self.seen.get(row["id"], 0), value)
+            if "viewer_unread" in row:
+                self.unread[row["id"]] = bool(row.get("viewer_unread"))
 
     def _on_response(self, response: Response) -> None:
         if response.request.method != "GET" or urlparse(response.url).path != "/v1/sessions":
@@ -194,6 +198,9 @@ class _ListObserver:
     def synced(self, session_ids: list[str], floor: int) -> bool:
         return all(self.seen.get(sid, 0) >= floor for sid in session_ids)
 
+    def unread_flagged(self, session_id: str) -> bool:
+        return self.unread.get(session_id, False)
+
 
 def _wait_for_list_refresh(
     page: Page, observer: _ListObserver, session_ids: list[str], floor: int
@@ -211,6 +218,21 @@ def _wait_for_list_refresh(
         # Playwright event handlers only run while a Playwright call is pending.
         page.wait_for_timeout(500)
     return observer.synced(session_ids, floor)
+
+
+def _wait_for_unread_flag(page: Page, observer: _ListObserver, session_id: str) -> bool:
+    """Wait until the client received ``viewer_unread`` true for *session_id*.
+
+    Lets the caller assert the mobile's own list carried the desktop's
+    "Mark as unread" before checking the UI, so a surfaced (or missing) dot can
+    only be the client's handling of it, not a dropped refresh.
+    """
+    deadline = time.monotonic() + _LIST_REFRESH_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if observer.unread_flagged(session_id):
+            return True
+        page.wait_for_timeout(500)
+    return observer.unread_flagged(session_id)
 
 
 def _send_and_leave(desktop: Page, session_id: str, text: str) -> None:
@@ -324,6 +346,123 @@ def test_read_on_desktop_clears_unread_on_open_mobile_client(
         for sid in session_ids:
             expect(_row(mobile, sid)).to_be_visible()
             expect(_unread_dot(_row(mobile, sid))).to_have_count(0)
+    finally:
+        mobile_ctx.close()
+        if desktop_ctx is not None:
+            desktop_ctx.close()
+
+
+def test_mark_unread_on_desktop_surfaces_on_open_mobile_client(
+    playwright: Playwright,
+    browser: Browser,
+    three_sessions: tuple[str, list[str]],
+    mock_llm_server_url: str,
+    output_path: str,
+) -> None:
+    """Marking a read session unread on desktop surfaces it on an open mobile client.
+
+    Desktop sends a message to one session and reads it, so both clients show it
+    read. Desktop then uses "Mark as unread". Without a reload the mobile client
+    must surface that one session as unread -- one Inbox "Unread" row, a
+    "1 unread" pill, badge 1 and its sidebar dot -- while the other two stay
+    read, and a reload must still agree.
+
+    :param playwright: Device registry for the phone profile.
+    :param browser: Shared browser; two contexts stand in for two devices.
+    :param three_sessions: ``(base_url, [ids])`` runner-bound sessions.
+    :param mock_llm_server_url: Mock model to script a delayed reply.
+    :param output_path: Per-test artifact directory for evidence screenshots.
+    """
+    base_url, session_ids = three_sessions
+    target = session_ids[0]
+    others = session_ids[1:]
+    marker = f"xdev-{uuid.uuid4().hex[:8]}"
+    # Several copies so a title-generation call can't drain the queue.
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": "Task finished: all tests green.", "delay": _REPLY_DELAY_S}] * 3,
+        match=marker,
+    )
+    artifacts = Path(output_path)
+    artifacts.mkdir(parents=True, exist_ok=True)
+
+    mobile_ctx = browser.new_context(**playwright.devices["Pixel 7"])
+    mobile_ctx.add_init_script(_ANDROID_SHELL_INIT_SCRIPT)
+    desktop_ctx: BrowserContext | None = None
+    try:
+        desktop_ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+        mobile = mobile_ctx.new_page()
+        desktop = desktop_ctx.new_page()
+        observer = _ListObserver()
+        observer.attach(mobile)
+
+        mobile.goto(f"{base_url}/?sidebar=open")
+        desktop.goto(f"{base_url}/inbox")
+        for sid in session_ids:
+            expect(_row(desktop, sid)).to_be_visible(timeout=30_000)
+            expect(_row(mobile, sid)).to_be_visible(timeout=30_000)
+            expect(_unread_dot(_row(mobile, sid))).to_have_count(0)
+        _wait_badge(mobile, 0, timeout_ms=30_000)
+
+        # Make the target unread on both clients, then read it on desktop so both
+        # show it read -- the state that "Mark as unread" must flip back.
+        _send_and_leave(desktop, target, f"Finish the task and report. Marker: {marker}")
+        expect(_unread_dot(_row(desktop, target))).to_be_visible(timeout=_TURN_TIMEOUT_MS)
+        expect(_unread_dot(_row(mobile, target))).to_be_visible(timeout=_TURN_TIMEOUT_MS)
+        _wait_badge(mobile, 1, timeout_ms=30_000)
+
+        read_floor = int(time.time())
+        _open_session(desktop, target)
+        expect(
+            desktop.locator('[data-testid="message-bubble"][data-role="assistant"]').last
+        ).to_be_visible(timeout=30_000)
+        expect(_unread_dot(_row(desktop, target))).to_have_count(0)
+        desktop.locator(f'{_SIDEBAR} a[href="/inbox"]').first.click()
+        expect(desktop).to_have_url(re.compile(r"/inbox$"))
+        expect(desktop.locator(_UNREAD_ROW)).to_have_count(0)
+
+        # Mobile must first catch up to the read so the later unread is a genuine
+        # cross-device flip, not a race against the still-unread baseline.
+        assert _wait_for_list_refresh(mobile, observer, [target], read_floor), (
+            f"mobile never received the desktop read-state: {observer.seen}"
+        )
+        _wait_badge(mobile, 0, timeout_ms=15_000)
+        expect(_unread_dot(_row(mobile, target))).to_have_count(0)
+        mobile.screenshot(path=str(artifacts / "mobile-before-desktop-unread.png"))
+
+        # Desktop marks the read session unread from the Inbox sidebar (it is not
+        # the open session, so viewing it can't immediately re-mark it read).
+        row = _row(desktop, target)
+        row.hover()
+        row.get_by_test_id("conversation-actions").click()
+        desktop.get_by_test_id("mark-unread-conversation").click()
+        expect(_unread_dot(row)).to_be_visible()
+        expect(desktop.locator(_UNREAD_ROW)).to_have_count(1)
+        desktop.screenshot(path=str(artifacts / "desktop-after-unread.png"))
+
+        # The mobile's own list must carry the desktop "Mark as unread" (the
+        # server sends it either way), so a surfaced dot can only be the client
+        # adopting a strictly-newer revision, not a dropped refresh.
+        surfaced = _wait_for_unread_flag(mobile, observer, target)
+        print(f"mobile list carried desktop mark-unread: {surfaced} ({observer.unread})")
+        mobile.screenshot(path=str(artifacts / "mobile-after-desktop-unread.png"))
+        print(f"mobile badge after desktop mark-unread: {_last_badge(mobile)}")
+        assert surfaced, f"mobile never received the desktop mark-unread: {observer.unread}"
+
+        _wait_badge(mobile, 1, timeout_ms=15_000)
+        expect(_unread_dot(_row(mobile, target))).to_be_visible(timeout=15_000)
+        for sid in others:
+            expect(_unread_dot(_row(mobile, sid))).to_have_count(0)
+        mobile.locator(f'{_SIDEBAR} a[href="/inbox"]').first.tap()
+        expect(mobile).to_have_url(re.compile(r"/inbox$"))
+        expect(mobile.locator(_UNREAD_ROW)).to_have_count(1)
+        expect(mobile.get_by_title("1 unread")).to_be_visible()
+
+        # A reload must still show the cross-device unread: durable, not just live.
+        mobile.reload()
+        expect(mobile.get_by_role("tab", name="Unread")).to_be_visible(timeout=30_000)
+        expect(mobile.locator(_UNREAD_ROW)).to_have_count(1)
+        _wait_badge(mobile, 1, timeout_ms=30_000)
     finally:
         mobile_ctx.close()
         if desktop_ctx is not None:

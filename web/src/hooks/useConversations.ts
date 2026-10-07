@@ -239,6 +239,14 @@ export interface Conversation {
    */
   viewer_unread?: boolean;
   /**
+   * Server-assigned monotonic revision (epoch microseconds) of the viewer's
+   * most recent read-state write, or null when never seen. The read-state
+   * mirror adopts a value only when this is strictly newer than the one it
+   * last applied, so a cross-device read / "Mark as unread" wins over a stale
+   * replica's older value.
+   */
+  viewer_read_state_at?: number | null;
+  /**
    * Excerpt of the chat content that matched the current `search_query`,
    * centered on the match with `…` marking elided ends. Present only on
    * search responses where the query hit a message body rather than the

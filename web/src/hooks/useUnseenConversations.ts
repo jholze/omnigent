@@ -7,8 +7,11 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source; both the server seed and later list refreshes only ever *raise* a
-// baseline, never lower it (see seedReadState and mergeNewerServerReadState).
+// source. Each read-state write now carries a monotonic server revision, so a
+// list refresh can order its value: a strictly-newer revision is an
+// authoritative cross-device action (a read, or a "Mark as unread") adopted
+// wholesale, while an older-or-equal one is a stale replica and is ignored. With
+// no revision we fall back to raise-only (see mergeNewerServerReadState).
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -39,6 +42,11 @@ type LastSeenMap = Record<string, number>;
 // optimistically on each mutation before the best-effort PUT lands.
 let lastSeenMap: LastSeenMap = {};
 const explicitlyUnread = new Set<string>();
+
+// Per-session server read-state revision last adopted here, so a strictly-newer
+// cross-device action is adopted and a stale replica serving an older value is
+// ignored. Not persisted: each load re-seeds it from the server list on mount.
+let serverReadStateAt: Record<string, number> = {};
 
 // localStorage persistence. Best-effort everywhere: storage can be
 // missing (SSR), full, or blocked — the in-memory mirror always works.
@@ -128,26 +136,58 @@ export interface ReadStateSeed {
   id: string;
   viewer_last_seen?: number | null;
   viewer_unread?: boolean;
+  viewer_read_state_at?: number | null;
   updated_at?: number;
 }
 
 /**
- * Live merge for an already-seeded conversation: raise the seen baseline to a
- * strictly-newer server value (a read on another device), which clears an
- * activity dot here without a reload. Older, equal and missing values are
- * ignored, so a stale replica can't lower the baseline. An explicitly-unread
- * conversation is skipped: the local "Mark as unread" is authoritative, and a
- * replica that missed the read-state PUT would otherwise serve a pre-mark read,
- * raise the baseline and clear the dot, reverting the user's action. It stays
- * unread until the user reads or reopens it here.
+ * Raise-only merge for a list value with no server read-state revision (an
+ * older server, or a replica that never stamped one). Without a revision we
+ * can't order the value against the local mirror, so we only raise the seen
+ * baseline to a strictly-newer `viewer_last_seen` (a read on another device)
+ * and never lower it or adopt an unread flag. An explicitly-unread conversation
+ * is skipped: a replica that missed the read-state PUT would otherwise serve a
+ * pre-mark read and clear the row.
  */
-function mergeNewerServerReadState(conv: ReadStateSeed): boolean {
+function mergeServerBaselineRaiseOnly(conv: ReadStateSeed): boolean {
   if (typeof conv.viewer_last_seen !== "number") return false;
   if (explicitlyUnread.has(conv.id)) return false;
   const local = lastSeenMap[conv.id];
   if (local !== undefined && conv.viewer_last_seen <= local) return false;
   lastSeenMap[conv.id] = conv.viewer_last_seen;
   return true;
+}
+
+/**
+ * Live merge for an already-seeded conversation from a list refresh. When the
+ * server stamps a read-state revision we can order the value: a strictly-newer
+ * revision is an authoritative cross-device action, so we adopt its baseline
+ * (raising it for a remote read, or LOWERING it for a remote "Mark as unread")
+ * and its unread flag wholesale — this is how another device's "Mark as unread"
+ * surfaces here without a reload. An older-or-equal revision is a stale replica
+ * that missed a later write and is ignored, so it can't revert newer state.
+ * Without a revision we fall back to {@link mergeServerBaselineRaiseOnly}.
+ */
+function mergeNewerServerReadState(conv: ReadStateSeed): boolean {
+  const rev = conv.viewer_read_state_at;
+  if (typeof rev !== "number") return mergeServerBaselineRaiseOnly(conv);
+  const known = serverReadStateAt[conv.id];
+  if (known !== undefined && rev <= known) return false;
+  serverReadStateAt[conv.id] = rev;
+  let changed = false;
+  if (typeof conv.viewer_last_seen === "number" && conv.viewer_last_seen !== lastSeenMap[conv.id]) {
+    lastSeenMap[conv.id] = conv.viewer_last_seen;
+    changed = true;
+  }
+  if (conv.viewer_unread === true) {
+    if (!explicitlyUnread.has(conv.id)) {
+      explicitlyUnread.add(conv.id);
+      changed = true;
+    }
+  } else if (explicitlyUnread.delete(conv.id)) {
+    changed = true;
+  }
+  return changed;
 }
 
 /**
@@ -183,6 +223,9 @@ export function seedReadState(conversations: readonly ReadStateSeed[]): void {
       explicitlyUnread.add(conv.id);
       changed = true;
     }
+    if (typeof conv.viewer_read_state_at === "number") {
+      serverReadStateAt[conv.id] = conv.viewer_read_state_at;
+    }
   }
   if (!hydrated) {
     hydrated = true;
@@ -217,6 +260,7 @@ export function useSeedReadState(conversations: readonly ReadStateSeed[] | undef
 export function resetReadStateForTests(): void {
   lastSeenMap = {};
   explicitlyUnread.clear();
+  serverReadStateAt = {};
   seeded.clear();
   hydrated = false;
   try {

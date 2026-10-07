@@ -95,9 +95,11 @@ def _reset_read_state() -> Iterator[None]:
     """Clear the module-level read-state caches around each test."""
     sessions_mod._read_last_seen.clear()
     sessions_mod._read_explicit_unread.clear()
+    sessions_mod._read_state_at.clear()
     yield
     sessions_mod._read_last_seen.clear()
     sessions_mod._read_explicit_unread.clear()
+    sessions_mod._read_state_at.clear()
 
 
 def test_put_mark_unread_returns_204_and_updates_cache() -> None:
@@ -139,6 +141,28 @@ def test_list_item_embeds_viewer_read_state() -> None:
     item = _build_item(None, _make_conversation("conv_a"))
     assert item.viewer_last_seen == 4_999  # type: ignore[attr-defined]
     assert item.viewer_unread is True  # type: ignore[attr-defined]
+    # The write stamped a positive epoch-µs revision, exposed for the client's
+    # strictly-newer adoption test.
+    assert isinstance(item.viewer_read_state_at, int)  # type: ignore[attr-defined]
+    assert item.viewer_read_state_at > 0  # type: ignore[attr-defined]
+
+
+def test_read_state_revision_advances_on_each_write() -> None:
+    """Every read-state write stamps a strictly-newer epoch-µs revision.
+
+    This monotonic revision is what lets a second device adopt a fresh
+    cross-device "Mark as unread" (newer) while ignoring a stale replica
+    serving an older value.
+    """
+    client = TestClient(_build_app())
+    client.put("/v1/sessions/conv_a/read-state", json={"last_seen": 10, "unread": False})
+    _, _, rev1 = sessions_mod._read_state_entry(None, "conv_a")
+    client.put("/v1/sessions/conv_a/read-state", json={"last_seen": 9, "unread": True})
+    last_seen, unread, rev2 = sessions_mod._read_state_entry(None, "conv_a")
+    # A later Mark-as-unread lowers the baseline but still advances the revision.
+    assert (last_seen, unread) == (9, True)
+    assert isinstance(rev1, int) and isinstance(rev2, int)
+    assert rev2 > rev1
 
 
 def test_list_item_reports_a_booting_session_as_running() -> None:
@@ -168,6 +192,7 @@ def test_list_item_defaults_when_user_never_saw_session() -> None:
     item = _build_item(None, _make_conversation("conv_untouched"))
     assert item.viewer_last_seen is None  # type: ignore[attr-defined]
     assert item.viewer_unread is False  # type: ignore[attr-defined]
+    assert item.viewer_read_state_at is None  # type: ignore[attr-defined]
 
 
 def test_read_state_is_scoped_per_user() -> None:
@@ -196,8 +221,10 @@ def test_prune_clears_read_state_across_all_users() -> None:
 
     sessions_mod._prune_session_read_state("conv_a")
 
-    # conv_a is gone for both users...
-    assert sessions_mod._read_state_entry("alice@example.com", "conv_a") == (None, False)
-    assert sessions_mod._read_state_entry("bob@example.com", "conv_a") == (None, False)
+    # conv_a is gone for both users (baseline, flag and revision all cleared)...
+    assert sessions_mod._read_state_entry("alice@example.com", "conv_a") == (None, False, None)
+    assert sessions_mod._read_state_entry("bob@example.com", "conv_a") == (None, False, None)
     # ...but other sessions are untouched.
-    assert sessions_mod._read_state_entry("alice@example.com", "conv_b") == (200, True)
+    last_seen_b, unread_b, rev_b = sessions_mod._read_state_entry("alice@example.com", "conv_b")
+    assert (last_seen_b, unread_b) == (200, True)
+    assert isinstance(rev_b, int) and rev_b > 0

@@ -187,6 +187,78 @@ describe("live cross-device merge", () => {
   });
 });
 
+describe("server-ordered read-state revision (cross-device Mark as unread)", () => {
+  it("surfaces another device's Mark as unread live when the server revision is newer", async () => {
+    const mod = await loadFresh();
+    // First seed: the session is read up to 3_000, revision 100.
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: 3_000, viewer_unread: false, viewer_read_state_at: 100 },
+    ]);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(false);
+    const { result } = renderHook(() => mod.useUnseenTick());
+    const before = result.current;
+
+    // Another device marks it unread: the server pins the baseline just below
+    // updated_at and stamps a strictly-newer revision. The open client adopts
+    // it live — lowering the baseline and setting the flag — so the dot shows.
+    act(() =>
+      mod.seedReadState([
+        { id: "conv-1", viewer_last_seen: 1_999, viewer_unread: true, viewer_read_state_at: 200 },
+      ]),
+    );
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(true); // 2000 > 1999
+    expect(result.current).not.toBe(before); // dot, Inbox row and badge recompute
+    expect(putCount()).toBe(0); // adopting the server's value is not a local write
+  });
+
+  it("ignores a stale replica serving an older revision after adopting a newer unread", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: 3_000, viewer_unread: false, viewer_read_state_at: 100 },
+    ]);
+    act(() =>
+      mod.seedReadState([
+        { id: "conv-1", viewer_last_seen: 1_999, viewer_unread: true, viewer_read_state_at: 200 },
+      ]),
+    );
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+
+    const { result } = renderHook(() => mod.useUnseenTick());
+    const before = result.current;
+    // A replica that missed the Mark-as-unread PUT still serves the old read
+    // (higher baseline, cleared flag) with its OLDER revision; it must not win.
+    act(() =>
+      mod.seedReadState([
+        { id: "conv-1", viewer_last_seen: 3_000, viewer_unread: false, viewer_read_state_at: 100 },
+      ]),
+    );
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(true);
+    expect(result.current).toBe(before); // stale value ignored → no recompute
+  });
+
+  it("clears a cross-device unread live when a later read carries a newer revision", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: 1_999, viewer_unread: true, viewer_read_state_at: 200 },
+    ]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(true);
+
+    // The user then reads it on another device: baseline raised, flag cleared,
+    // newer revision — the open client follows.
+    act(() =>
+      mod.seedReadState([
+        { id: "conv-1", viewer_last_seen: 5_000, viewer_unread: false, viewer_read_state_at: 300 },
+      ]),
+    );
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 2_000, "idle")).toBe(false);
+  });
+});
+
 describe("isConversationUnseen", () => {
   it("returns false with no baseline, when running, or when status is undefined", async () => {
     const mod = await loadFresh();
