@@ -1745,7 +1745,7 @@ def extended_model_catalog(
         return None
     by_slug = {m.get("slug"): m for m in models if isinstance(m, dict)}
     template = by_slug.get(clone_source)
-    if template is None:
+    if template is None and clone_source == _CATALOG_CLONE_SOURCE_SLUG:
         # Older installed Codex CLIs may not ship the current clone source yet.
         # Keep gateway-only arms spawnable from a compatible older catalog row.
         template = next(

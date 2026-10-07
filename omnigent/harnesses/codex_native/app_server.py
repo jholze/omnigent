@@ -1560,7 +1560,7 @@ def mark_launch_default(rows: list[_JsonObject], pinned_model: str | None) -> li
     explicitly supported) marks NO default: crowning a different visible
     model would let the launch path pin a model the configuration never
     selected. Without a pin, prefer the earliest of Omnigent's launch defaults
-    the rows list (an older codex catalog may predate the newest one);
+    in the rows list (an older codex catalog may predate the newest one);
     otherwise keep Codex's own first default.
     Rows are otherwise verbatim.
 
