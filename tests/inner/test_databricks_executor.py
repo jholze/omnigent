@@ -2672,12 +2672,7 @@ def test_reused_token_source_retries_resolution_after_failure(monkeypatch):
 def test_reused_token_source_runs_ambient_resolution_only_off_loopback(
     monkeypatch, server_url, expect_ambient
 ):
-    """Ambient SDK resolution runs only for servers that can be Databricks-fronted.
-
-    A loopback server has no Databricks edge in front of it, and the SDK's
-    default chain shells out to ``databricks auth token`` with no timeout —
-    so the source answers ``None`` for it without resolving anything.
-    """
+    """Loopback servers skip ambient SDK resolution; other servers (or none) still resolve."""
     from omnigent.inner.databricks_executor import (
         _DatabricksBearerAuth,
         _ReusedDatabricksTokenSource,

@@ -2717,13 +2717,7 @@ def test_remote_headers_falls_back_to_ambient_databricks_creds(
 def test_remote_headers_skips_ambient_databricks_creds_for_loopback_server(
     monkeypatch: pytest.MonkeyPatch, server_url: str
 ) -> None:
-    """A loopback server never triggers ambient Databricks credential discovery.
-
-    The SDK's default chain shells out to ``databricks auth token`` with no
-    timeout, and a local server is never Databricks-fronted — so running that
-    chain for it can only stall the caller (``omnigent host`` wedged before it
-    printed anything). With no explicit credential the headers stay bare.
-    """
+    """Loopback servers skip ambient discovery and, without explicit credentials, stay bare."""
     monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
     monkeypatch.setattr(chat_module, "_stored_databricks_record_token", lambda _url: None)
@@ -2767,6 +2761,27 @@ def test_server_auth_is_none_for_loopback_server_without_login(
     )
 
     assert chat_module._server_auth(server_url="http://127.0.0.1:6767", session_id=None) is None
+
+
+def test_server_auth_keeps_stored_apps_record_for_loopback_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored Databricks Apps record still yields SDK-backed auth for a loopback URL."""
+    monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda _url: "https://ws.example.databricks.com",
+    )
+    monkeypatch.setattr(
+        chat_module,
+        "_read_databrickscfg",
+        lambda _profile: pytest.fail("ambient Databricks discovery ran for a loopback server"),
+    )
+
+    auth = chat_module._server_auth(server_url="http://127.0.0.1:6767", session_id=None)
+
+    assert isinstance(auth, chat_module._DatabricksTokenAuth)
 
 
 def test_remote_headers_adds_org_id_header(monkeypatch: pytest.MonkeyPatch) -> None:

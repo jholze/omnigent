@@ -868,14 +868,11 @@ def _ambient_databricks_auth_applies(server_url: str | None) -> bool:
     """Whether ambient Databricks credentials can authenticate *server_url*.
 
     A loopback Omnigent server is never fronted by the Databricks edge, so the
-    SDK's default credential chain has nothing to offer it. Skipping the chain
-    there matters: it shells out to ``databricks auth token`` with no timeout,
-    which can wedge the caller before it ever reaches the server. ``None``
-    (no server named) keeps the ambient resolution.
+    SDK's default credential chain has nothing to offer it — and that chain
+    shells out to ``databricks auth token`` with no timeout, which can wedge
+    the caller. ``None`` (no server named) keeps the ambient resolution.
 
-    :param server_url: Omnigent server base URL, e.g.
-        ``"http://127.0.0.1:6767"`` or
-        ``"https://myapp-123.aws.databricksapps.com"``, or ``None``.
+    :param server_url: Server base URL, e.g. ``"http://127.0.0.1:6767"``, or ``None``.
     :returns: ``False`` for a loopback server, ``True`` otherwise.
     """
     if not server_url:

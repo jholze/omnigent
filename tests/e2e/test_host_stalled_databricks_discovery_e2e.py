@@ -150,7 +150,6 @@ def test_host_registers_when_ambient_databricks_discovery_never_returns(
     )
     console = io.BytesIO()
     child.logfile_read = console
-    started = time.monotonic()
     try:
         try:
             child.expect(_CONNECTED_RE, timeout=_REGISTER_TIMEOUT_S)
@@ -163,13 +162,11 @@ def test_host_registers_when_ambient_databricks_discovery_never_returns(
                 f"stalled CLI children={_stalled_cli_processes()!r}).\n"
                 f"Console output:\n{output or '<none>'}"
             )
-        elapsed = time.monotonic() - started
         assert child.match.group(1).decode() == host_id
         deadline = time.monotonic() + 15.0
         while _host_status(http_client, host_id) != "online":
             assert time.monotonic() < deadline, f"host {host_id} connected but never went online"
             time.sleep(0.5)
-        assert elapsed < _REGISTER_TIMEOUT_S
         # A local server needs no Databricks credential, so registering with it
         # must never shell out to the Databricks CLI at all.
         assert not cli_invocations.exists(), (

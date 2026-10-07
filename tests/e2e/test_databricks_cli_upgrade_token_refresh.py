@@ -199,7 +199,7 @@ def test_prompt_survives_databricks_cli_upgrade_mid_session(
     """A prompt survives a CLI upgrade under a live runner."""
     from databricks.sdk.oauth import HostMetadata
 
-    from omnigent.cli_auth import open_server_client
+    from omnigent.cli_auth import open_server_client, store_databricks_auth
     from omnigent.harnesses.claude_native.bridge import (
         prepare_bridge_dir,
         start_tool_relay,
@@ -242,6 +242,9 @@ def test_prompt_survives_databricks_cli_upgrade_mid_session(
     try:
         server_proc, base_url = _start_server(tmp_path)
         session_id = _create_session(base_url)
+        # A loopback server never gets ambient Databricks credentials, so record
+        # the login that pins it to the staged workspace, as `omnigent login` would.
+        store_databricks_auth(base_url, "https://adb-1111222233334444.15.azuredatabricks.net")
 
         # Keep one auth factory alive across both CLI versions.
         factory = _make_auth_token_factory(base_url)
