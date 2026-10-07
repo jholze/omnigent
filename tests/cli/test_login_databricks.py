@@ -15,6 +15,7 @@ app-rejects-token failure, and non-interference with accounts mode.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -158,7 +159,8 @@ def _patch_login_env(
         ``None`` so tests never read the developer's real ``~/.databrickscfg``.
     :param real_resolver: Leave ``_databricks_workspace_auth_info`` unpatched so
         the real ``~/.databrickscfg`` resolver runs (point ``DATABRICKS_CONFIG_FILE``
-        at a temp file first); ``cached_tokens`` is then ignored.
+        at a temp file first; every other ``DATABRICKS_*`` variable is cleared);
+        ``cached_tokens`` is then ignored.
     :param cli_responder: Produces ``(returncode, stdout)`` for each databricks
         CLI argv (binary dropped), e.g. to emulate ``auth login`` saving a
         profile and ``auth token`` minting. Defaults to a silent success.
@@ -194,6 +196,13 @@ def _patch_login_env(
 
     if not real_resolver:
         monkeypatch.setattr(cli_mod, "_databricks_workspace_auth_info", _auth_info)
+    else:
+        # The real resolver's SDK Config reads every DATABRICKS_* variable;
+        # ambient CI credentials would change which auth path a seeded
+        # profile takes, and so which token it presents.
+        for name in list(os.environ):
+            if name.startswith("DATABRICKS_") and name != "DATABRICKS_CONFIG_FILE":
+                monkeypatch.delenv(name)
 
     login_calls: list[str] = []
 
@@ -599,13 +608,6 @@ def test_login_stale_retry_presents_the_profile_it_just_logged_into(
     cfg_path = tmp_path / "databrickscfg"
     cfg_path.write_text(f"[workspace-pat]\nhost = {_WORKSPACE}\ntoken = tok-stale\n")
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
-    for name in (
-        "DATABRICKS_CONFIG_PROFILE",
-        "DATABRICKS_HOST",
-        "DATABRICKS_TOKEN",
-        "DATABRICKS_CLI_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
 
     def _databricks_cli(argv: list[str]) -> tuple[int, str]:
         if argv[:2] == ["auth", "login"]:
@@ -615,9 +617,10 @@ def test_login_stale_retry_presents_the_profile_it_just_logged_into(
                 fh.write(f"\n[{profile}]\nhost = {host}\nauth_type = databricks-cli\n")
             return 0, f"Profile {profile} was successfully saved\n"
         if argv[:2] == ["auth", "token"]:
-            if "--profile" not in argv:
-                # Like the real CLI: a host-keyed lookup is ambiguous once two
-                # profiles share the host, so only the --profile mint succeeds.
+            # Like the real CLI: the host-keyed lookup is ambiguous once two
+            # profiles share the host, and only the OAuth profile the login
+            # wrote has a grant to mint from.
+            if "--profile" not in argv or argv[argv.index("--profile") + 1] != _PROFILE:
                 return 1, ""
             minted = {
                 "access_token": "tok-fresh",
@@ -634,8 +637,12 @@ def test_login_stale_retry_presents_the_profile_it_just_logged_into(
 
     result = CliRunner().invoke(cli_group, ["login", _WORKSPACE_API_URL])
 
-    assert f"auth login --host {_WORKSPACE} --profile {_PROFILE}" in login_calls
-    assert fake.requests[-1]["authorization"] == "Bearer tok-fresh", result.output
+    presented = [r["authorization"] for r in fake.requests if r["authorization"]]
+    # The cached profile's token was presented and rejected first (the reported
+    # trigger); exactly one re-login then presented the fresh profile's token.
+    assert presented[0] == "Bearer tok-stale", result.output
+    assert login_calls.count(f"auth login --host {_WORKSPACE} --profile {_PROFILE}") == 1
+    assert presented[-1] == "Bearer tok-fresh", result.output
     assert result.exit_code == 0, result.output
     assert "Logged in as alice@example.com" in result.output
     assert load_databricks_workspace_host(_WORKSPACE_API_URL) == _WORKSPACE

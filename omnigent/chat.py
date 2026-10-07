@@ -756,8 +756,10 @@ def _remote_headers(
     return headers
 
 
-# Reuse the SDK's in-memory token cache for each server.
-_databricks_auth_cache: dict[str, _ReusedDatabricksTokenSource] = {}
+# Reuse the SDK's in-memory token cache for each server. The record's host and
+# profile ride along so a re-login that rewrites the record in this process
+# replaces a source still minting from the superseded profile.
+_databricks_auth_cache: dict[str, tuple[str, str | None, _ReusedDatabricksTokenSource]] = {}
 
 
 def _stored_databricks_record_token(server_url: str) -> str | None:
@@ -779,12 +781,13 @@ def _stored_databricks_record_token(server_url: str) -> str | None:
     workspace_host = load_databricks_workspace_host(server_url)
     if workspace_host is None:
         return None
-    source = _databricks_auth_cache.get(server_url)
-    if source is None:
-        source = _ReusedDatabricksTokenSource(
-            host=workspace_host, profile=load_databricks_profile(server_url)
-        )
-        _databricks_auth_cache[server_url] = source
+    profile = load_databricks_profile(server_url)
+    cached = _databricks_auth_cache.get(server_url)
+    if cached is None or cached[:2] != (workspace_host, profile):
+        source = _ReusedDatabricksTokenSource(host=workspace_host, profile=profile)
+        _databricks_auth_cache[server_url] = (workspace_host, profile, source)
+    else:
+        source = cached[2]
     return source.current_token()
 
 

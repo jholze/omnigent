@@ -4671,3 +4671,54 @@ def test_cursor_native_resume_never_drives_an_omnigent_turn(
     )
 
     assert redirected["session_id"] == "conv_abc123"
+
+
+def test_stored_databricks_record_token_follows_a_rewritten_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inline re-login that records another profile replaces the cached source.
+
+    The host preflight mints once, caching a source built from the record, and
+    may then run ``omnigent login`` in the same process. The rewritten record
+    must drive the next mint; an unchanged record keeps reusing the source.
+    """
+    import omnigent.inner.databricks_executor as dbx
+    from omnigent.cli_auth import store_databricks_auth
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    monkeypatch.setattr(chat_module, "_databricks_auth_cache", {})
+    server = "https://example.databricks.com/api/2.0/omnigent"
+    workspace = "https://example.databricks.com"
+
+    class _Cfg:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def authenticate(self) -> dict[str, str]:
+            return {"Authorization": f"Bearer {self.token}"}
+
+    resolved: list[str | None] = []
+
+    def _fake_resolve(
+        profile: str | None = None,
+        *,
+        host: str | None = None,
+        preferred_profile: str | None = None,
+    ) -> tuple[object, str | None]:
+        resolved.append(preferred_profile)
+        auth = dbx._DatabricksBearerAuth(
+            _Cfg(f"tok-{preferred_profile}"), profile_name=preferred_profile
+        )
+        return auth, host
+
+    monkeypatch.setattr(dbx, "_resolve_databricks_auth", _fake_resolve)
+
+    store_databricks_auth(server, workspace, profile_name="workspace-pat")
+    assert chat_module._stored_databricks_record_token(server) == "tok-workspace-pat"
+    assert chat_module._stored_databricks_record_token(server) == "tok-workspace-pat"
+    store_databricks_auth(server, workspace, profile_name="example")
+    assert chat_module._stored_databricks_record_token(server) == "tok-example"
+    # One resolution per distinct record, not per call.
+    assert resolved == ["workspace-pat", "example"]
