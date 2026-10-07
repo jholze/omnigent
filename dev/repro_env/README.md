@@ -78,9 +78,9 @@ runner or decide the model backend from ambient credentials.
 Attachment supports HTTP/browser journeys and native session fixtures. Tests
 that directly kill/restart a server or runner or access the fixture database
 require their own environment; run those outside `dev.repro_env exec`. Missing
-process/database state produces an explicit error. The three connection
+process/database state produces an explicit error. The four connection
 variables must be supplied together; use the wrapper rather than setting only
-one of them.
+some of them.
 
 Standalone native mock fixtures save an existing provider config to an
 owner-only `.e2e-backup` file next to its resolved target before replacing it

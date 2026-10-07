@@ -250,8 +250,9 @@ def test_exec_exposes_relocated_environment_directory(tmp_path, monkeypatch, evi
     monkeypatch.setenv("EXPECTED_CONFIG_HOME", str(config_home))
     script = (
         "import json, os, pathlib; "
-        "state = json.loads((pathlib.Path(os.environ['OMNIGENT_REPRO_ENV_DIR']) "
-        "/ 'environment.json').read_text()); "
+        "env_dir = pathlib.Path(os.environ['OMNIGENT_REPRO_ENV_DIR']); "
+        "assert env_dir.is_absolute(), env_dir; "
+        "state = json.loads((env_dir / 'environment.json').read_text()); "
         "assert state['config_home'] == os.environ['EXPECTED_CONFIG_HOME'], state"
     )
     argv = ["dev.repro_env", "--output", output.name, "exec", "--", sys.executable, "-c", script]
