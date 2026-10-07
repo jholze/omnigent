@@ -601,6 +601,9 @@ def _prune_session_read_state(session_id: str) -> None:
         seen.pop(session_id, None)
     for unread in _read_explicit_unread.values():
         unread.discard(session_id)
+    # Drop the session-level finish stamp too, so a deleted/archived session
+    # doesn't retain it indefinitely.
+    _session_finished_at_cache.pop(session_id, None)
 
 
 def _discovery_key(user_id: str | None) -> str:
@@ -4935,11 +4938,9 @@ def _publish_status(
         return
     previous_status = _session_status_cache.get(session_id)
     _session_status_cache[session_id] = status
-    # A turn just finished: an in-flight status reached a terminal one. Stamp
-    # it before any event/list read can observe the edge, so a row that shows
-    # ``idle``/``failed`` always carries the finish time that produced it.
-    # An unknown previous status (restart, first observation) stays unstamped
-    # — clients treat a missing stamp as "not seen" and still notify.
+    # Stamp the finish before any list read can observe the edge. An unknown
+    # previous status (restart, first observation) stays unstamped — clients
+    # treat a missing stamp as "not seen" and still notify.
     turn_finished = status in ("idle", "failed") and previous_status in ("running", "waiting")
     if turn_finished:
         _session_finished_at_cache[session_id] = int(time.time())

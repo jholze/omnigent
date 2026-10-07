@@ -235,6 +235,29 @@ def test_list_item_embeds_last_finished_at() -> None:
     )
 
 
+def test_relinquish_clears_last_finished_at() -> None:
+    """Handing the relay to another replica drops the local finish stamp.
+
+    The non-owner must then serve ``last_finished_at = None`` (fail open)
+    rather than a stale earlier-turn stamp that could suppress a notification
+    for a newer finish observed on the owning replica.
+    """
+    from omnigent.server.routes._sessions import orchestration
+
+    sessions_mod._publish_status("conv_a", "running")
+    sessions_mod._publish_status("conv_a", "idle")
+    assert (  # type: ignore[attr-defined]
+        _build_item(None, _make_conversation("conv_a")).last_finished_at is not None
+    )
+
+    orchestration._relinquish_session_live_state("conv_a")
+
+    assert "conv_a" not in sessions_mod._session_finished_at_cache
+    assert (  # type: ignore[attr-defined]
+        _build_item(None, _make_conversation("conv_a")).last_finished_at is None
+    )
+
+
 def test_prune_clears_read_state_across_all_users() -> None:
     """Pruning a session drops its read-state from every user's caches."""
     sessions_mod._set_read_state("alice@example.com", "conv_a", 4_999, True)
@@ -248,3 +271,14 @@ def test_prune_clears_read_state_across_all_users() -> None:
     assert sessions_mod._read_state_entry("bob@example.com", "conv_a") == (None, False)
     # ...but other sessions are untouched.
     assert sessions_mod._read_state_entry("alice@example.com", "conv_b") == (200, True)
+
+
+def test_prune_clears_last_finished_at() -> None:
+    """Pruning a deleted/archived session drops its turn-finish stamp."""
+    sessions_mod._publish_status("conv_a", "running")
+    sessions_mod._publish_status("conv_a", "idle")
+    assert "conv_a" in sessions_mod._session_finished_at_cache
+
+    sessions_mod._prune_session_read_state("conv_a")
+
+    assert "conv_a" not in sessions_mod._session_finished_at_cache

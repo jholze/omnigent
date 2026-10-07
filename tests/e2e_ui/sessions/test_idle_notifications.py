@@ -389,11 +389,15 @@ def test_idle_notification_click_navigates_to_chat(
     """
     base_url, session_id = seeded_session
     marker = f"left-mid-turn-{uuid.uuid4().hex[:8]}"
+    # Scope the gated reply to the main turn's advertised ``researcher`` tool so
+    # title generation (same marker, no tools) can't consume the blocked
+    # response and steal the gate.
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": "Greeting delivered.", "block": True}],
         key=marker,
         match=marker,
+        required_tools=["researcher"],
     )
     try:
         page.add_init_script(_HARNESS_INIT_SCRIPT)

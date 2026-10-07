@@ -7448,6 +7448,10 @@ def _relinquish_session_live_state(session_id: str) -> None:
     """Drop local live state for a session now owned by another replica."""
     _session_status_cache.pop(session_id, None)
     _session_active_response_cache.pop(session_id, None)
+    # Serve ``None`` for the finish stamp once another replica owns the relay:
+    # a stale earlier-turn stamp left here would suppress a notification for a
+    # newer finish observed through the mirrored row. Fail open instead.
+    _session_finished_at_cache.pop(session_id, None)
     session_live_state.forget_live_status(session_id)
 
 
