@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -49,9 +50,11 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
                 if models_requested.is_set():
                     models_polled.set()
                 models_requested.set()
-                # The host accepted the request but never answers it.
+                # The host accepted the request but never answers it; by teardown the
+                # client has already given up on it, so aborting may find nothing to abort.
                 await release.wait()
-                await route.abort()
+                with contextlib.suppress(Exception):
+                    await route.abort()
 
             async def worktrees(route: Route) -> None:
                 await route.fulfill(
@@ -102,7 +105,7 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
                     "picker": await picker.count(),
                 }
                 samples.append(sample)
-                if shots and elapsed >= shots[0]:
+                while shots and elapsed >= shots[0]:
                     await page.screenshot(path=output / f"landing-{shots.pop(0):.0f}s.png")
                 if sample["picker"] or elapsed >= _PICKER_DEADLINE_S:
                     break

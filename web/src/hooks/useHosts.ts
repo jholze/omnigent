@@ -221,8 +221,8 @@ export function useHostModelOptions(
     if (becameSelected && failed && !isFetching) void refetch();
   }, [canRefresh, failed, isFetching, refetch]);
   // React Query drops a data-less query's error and status while it refetches.
-  // Keep each key's last failure until its catalog arrives, so a picker that
-  // already settled stays settled, with its message, while the poll retries.
+  // Keep each key's last failure until its catalog arrives (or the cache forgets
+  // the failure), so a settled picker keeps its message while the poll retries.
   const [failures, setFailures] = useState(() => new Map<string, Error>());
   useEffect(() => {
     if (query.isError) {
@@ -236,7 +236,8 @@ export function useHostModelOptions(
       });
     }
   }, [pollerKey, query.isError, query.isSuccess, query.error]);
-  const error = query.error ?? (query.isPending ? (failures.get(pollerKey) ?? null) : null);
+  const retained = query.isPending && query.errorUpdateCount > 0 ? failures.get(pollerKey) : null;
+  const error = query.error ?? retained ?? null;
   const isError = error !== null;
   return {
     data: query.data,

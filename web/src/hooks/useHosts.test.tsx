@@ -490,9 +490,7 @@ describe("useHostModelOptions", () => {
   });
 
   it("polls in the background after a timeout and fills in once the host answers", async () => {
-    let answer = (_response: Response): void => {
-      throw new Error("the poll did not start a second request");
-    };
+    let answer!: (response: Response) => void;
     fetchMock.mockReturnValueOnce(new Promise<Response>(() => {})).mockReturnValueOnce(
       new Promise<Response>((resolve) => {
         answer = resolve;
