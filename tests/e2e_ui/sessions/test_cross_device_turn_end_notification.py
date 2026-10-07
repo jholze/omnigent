@@ -318,14 +318,13 @@ def test_phone_not_notified_for_turn_sent_and_watched_on_laptop(
     marker = f"watched-turn-{uuid.uuid4().hex[:8]}"
 
     # Hold the reply on the mock's gate so the session stays ``running`` until
-    # both clients observe it. Scoped by the unique marker and the main turn's
-    # ``researcher`` tool so title-gen (same marker, no tools) can't consume it.
+    # both clients observe it. Content-routed by the unique marker so no other
+    # turn can steal (or be stolen by) this queue.
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": "Greeting delivered.", "block": True}],
         key=f"watched-turn-{uuid.uuid4().hex[:8]}",
         match=marker,
-        required_tools=["researcher"],
     )
 
     record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
