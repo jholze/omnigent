@@ -104,7 +104,7 @@ describe("hostFetch session recovery", () => {
   const reload = vi.fn();
   const fetcher = vi.fn();
   const expiredSession = new Error("Fetch request failed due to expired user session");
-  let originalLocation: Location;
+  const originalLocation = window.location;
 
   async function loadHost() {
     const host = await import("./host");
@@ -117,7 +117,6 @@ describe("hostFetch session recovery", () => {
     reload.mockReset();
     fetcher.mockReset();
     window.sessionStorage.clear();
-    originalLocation = window.location;
     Object.defineProperty(window, "location", {
       configurable: true,
       value: { ...originalLocation, reload },
@@ -296,6 +295,23 @@ describe("hostFetch session recovery", () => {
     const { hostFetch } = await loadHost();
 
     await expect(hostFetch("/v1/me")).resolves.toBe(response);
+  });
+
+  it("keeps the loop guard when clearing storage fails on re-arm", async () => {
+    fetcher.mockRejectedValue(expiredSession);
+    const firstPage = await loadHost();
+    await expect(firstPage.hostFetch("/v1/sessions")).rejects.toBe(expiredSession);
+
+    vi.resetModules();
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("Storage is disabled", "SecurityError");
+    });
+    const nextPage = await loadHost();
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ user_id: "user@example.com" })));
+    await nextPage.hostFetch("/v1/me");
+    await expect(nextPage.hostFetch("/v1/sessions")).rejects.toBe(expiredSession);
+
+    expect(reload).toHaveBeenCalledTimes(1);
   });
   /* oxlint-enable no-shadow */
 });

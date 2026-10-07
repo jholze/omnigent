@@ -19,7 +19,6 @@ const SESSION_CHANGE_EVENT = "embed-host-session-change";
 
 interface EmbedHostControls {
   expireSession: (options?: { persist?: boolean }) => void;
-  restoreSession: () => void;
   isExpired: () => boolean;
   pageLoads: () => number;
 }
@@ -59,11 +58,6 @@ const controls: EmbedHostControls = {
   expireSession(options) {
     state.expired = true;
     if (options?.persist) writeStorage(EXPIRED_KEY, "1");
-    window.dispatchEvent(new Event(SESSION_CHANGE_EVENT));
-  },
-  restoreSession() {
-    state.expired = false;
-    writeStorage(EXPIRED_KEY, null);
     window.dispatchEvent(new Event(SESSION_CHANGE_EVENT));
   },
   isExpired: hostSessionExpired,
