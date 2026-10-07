@@ -269,6 +269,8 @@ export interface Session {
    */
   agentName: string | null;
   runnerId?: string | null;
+  /** Current runner reachability; absent when the snapshot omits liveness. */
+  runnerOnline?: boolean;
   /**
    * Host that launched (or should launch) the runner, e.g.
    * ``"host_a1b2"``; ``null`` for CLI/local sessions. Carried on the
@@ -281,6 +283,8 @@ export interface Session {
    * older recorded fixtures may omit it (treated as `null`).
    */
   hostId?: string | null;
+  /** Current host reachability; absent when the snapshot omits liveness. */
+  hostOnline?: boolean;
   /**
    * Whether this session's host is a dormant resumable managed host the
    * server can wake on the next message. Carried on the snapshot so the open
@@ -419,6 +423,8 @@ export interface Session {
     title?: string;
     cause?: string;
     remediation?: string;
+    /** For `runner_rejected_event`: the persisted item the runner refused (newer servers). */
+    item_id?: string;
   } | null;
   /**
    * Outstanding `response.elicitation_request` event payloads on
@@ -547,10 +553,12 @@ export interface SandboxStatus {
 
 /** Host-discovered menu metadata. Invocation resolves the full skill on the runner. */
 export interface SkillSummary {
-  /** Lowercase kebab-case identifier, e.g. ``"triage-issues"``. */
+  /** Invocation identifier (the skill's directory name), e.g. ``"triage-issues"``. */
   name: string;
   /** One-line summary from the SKILL.md frontmatter. */
   description: string;
+  /** Frontmatter ``name`` label, e.g. ``"Triage Issues"``; absent from older servers. */
+  display_name?: string | null;
 }
 
 export type SkillsStatus = "loading" | "ready" | "error" | "unavailable";
