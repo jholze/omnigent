@@ -538,12 +538,9 @@ async def serve_tunnel(
                         and http_auth_rejection_streak >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
                     ):
                         if server_url:
-                            # `omnigent login` detects the fronting workspace
-                            # itself — unlike a raw `databricks auth login
-                            # --host`, which would need the workspace host,
-                            # not the server URL (for workspace-hosted
-                            # servers the API mount is the wrong --host). Quoted so
-                            # the `?o=` selector survives zsh globbing when pasted.
+                            # `omnigent login` infers the fronting workspace itself,
+                            # unlike `databricks auth login --host`, which needs the
+                            # workspace host. Quoted so `?o=` survives shell globbing.
                             from omnigent.util.server_url import display_server_url
 
                             login_hint = (

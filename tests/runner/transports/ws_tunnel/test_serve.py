@@ -7,9 +7,12 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import ssl
+import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Any, TypedDict
 
@@ -360,23 +363,19 @@ async def test_serve_tunnel_fails_loud_on_protocol_rejection(
         )
 
 
-@pytest.mark.asyncio
-async def test_serve_tunnel_fails_loud_on_http_auth_rejection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """HTTP 401 without a factory retries up to the streak cap then fails.
-
-    The fatal message carries a login hint the user pastes into a shell, so it
-    must spell the configured CLI wrapper and quote the ``?o=`` display URL.
+async def _serve_until_http_auth_rejection(
+    monkeypatch: pytest.MonkeyPatch, *, server_url: str
+) -> str:
+    """Drive ``serve_tunnel`` into the HTTP 401 fatal cap and return its message.
 
     :param monkeypatch: Pytest monkeypatch fixture.
-    :returns: None.
+    :param server_url: Server URL handed to ``serve_tunnel``.
+    :returns: The fatal ``RuntimeError`` text, including the login hint.
     """
     from omnigent.runner.transports.ws_tunnel.serve import (
         _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS,
     )
 
-    monkeypatch.setenv(WRAPPER_COMMAND_ENV, "isaac omni")
     attempt = 0
 
     async def _serve_once(
@@ -417,23 +416,101 @@ async def test_serve_tunnel_fails_loud_on_http_auth_rejection(
     with pytest.raises(RuntimeError, match="HTTP 401") as exc_info:
         await serve_tunnel(
             _noop_app,
-            server_url="https://example.databricks.com/api/2.0/omnigent?o=123",
+            server_url=server_url,
             runner_id="runner_auth_rejected",
             runner_version="0.1.0",
             auth_token="tok-expired",
         )
 
     assert attempt == _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
-    message = str(exc_info.value)
+    return str(exc_info.value)
+
+
+def _login_hint_command(message: str) -> str:
+    """Extract the backticked command a fatal message tells the user to run.
+
+    :param message: Fatal ``RuntimeError`` text.
+    :returns: The command between the backticks, e.g. ``"omnigent login <url>"``.
+    """
     hint = re.search(r"run `([^`]+)` to re-authenticate", message)
     assert hint, message
-    command = hint.group(1)
+    return hint.group(1)
+
+
+@pytest.mark.asyncio
+async def test_serve_tunnel_fails_loud_on_http_auth_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP 401 without a factory retries up to the streak cap then fails.
+
+    The fatal message carries a login hint the user pastes into a shell, so it
+    must spell the configured CLI wrapper and quote the ``?o=`` display URL.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    monkeypatch.setenv(WRAPPER_COMMAND_ENV, "isaac omni")
+
+    message = await _serve_until_http_auth_rejection(
+        monkeypatch, server_url="https://example.databricks.com/api/2.0/omnigent?o=123"
+    )
+
+    command = _login_hint_command(message)
     assert command.startswith("isaac omni login "), command
     assert "https://example.databricks.com/omnigent?o=123" in command
     # Every glob metacharacter must sit inside quotes (or be escaped) so the
     # command pastes into a nomatch shell such as zsh unchanged.
     unquoted = re.sub(r"\\.|'[^']*'|\"[^\"]*\"", "", command)
     assert not any(ch in unquoted for ch in "?*["), command
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("bash") is None,
+    reason="needs bash to stand in for a nomatch shell such as zsh",
+)
+@pytest.mark.asyncio
+async def test_http_auth_rejection_hint_pastes_into_nomatch_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The printed login command runs unchanged in a shell that refuses bad globs.
+
+    zsh aborts ``omnigent login https://…/omnigent?o=123`` with ``no matches
+    found`` because ``?`` is a glob; ``bash -O failglob`` behaves the same.
+    The wrapper binary is shimmed to print the arguments it receives.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :param tmp_path: Pytest temporary directory.
+    :returns: None.
+    """
+    monkeypatch.setenv(WRAPPER_COMMAND_ENV, "isaac omni")
+    message = await _serve_until_http_auth_rejection(
+        monkeypatch, server_url="https://example.databricks.com/api/2.0/omnigent?o=123"
+    )
+    command = _login_hint_command(message)
+
+    shims = tmp_path / "bin"
+    shims.mkdir()
+    for name in ("isaac", "omnigent"):
+        shim = shims / name
+        shim.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+        shim.chmod(0o755)
+    bash = shutil.which("bash")
+    assert bash is not None
+    pasted = subprocess.run(
+        [bash, "-O", "failglob", "-c", command],
+        env={"PATH": f"{shims}{os.pathsep}/usr/bin:/bin"},
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert pasted.returncode == 0, pasted.stderr
+    assert pasted.stdout.splitlines() == [
+        "omni",
+        "login",
+        "https://example.databricks.com/omnigent?o=123",
+    ]
 
 
 def test_websocket_auth_redirect_url_detects_https_redirect() -> None:
