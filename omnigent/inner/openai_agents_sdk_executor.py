@@ -839,34 +839,34 @@ def _resolve_tool_message_names(messages: Any) -> Any:  # type: ignore[explicit-
     OSS models on the Databricks AI Gateway reject a tool result with no
     resolvable name when the preceding assistant issued parallel ``tool_calls``,
     since results then have no unambiguous positional match. The openai-agents
-    converter omits the name, so resolve it from the assistant ``tool_calls`` by
-    ``tool_call_id``. *messages* is returned unchanged when not a list of dicts.
+    converter omits the name, so resolve it by ``tool_call_id`` from the
+    ``tool_calls`` seen earlier in the same conversation. Returns a new list and
+    leaves the input dicts untouched; *messages* is returned unchanged when it
+    is not a list.
     """
     if not isinstance(messages, list):
         return messages
     names_by_call_id: dict[str, str] = {}
+    resolved: list[object] = []
     for message in messages:
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        for tool_call in message.get("tool_calls") or []:
-            if not isinstance(tool_call, dict):
-                continue
-            call_id = tool_call.get("id")
-            function = tool_call.get("function")
-            name = function.get("name") if isinstance(function, dict) else None
-            if isinstance(call_id, str) and isinstance(name, str):
-                names_by_call_id[call_id] = name
-    for message in messages:
-        if not isinstance(message, dict) or message.get("role") != "tool":
-            continue
-        if message.get("name"):
-            continue
-        call_id = message.get("tool_call_id")
-        if isinstance(call_id, str):
-            resolved = names_by_call_id.get(call_id)
-            if resolved:
-                message["name"] = resolved
-    return messages
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = tool_call.get("id")
+                function = tool_call.get("function")
+                name = function.get("name") if isinstance(function, dict) else None
+                if isinstance(call_id, str) and isinstance(name, str):
+                    names_by_call_id[call_id] = name
+        elif (
+            isinstance(message, dict) and message.get("role") == "tool" and not message.get("name")
+        ):
+            call_id = message.get("tool_call_id")
+            resolved_name = names_by_call_id.get(call_id) if isinstance(call_id, str) else None
+            if resolved_name:
+                message = {**message, "name": resolved_name}
+        resolved.append(message)
+    return resolved
 
 
 class _ReasoningBlockFilterStream:

@@ -497,6 +497,96 @@ def test_non_databricks_tool_results_keep_no_name() -> None:
     assert "name" not in tool_message
 
 
+def test_databricks_executor_wires_tool_name_resolution() -> None:
+    """Constructing the executor against a gateway URL resolves forwarded tool names."""
+    captured: dict = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs) -> object:
+            captured.update(kwargs)
+            return object()
+
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    class _FakeClient:
+        base_url = "https://host.example.com/ai-gateway/openai/v1"
+        chat = _FakeChat()
+
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    client = _FakeClient()
+    executor = OpenAIAgentsSDKExecutor(client=client, use_responses=False)
+    assert executor._databricks is True
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                },
+                {
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "get_time", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "content": "18C"},
+        {"role": "tool", "tool_call_id": "call_b", "content": "22:00"},
+    ]
+    _run(client.chat.completions.create(messages=messages, stream=False))
+
+    resolved = {
+        m["tool_call_id"]: m.get("name") for m in captured["messages"] if m.get("role") == "tool"
+    }
+    assert resolved == {"call_a": "get_weather", "call_b": "get_time"}
+
+
+def test_tool_names_resolve_from_nearest_preceding_assistant_call() -> None:
+    """A reused tool_call_id resolves to the name from its own preceding turn."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_x", "content": "18C"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {"name": "get_time", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_x", "content": "22:00"},
+    ]
+    forwarded = _capture_forwarded_messages(messages, databricks=True)
+    names = [m.get("name") for m in forwarded if m.get("role") == "tool"]
+    assert names == ["get_weather", "get_time"]
+
+
 class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
     def test_close_closes_owned_client_but_not_injected_client(self):
         class _ClosableClient:
