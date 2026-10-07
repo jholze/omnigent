@@ -22,8 +22,6 @@ from tests.e2e_ui.conftest import (
     open_right_rail,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
 
 @pytest.mark.parametrize(
     ("tab_name", "tooltip", "shortcut", "expected_state"),
@@ -84,7 +82,15 @@ def test_right_panel_terminals_and_file_viewer(
     viewer just needs a deterministic file present in the scanned workspace.
     """
     base_url, session_id = terminal_session
-    test_file = _REPO_ROOT / _TERMINAL_PANEL_FILE
+    listing = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}/resources/environments/default/filesystem",
+        timeout=10.0,
+    )
+    listing.raise_for_status()
+    # The API seeds into the workspace it reports as ``base``; the scripted
+    # terminal (``cwd: .``) writes a copy into the runner's cwd, i.e. pytest's.
+    workspace_file = Path(listing.json()["base"]) / _TERMINAL_PANEL_FILE
+    test_file = Path.cwd() / _TERMINAL_PANEL_FILE
     if test_file.exists():
         test_file.unlink()
 
@@ -171,6 +177,7 @@ def test_right_panel_terminals_and_file_viewer(
             timeout=20_000
         )
     finally:
+        workspace_file.unlink(missing_ok=True)
         if test_file.exists():
             test_file.unlink()
 
