@@ -121,7 +121,10 @@ function sanitize(entry: unknown): SessionWorkspaceState {
   if (record.selectedSideChatId === null || typeof record.selectedSideChatId === "string") {
     state.selectedSideChatId = record.selectedSideChatId;
   }
-  if (typeof record.selectedPrUrl === "string" && record.selectedPrUrl) {
+  // Shape-checked like the other fields: it is forwarded verbatim as a query
+  // parameter, so a corrupted value should be dropped rather than cause repeated
+  // 400 round-trips.
+  if (typeof record.selectedPrUrl === "string" && URL.canParse(record.selectedPrUrl)) {
     state.selectedPrUrl = record.selectedPrUrl;
   }
   return state;

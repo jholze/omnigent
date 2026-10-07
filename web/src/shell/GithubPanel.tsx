@@ -827,10 +827,25 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
       });
     }
   }, [conversationId, info.data]);
+  const cachedAssociations =
+    knownAssociations?.sessionId === conversationId ? knownAssociations.data : undefined;
+  // Older hosts still wrap the runner's "PR no longer tracked" rejection as a
+  // 502 instead of the typed 400 below, so a dropped remembered PR can't be told
+  // apart from a transient failure and must be kept. When the per-PR request
+  // fails that way with nothing cached, fetch the session default so the picker
+  // and Link/Unlink controls stay usable while the preference is preserved.
+  const restorationUnrecoverable =
+    !!selected &&
+    !!info.error &&
+    !info.data &&
+    !(info.error instanceof RunnerOfflineError) &&
+    !cachedAssociations;
+  const defaultInfo = useGithubInfo(conversationId, {
+    poll: true,
+    enabled: restorationUnrecoverable,
+  });
   // Switching the metadata query must not unmount the session's PR controls.
-  const associations =
-    info.data ??
-    (knownAssociations?.sessionId === conversationId ? knownAssociations.data : undefined);
+  const associations = info.data ?? defaultInfo.data ?? cachedAssociations;
   const update = useUpdateSessionPr(conversationId);
   useEffect(() => {
     if (!selected && info.data?.selected_pr_url) {
@@ -849,16 +864,24 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
     },
     [conversationId],
   );
-  // A remembered PR is tentative until the runner serves it again. Only a 400
-  // (the session no longer tracks that URL) drops it; other failures keep it.
+  // A remembered PR is tentative until the runner serves it. An authoritative
+  // 400 (invalid_input: the session no longer tracks that URL) drops it,
+  // checked before cached data so a stale success can't mask a fresh rejection
+  // and keyed on the live selection so a later poll still clears it, not just
+  // the first restore. Any other failure (an older host's 502, a transient
+  // gateway/network error, the runner asleep) keeps the preference.
   useEffect(() => {
-    if (!restored) return;
-    if (info.data) {
-      setSelection({ sessionId: conversationId, url: restored });
-    } else if (info.error instanceof ApiError && info.error.status === 400) {
+    if (
+      selected &&
+      info.error instanceof ApiError &&
+      info.error.status === 400 &&
+      info.error.code === "invalid_input"
+    ) {
       forgetSelection();
+    } else if (restored && info.data && !info.error) {
+      setSelection({ sessionId: conversationId, url: restored });
     }
-  }, [conversationId, restored, info.data, info.error, forgetSelection]);
+  }, [conversationId, restored, selected, info.data, info.error, forgetSelection]);
   const prs = associations?.prs ?? [];
   const selectedPr = prs.find((pr) => pr.url === (selected ?? associations?.selected_pr_url));
   const linkInEmptyState = prs.length === 0 && deriveGithubPanelState(info).kind === "no-pr";

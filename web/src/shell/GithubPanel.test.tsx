@@ -693,7 +693,7 @@ describe("session PR selection", () => {
     expect(picker).toHaveTextContent("example/two #42 — Second repository");
     expect(picker).not.toHaveAttribute("title");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(useGithubInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: two });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: two });
     await user.hover(picker);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "example/two #42 — Second repository",
@@ -720,7 +720,7 @@ describe("session PR selection", () => {
     expect(fallback).toHaveAttribute("href", two);
     await user.click(picker);
     await user.click(screen.getByRole("option", { name: "example/one #42 — First repository" }));
-    expect(useGithubInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: one });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: one });
 
     state.info = { isLoading: true, error: null, isFetching: true };
     rerender(<GithubPanel conversationId="conv_other" />);
@@ -891,11 +891,11 @@ describe("remembered session PR", () => {
 
     rerender(<GithubPanel conversationId="conv_other" />);
     expect(picker()).toHaveTextContent(mergedLabel);
-    expect(useGithubInfo).toHaveBeenLastCalledWith("conv_other", { poll: true, prUrl: merged });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_other", { poll: true, prUrl: merged });
 
     rerender(<GithubPanel conversationId="conv_1" />);
     expect(picker()).toHaveTextContent(openLabel);
-    expect(useGithubInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: open });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: open });
   });
 
   it("restores the picked PR after the panel is remounted", async () => {
@@ -907,7 +907,7 @@ describe("remembered session PR", () => {
 
     renderPanel();
     expect(picker()).toHaveTextContent(openLabel);
-    expect(useGithubInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: open });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: open });
   });
 
   it("forgets a remembered PR the session no longer tracks", async () => {
@@ -927,13 +927,52 @@ describe("remembered session PR", () => {
   it.each([
     ["the runner is offline", new RunnerOfflineError()],
     ["the gateway fails", new ApiError("502 Bad Gateway", 502, null)],
+    // A front-door/gateway 400 carries no invalid_input code, so it must not be
+    // mistaken for the runner's authoritative rejection and drop the pick.
+    ["a gateway returns a 400 without invalid_input", new ApiError("400 Bad Request", 400, null)],
     ["the network fails", new TypeError("Failed to fetch")],
   ])("keeps the remembered PR while %s", (_failure, error) => {
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
     const transient = failing(error);
     vi.mocked(useGithubInfo).mockImplementation(() => transient);
     renderPanel();
-    expect(useGithubInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: open });
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: open });
+    expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBe(open);
+  });
+
+  it("drops a remembered PR a refetch rejects even while its stale data is cached", async () => {
+    writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
+    // React Query keeps the last successful data alongside a failed refetch, so
+    // the panel must honour the authoritative 400 rather than the stale success.
+    const staleThenRejected = {
+      ...served(open),
+      error: new ApiError(
+        "This pull request is not associated with the session",
+        400,
+        "invalid_input",
+      ),
+    } as unknown as InfoQuery;
+    vi.mocked(useGithubInfo).mockImplementation((_conversationId, options) =>
+      options?.prUrl === open ? staleThenRejected : served(options?.prUrl ?? merged),
+    );
+    renderPanel();
+    await waitFor(() => expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBeUndefined());
+    await waitFor(() => expect(picker()).toHaveTextContent(mergedLabel));
+  });
+
+  it("keeps the controls usable when an older host rejects the remembered PR without a 400", () => {
+    writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
+    // An older host wraps the runner's rejection as a 502 (no invalid_input), so
+    // the preference is kept; fetching the session default keeps the picker and
+    // Link/Unlink controls reachable so the user can recover.
+    const olderHost = failing(new ApiError("502 Bad Gateway", 502, null));
+    vi.mocked(useGithubInfo).mockImplementation((_conversationId, options) =>
+      options?.prUrl === open ? olderHost : served(options?.prUrl ?? merged),
+    );
+    renderPanel();
+    expect(picker()).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Link a PR" })).toBeInTheDocument();
+    expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, enabled: true });
     expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBe(open);
   });
 

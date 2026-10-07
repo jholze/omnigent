@@ -9,6 +9,7 @@ a ``gh`` stub first on the runner's PATH answers with metadata for two PRs
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import signal
@@ -202,8 +203,12 @@ def gh_stubbed_server(
 
     stub_dir = tmp_path / "gh-stub"
     stub_dir.mkdir()
+    stub_py = stub_dir / "gh_stub.py"
+    stub_py.write_text(GH_STUB.format(python=sys.executable))
+    # A /bin/sh shim execs the interpreter by quoted path, tolerating spaces and
+    # long venv paths that a bare shebang line can't handle on every runner.
     stub = stub_dir / "gh"
-    stub.write_text(GH_STUB.format(python=sys.executable))
+    stub.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stub_py}" "$@"\n')
     stub.chmod(0o755)
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -341,8 +346,11 @@ def pr_sessions(
     try:
         yield base_url, session_ids[0], session_ids[1]
     finally:
+        # Teardown stays best-effort: a delete that fails (e.g. the server died
+        # mid-test) must not skip the remaining sessions or mask the real error.
         for session_id in session_ids:
-            httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
 
 
 def _open_github_tab(page: Page) -> None:
@@ -406,9 +414,13 @@ def test_selected_pr_survives_switching_sessions(
     page.get_by_role("link", name=SESSION_B_TITLE, exact=True).click()
     expect(page).to_have_url(re.compile(rf"/c/{session_b}"))
     _open_github_tab(page)
-    _link_pr(page, OPEN_PR, OPEN_LABEL)
-    expect(picker).to_have_text(OPEN_LABEL)
-    page.screenshot(path=tmp_path / "3-session-b-open.png", animations="disabled")
+    # Session B picks the *other* PR. If the selection leaked across sessions
+    # (a global rather than per-session store), returning to A would show B's
+    # merged pick instead of A's open one, so a different pick here is what makes
+    # the final assertion prove per-session isolation rather than a shared value.
+    _link_pr(page, MERGED_PR, MERGED_LABEL)
+    expect(picker).to_have_text(MERGED_LABEL)
+    page.screenshot(path=tmp_path / "3-session-b-merged.png", animations="disabled")
     _hold(page, 2_000)
 
     page.get_by_role("link", name=SESSION_A_TITLE, exact=True).click()

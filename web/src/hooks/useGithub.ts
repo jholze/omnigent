@@ -275,7 +275,7 @@ export function computeGithubPollInterval(info: GithubInfo | undefined): number 
  */
 export function useGithubInfo(
   rawConversationId: string | undefined,
-  options?: { poll?: boolean; prUrl?: string },
+  options?: { poll?: boolean; prUrl?: string; enabled?: boolean },
 ) {
   // A `temp:*` id (navigate-first new-chat window) has no server session.
   const conversationId = isTempConvId(rawConversationId) ? undefined : rawConversationId;
@@ -287,7 +287,7 @@ export function useGithubInfo(
   return useQuery({
     queryKey: ["github-info", conversationId, ...(options?.prUrl ? [options.prUrl] : [])],
     queryFn: () => fetchGithubInfo(conversationId!, options?.prUrl),
-    enabled: !!conversationId && serveable !== false,
+    enabled: !!conversationId && serveable !== false && (options?.enabled ?? true),
     retry: shouldRetryRunnerOffline,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
