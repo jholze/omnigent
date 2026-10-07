@@ -2393,7 +2393,7 @@ async def test_runner_setup_failure_with_empty_message_still_names_a_cause(
         spec: object, *, cwd: object = None, workdir: object = None
     ) -> dict[str, str]:
         del spec, cwd, workdir
-        # str(TimeoutError()) == "" — the empty-reason setup failure the ticket cites.
+        # str(TimeoutError()) == "" — an exception whose text is empty.
         raise TimeoutError()
 
     monkeypatch.setattr(

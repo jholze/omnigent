@@ -60,7 +60,7 @@ def _create_codex_native_session(base_url: str, runner_id: str) -> str:
 
 
 def _set_reasoning_effort(base_url: str, session_id: str, effort: str) -> None:
-    """Persist an effort through the real session API and verify the stored value."""
+    """Persist an effort through the real session API; the caller verifies the stored value."""
     resp = httpx.patch(
         f"{base_url}/v1/sessions/{session_id}",
         json={"reasoning_effort": effort, "silent": True},

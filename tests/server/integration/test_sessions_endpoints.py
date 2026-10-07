@@ -5577,6 +5577,64 @@ async def test_post_external_session_status_failed_without_detail_still_carries_
     assert snapshot_error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
 
 
+async def test_post_external_session_status_failed_reauth_does_not_borrow_prose(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reauth flag does not vouch for borrowed assistant text as the failure reason."""
+    reply = "All conflicts resolved. Continue the sync:"
+    published: list[tuple[str, dict[str, Any]]] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(204)),
+        base_url="http://runner",
+    ) as fake_runner:
+        _route_to_runner(monkeypatch, fake_runner)
+        _capture_published(monkeypatch, published)
+        agent = await create_test_agent(
+            client, executor={"type": "omnigent", "config": {"harness": "codex-native"}}
+        )
+        session = await _create_session(client, agent["id"])
+        item_resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "message",
+                    "response_id": "resp_reauth",
+                    "source_id": "src_reauth",
+                    "item_data": {
+                        "role": "assistant",
+                        "agent": "codex-native-ui",
+                        "content": [{"type": "output_text", "text": reply}],
+                    },
+                },
+            },
+        )
+        assert item_resp.status_code == 202, item_resp.text
+        status_resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={
+                "type": "external_session_status",
+                "data": {
+                    "status": "failed",
+                    "reauth_required": True,
+                    "response_id": "resp_reauth",
+                },
+            },
+        )
+
+    assert status_resp.status_code == 202, status_resp.text
+    failed_events = [ev for _sid, ev in published if ev.get("status") == "failed"]
+    assert failed_events, f"no failed status was published: {published}"
+    error = failed_events[0]["error"]
+    assert error is not None
+    assert error["code"] == "codex_reauth_required"
+    assert reply not in error["message"]
+    from omnigent.server.routes.sessions.routes_events import _NATIVE_FAILURE_WITHOUT_DETAIL
+
+    assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
+
+
 @pytest.mark.parametrize(
     ("spec_harness", "harness_override", "expected_code"),
     [

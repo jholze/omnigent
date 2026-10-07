@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
@@ -57,13 +59,25 @@ def _publish_assistant_message(
     resp.raise_for_status()
 
 
+def _stop_respawned_runner(runner: subprocess.Popen[bytes] | None) -> None:
+    """Tear down a runner this test had to respawn so it does not outlive the test."""
+    if runner is None:
+        return
+    runner.terminate()
+    try:
+        runner.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        runner.kill()
+        runner.wait(timeout=5)
+
+
 def test_detail_less_native_failure_surfaces_readable_error(
     page: Page,
     live_server: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """Shape 1: a native turn that fails with no detail must not fail silently."""
-    _ensure_runner_online(live_server, tmp_path_factory)
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     session_id = _create_native_codex_session(live_server, runner_id)
     try:
@@ -85,6 +99,7 @@ def test_detail_less_native_failure_surfaces_readable_error(
         expect(native_failure_pill.first).to_be_visible(timeout=15_000)
     finally:
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        _stop_respawned_runner(respawned)
 
 
 def test_native_failure_does_not_show_assistant_reply_as_the_error(
@@ -93,7 +108,7 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """Shape 3: a successful reply must never be published as the failure reason."""
-    _ensure_runner_online(live_server, tmp_path_factory)
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     session_id = _create_native_codex_session(live_server, runner_id)
     try:
@@ -128,3 +143,4 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
         )
     finally:
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        _stop_respawned_runner(respawned)

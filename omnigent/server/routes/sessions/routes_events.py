@@ -353,11 +353,9 @@ def _is_batchable_external_item(event: SessionEventInput) -> bool:
 _NATIVE_FAILURE_WITHOUT_DETAIL = (
     "The turn failed but the agent reported no detail. See the runner log for details."
 )
-# Codes the classifier leaves on text it does not recognize as an error.
-_UNCLASSIFIED_NATIVE_FAILURE_CODES = frozenset({"native_turn_error", "codex_turn_error"})
 
 
-def _native_failure_message(detail: str, *, borrowed: bool, classified_code: str) -> str:
+def _native_failure_message(detail: str, *, borrowed: bool, recognized: bool) -> str:
     """
     Choose the reason published for a native ``failed`` edge.
 
@@ -365,14 +363,13 @@ def _native_failure_message(detail: str, *, borrowed: bool, classified_code: str
     :param borrowed: Whether ``detail`` is the turn's persisted assistant text
         rather than the forwarder's own report. Borrowed text is used only when
         it reads as an error report, never a successful reply.
-    :param classified_code: Code returned by :func:`classify_native_turn_error`.
+    :param recognized: Whether the classifier refined the failure code from
+        ``detail`` itself; a code derived from a wire flag does not vouch for it.
     :returns: ``detail`` when it is a usable reason, else the detail-less message.
     """
     if not detail:
         return _NATIVE_FAILURE_WITHOUT_DETAIL
-    if not borrowed or classified_code not in _UNCLASSIFIED_NATIVE_FAILURE_CODES:
-        return detail
-    if detail.casefold().startswith("api error:"):
+    if not borrowed or recognized or detail.casefold().startswith("api error:"):
         return detail
     return _NATIVE_FAILURE_WITHOUT_DETAIL
 
@@ -1926,7 +1923,7 @@ def register_events_routes(
                 status_error = ErrorDetail(
                     code=classified_code,
                     message=_native_failure_message(
-                        detail, borrowed=borrowed, classified_code=classified_code
+                        detail, borrowed=borrowed, recognized=classified_code != error_code
                     ),
                     title=diagnosis.title if diagnosis else None,
                     cause=diagnosis.cause if diagnosis else None,

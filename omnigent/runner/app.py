@@ -1742,10 +1742,8 @@ def create_runner_app(
         terminal output:`` block, which the web UI renders as diagnostics.
         """
         # httpx raises several transport errors with no message at all
-        # (``ReadError()``), which left the whole diagnostic as the bare
-        # sentence. Fall back to the exception type so the message always names
-        # which transport failure ended the stream.
-        cause = str(exc).strip() or type(exc).__name__
+        # (``ReadError()``); the class name then names the transport failure.
+        cause = _exception_detail(exc)
         message = f"Harness stream connection error: {cause}"
         pane = _live_terminal_pane_snapshot(conv_id)
         if pane:

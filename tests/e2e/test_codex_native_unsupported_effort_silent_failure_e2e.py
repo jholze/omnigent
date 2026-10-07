@@ -30,15 +30,24 @@ _HEALTH_TIMEOUT_S = 90.0
 _TURN_OUTCOME_TIMEOUT_S = 120.0
 _POLL_INTERVAL_S = 2.0
 
-#: The model the report pins -- advertised by the fake WITHOUT ``minimal``.
+#: Model advertised by the fake WITHOUT ``minimal`` support.
 _ASTRA_MODEL = "gpt-6-astra"
 
-# Keep CI's egress proxy away from the spawned loopback server.
-_client = httpx.Client(trust_env=False)
 
-# Shared fixtures use clients that honor NO_PROXY.
-for _var in ("NO_PROXY", "no_proxy"):
-    os.environ[_var] = ",".join(filter(None, [os.environ.get(_var, ""), "127.0.0.1,localhost"]))
+@pytest.fixture(scope="module", autouse=True)
+def _loopback_bypasses_proxy() -> Iterator[None]:
+    """Exempt loopback from any ambient proxy for this module and restore it afterwards."""
+    saved = {var: os.environ.get(var) for var in ("NO_PROXY", "no_proxy")}
+    for var, value in saved.items():
+        os.environ[var] = ",".join(filter(None, [value or "", "127.0.0.1,localhost"]))
+    try:
+        yield
+    finally:
+        for var, value in saved.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
 
 
 # Avoid nested sandbox startup in an already isolated test environment.
@@ -103,6 +112,15 @@ def _pinned_model():
 
 STATE = {{"model": _pinned_model(), "effort": None, "turn_seq": 0}}
 CONNECTIONS = set()
+TASKS = set()
+
+
+def _spawn(coro):
+    # The loop holds only weak references to tasks; keep ours until they finish.
+    task = asyncio.ensure_future(coro)
+    TASKS.add(task)
+    task.add_done_callback(TASKS.discard)
+    return task
 
 
 def _log(text):
@@ -144,7 +162,7 @@ async def _run_turn(turn_id):
     _log("turn " + turn_id + " model=" + str(model) + " effort=" + str(effort))
     if effort and effort not in supported:
         # The model does not offer this effort: codex ends the turn failed
-        # with no TurnError payload (the reported "no provider error at all").
+        # with no TurnError payload.
         await _broadcast("turn/failed", {{
             "threadId": THREAD_ID,
             "turn": {{"id": turn_id, "status": "failed", "items": []}},
@@ -191,7 +209,7 @@ async def _handler(ws):
                     if key in params:
                         STATE[key] = params[key]
                 result = {{}}
-                asyncio.ensure_future(_broadcast("thread/settings/updated", {{
+                _spawn(_broadcast("thread/settings/updated", {{
                     "threadId": THREAD_ID,
                     "threadSettings": {{"model": STATE["model"], "effort": STATE["effort"]}},
                 }}))
@@ -199,12 +217,12 @@ async def _handler(ws):
                 STATE["turn_seq"] += 1
                 turn_id = "turn_" + str(STATE["turn_seq"])
                 result = {{"turn": {{"id": turn_id}}}}
-                asyncio.ensure_future(_run_turn(turn_id))
+                _spawn(_run_turn(turn_id))
             else:
                 result = {{}}
             await ws.send(json.dumps({{"id": msg["id"], "result": result}}))
             if method == "initialize":
-                asyncio.ensure_future(_announce_thread(ws))
+                _spawn(_announce_thread(ws))
     finally:
         CONNECTIONS.discard(ws)
 
@@ -273,6 +291,7 @@ class _Rig:
     server_log: Path
     runner_log: Path
     workspace: Path
+    client: httpx.Client
 
     def log_tails(self) -> str:
         return (
@@ -330,6 +349,8 @@ def fake_codex_rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Rig]:
     runner_log = work / "runner.log"
     server_handle = server_log.open("w")
     runner_handle = runner_log.open("w")
+    # Keep CI's egress proxy away from the spawned loopback server.
+    client = httpx.Client(trust_env=False)
     server_proc: subprocess.Popen[bytes] | None = None
     runner_proc: subprocess.Popen[bytes] | None = None
     try:
@@ -367,8 +388,8 @@ def fake_codex_rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Rig]:
             if server_proc.poll() is not None or runner_proc.poll() is not None:
                 break
             try:
-                if _client.get(f"{base_url}/health", timeout=2).status_code == 200:
-                    status = _client.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
+                if client.get(f"{base_url}/health", timeout=2).status_code == 200:
+                    status = client.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
                     if status.status_code == 200 and status.json().get("online"):
                         online = True
                         break
@@ -387,6 +408,7 @@ def fake_codex_rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Rig]:
             server_log=server_log,
             runner_log=runner_log,
             workspace=workspace,
+            client=client,
         )
     finally:
         for proc in (runner_proc, server_proc):
@@ -401,11 +423,12 @@ def fake_codex_rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Rig]:
                     proc.wait(timeout=5)
         server_handle.close()
         runner_handle.close()
+        client.close()
 
 
 def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
     """Create a live astra session and apply the requested effort after adoption."""
-    create = _client.post(
+    create = rig.client.post(
         f"{rig.base_url}/v1/sessions",
         data={"metadata": json.dumps({"workspace": str(rig.workspace)})},
         files={"bundle": ("codex.tar.gz", _spec_bundle(), "application/gzip")},
@@ -414,14 +437,14 @@ def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
     create.raise_for_status()
     session_id = str(create.json()["session_id"])
 
-    pin = _client.patch(
+    pin = rig.client.patch(
         f"{rig.base_url}/v1/sessions/{session_id}",
         json={"model_override": _ASTRA_MODEL},
         timeout=30.0,
     )
     assert pin.status_code < 400, f"model PATCH rejected: {pin.status_code} {pin.text}"
 
-    bind = _client.patch(
+    bind = rig.client.patch(
         f"{rig.base_url}/v1/sessions/{session_id}",
         json={"runner_id": rig.runner_id},
         timeout=60.0,
@@ -432,7 +455,7 @@ def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
     deadline = time.monotonic() + _HEALTH_TIMEOUT_S
     thread_live = False
     while time.monotonic() < deadline:
-        snapshot = _client.get(f"{rig.base_url}/v1/sessions/{session_id}", timeout=10.0)
+        snapshot = rig.client.get(f"{rig.base_url}/v1/sessions/{session_id}", timeout=10.0)
         if snapshot.status_code == 200 and snapshot.json().get("external_session_id"):
             thread_live = True
             break
@@ -440,7 +463,7 @@ def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
     assert thread_live, f"codex-native thread never came live for {session_id}\n{rig.log_tails()}"
 
     # Omnigent accepts the full Codex effort ladder.
-    effort_patch = _client.patch(
+    effort_patch = rig.client.patch(
         f"{rig.base_url}/v1/sessions/{session_id}",
         json={"reasoning_effort": reasoning_effort},
         timeout=30.0,
@@ -450,7 +473,7 @@ def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
     )
 
     # Confirm both model and effort persisted.
-    snapshot = _client.get(f"{rig.base_url}/v1/sessions/{session_id}", timeout=10.0)
+    snapshot = rig.client.get(f"{rig.base_url}/v1/sessions/{session_id}", timeout=10.0)
     snapshot.raise_for_status()
     body = snapshot.json()
     assert body.get("model_override") == _ASTRA_MODEL, body.get("model_override")
@@ -459,7 +482,7 @@ def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
 
 
 def _send_user_message(rig: _Rig, session_id: str, text: str) -> None:
-    send = _client.post(
+    send = rig.client.post(
         f"{rig.base_url}/v1/sessions/{session_id}/events",
         json={
             "type": "message",
@@ -490,11 +513,11 @@ def _wait_for_turn_outcome(rig: _Rig, session_id: str) -> _TurnOutcome:
     deadline = time.monotonic() + _TURN_OUTCOME_TIMEOUT_S
     last: _TurnOutcome | None = None
     while time.monotonic() < deadline:
-        session = _client.get(f"{rig.base_url}/v1/sessions/{session_id}", timeout=10.0)
+        session = rig.client.get(f"{rig.base_url}/v1/sessions/{session_id}", timeout=10.0)
         session_body = session.json() if session.status_code == 200 else {}
         status = str(session_body.get("status", ""))
         labels = session_body.get("labels") or {}
-        items_resp = _client.get(
+        items_resp = rig.client.get(
             f"{rig.base_url}/v1/sessions/{session_id}/items?limit=100", timeout=10.0
         )
         items = list(items_resp.json().get("data", [])) if items_resp.status_code == 200 else []
