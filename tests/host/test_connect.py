@@ -8625,3 +8625,40 @@ def test_run_host_process_classifies_how_the_host_ended(
         )
 
     assert _host_exit_reasons(caplog) == [expected]
+
+
+def test_build_connect_headers_survives_stalled_ambient_databricks_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tunnel handshake headers are built even when ambient Databricks credential
+    discovery (no login token, no profile, SDK default chain) never returns."""
+    import databricks.sdk.config as sdk_config
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    release = threading.Event()
+
+    class _StalledConfig:
+        def __init__(self, **_kwargs: object) -> None:
+            release.wait()
+            raise ValueError("default auth: cannot configure default credentials")
+
+    monkeypatch.setattr(sdk_config, "Config", _StalledConfig)
+    host = _host("http://127.0.0.1:6767")
+    headers: list[dict[str, str]] = []
+
+    worker = threading.Thread(
+        target=lambda: headers.append(host._build_connect_headers()), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=45.0)
+    try:
+        assert not worker.is_alive(), (
+            "the tunnel handshake was still blocked in Databricks credential discovery after 45s"
+        )
+        assert headers and "Authorization" not in headers[0]
+    finally:
+        release.set()
+        worker.join(timeout=10.0)

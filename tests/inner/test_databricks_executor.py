@@ -2658,3 +2658,80 @@ def test_reused_token_source_retries_resolution_after_failure(monkeypatch):
     assert source.current_token() is None
     available["ok"] = True
     assert source.current_token() == "tok-late"
+
+
+@pytest.mark.parametrize(
+    ("server_url", "expect_ambient"),
+    [
+        ("http://127.0.0.1:6767", False),
+        ("http://localhost:6767", False),
+        ("https://myapp-123.aws.databricksapps.com", True),
+        (None, True),
+    ],
+)
+def test_reused_token_source_runs_ambient_resolution_only_off_loopback(
+    monkeypatch, server_url, expect_ambient
+):
+    """Ambient SDK resolution runs only for servers that can be Databricks-fronted.
+
+    A loopback server has no Databricks edge in front of it, and the SDK's
+    default chain shells out to ``databricks auth token`` with no timeout —
+    so the source answers ``None`` for it without resolving anything.
+    """
+    from omnigent.inner.databricks_executor import (
+        _DatabricksBearerAuth,
+        _ReusedDatabricksTokenSource,
+    )
+
+    class _Cfg:
+        def authenticate(self):
+            return {"Authorization": "Bearer ambient-tok"}
+
+    resolutions = []
+
+    def _fake_resolve(profile=None, *, host=None):
+        resolutions.append(host)
+        return _DatabricksBearerAuth(_Cfg(), profile_name=None), "https://ex.test"
+
+    monkeypatch.setattr(
+        "omnigent.inner.databricks_executor._resolve_databricks_auth", _fake_resolve
+    )
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+
+    token = _ReusedDatabricksTokenSource(server_url).current_token()
+
+    if expect_ambient:
+        assert token == "ambient-tok"
+        assert resolutions == [None]
+    else:
+        assert token is None
+        assert resolutions == []
+
+
+def test_reused_token_source_keeps_login_record_for_loopback_server(monkeypatch):
+    """A stored ``omnigent login`` workspace record still resolves, loopback or not."""
+    from omnigent.inner.databricks_executor import (
+        _DatabricksBearerAuth,
+        _ReusedDatabricksTokenSource,
+    )
+
+    class _Cfg:
+        def authenticate(self):
+            return {"Authorization": "Bearer record-tok"}
+
+    resolutions = []
+
+    def _fake_resolve(profile=None, *, host=None):
+        resolutions.append(host)
+        return _DatabricksBearerAuth(_Cfg(), profile_name=None), host
+
+    monkeypatch.setattr(
+        "omnigent.inner.databricks_executor._resolve_databricks_auth", _fake_resolve
+    )
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda _url: "https://ws.example.databricks.com",
+    )
+
+    assert _ReusedDatabricksTokenSource("http://127.0.0.1:6767").current_token() == "record-tok"
+    assert resolutions == ["https://ws.example.databricks.com"]

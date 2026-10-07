@@ -864,6 +864,27 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
     return _DatabricksBearerAuth(host_cfg, failure_message=host_failure), host
 
 
+def _ambient_databricks_auth_applies(server_url: str | None) -> bool:
+    """Whether ambient Databricks credentials can authenticate *server_url*.
+
+    A loopback Omnigent server is never fronted by the Databricks edge, so the
+    SDK's default credential chain has nothing to offer it. Skipping the chain
+    there matters: it shells out to ``databricks auth token`` with no timeout,
+    which can wedge the caller before it ever reaches the server. ``None``
+    (no server named) keeps the ambient resolution.
+
+    :param server_url: Omnigent server base URL, e.g.
+        ``"http://127.0.0.1:6767"`` or
+        ``"https://myapp-123.aws.databricksapps.com"``, or ``None``.
+    :returns: ``False`` for a loopback server, ``True`` otherwise.
+    """
+    if not server_url:
+        return True
+    from omnigent_client._http import is_loopback_url
+
+    return not is_loopback_url(server_url)
+
+
 class _ReusedDatabricksTokenSource:
     """Reuse SDK auth, re-resolving it after a token mint fails."""
 
@@ -886,6 +907,8 @@ class _ReusedDatabricksTokenSource:
             )
             if workspace_host is not None:
                 return _resolve_databricks_auth(host=workspace_host)[0]
+            if not _ambient_databricks_auth_applies(self._server_url):
+                return None
             return _resolve_databricks_auth()[0]
         except (DatabricksAuthError, ImportError, ValueError):
             return None

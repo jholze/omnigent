@@ -55,6 +55,7 @@ from omnigent.errors import OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.inner import _proc
 from omnigent.inner.databricks_executor import (
+    _ambient_databricks_auth_applies,
     _read_databrickscfg,
     _ReusedDatabricksTokenSource,
 )
@@ -702,7 +703,8 @@ def _remote_headers(
          (populated by ``omnigent login <apps-url>``) — mints a
          fresh workspace OAuth token via the SDK
       4. ambient Databricks CLI / ``~/.databrickscfg`` credentials
-         (the SDK's default resolution; no profile is threaded)
+         (the SDK's default resolution; no profile is threaded) — never
+         for a loopback server, which is not Databricks-fronted
 
     This lets ``omnigent run --server <apps-url>`` work against
     Databricks Apps after a one-time ``omnigent login <apps-url>``,
@@ -738,7 +740,7 @@ def _remote_headers(
             record_token = _stored_databricks_record_token(server_url)
             if record_token:
                 headers["Authorization"] = f"Bearer {record_token}"
-    if "Authorization" not in headers:
+    if "Authorization" not in headers and _ambient_databricks_auth_applies(server_url):
         # 4. Ambient ~/.databrickscfg credentials.
         creds = _read_databrickscfg(None)
         if creds is not None and creds.token:
@@ -955,6 +957,8 @@ def _server_auth(
 
         if load_token(server_url) or load_databricks_workspace_host(server_url):
             return _DatabricksTokenAuth(server_url=server_url, session_id=session_id)
+    if not _ambient_databricks_auth_applies(server_url):
+        return None
     creds = _read_databrickscfg(None)
     if creds is not None and creds.token:
         return _DatabricksTokenAuth(server_url=server_url, session_id=session_id)

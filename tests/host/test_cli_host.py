@@ -1483,3 +1483,60 @@ def test_background_host_web_ui_open_preference(
 
     assert result.exit_code == 0, result.output
     assert opened == expected_opened
+
+
+def test_host_preflight_survives_stalled_ambient_databricks_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``host --server <local url>`` reaches the daemon loop even when ambient
+    Databricks credential discovery (no profile, SDK default chain) never returns."""
+    import threading
+
+    import databricks.sdk.config as sdk_config
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    release = threading.Event()
+
+    class _StalledConfig:
+        def __init__(self, **_kwargs: object) -> None:
+            release.wait()
+            raise ValueError("default auth: cannot configure default credentials")
+
+    monkeypatch.setattr(sdk_config, "Config", _StalledConfig)
+    started: list[str] = []
+    outcome: list[object] = []
+
+    def _invoke() -> None:
+        with patch(
+            "omnigent.host.connect.run_host_process",
+            lambda server_url, **_kwargs: started.append(server_url),
+        ):
+            outcome.append(
+                CliRunner().invoke(
+                    cli,
+                    [
+                        "host",
+                        "--server",
+                        "http://127.0.0.1:6767",
+                        "--non-interactive",
+                        "--no-open",
+                    ],
+                )
+            )
+
+    worker = threading.Thread(target=_invoke, daemon=True)
+    worker.start()
+    worker.join(timeout=45.0)
+    try:
+        assert not worker.is_alive(), (
+            "`omnigent host` was still blocked in Databricks credential discovery after 45s "
+            "and never reached the daemon loop"
+        )
+        assert started == ["http://127.0.0.1:6767"], getattr(outcome[0], "output", outcome)
+    finally:
+        release.set()
+        worker.join(timeout=10.0)

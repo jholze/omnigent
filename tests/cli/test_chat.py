@@ -2711,6 +2711,64 @@ def test_remote_headers_falls_back_to_ambient_databricks_creds(
     assert read_calls == [None]
 
 
+@pytest.mark.parametrize(
+    "server_url", ["http://127.0.0.1:6767", "http://localhost:6767", "http://[::1]:6767"]
+)
+def test_remote_headers_skips_ambient_databricks_creds_for_loopback_server(
+    monkeypatch: pytest.MonkeyPatch, server_url: str
+) -> None:
+    """A loopback server never triggers ambient Databricks credential discovery.
+
+    The SDK's default chain shells out to ``databricks auth token`` with no
+    timeout, and a local server is never Databricks-fronted — so running that
+    chain for it can only stall the caller (``omnigent host`` wedged before it
+    printed anything). With no explicit credential the headers stay bare.
+    """
+    monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+    monkeypatch.setattr(chat_module, "_stored_databricks_record_token", lambda _url: None)
+    monkeypatch.setattr(
+        chat_module,
+        "_read_databrickscfg",
+        lambda _profile: pytest.fail("ambient Databricks discovery ran for a loopback server"),
+    )
+
+    assert _remote_headers(server_url=server_url, host_id=None) == {}
+
+
+def test_remote_headers_keeps_stored_login_for_loopback_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the ambient guess is skipped for a local server; an explicit login still rides."""
+    monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: "oidc-token")
+    monkeypatch.setattr(
+        chat_module,
+        "_read_databrickscfg",
+        lambda _profile: pytest.fail("ambient Databricks discovery ran for a loopback server"),
+    )
+
+    assert _remote_headers(server_url="http://127.0.0.1:6767", host_id=None) == {
+        "Authorization": "Bearer oidc-token"
+    }
+
+
+def test_server_auth_is_none_for_loopback_server_without_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_server_auth`` answers ``None`` for a local server without probing the SDK chain."""
+    monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+    monkeypatch.setattr(
+        chat_module,
+        "_read_databrickscfg",
+        lambda _profile: pytest.fail("ambient Databricks discovery ran for a loopback server"),
+    )
+
+    assert chat_module._server_auth(server_url="http://127.0.0.1:6767", session_id=None) is None
+
+
 def test_remote_headers_adds_org_id_header(monkeypatch: pytest.MonkeyPatch) -> None:
     """A recorded ?o= selector rides every ad-hoc request.
 
