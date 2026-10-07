@@ -278,7 +278,7 @@ async def test_cancelled_body_wait_sends_request_cancel_before_forgetting_reques
     assert "req1" not in session.in_flight
     cancels: list[RequestCancelFrame] = []
     while not session.outbound_queue.empty():
-        frame = decode_frame(session.outbound_queue.get_nowait())
+        frame = decode_frame(session.outbound_queue.get_nowait().data)
         if isinstance(frame, RequestCancelFrame):
             cancels.append(frame)
     assert len(cancels) == 1
@@ -304,7 +304,7 @@ async def test_cancelled_head_wait_sends_request_cancel_before_forgetting_reques
     # Let the request frame go out and the head wait park; no head arrives.
     await asyncio.sleep(0.01)
     assert not task.done()
-    sent = decode_frame(session.outbound_queue.get_nowait())
+    sent = decode_frame(session.outbound_queue.get_nowait().data)
     assert isinstance(sent, RequestFrame)
     req_id = sent.id
     assert req_id in session.in_flight
@@ -317,7 +317,7 @@ async def test_cancelled_head_wait_sends_request_cancel_before_forgetting_reques
     assert req_id not in session.in_flight
     cancels: list[RequestCancelFrame] = []
     while not session.outbound_queue.empty():
-        frame = decode_frame(session.outbound_queue.get_nowait())
+        frame = decode_frame(session.outbound_queue.get_nowait().data)
         if isinstance(frame, RequestCancelFrame):
             cancels.append(frame)
     assert len(cancels) == 1
@@ -349,7 +349,7 @@ async def test_body_generator_finalization_sends_request_cancel() -> None:
     assert "req1" not in session.in_flight
     cancels: list[RequestCancelFrame] = []
     while not session.outbound_queue.empty():
-        frame = decode_frame(session.outbound_queue.get_nowait())
+        frame = decode_frame(session.outbound_queue.get_nowait().data)
         if isinstance(frame, RequestCancelFrame):
             cancels.append(frame)
     assert len(cancels) == 1
@@ -385,7 +385,7 @@ async def test_flow_control_follows_runner_capability(capable: bool) -> None:
     await asyncio.sleep(0.01)
     raw = session.outbound_queue.get_nowait()
     assert raw is not None
-    sent = decode_frame(raw)
+    sent = decode_frame(raw.data)
     assert isinstance(sent, RequestFrame)
     assert sent.flow_window == (RESPONSE_FLOW_WINDOW_FRAMES if capable else None)
 
@@ -403,7 +403,7 @@ async def test_flow_control_follows_runner_capability(capable: bool) -> None:
     while not session.outbound_queue.empty():
         raw = session.outbound_queue.get_nowait()
         assert raw is not None
-        frame = decode_frame(raw)
+        frame = decode_frame(raw.data)
         if isinstance(frame, RequestFlowFrame):
             grants.append((frame.id, frame.credits))
     assert grants == ([(sent.id, RESPONSE_FLOW_CREDIT_BATCH)] if capable else [])
