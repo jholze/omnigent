@@ -72,8 +72,8 @@ _CODEX_LAUNCH_DEFAULT = StaticModelFallback(
 )
 
 #: The launch default for a path that cannot read the installed codex catalog
-#: (codex's own ChatGPT/API-key login): the broadly compatible arm older CLIs
-#: still serve, since GPT-6 Luna ships only from codex 0.157.0.
+#: (codex's own login). The preference is newest-first, so its last entry is the
+#: most broadly compatible arm — GPT-5.6 Sol, since GPT-6 Luna needs codex 0.157.0.
 CODEX_DEFAULT_MODEL = _CODEX_LAUNCH_DEFAULT.model_ids[-1]
 
 #: The launch defaults in preference order, for a launch that can read the catalog.

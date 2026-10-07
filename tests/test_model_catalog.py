@@ -1316,7 +1316,6 @@ def test_background_title_codex_economy_model_stays_catalog_compatible() -> None
     only from codex 0.157.0 and its backend rejects it on older CLIs.
     """
     assert BACKGROUND_TITLE_CODEX_ECONOMY_MODEL == "gpt-5.6-luna"
-    assert BACKGROUND_TITLE_CODEX_ECONOMY_MODEL.startswith("gpt-5.")
     assert codex_spawn_model(BACKGROUND_TITLE_CODEX_ECONOMY_MODEL) == (
         BACKGROUND_TITLE_CODEX_ECONOMY_MODEL
     )

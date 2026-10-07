@@ -1,11 +1,12 @@
 """E2E: an unpinned Databricks Codex session launches on the newest advertised GPT.
 
 With a Unity Catalog model-services listing that advertises
-``system.ai.gpt-6-luna`` (a major-only tiered arm) next to older GPT-5.x ids,
+``system.ai.gpt-6-terra`` (a major-only tiered arm) next to older GPT-5.x ids,
 a new native Codex session that pins no model must launch on the newest
-advertised generation instead of lagging on a GPT-5.x id. The workspace does
-not advertise Omnigent's static launch default, so a launch that fell back to
-it instead of ranking the live listing would be caught here.
+advertised generation instead of lagging on a GPT-5.x id. The advertised arm
+is none of Omnigent's launch-default preference ids, so a launch that fell
+back to a static default instead of ranking the live listing would paint a
+different model and be caught here.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
 from tests.e2e_ui.start_session.test_unpinned_codex_default_model import _codex_pane_text
 
 _DATABRICKS_PROFILE = "e2e-mock"
-_NEWEST_ADVERTISED = "system.ai.gpt-6-luna"
+_NEWEST_ADVERTISED = "system.ai.gpt-6-terra"
 _MODEL_SERVICES_PATH = "/api/2.1/unity-catalog/model-services"
 _HEALTH_TIMEOUT_S = 60.0
 _HEALTH_POLL_INTERVAL_S = 0.5
@@ -56,13 +57,13 @@ _HEALTH_POLL_INTERVAL_S = 0.5
 _TUI_BANNER_TIMEOUT_MS = 120_000
 
 
-# A workspace advertising the newest major-only tiered arm next to older
-# GPT-5.x ids. Omnigent's static launch default is deliberately absent, so a
-# fallback launch cannot masquerade as a correctly ranked discovery.
+# A workspace advertising the newest major-only tiered arm beside older,
+# uncurated GPT-5.x ids: ranking turns purely on generation, so the arm wins
+# only when discovery reads it as GPT-6, and it is no launch-default fallback.
 _ADVERTISED_MODEL_IDS = (
-    "system.ai.gpt-6-luna",
-    "system.ai.gpt-5-5",
-    "system.ai.gpt-5-4-mini",
+    "system.ai.gpt-6-terra",
+    "system.ai.gpt-5-6-mini",
+    "system.ai.gpt-5-5-mini",
 )
 
 
@@ -283,12 +284,14 @@ def dedicated_databricks_codex_stack(
     finally:
         for child in (runner_proc, proc):
             if child is not None and child.poll() is None:
-                child.send_signal(signal.SIGTERM)
-                try:
-                    child.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=5)
+                # Isolate each child's teardown so one failure still runs the rest.
+                with suppress(OSError, subprocess.TimeoutExpired):
+                    child.send_signal(signal.SIGTERM)
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=5)
         # shutdown() blocks until serve_forever is running, so skip it if the
         # thread never started; server_close still frees the bound socket.
         if serving and workspace is not None and workspace_thread is not None:
@@ -315,10 +318,9 @@ _LAUNCH_ERROR_RE = re.compile(
 
 
 def _launched_model(pane_text: str, candidates: dict[str, str]) -> str | None:
-    # The TUI paints the model as ``model: <id>`` or as an ``<id> <effort>``
-    # footer depending on the codex version, so match any token folding to a
-    # candidate, but skip error lines so a startup failure that names a model
-    # does not count as that model launching.
+    # The TUI paints the model as ``model: <id>`` or an ``<id> <effort>`` footer
+    # depending on the codex version; skip error lines so a startup failure
+    # naming a model does not count as that model launching.
     for line in pane_text.splitlines():
         if _LAUNCH_ERROR_RE.search(line):
             continue
@@ -331,10 +333,10 @@ def _launched_model(pane_text: str, candidates: dict[str, str]) -> str | None:
 def test_launched_model_ignores_startup_error_naming_the_model() -> None:
     """A startup error naming a model is not a successful launch banner."""
     candidates = _launch_candidates(_ADVERTISED_MODEL_IDS)
-    assert _launched_model("ERROR: model gpt-6-luna unavailable", candidates) is None
+    assert _launched_model("ERROR: model gpt-6-terra unavailable", candidates) is None
     assert (
-        _launched_model("  system.ai.gpt-6-luna  default · /repo", candidates)
-        == "system.ai.gpt-6-luna"
+        _launched_model("  system.ai.gpt-6-terra  default · /repo", candidates)
+        == "system.ai.gpt-6-terra"
     )
 
 
@@ -403,9 +405,9 @@ def test_unpinned_databricks_codex_session_launches_newest_advertised_generation
         page.wait_for_timeout(1_000)
 
     listed = ", ".join(_ADVERTISED_MODEL_IDS)
-    assert stack.workspace.requests, (
-        "the launch never consulted the workspace model-services listing"
-    )
+    assert any(
+        path.split("?", 1)[0] == _MODEL_SERVICES_PATH for path in stack.workspace.requests
+    ), "the launch never consulted the workspace model-services listing"
     assert launched is not None, (
         f"Codex TUI never painted its launch model; last pane text:\n{pane_text}"
     )
