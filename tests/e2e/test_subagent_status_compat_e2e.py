@@ -30,12 +30,13 @@ async def test_subagent_idle_reporting_with_old_server(
     server_version: str,
     tmp_path: Path,
 ) -> None:
-    """Transcript inactivity is observational for every server version.
+    """Transcript inactivity never forces a terminal status from the forwarder.
 
-    An old server rejects ``subagent.status`` as an unknown event (tried once,
-    then suppressed); a new server accepts it but does not complete the child.
-    Either way the child stays ``running`` until an authoritative status, and
-    later items and statuses still arrive.
+    Released servers differ: before 0.15 ``subagent.status`` is rejected as an
+    unknown event (tried once, then suppressed); 0.15–0.17 accept it but still
+    map a quiet transcript to ``idle``; the observational fix (0.18+) accepts it
+    and leaves a quiet-but-running tool ``running``. The forwarder never emits a
+    terminal fallback, and later items and statuses still arrive in every case.
     """
     agent_name = register_inline_agent(
         http_client,
@@ -183,11 +184,14 @@ async def test_subagent_idle_reporting_with_old_server(
                 assert not capability.supported
                 expected_status = "running"
             else:
-                # A new server accepts the inactivity event but no longer maps
-                # it to idle: a quiet transcript can belong to a running tool.
+                # The event is accepted. A server that predates the
+                # observational fix still maps a quiet transcript to idle; a
+                # fixed server leaves a quiet-but-running tool alone.
                 assert all(r.status_code == 202 for r in idle_responses)
                 assert len(idle_responses) == cycle + 1
-                expected_status = "running"
+                expected_status = (
+                    "running" if Version(server_version).release >= (0, 18) else "idle"
+                )
             snapshot = await client.get(f"/v1/sessions/{child_id}")
             snapshot.raise_for_status()
             assert snapshot.json()["status"] == expected_status
