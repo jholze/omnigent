@@ -258,7 +258,5 @@ _BACKGROUND_TITLE_FALLBACKS: dict[str, StaticModelFallback] = {
 #: The claude-family arm background session titles pin.
 BACKGROUND_TITLE_CLAUDE_ECONOMY_MODEL = _BACKGROUND_TITLE_FALLBACKS["claude"].model_ids[0]
 
-#: The codex-family arm background session titles pin. The title launch pins
-#: --model without reading the installed catalog, so it stays on the GPT-5.6
-#: arm older CLIs serve; GPT-6 Luna ships only from codex 0.157.0.
+#: The codex-family arm background session titles pin; see the table entry's provenance.
 BACKGROUND_TITLE_CODEX_ECONOMY_MODEL = _BACKGROUND_TITLE_FALLBACKS["codex"].model_ids[0]

@@ -33,7 +33,7 @@ import pytest
 from playwright.sync_api import Page
 
 from omnigent.models.codex_model_vocabulary import comparable_model_id
-from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
+from omnigent.models.model_fallbacks import CODEX_LAUNCH_DEFAULT_PREFERENCE
 from omnigent.runner.identity import token_bound_runner_id
 from tests.e2e_ui.conftest import (
     _REPO_ROOT,
@@ -176,7 +176,7 @@ def _wait_healthy(
                 if status.status_code == 200 and status.json().get("online") is True:
                     return
                 last_error = f"runner status {status.status_code}: {status.text[:200]}"
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+        except httpx.TransportError as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         except json.JSONDecodeError as exc:
             last_error = f"runner status returned non-JSON: {exc}"
@@ -304,9 +304,10 @@ def dedicated_databricks_codex_stack(
 
 
 def _launch_candidates(model_ids: tuple[str, ...]) -> dict[str, str]:
-    """Ids the TUI could plausibly name: the listing plus Omnigent's static launch default."""
+    """Ids the TUI could plausibly name: the listing plus Omnigent's launch-default preference."""
     return {
-        comparable_model_id(model_id): model_id for model_id in (*model_ids, CODEX_DEFAULT_MODEL)
+        comparable_model_id(model_id): model_id
+        for model_id in (*model_ids, *CODEX_LAUNCH_DEFAULT_PREFERENCE)
     }
 
 
