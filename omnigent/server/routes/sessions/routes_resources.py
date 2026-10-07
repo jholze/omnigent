@@ -451,8 +451,6 @@ def register_resources_routes(
         path: str,
         conversation: Conversation,
         params: dict[str, str] | None = None,
-        *,
-        surface_invalid_input: bool = False,
     ) -> dict[str, Any]:
         """Proxy a GET request to the runner and return parsed JSON.
 
@@ -461,13 +459,9 @@ def register_resources_routes(
         :param conversation: Conversation loaded during authorization.
         :param params: Optional query params forwarded to the runner,
             e.g. ``{"order": "asc"}``. ``None`` sends no query string.
-        :param surface_invalid_input: When set, a runner 400 is re-derived as a
-            typed ``invalid_input`` instead of being flattened to a 502. Only
-            the GitHub-info path needs this; other routes keep the 502 contract.
         :returns: Parsed JSON response body.
-        :raises OmnigentError: ``not_found`` (404) or ``session_agent_missing``
-            (410) re-derived from the runner body, and ``invalid_input`` (400)
-            when *surface_invalid_input* is set.
+        :raises OmnigentError: Typed ``not_found`` (404) or
+            ``session_agent_missing`` (410) re-derived from the runner body.
         :raises HTTPException: 502 on any other runner failure.
         """
         runner_client = await _get_runner_client_for_resource_access(
@@ -502,18 +496,6 @@ def register_resources_routes(
                 message,
                 code=ErrorCode.NOT_FOUND,
             )
-        if resp.status_code == 400 and surface_invalid_input:
-            # The runner rejected the request itself (for example a PR URL the
-            # session no longer tracks): surface a typed 400, not an upstream 502.
-            message = "Invalid request"
-            if isinstance(response_payload, dict):
-                error = response_payload.get("error")
-                detail = response_payload.get("detail")
-                if isinstance(error, dict) and isinstance(error.get("message"), str):
-                    message = error["message"]
-                elif isinstance(detail, str) and detail:
-                    message = detail
-            raise OmnigentError(message, code=ErrorCode.INVALID_INPUT)
         if resp.status_code != 200:
             # Re-derive the typed session-lifecycle 410 (agent deleted or
             # rebound) instead of flattening it to a generic 502.
@@ -539,7 +521,6 @@ def register_resources_routes(
         runner_path: str,
         runner_params: dict[str, str] | None = None,
         host_workspace_resolver: Callable[[], Awaitable[str]] | None = None,
-        surface_invalid_input: bool = False,
     ) -> dict[str, Any]:
         """Serve a filesystem read, falling back to the host when offline.
 
@@ -559,9 +540,6 @@ def register_resources_routes(
         :param host_params: Op-specific args for the host reader.
         :param runner_path: Runner-relative URL for the live path.
         :param runner_params: Optional query params for the runner path.
-        :param surface_invalid_input: Forwarded to :func:`_proxy_get_to_runner`
-            so the GitHub-info path can tell an authoritative runner rejection
-            from a transient failure; other ops keep the generic 502 contract.
         :param host_workspace_resolver: Resolves the absolute root the host
             reader should be rooted at, for an absolute browse target.
             Awaited ONLY when the fallback is actually taken: a live runner
@@ -581,7 +559,6 @@ def register_resources_routes(
                 runner_path,
                 conversation,
                 params=runner_params,
-                surface_invalid_input=surface_invalid_input,
             )
         except OmnigentError as exc:
             # Only the runner-offline case is a candidate for the host
@@ -2966,7 +2943,6 @@ def register_resources_routes(
             host_params={"pr_url": pr_url} if pr_url else {},
             runner_params={"pr_url": pr_url} if pr_url else None,
             runner_path=f"/v1/sessions/{session_id}/resources/github",
-            surface_invalid_input=True,
         )
 
     @router.get(

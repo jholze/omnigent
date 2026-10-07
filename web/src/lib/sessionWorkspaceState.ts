@@ -61,11 +61,13 @@ function isRailTab(value: unknown): value is RightRailTab {
   return typeof value === "string" && (RAIL_TABS as readonly string[]).includes(value);
 }
 
-// `URL.canParse` is newer than this app's build targets (vite.config.ts), where
-// calling it throws; `new URL` is universally available, so probe with it.
-function isParseableUrl(value: string): boolean {
+// `URL.canParse` is newer than this app's build targets (vite.config.ts) and
+// throws there, so probe with `new URL`. Restrict to http(s) so a stored
+// `javascript:`/`data:` value can't later be surfaced as a link target.
+function isHttpUrl(value: string): boolean {
   try {
-    return Boolean(new URL(value));
+    const { protocol } = new URL(value);
+    return protocol === "https:" || protocol === "http:";
   } catch {
     return false;
   }
@@ -131,9 +133,9 @@ function sanitize(entry: unknown): SessionWorkspaceState {
   if (record.selectedSideChatId === null || typeof record.selectedSideChatId === "string") {
     state.selectedSideChatId = record.selectedSideChatId;
   }
-  // Forwarded verbatim as a query parameter, so drop a corrupted value rather
-  // than cause repeated 400 round-trips.
-  if (typeof record.selectedPrUrl === "string" && isParseableUrl(record.selectedPrUrl)) {
+  // Forwarded verbatim as a request parameter and used as a link target, so
+  // drop a corrupted or non-http value rather than persist it.
+  if (typeof record.selectedPrUrl === "string" && isHttpUrl(record.selectedPrUrl)) {
     state.selectedPrUrl = record.selectedPrUrl;
   }
   return state;

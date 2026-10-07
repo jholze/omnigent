@@ -285,7 +285,7 @@ def gh_stubbed_server(
             try:
                 if httpx.get(f"{base_url}/health", timeout=2).status_code == 200:
                     status = httpx.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
-                    if status.status_code == 200 and status.json()["online"] is True:
+                    if status.status_code == 200 and status.json().get("online") is True:
                         break
                     last_error = f"runner status {status.status_code}: {status.text[:200]}"
             except httpx.HTTPError as exc:
@@ -417,10 +417,8 @@ def test_selected_pr_survives_switching_sessions(
     page.get_by_role("link", name=SESSION_B_TITLE, exact=True).click()
     expect(page).to_have_url(re.compile(rf"/c/{session_b}"))
     _open_github_tab(page)
-    # Session B picks the *other* PR. If the selection leaked across sessions
-    # (a global rather than per-session store), returning to A would show B's
-    # merged pick instead of A's open one, so a different pick here is what makes
-    # the final assertion prove per-session isolation rather than a shared value.
+    # Session B picks the *other* PR, so returning to A must still show A's open
+    # pick; a shared (non per-session) store would leak B's merged pick instead.
     _link_pr(page, MERGED_PR, MERGED_LABEL)
     expect(picker).to_have_text(MERGED_LABEL)
     page.screenshot(path=tmp_path / "3-session-b-merged.png", animations="disabled")

@@ -919,26 +919,26 @@ describe("remembered session PR", () => {
     expect(useGithubInfo).toHaveBeenCalledWith("conv_1", { poll: true, prUrl: open });
   });
 
-  it("forgets a remembered PR the session no longer tracks", async () => {
+  it("forgets a remembered PR missing from the session's PR list", async () => {
     const stale = "https://github.com/example/project/pull/99";
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: stale });
-    const rejected = failing(
-      new ApiError("This pull request is not associated with the session", 400, "invalid_input"),
-    );
+    const rejected = failing(new Error("pull request not found"));
     vi.mocked(useGithubInfo).mockImplementation((_conversationId, options) =>
       options?.prUrl === stale ? rejected : served(options?.prUrl ?? merged),
     );
     renderPanel();
+    // The session's PR list (from the default fetch) excludes the stale pick, so
+    // it is forgotten and the panel falls back to the session default.
     await waitFor(() => expect(picker()).toHaveTextContent(mergedLabel));
     expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBeUndefined();
   });
 
+  // With no reachable session to list its PRs, a failed restore can't prove the
+  // pick is gone, so it is kept; a flaky fetch must not lose the user's pick.
   it.each([
     ["the runner is offline", new RunnerOfflineError()],
     ["the gateway fails", new ApiError("502 Bad Gateway", 502, null)],
-    // A front-door/gateway 400 carries no invalid_input code, so it must not be
-    // mistaken for the runner's authoritative rejection and drop the pick.
-    ["a gateway returns a 400 without invalid_input", new ApiError("400 Bad Request", 400, null)],
+    ["a gateway returns a 400", new ApiError("400 Bad Request", 400, null)],
     ["the network fails", new TypeError("Failed to fetch")],
   ])("keeps the remembered PR while %s", (_failure, error) => {
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
@@ -949,10 +949,11 @@ describe("remembered session PR", () => {
     expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBe(open);
   });
 
-  it("drops a remembered PR a refetch rejects even while its stale data is cached", async () => {
+  it("keeps a remembered PR whose refetch rejects while its stale data is cached", async () => {
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
     // React Query keeps the last successful data alongside a failed refetch, so
-    // the panel must honour the authoritative 400 rather than the stale success.
+    // the stale success keeps the pick on screen instead of a transient error
+    // dropping it.
     const staleThenRejected = {
       ...served(open),
       error: new ApiError(
@@ -965,18 +966,18 @@ describe("remembered session PR", () => {
       options?.prUrl === open ? staleThenRejected : served(options?.prUrl ?? merged),
     );
     renderPanel();
-    await waitFor(() => expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBeUndefined());
-    await waitFor(() => expect(picker()).toHaveTextContent(mergedLabel));
+    expect(picker()).toHaveTextContent(openLabel);
+    expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBe(open);
   });
 
-  it("keeps the controls usable when an older host rejects the remembered PR without a 400", () => {
+  it("keeps the controls usable when restoring the remembered PR fails with no cache", () => {
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
-    // An older host wraps the runner's rejection as a 502 (no invalid_input), so
-    // the preference is kept; fetching the session default keeps the picker and
-    // Link/Unlink controls reachable so the user can recover.
-    const olderHost = failing(new ApiError("502 Bad Gateway", 502, null));
+    // With no cached associations, a failed restore fetches the session default
+    // so the picker and Link/Unlink controls stay reachable while the preference
+    // is kept.
+    const restoreFailure = failing(new ApiError("502 Bad Gateway", 502, null));
     vi.mocked(useGithubInfo).mockImplementation((_conversationId, options) =>
-      options?.prUrl === open ? olderHost : served(options?.prUrl ?? merged),
+      options?.prUrl === open ? restoreFailure : served(options?.prUrl ?? merged),
     );
     renderPanel();
     expect(picker()).toBeInTheDocument();

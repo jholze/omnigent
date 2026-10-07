@@ -70,7 +70,6 @@ import { useResizableColumn } from "@/hooks/useResizableColumn";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
-import { ApiError } from "@/lib/sessionsApi";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import {
   fetchGithubFileContents,
@@ -829,9 +828,9 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
   }, [conversationId, info.data]);
   const cachedAssociations =
     knownAssociations?.sessionId === conversationId ? knownAssociations.data : undefined;
-  // Older hosts return a 502 (not the typed 400 below) for a dropped PR, so it
-  // can't be told from a transient failure and is kept; with nothing cached,
-  // fetch the session default so the picker and controls stay usable.
+  // A restore error alone can't prove the pick is gone, so with nothing cached
+  // fetch the session default: it keeps the picker and controls usable and
+  // provides the PR list the reconciliation effect uses to keep or forget it.
   const restorationUnrecoverable =
     !!selected &&
     !!info.error &&
@@ -866,21 +865,17 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
     },
     [conversationId],
   );
-  // Only an authoritative 400 (invalid_input) drops the pick — checked before
-  // cached data so a stale success can't mask a fresh rejection, and keyed on
-  // the live selection so a later poll still clears it. Other failures keep it.
+  // Reconcile the remembered pick against the session: adopt it once a fetch
+  // confirms the session still tracks it, or forget it (showing the default)
+  // once a known PR list proves it does not. A failed fetch leaves it untouched.
   useEffect(() => {
-    if (
-      selected &&
-      info.error instanceof ApiError &&
-      info.error.status === 400 &&
-      info.error.code === "invalid_input"
-    ) {
-      forgetSelection();
-    } else if (restored && info.data && !info.error) {
+    if (!restored) return;
+    if (info.data && !info.error) {
       setSelection({ sessionId: conversationId, url: restored });
+    } else if (associations?.prs && !associations.prs.some((pr) => pr.url === restored)) {
+      forgetSelection(associations.selected_pr_url);
     }
-  }, [conversationId, restored, selected, info.data, info.error, forgetSelection]);
+  }, [conversationId, restored, info.data, info.error, associations, forgetSelection]);
   const prs = associations?.prs ?? [];
   const selectedPr = prs.find((pr) => pr.url === (selected ?? associations?.selected_pr_url));
   const linkInEmptyState = prs.length === 0 && deriveGithubPanelState(info).kind === "no-pr";
