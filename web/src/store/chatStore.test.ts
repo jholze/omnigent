@@ -5832,9 +5832,7 @@ describe("chatStore — stop", () => {
   });
 
   it("keeps the POSTed prompt bubble while clearing local working state on stop", () => {
-    // A POSTed-but-unconsumed prompt is still optimistic; stop() (both the Stop
-    // button and composer Escape) must keep it unchanged while settling the
-    // local working state.
+    // Escape routes through stop(); server reconciliation, not stop, owns bubble cleanup.
     useChatStore.setState({
       conversationId: "conv_abc",
       pendingUserMessages: [
@@ -5853,7 +5851,6 @@ describe("chatStore — stop", () => {
     useChatStore.getState().stop();
 
     const state = useChatStore.getState();
-    // Posted prompts remain pending until server reconciliation.
     expect(state.pendingUserMessages).toEqual([
       {
         tempId: "pend_1",
@@ -5902,6 +5899,56 @@ describe("chatStore — stop", () => {
       expect(useChatStore.getState().pendingUserMessages).toEqual([]);
     },
   );
+
+  it("keeps a native-terminal bubble through a terminal status; input.consumed reconciles it", () => {
+    // Native-terminal sessions are the exception: session_status skips the
+    // pending clear for them, so a kept bubble is reconciled by the vendor-TUI
+    // round-trip's session.input.consumed, never the terminal-status edge.
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      isNativeTerminalSession: true,
+      pendingUserMessages: [
+        {
+          tempId: "pend_native",
+          content: [{ type: "input_text", text: "kept until the TUI consumes it" }],
+          posted: true,
+        },
+      ],
+      activeResponse: { responseId: "resp_1", state: "streaming", error: null },
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    seedConversationsCache([conv("conv_abc", "running")]);
+
+    useChatStore.getState().stop();
+
+    // A terminal status leaves the native bubble in place — unlike non-native.
+    handleSessionEvent({ type: "session_status", conversationId: "conv_abc", status: "idle" });
+    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual([
+      "pend_native",
+    ]);
+
+    // The consumed round-trip promotes it into committed history. The server
+    // names its own pending id, which the optimistic bubble never adopted, so
+    // the FIFO head is the one promoted.
+    handleSessionEvent({
+      type: "session_input_consumed",
+      itemId: "msg_native_committed",
+      itemType: "message",
+      clearedPendingId: "pending_native_srv",
+      data: {
+        role: "user",
+        content: [{ type: "input_text", text: "kept until the TUI consumes it" }],
+      },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.pendingUserMessages).toEqual([]);
+    const promoted = state.blocks.at(-1) as UserMessageBlock;
+    expect(promoted?.type).toBe("user_message");
+    expect(promoted?.ctx.itemId).toBe("msg_native_committed");
+    expect(promoted?.stableKey).toBe("pend_native");
+  });
 
   it("leaves a non-streaming activeResponse untouched on stop", () => {
     // Pins the `state === "streaming"` guard: stop() still clears the working
