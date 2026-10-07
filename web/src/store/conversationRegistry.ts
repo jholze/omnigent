@@ -249,7 +249,11 @@ export class ConversationRegistry {
       if (missingPending.length > 0 || missingFailed.length > 0) {
         existing.setState({
           pendingUserMessages: [...missingPending, ...existingState.pendingUserMessages],
-          failedUserMessages: [...missingFailed, ...existingState.failedUserMessages],
+          // Keep the oldest-first order `send` establishes; a merged temp entry
+          // can carry a newer failed send than the ones already on the live id.
+          failedUserMessages: [...missingFailed, ...existingState.failedUserMessages].sort(
+            (a, b) => (a.seq ?? 0) - (b.seq ?? 0),
+          ),
         });
       }
       this.release(oldId);

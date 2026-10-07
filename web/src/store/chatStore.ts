@@ -1104,7 +1104,7 @@ export interface ChatActions {
   /** Resend a retained failed message; its unchanged body reuses its stable id. */
   retryFailedMessage: (stableId: string) => Promise<void>;
   /** Replace a retained failed message's text and attachments before a retry. */
-  editFailedMessage: (stableId: string, text: string, files: File[]) => void;
+  editFailedMessage: (stableId: string, text: string, files: File[]) => boolean;
   /** Ask the server whether a retained send of unknown fate was delivered. */
   checkFailedMessage: (stableId: string) => Promise<void>;
   /** Drop a retained failed message without sending it. */
@@ -2249,19 +2249,22 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   editFailedMessage: (stableId, text, files) => {
     // A retry already handed this message to `send`; editing it now would mint a
     // new id the in-flight dispatch no longer matches, double-posting the body.
-    if (retriedFailedMessages.has(stableId)) return;
+    // Report the block so the card's editor stays open instead of falsely
+    // confirming an edit the store dropped.
+    if (retriedFailedMessages.has(stableId)) return false;
     const found = findFailedMessage(stableId);
-    if (found === undefined || found.message.unsettled === true) return;
-    if (text.trim() === "" && files.length === 0) return;
+    if (found === undefined || found.message.unsettled === true) return true;
+    if (text.trim() === "" && files.length === 0) return true;
     const { entry, message } = found;
     const unchanged =
       text === message.text &&
       files.length === message.files.length &&
       files.every((file, i) => file === message.files[i]);
-    if (unchanged) return;
+    if (unchanged) return true;
     // A changed body is a new message: the server dedupes a repeated stable id
     // to the item it already holds, so the edit must go out under a fresh id.
-    // The quote provenance serialises into the text, so an edit outdates it.
+    // The quote provenance serialises into the text, so an edit outdates it. The
+    // old failure reason described the original payload, so it no longer applies.
     const { replyDraft, ...rest } = message;
     const edited: FailedUserMessage = {
       ...rest,
@@ -2269,11 +2272,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       stableId: randomUUID().replace(/-/g, ""),
       text,
       files,
+      reason: "",
       serverRefused: false,
     };
     entry.setState((s) => ({
       failedUserMessages: s.failedUserMessages.map((m) => (m.stableId === stableId ? edited : m)),
     }));
+    return true;
   },
   checkFailedMessage: async (stableId) => {
     const found = findFailedMessage(stableId);

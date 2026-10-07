@@ -68,6 +68,7 @@ import {
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
   beginLocalConversation,
   consumePendingInitialPrompt,
+  ensureConversationStreamed,
   handleSessionEvent,
   hydrateLocalConversation,
   isStaleCompletedResponse,
@@ -1421,6 +1422,27 @@ describe("chatStore — switchTo", () => {
     expect(useChatStore.getState().failedUserMessages).toMatchObject([
       { stableId, conversationId: "conv_rebind_failed" },
     ]);
+  });
+
+  it("keeps a retained failed send when ensureConversationStreamed re-binds a dead stream", async () => {
+    // A side chat re-binds through `ensureConversationStreamed`, not `switchTo`,
+    // and never becomes the active conversation; its retained sends live only
+    // on the entry, so this path must carry them onto the fresh entry too.
+    const stableId = "c".repeat(32);
+    seedSession("conv_sidechat_rebind", []);
+    await useChatStore.getState().switchTo("conv_sidechat_rebind");
+    const entry = conversationRegistry.peek("conv_sidechat_rebind")!;
+    entry.setState({
+      abortController: null,
+      failedUserMessages: [retainedFailedMessage("conv_sidechat_rebind", stableId)],
+    });
+    await useChatStore.getState().switchTo(null);
+
+    await ensureConversationStreamed("conv_sidechat_rebind");
+
+    expect(
+      conversationRegistry.peek("conv_sidechat_rebind")!.getState().failedUserMessages,
+    ).toMatchObject([{ stableId, conversationId: "conv_sidechat_rebind" }]);
   });
 
   it("drops a carried-over failed send whose item the re-bind snapshot holds", async () => {
@@ -5924,7 +5946,11 @@ describe("chatStore — retained failed sends", () => {
     // The server would dedupe the old id to the ORIGINAL text, so the edit must
     // go out under a new one; the quotes serialised into the old text are stale.
     const [edited] = useChatStore.getState().failedUserMessages;
-    expect(edited).toMatchObject({ text: "resend me, but edited", serverRefused: false });
+    expect(edited).toMatchObject({
+      text: "resend me, but edited",
+      serverRefused: false,
+      reason: "",
+    });
     expect(edited!.stableId).toMatch(/^[0-9a-f]{32}$/);
     expect(edited!.stableId).not.toBe(stableId);
     expect(edited!.replyDraft).toBeUndefined();

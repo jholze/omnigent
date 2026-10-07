@@ -22,7 +22,7 @@ function renderCard(message: FailedUserMessage) {
   const handlers = {
     onRetry: vi.fn(),
     onCheck: vi.fn(async () => {}),
-    onEdit: vi.fn(),
+    onEdit: vi.fn(() => true),
     onDiscard: vi.fn(),
   };
   render(<FailedSendMessage message={message} {...handlers} />);
@@ -76,6 +76,23 @@ describe("FailedSendMessage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     expect(handlers.onEdit).toHaveBeenCalledWith("edited message", []);
+    expect(screen.queryByLabelText("Edit unsent message")).toBeNull();
+  });
+
+  it("keeps the editor open when the store refuses the edit", () => {
+    const handlers = renderCard(retained());
+    handlers.onEdit.mockReturnValue(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Edit unsent message"), {
+      target: { value: "edit during a retry" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    // A retry owns the message, so the store dropped the edit; the editor
+    // stays open with the pending text rather than falsely confirming it.
+    expect(handlers.onEdit).toHaveBeenCalledWith("edit during a retry", []);
+    expect(screen.getByLabelText("Edit unsent message")).toHaveValue("edit during a retry");
   });
 
   it("cancels an edit with Escape without saving", () => {

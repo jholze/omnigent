@@ -11,7 +11,10 @@ import { type FailedUserMessage, useChatStore } from "@/store/chatStore";
 function RetainedAttachment({ file, onRemove }: { file: File; onRemove?: () => void }) {
   const [preview, setPreview] = useState<string | null>(null);
   useEffect(() => {
-    if (!file.type.startsWith("image/") || typeof URL.createObjectURL !== "function") return;
+    if (!file.type.startsWith("image/") || typeof URL.createObjectURL !== "function") {
+      setPreview(null);
+      return;
+    }
     const url = URL.createObjectURL(file);
     setPreview(url);
     return () => URL.revokeObjectURL(url);
@@ -57,7 +60,7 @@ interface FailedSendMessageProps {
   message: FailedUserMessage;
   onRetry: () => void;
   onCheck: () => Promise<void>;
-  onEdit: (text: string, files: File[]) => void;
+  onEdit: (text: string, files: File[]) => boolean;
   onDiscard: () => void;
 }
 
@@ -126,8 +129,9 @@ export function FailedSendMessage({
               onSubmit={(event) => {
                 event.preventDefault();
                 if (editEmpty) return;
-                onEdit(text, files);
-                setEditing(false);
+                // Keep the editor open if the store refused the edit (a retry
+                // owns the message), so the change is not silently dropped.
+                if (onEdit(text, files)) setEditing(false);
               }}
             >
               <label className="sr-only" htmlFor={editId}>

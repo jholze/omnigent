@@ -89,8 +89,10 @@ def _deliver_then_drop_response(page: Page, session_id: str, prompt: str) -> lis
         ):
             route.continue_()
             return
-        dropped[0] += 1
+        # Count the drop only after the fetch reaches the server, so a failed
+        # injection surfaces here instead of a confusing later assertion.
         route.fetch()
+        dropped[0] += 1
         route.abort("internetdisconnected")
 
     page.route(_events_url(session_id), _handle)
