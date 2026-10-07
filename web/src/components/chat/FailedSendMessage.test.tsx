@@ -64,6 +64,19 @@ describe("FailedSendMessage", () => {
     expect(handlers.onCheck).toHaveBeenCalledOnce();
   });
 
+  it("offers Check again when the check itself rejects", async () => {
+    const handlers = renderCard(retained({ unsettled: true, reason: "" }));
+    handlers.onCheck.mockRejectedValueOnce(new Error("offline"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    });
+
+    expect(handlers.onCheck).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Check" })).toBeEnabled();
+    expect(screen.getByTestId("failed-send-message")).toHaveTextContent("Send unconfirmed");
+  });
+
   it("edits the text and removes an attachment before saving", () => {
     const file = new File(["notes"], "notes.txt", { type: "text/plain" });
     const handlers = renderCard(retained({ files: [file] }));
@@ -93,6 +106,34 @@ describe("FailedSendMessage", () => {
     // stays open with the pending text rather than falsely confirming it.
     expect(handlers.onEdit).toHaveBeenCalledWith("edit during a retry", []);
     expect(screen.getByLabelText("Edit unsent message")).toHaveValue("edit during a retry");
+  });
+
+  it("withholds Save, keeping the edit, once delivery turns unconfirmed mid-edit", () => {
+    const message = retained();
+    const handlers = {
+      onRetry: vi.fn(),
+      onCheck: vi.fn(async () => {}),
+      onEdit: vi.fn(() => true),
+      onDiscard: vi.fn(),
+    };
+    const { rerender } = render(<FailedSendMessage message={message} {...handlers} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Edit unsent message"), {
+      target: { value: "edited while the retry settled" },
+    });
+
+    // A background retry lost its acknowledgement: the message may already be
+    // delivered, so the edit must neither save nor vanish.
+    rerender(<FailedSendMessage message={{ ...message, unsettled: true }} {...handlers} />);
+    const save = screen.getByRole("button", { name: "Save changes" });
+    expect(save).toBeDisabled();
+    fireEvent.submit(save.closest("form")!);
+
+    expect(handlers.onEdit).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Edit unsent message")).toHaveValue(
+      "edited while the retry settled",
+    );
+    expect(screen.getByTestId("failed-send-message")).toHaveTextContent("Send unconfirmed");
   });
 
   it("cancels an edit with Escape without saving", () => {

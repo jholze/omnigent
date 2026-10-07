@@ -94,6 +94,8 @@ export function FailedSendMessage({
     setChecking(true);
     try {
       await onCheck();
+    } catch {
+      // The card stays unconfirmed; the user can Check again.
     } finally {
       setChecking(false);
     }
@@ -128,7 +130,7 @@ export function FailedSendMessage({
               className="flex w-full min-w-0 flex-col gap-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (editEmpty) return;
+                if (editEmpty || unconfirmed) return;
                 // Keep the editor open if the store refused the edit (a retry
                 // owns the message), so the change is not silently dropped.
                 if (onEdit(text, files)) setEditing(false);
@@ -163,7 +165,7 @@ export function FailedSendMessage({
                   size="xs"
                   variant="link"
                   className="px-0 text-xs text-foreground"
-                  disabled={editEmpty}
+                  disabled={editEmpty || unconfirmed}
                 >
                   Save changes
                 </Button>

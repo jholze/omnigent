@@ -1103,7 +1103,10 @@ export interface ChatActions {
   send: (text: string, agentId: string, files?: File[], opts?: SendOptions) => Promise<void>;
   /** Resend a retained failed message; its unchanged body reuses its stable id. */
   retryFailedMessage: (stableId: string) => Promise<void>;
-  /** Replace a retained failed message's text and attachments before a retry. */
+  /**
+   * Replace a retained failed message's text and attachments before a retry.
+   * Returns `false` when the edit was refused, so the card keeps its editor open.
+   */
   editFailedMessage: (stableId: string, text: string, files: File[]) => boolean;
   /** Ask the server whether a retained send of unknown fate was delivered. */
   checkFailedMessage: (stableId: string) => Promise<void>;
@@ -2249,12 +2252,11 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   editFailedMessage: (stableId, text, files) => {
     // A retry already handed this message to `send`; editing it now would mint a
     // new id the in-flight dispatch no longer matches, double-posting the body.
-    // Report the block so the card's editor stays open instead of falsely
-    // confirming an edit the store dropped.
     if (retriedFailedMessages.has(stableId)) return false;
     const found = findFailedMessage(stableId);
-    if (found === undefined || found.message.unsettled === true) return true;
-    if (text.trim() === "" && files.length === 0) return true;
+    // An unsettled send may already be delivered, so its body must not change.
+    if (found === undefined || found.message.unsettled === true) return false;
+    if (text.trim() === "" && files.length === 0) return false;
     const { entry, message } = found;
     const unchanged =
       text === message.text &&
@@ -2262,9 +2264,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       files.every((file, i) => file === message.files[i]);
     if (unchanged) return true;
     // A changed body is a new message: the server dedupes a repeated stable id
-    // to the item it already holds, so the edit must go out under a fresh id.
-    // The quote provenance serialises into the text, so an edit outdates it. The
-    // old failure reason described the original payload, so it no longer applies.
+    // to the item it already holds, so the edit goes out under a fresh id, with
+    // the now-stale quote provenance and failure reason dropped.
     const { replyDraft, ...rest } = message;
     const edited: FailedUserMessage = {
       ...rest,

@@ -188,7 +188,7 @@ def test_host_session_that_never_connects_names_the_cause(
 
         # The send relaunches; the wedger freezes that runner too. The failed
         # send is retained as a transcript card that names the connect phase
-        # and offers Retry, in place of the old standalone error pill.
+        # and offers Retry.
         composer.fill("hello? is anything happening?")
         composer.press("Enter")
         card = page.get_by_test_id("failed-send-message")

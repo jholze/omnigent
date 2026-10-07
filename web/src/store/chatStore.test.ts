@@ -5778,7 +5778,7 @@ describe("chatStore — retained failed sends", () => {
     const retry = useChatStore.getState().retryFailedMessage(stableId);
     // An edit would otherwise mint a new id the in-flight dispatch no longer
     // matches, and a discard would be undone by the retry's re-retention.
-    useChatStore.getState().editFailedMessage(stableId, "a sneaky edit", []);
+    expect(useChatStore.getState().editFailedMessage(stableId, "a sneaky edit", [])).toBe(false);
     useChatStore.getState().discardFailedMessage(stableId);
     expect(useChatStore.getState().failedUserMessages).toMatchObject([
       { text: "/compact", stableId },
@@ -5924,12 +5924,16 @@ describe("chatStore — retained failed sends", () => {
     retain(stableId, { unsettled: true });
 
     await useChatStore.getState().retryFailedMessage(stableId);
-    useChatStore.getState().editFailedMessage(stableId, "resend me, but edited", []);
+    const edited = useChatStore.getState().editFailedMessage(stableId, "resend me, but edited", []);
 
+    // The refused edit reports `false` so the card keeps its editor open.
+    expect(edited).toBe(false);
     expect(eventsPostCount()).toBe(0);
     expect(useChatStore.getState().failedUserMessages).toMatchObject([
       { stableId, text: "resend me", unsettled: true },
     ]);
+    // An unknown id refuses too — the card it belonged to is already gone.
+    expect(useChatStore.getState().editFailedMessage("0".repeat(32), "orphan", [])).toBe(false);
   });
 
   it("edits a retained message under a fresh stable id and forgets its refusal", () => {
@@ -5990,8 +5994,10 @@ describe("chatStore — retained failed sends", () => {
     retain(stableId);
     const before = useChatStore.getState().failedUserMessages;
 
-    useChatStore.getState().editFailedMessage(stableId, "resend me", []);
-    useChatStore.getState().editFailedMessage(stableId, "   ", []);
+    // Saving an identical body is a no-op the editor may close on; an empty
+    // body is refused so the editor stays open.
+    expect(useChatStore.getState().editFailedMessage(stableId, "resend me", [])).toBe(true);
+    expect(useChatStore.getState().editFailedMessage(stableId, "   ", [])).toBe(false);
 
     expect(useChatStore.getState().failedUserMessages).toBe(before);
   });
