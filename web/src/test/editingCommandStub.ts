@@ -5,7 +5,10 @@ import { vi } from "vitest";
  * ``insertText`` to the focused field like a browser (in-place edit plus an
  * ``input`` event, no ``value`` setter). Remove via removeEditingCommandStub.
  */
+let priorDescriptor: PropertyDescriptor | undefined;
+
 export function installEditingCommandStub() {
+  priorDescriptor = Object.getOwnPropertyDescriptor(document, "execCommand");
   const stub = vi.fn((command: string, _showUi?: boolean, value?: string): boolean => {
     const field = document.activeElement;
     if (!(field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement)) return false;
@@ -30,5 +33,10 @@ export function installEditingCommandStub() {
 }
 
 export function removeEditingCommandStub(): void {
-  delete (document as { execCommand?: unknown }).execCommand;
+  if (priorDescriptor) {
+    Object.defineProperty(document, "execCommand", priorDescriptor);
+    priorDescriptor = undefined;
+  } else {
+    delete (document as { execCommand?: unknown }).execCommand;
+  }
 }
