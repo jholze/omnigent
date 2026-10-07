@@ -56,7 +56,6 @@ description: >-
 # transcript, the code it reads to root-cause, the fix, and the tests together.
 executor:
   type: omnigent
-  model: "databricks-claude-fable-5-1"
   context_window: 1000000
   reasoning_effort: xhigh
   config:
@@ -85,98 +84,8 @@ spawn: false
 os_env:
   type: caller_process
   cwd: .
-  # BEGIN omnigent-internal CI security overlay
   sandbox:
-    type: linux_bwrap
-    write_paths:
-      - "."
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/.git/objects"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/.git/refs"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/.git/logs"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/.git/ci-packed-refs"
-    cwd_allow_hidden:
-      - "*"
-    env_passthrough:
-      - NO_PROXY
-      - no_proxy
-      - OMNIGENT_PW_NO_SANDBOX
-      - OMNIGENT_PYTHON
-      - PLAYWRIGHT_BROWSERS_PATH
-      - PYTHONPATH
-      - TIKTOKEN_CACHE_DIR
-    read_paths:
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/.git"
-      - "/home/runner/work/_temp/omnigent-resolve-harnesses/omnigent"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/.harness-clis"
-      - "/home/runner/work/_temp/omnigent-resolve-harnesses"
-      - "/home/runner/.cache/ms-playwright"
-      - "/home/runner/work/_temp/tiktoken-cache"
-      - "/opt/hostedtoolcache"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/omnigent"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/sdks/python-client/omnigent_client"
-      - "/home/runner/work/omnigent-internal/omnigent-internal/omnigent-src/sdks/ui/omnigent_ui_sdk"
-    egress_allow_private_destinations: true
-    egress_rules:
-      - "* ai-oss-ecosystem-integration-testing.cloud.databricks.com/ai-gateway/anthropic/**"
-      - "* ai-oss-ecosystem-integration-testing.cloud.databricks.com/ai-gateway/codex/v1/**"
-      - "* omnigent-repro-3272836215725701.aws.databricksapps.com/**"
-      - "GET api.github.com/repos/omnigent-ai/omnigent/issues/**"
-      - "GET api.github.com/repos/omnigent-ai/omnigent/pulls/**"
-      - "GET api.github.com/repos/omnigent-ai/omnigent/actions/**"
-      - "GET,HEAD results-receiver.actions.githubusercontent.com/**"
-      - "GET,HEAD *.blob.core.windows.net/actions-results/**"
-      - "GET github.com/omnigent-ai/omnigent/**"
-      - "GET raw.githubusercontent.com/anthropics/claude-code/refs/heads/main/CHANGELOG.md"
-      - "GET raw.githubusercontent.com/omnigent-ai/omnigent/**"
-      - "GET objects.githubusercontent.com/**"
-      - "GET user-images.githubusercontent.com/**"
-      - "* registry.npmjs.org/**"
-      - "* npm-proxy.cloud.databricks.com/**"
-      - "GET pypi.org/simple/**"
-      - "GET files.pythonhosted.org/packages/**"
-      - "* pypi-proxy.cloud.databricks.com/**"
-      - "* 127.0.0.1/**"
-      - "* localhost/**"
-      - "GET api.github.com/search/issues"
-      - "POST api.github.com/graphql"
-      - "GET api.github.com/repos/omnigent-ai/omnigent"
-      - "GET api.github.com/repos/omnigent-ai/omnigent/**"
-      - "GET github.com/omnigent-ai/omnigent/**"
-      - "GET github.com/omnigent-ai/omnigent.git/**"
-      - "POST github.com/omnigent-ai/omnigent/git-upload-pack"
-      - "POST github.com/omnigent-ai/omnigent.git/git-upload-pack"
-      - "GET raw.githubusercontent.com/omnigent-ai/omnigent/**"
-      - "GET codeload.github.com/omnigent-ai/omnigent/**"
-      - "* api.cursor.com/**"
-      - "* api2.cursor.sh/**"
-      - "* api3.cursor.sh/**"
-      - "* api4.cursor.sh/**"
-      - "* api5.cursor.sh/**"
-      - "* agent.cursor.sh/**"
-      - "* agent.api5.cursor.sh/**"
-      - "* agentn.us.api5.cursor.sh/**"
-      - "POST api.linear.app/graphql"
-      - "PUT uploads.linear.app/**"
-      - "GET uploads.linear.app/**"
-      - "* api.github.com/**"
-      - "* github.com/**"
-      - "* uploads.github.com/**"
-    credential_proxy:
-      - type: https_bearer
-        target: "ai-oss-ecosystem-integration-testing.cloud.databricks.com"
-        source: {env: DATABRICKS_REPRO_GATEWAY_TOKEN}
-        env: LLM_API_KEY
-      - type: gh_basic
-        source:
-          unix_socket: "/home/runner/work/_temp/resolve-github-credentials/token.sock"
-          refresh_interval_seconds: 60
-      - type: https_bearer
-        target: "api.linear.app"
-        source: {env: DATABRICKS_REPRO_LINEAR_TOKEN}
-        env: LINEAR_API_KEY
-    # Cursor uses HTTP/2 for agent turns. Its key is resolved by
-    # the trusted runner and passed directly to the Cursor harness;
-    # binding these hosts to a rewrite rule would block opaque h2 relay.
+    type: none
 
 # Block only the catastrophic shell set (force-push, `rm -rf /`, hard reset to a
 # remote ref); everything else runs without an ASK gate so the agent stays
