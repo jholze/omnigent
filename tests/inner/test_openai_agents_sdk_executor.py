@@ -665,8 +665,10 @@ def test_databricks_request_body_serializes_resolvable_tool_name() -> None:
 
     async def _run_inner() -> None:
         _wrap_client_for_reasoning_models(client, databricks=True)
-        await client.chat.completions.create(model="kimi", messages=messages, stream=False)
-        await client.close()
+        try:
+            await client.chat.completions.create(model="kimi", messages=messages, stream=False)
+        finally:
+            await client.close()
 
     _run(_run_inner())
 

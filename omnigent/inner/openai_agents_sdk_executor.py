@@ -865,6 +865,8 @@ def _resolve_tool_message_names(messages: Any) -> Any:  # type: ignore[explicit-
             resolved_name = names_by_call_id.get(call_id) if isinstance(call_id, str) else None
             if resolved_name:
                 message = {**message, "name": resolved_name}
+            else:
+                logger.debug("No resolvable tool name for Databricks tool_call_id=%r", call_id)
         resolved.append(message)
     return resolved
 
