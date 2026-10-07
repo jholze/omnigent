@@ -1606,6 +1606,8 @@ function BrowserStorageControls() {
   const [pending, setPending] = useState<"saving" | "clearing" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cleared, setCleared] = useState(false);
+  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [readAttempt, setReadAttempt] = useState(0);
   const labelId = useId();
   const descriptionId = useId();
@@ -1659,13 +1661,17 @@ function BrowserStorageControls() {
   };
 
   const clear = async () => {
+    if (pending !== null) return;
     setPending("clearing");
     setError(null);
+    setClearError(null);
     setCleared(false);
     try {
-      setCleared(await bridge.clearSavedData());
+      await bridge.clearSavedData();
+      setCleared(true);
+      setClearDialogOpen(false);
     } catch (err) {
-      setError(
+      setClearError(
         `Couldn't clear saved browser data: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
@@ -1693,16 +1699,58 @@ function BrowserStorageControls() {
           componentId="settings.general.remember_browser_logins"
         />
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={disabled}
-        loading={pending === "clearing"}
-        onClick={() => void clear()}
-        componentId="settings.general.clear_browser_data"
+      <Dialog
+        open={clearDialogOpen}
+        onOpenChange={(open) => {
+          if (pending === "clearing") return;
+          setClearDialogOpen(open);
+          if (open) {
+            setClearError(null);
+            setCleared(false);
+          }
+        }}
       >
-        Clear saved browser data
-      </Button>
+        <DialogTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={disabled}
+            componentId="settings.general.open_clear_browser_data_dialog"
+          >
+            Clear saved browser data
+          </Button>
+        </DialogTrigger>
+        <DialogContent showCloseButton={pending !== "clearing"}>
+          <DialogHeader>
+            <DialogTitle>Clear saved browser data?</DialogTitle>
+            <DialogDescription>
+              This closes browser pages and deletes saved cookies and site data on this device
+              across all sessions, agents, windows, connected servers, and accounts. You will need
+              to sign in to websites again. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {clearError && (
+            <p role="alert" className="text-sm text-destructive">
+              {clearError}
+            </p>
+          )}
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={pending === "clearing"}>
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              variant="destructive"
+              loading={pending === "clearing"}
+              onClick={() => void clear()}
+              componentId="settings.general.clear_browser_data"
+            >
+              Clear data
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}

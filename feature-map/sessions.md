@@ -85,7 +85,7 @@ create or select a closable Browser soft tab automatically.
 Open Settings with **Cmd/Ctrl+,** or the **sidebar gear**, then go to
 **General → Browser**. Enable **Remember logins across sessions** to share saved
 logins across all sessions and windows. Choose **Clear saved browser data** and
-accept the native confirmation to sign out of sites in that shared profile.
+confirm in the app dialog to sign out of sites in that shared profile.
 
 **Desktop recent sessions:** hold Control and press Tab to open the five most
 recent sessions. Continue pressing Tab (or Shift+Tab) to cycle, release Control
@@ -212,9 +212,10 @@ plain `uv run pytest`, which starts a private server for the test.
   **Remember logins across sessions**; the switch changes immediately without a
   popup. Sign in once and verify another session and an app restart keep the
   login. Disable it to restore isolation; choose **Clear saved browser data**,
-  accept the native confirmation, and re-enable it to verify the saved login
-  is gone. The same Electron test drives the Settings controls. Manually check
-  both Settings entry points: **Cmd/Ctrl+,** and the **sidebar gear**.
+  cancel the app dialog and verify the saved login remains. Clear again and
+  confirm to verify the saved login is gone, including when remembering is off.
+  The same Electron test drives the Settings controls. Manually check both
+  Settings entry points: **Cmd/Ctrl+,** and the **sidebar gear**.
 
 ## Gotchas
 

@@ -483,7 +483,7 @@ The setting is off by default. Changing it takes effect immediately without a
 popup and closes open browser pages; after enabling, sign into your sites once
 in the shared browser. Disabling returns to temporary storage per conversation
 and keeps the saved profile available for later. In **Settings → General →
-Browser**, **Clear saved browser data** asks for native confirmation before
+Browser**, **Clear saved browser data** opens an in-app confirmation before
 deleting its cookies, site storage, and cache, including while the setting is
 off. Signing out of an Omnigent server does not clear this shared profile.
 

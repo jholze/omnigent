@@ -353,19 +353,29 @@ describe(
           assert.deepEqual(await storage(second), ["", null]);
 
           await settings(false);
-          await desktop.electronApp.evaluate(({ dialog }) => {
-            const showMessageBox = dialog.showMessageBox;
-            dialog.showMessageBox = async () => {
-              dialog.showMessageBox = showMessageBox;
-              return { response: 0 };
-            };
+          const clearButton = desktop.window.getByRole("button", {
+            name: "Clear saved browser data",
+            exact: true,
           });
-          await desktop.window
-            .getByRole("button", { name: "Clear saved browser data", exact: true })
-            .click();
-          await desktop.window
-            .getByRole("button", { name: "Clear saved browser data", exact: true, disabled: false })
-            .waitFor({ state: "visible" });
+          const confirmation = desktop.window.getByRole("dialog", {
+            name: "Clear saved browser data?",
+            exact: true,
+          });
+          await clearButton.click();
+          await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+          await confirmation.waitFor({ state: "hidden" });
+          await rememberLogins(false).click();
+          await rememberLogins(true).waitFor({ state: "visible" });
+          await open(first);
+          assert.deepEqual(await storage(first), ["agent_identity=alice", "alice"]);
+
+          await settings(true);
+          await rememberLogins(true).click();
+          await rememberLogins(false).waitFor({ state: "visible" });
+          await clearButton.click();
+          await confirmation.getByRole("button", { name: "Clear data", exact: true }).click();
+          await confirmation.waitFor({ state: "hidden" });
+          await desktop.window.getByText("Saved browser data cleared.", { exact: true }).waitFor();
           await rememberLogins(false).click();
           await rememberLogins(true).waitFor({ state: "visible" });
           await open(first);

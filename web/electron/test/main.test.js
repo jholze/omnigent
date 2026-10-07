@@ -1926,31 +1926,6 @@ describe("browser storage settings", () => {
     assert.equal(fs.existsSync(h.settingsPath), false);
   });
 
-  it("keeps saved storage and existing views when clearing is cancelled", async (t) => {
-    const h = connect(t);
-    h.api.windows.get(h.win).browserRegistry.closeAll = () => assert.fail("views must stay open");
-    h.electron.session.fromPartition = () => assert.fail("storage must remain untouched");
-    h.electron.dialog.showMessageBox = async (win, options) => {
-      assert.equal(win, h.win);
-      assert.equal(options.defaultId, options.cancelId);
-      return { response: options.cancelId };
-    };
-    assert.equal(await h.ipc.get("omnigent:browser-storage-clear")(h.event), false);
-    assert.equal(fs.existsSync(h.settingsPath), false);
-    assert.equal(h.api.browserRegistryForSender(h.event), h.api.windows.get(h.win).browserRegistry);
-  });
-
-  it("cancels clearing if the requesting window leaves its server", async (t) => {
-    const h = connect(t);
-    h.api.windows.get(h.win).browserRegistry.closeAll = () => assert.fail("views must stay open");
-    h.electron.session.fromPartition = () => assert.fail("storage must remain untouched");
-    h.electron.dialog.showMessageBox = async () => {
-      h.setUrl("file:///setup.html");
-      return { response: 0 };
-    };
-    assert.equal(await h.ipc.get("omnigent:browser-storage-clear")(h.event), false);
-  });
-
   it("blocks browser access while clearing and restores it after a reported failure", async (t) => {
     const h = connect(t);
     fs.writeFileSync(h.settingsPath, JSON.stringify({ browser_remember_logins: true }));
@@ -1970,7 +1945,7 @@ describe("browser storage settings", () => {
       assert.equal(partition, "persist:omnigent-browser");
       return browserSession;
     };
-    h.electron.dialog.showMessageBox = async () => ({ response: 0 });
+    h.electron.dialog.showMessageBox = () => assert.fail("confirmation belongs to app settings");
     const clear = () => h.ipc.get("omnigent:browser-storage-clear")(h.event);
     const pending = clear();
     const rejected = assert.rejects(pending, /storage deletion failed/);

@@ -5,6 +5,7 @@
 
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -508,7 +509,38 @@ describe("Browser settings", () => {
     expect(toggle).not.toBeChecked();
   });
 
-  it("delegates clearing to the native bridge and reports success even with remembering off", async () => {
+  it.each(["Cancel", "Escape", "Close", "backdrop"])(
+    "dismisses clear confirmation with %s without deleting data and restores focus",
+    async (dismiss) => {
+      const user = userEvent.setup();
+      const { bridge } = installBrowserStorageBridge();
+      renderPage("/settings/general");
+      const clear = screen.getByRole("button", { name: clearName });
+      await waitFor(() => expect(clear).toBeEnabled());
+
+      await user.click(clear);
+      const dialog = screen.getByRole("dialog", { name: "Clear saved browser data?" });
+      expect(dialog).toHaveAccessibleDescription(
+        "This closes browser pages and deletes saved cookies and site data on this device across all sessions, agents, windows, connected servers, and accounts. You will need to sign in to websites again. This cannot be undone.",
+      );
+      expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+      expect(bridge.clearSavedData).not.toHaveBeenCalled();
+
+      if (dismiss === "Escape") await user.keyboard("{Escape}");
+      else if (dismiss === "backdrop") {
+        await user.click(document.querySelector('[data-slot="dialog-overlay"]')!);
+      } else await user.click(within(dialog).getByRole("button", { name: dismiss }));
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await waitFor(() => expect(clear).toHaveFocus());
+      expect(bridge.clearSavedData).not.toHaveBeenCalled();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+    },
+  );
+
+  it("clears only after confirmation, blocks interaction while pending, and reports success with remembering off", async () => {
+    const user = userEvent.setup();
     const { bridge } = installBrowserStorageBridge(false);
     const confirm = vi.spyOn(window, "confirm");
     let finishClear!: (cleared: boolean) => void;
@@ -522,59 +554,72 @@ describe("Browser settings", () => {
     const clear = screen.getByRole("button", { name: clearName });
     await waitFor(() => expect(clear).toBeEnabled());
 
-    fireEvent.click(clear);
+    await user.click(clear);
+    const dialog = screen.getByRole("dialog", { name: "Clear saved browser data?" });
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    const confirmClear = within(dialog).getByRole("button", { name: "Clear data" });
+    expect(bridge.clearSavedData).not.toHaveBeenCalled();
+    expect(confirmClear).toHaveAttribute("data-variant", "destructive");
+
+    await user.dblClick(confirmClear);
     expect(bridge.clearSavedData).toHaveBeenCalledTimes(1);
     expect(toggle).toBeDisabled();
     expect(clear).toBeDisabled();
+    expect(cancel).toBeDisabled();
+    expect(confirmClear).toBeDisabled();
+    expect(confirmClear).toHaveAttribute("aria-busy", "true");
     expect(confirm).not.toHaveBeenCalled();
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(clear).toHaveAttribute("aria-busy", "true");
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+    fireEvent.click(cancel);
+    fireEvent.click(confirmClear);
+    await user.keyboard("{Escape}");
+    await user.click(document.querySelector('[data-slot="dialog-overlay"]')!);
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(bridge.clearSavedData).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Saved browser data cleared.")).toBeNull();
     await act(async () => finishClear(true));
 
     expect(screen.getByRole("status")).toHaveTextContent("Saved browser data cleared.");
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(toggle).toBeEnabled();
     expect(clear).toBeEnabled();
+    await waitFor(() => expect(clear).toHaveFocus());
     expect(toggle).not.toBeChecked();
     expect(bridge.setRememberLogins).not.toHaveBeenCalled();
   });
 
-  it.each(["cancel", "error"])(
-    "handles clear %s without a stale success message",
-    async (outcome) => {
-      const { bridge } = installBrowserStorageBridge(true);
-      renderPage("/settings/general");
-      const clear = screen.getByRole("button", { name: clearName });
-      await waitFor(() => expect(clear).toBeEnabled());
-      fireEvent.click(clear);
-      expect(await screen.findByText("Saved browser data cleared.")).toHaveAttribute(
-        "role",
-        "status",
-      );
+  it("keeps clear failures in the dialog for retry without a stale success message", async () => {
+    const user = userEvent.setup();
+    const { bridge } = installBrowserStorageBridge(true);
+    renderPage("/settings/general");
+    const clear = screen.getByRole("button", { name: clearName });
+    const toggle = screen.getByRole("switch", { name: toggleName });
+    await waitFor(() => expect(clear).toBeEnabled());
+    await user.click(clear);
+    await user.click(screen.getByRole("button", { name: "Clear data" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Saved browser data cleared.");
 
-      if (outcome === "cancel") bridge.clearSavedData.mockResolvedValueOnce(false);
-      else bridge.clearSavedData.mockRejectedValueOnce(new Error("Data is locked"));
-      fireEvent.click(clear);
-      await waitFor(() => expect(clear).toBeEnabled());
+    bridge.clearSavedData.mockRejectedValueOnce(new Error("Data is locked"));
+    await user.click(clear);
+    expect(screen.queryByText("Saved browser data cleared.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Clear data" }));
 
-      expect(screen.queryByRole("status")).toBeNull();
-      expect(screen.getByRole("switch", { name: toggleName })).toBeChecked();
-      expect(bridge.setRememberLogins).not.toHaveBeenCalled();
-      if (outcome === "cancel") {
-        expect(screen.queryByRole("alert")).toBeNull();
-      } else {
-        expect(screen.getByRole("alert")).toHaveTextContent(
-          "Couldn't clear saved browser data: Data is locked",
-        );
-        fireEvent.click(clear);
-        expect(await screen.findByText("Saved browser data cleared.")).toHaveAttribute(
-          "role",
-          "status",
-        );
-        expect(screen.queryByRole("alert")).toBeNull();
-      }
-    },
-  );
+    const dialog = screen.getByRole("dialog", { name: "Clear saved browser data?" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "Couldn't clear saved browser data: Data is locked",
+    );
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeEnabled();
+    expect(toggle).toBeChecked();
+    expect(bridge.setRememberLogins).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Clear data" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Saved browser data cleared.");
+    expect(bridge.clearSavedData).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(clear).toHaveFocus());
+  });
 });
 
 describe("SettingsPage", () => {

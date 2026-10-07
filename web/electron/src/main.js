@@ -3560,27 +3560,13 @@ function isPinnedOriginSender(event) {
 const SHARED_BROWSER_PARTITION = "persist:omnigent-browser";
 let browserStorageBusy = false;
 
-async function updateBrowserStorage(event, enabled) {
+async function updateBrowserStorage(enabled) {
   if (browserStorageBusy) throw new Error("Browser storage is busy. Try again shortly.");
   const clearing = enabled === undefined;
   if (!clearing && enabled === (loadSettings().browser_remember_logins === true)) return enabled;
   browserStorageBusy = true;
   try {
-    if (clearing) {
-      const { response } = await dialog.showMessageBox(
-        BrowserWindow.fromWebContents(event.sender),
-        {
-          type: "question",
-          message: "Clear saved browser data?",
-          detail:
-            "This signs you out of sites in the shared browser and deletes its cookies, site storage, and cache. All open browser pages will close.",
-          buttons: ["Clear Data", "Cancel"],
-          defaultId: 1,
-          cancelId: 1,
-        },
-      );
-      if (response !== 0 || !isPinnedOriginSender(event)) return false;
-    } else {
+    if (!clearing) {
       const settings = loadSettings();
       settings.browser_remember_logins = enabled;
       saveSettings(settings);
@@ -4670,12 +4656,12 @@ function registerIpc() {
     if (!isPinnedOriginSender(event))
       throw new Error("Browser settings require a connected server page");
     if (typeof enabled !== "boolean") throw new Error("Remember logins must be a boolean");
-    return updateBrowserStorage(event, enabled);
+    return updateBrowserStorage(enabled);
   });
   ipcMain.handle("omnigent:browser-storage-clear", (event) => {
     if (!isPinnedOriginSender(event))
       throw new Error("Browser settings require a connected server page");
-    return updateBrowserStorage(event);
+    return updateBrowserStorage();
   });
 }
 

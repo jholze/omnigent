@@ -366,7 +366,7 @@ export interface ElectronUpdateBridge {
 export interface BrowserStorageBridge {
   getRememberLogins: () => Promise<boolean>;
   setRememberLogins: (enabled: boolean) => Promise<boolean>;
-  /** The main process confirms deletion; false means the user cancelled. */
+  /** Caller confirms deletion; resolves true on success and rejects on failure. */
   clearSavedData: () => Promise<boolean>;
   onChanged: (callback: (enabled: boolean) => void) => () => void;
 }
