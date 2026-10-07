@@ -3300,14 +3300,20 @@ _RELAYED_FAILURE_WITHOUT_MESSAGE = (
     "The turn failed but the runner reported no detail. See the runner log for details."
 )
 _RELAYED_FAILURE_REASON_STAND_IN = "no reason reported (see the runner log for details)"
+# Runner messages whose reason follows the colon; older runners sent them bare.
+_RELAYED_DROPPED_REASON_PREFIXES = frozenset(
+    {"turn setup failed:", "background turn drain failed:"}
+)
 
 
-def _ensure_relayed_failure_reason(error: ErrorDetail) -> ErrorDetail:
-    """Repair a relayed failure whose message is blank or ends at a dropped-reason colon."""
+def _ensure_relayed_failure_reason(error: ErrorDetail | None) -> ErrorDetail:
+    """Repair a relayed failure that carries no error, a blank message, or a bare prefix."""
+    if error is None:
+        return ErrorDetail(code="runner_error", message=_RELAYED_FAILURE_WITHOUT_MESSAGE)
     message = error.message.strip()
     if not message:
         return error.model_copy(update={"message": _RELAYED_FAILURE_WITHOUT_MESSAGE})
-    if message.endswith(":"):
+    if message in _RELAYED_DROPPED_REASON_PREFIXES:
         return error.model_copy(
             update={"message": f"{message} {_RELAYED_FAILURE_REASON_STAND_IN}"}
         )
@@ -8112,7 +8118,7 @@ async def _relay_runner_stream_once(
                                 if isinstance(raw_err, dict)
                                 else None
                             )
-                            if status == "failed" and status_error is not None:
+                            if status == "failed":
                                 # Normalize failures from runners that predate this guard.
                                 status_error = _ensure_relayed_failure_reason(status_error)
                                 await _persist_session_status_error_labels(

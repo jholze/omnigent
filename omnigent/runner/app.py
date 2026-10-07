@@ -2296,7 +2296,7 @@ def create_runner_app(
         except BackgroundTitleHarnessError as exc:
             return JSONResponse(
                 status_code=502,
-                content={"error": "title_harness_failed", "detail": str(exc)},
+                content={"error": "title_harness_failed", "detail": _exception_detail(exc)},
             )
         except (ImportError, OSError, RuntimeError) as exc:
             return JSONResponse(

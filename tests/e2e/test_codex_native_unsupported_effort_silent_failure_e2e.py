@@ -101,10 +101,11 @@ def _pinned_model():
     if not home:
         return None
     try:
-        for line in open(os.path.join(home, "config.toml"), encoding="utf-8"):
-            line = line.strip()
-            if line.startswith("model =") or line.startswith("model="):
-                return line.split("=", 1)[1].strip().strip('"')
+        with open(os.path.join(home, "config.toml"), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("model =") or line.startswith("model="):
+                    return line.split("=", 1)[1].strip().strip('"')
     except OSError:
         return None
     return None
@@ -124,11 +125,13 @@ def _spawn(coro):
 
 
 def _log(text):
-    import os
-    path = os.environ.get("FAKE_CODEX_LOG", "")
-    if path:
-        with open(path, "a", encoding="utf-8") as fh:
+    # The log path is baked in; the runner curates the app-server environment,
+    # so an inherited env var would not survive to this process.
+    try:
+        with open({log_path!r}, "a", encoding="utf-8") as fh:
             fh.write(text + chr(10))
+    except OSError:
+        pass
 
 
 async def _broadcast(method, params):
@@ -136,8 +139,8 @@ async def _broadcast(method, params):
     for ws in list(CONNECTIONS):
         try:
             await ws.send(payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log("broadcast failed for " + method + ": " + repr(exc))
 
 
 async def _announce_thread(ws):
@@ -147,8 +150,8 @@ async def _announce_thread(ws):
             "method": "thread/started",
             "params": {{"thread": {{"id": THREAD_ID}}}},
         }}))
-    except Exception:
-        pass
+    except Exception as exc:
+        _log("thread/started announcement failed: " + repr(exc))
 
 
 async def _run_turn(turn_id):
@@ -292,6 +295,11 @@ class _Rig:
     runner_log: Path
     workspace: Path
     client: httpx.Client
+    codex_log: Path
+
+    def codex_requests(self) -> str:
+        """Return everything the fake Codex app-server logged, or empty when none."""
+        return self.codex_log.read_text() if self.codex_log.is_file() else ""
 
     def log_tails(self) -> str:
         return (
@@ -316,8 +324,11 @@ def fake_codex_rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Rig]:
     for path in (bin_dir, config_home, codex_home, home_dir, state_dir, artifacts, workspace):
         path.mkdir(parents=True, exist_ok=True)
 
+    codex_log = work / "fake-codex.log"
     fake_codex = bin_dir / "codex"
-    fake_codex.write_text(_FAKE_CODEX_TEMPLATE.format(python=sys.executable))
+    fake_codex.write_text(
+        _FAKE_CODEX_TEMPLATE.format(python=sys.executable, log_path=str(codex_log))
+    )
     fake_codex.chmod(0o755)
     # Keep launch routing on the authenticated Codex path.
     (codex_home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-fake-e2e"}))
@@ -409,6 +420,7 @@ def fake_codex_rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Rig]:
             runner_log=runner_log,
             workspace=workspace,
             client=client,
+            codex_log=codex_log,
         )
     finally:
         for proc in (runner_proc, server_proc):
@@ -570,8 +582,22 @@ def test_unsupported_effort_minimal_failure_is_surfaced(fake_codex_rig: _Rig) ->
     _send_user_message(fake_codex_rig, session_id, "Say hello.")
     outcome = _wait_for_turn_outcome(fake_codex_rig, session_id)
 
+    # The turn must actually have run astra at minimal effort; otherwise a
+    # setup regression (a supported model/effort reaching the fake) could pass
+    # this test without exercising the reported failure at all.
+    requests = fake_codex_rig.codex_requests()
+    assert f"model={_ASTRA_MODEL} effort=minimal" in requests, (
+        "the fake Codex app-server never ran a turn with the reported "
+        f"model/effort; log:\n{requests}\n{fake_codex_rig.log_tails()}"
+    )
+
     if outcome.assistant_texts and outcome.session_status != "failed":
-        # Up-front gating is also an acceptable non-silent outcome.
+        # Rejecting the unsupported effort before dispatch is also non-silent;
+        # require that explicit rejection rather than a plain assistant reply.
+        assert outcome.surfaced_errors(), (
+            "the unsupported effort produced an assistant reply with no error; "
+            f"items={json.dumps(outcome.items)[:1500]}\n{fake_codex_rig.log_tails()}"
+        )
         return
 
     # A failed outcome must surface through an item or last_task_error.

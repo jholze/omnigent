@@ -72,7 +72,7 @@ def _stop_respawned_runner(runner: subprocess.Popen[bytes] | None) -> None:
 
 
 def test_detail_less_native_failure_surfaces_readable_error(
-    page: Page,
+    request: pytest.FixtureRequest,
     live_server: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
@@ -80,6 +80,9 @@ def test_detail_less_native_failure_surfaces_readable_error(
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     session_id = _create_native_codex_session(live_server, runner_id)
+    # Create the recorded page only after non-browser setup so the clip opens
+    # on the session navigation, not a blank page during runner/session setup.
+    page: Page = request.getfixturevalue("page")
     try:
         page.goto(f"{live_server}/c/{session_id}")
         expect(page.get_by_role("textbox", name="Message the agent")).to_be_visible(timeout=20_000)
@@ -98,12 +101,14 @@ def test_detail_less_native_failure_surfaces_readable_error(
         native_failure_pill = pills.filter(has_text=_NATIVE_FAILURE_HEADLINE)
         expect(native_failure_pill.first).to_be_visible(timeout=15_000)
     finally:
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        _stop_respawned_runner(respawned)
+        try:
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        finally:
+            _stop_respawned_runner(respawned)
 
 
 def test_native_failure_does_not_show_assistant_reply_as_the_error(
-    page: Page,
+    request: pytest.FixtureRequest,
     live_server: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
@@ -111,6 +116,9 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     session_id = _create_native_codex_session(live_server, runner_id)
+    # Create the recorded page only after non-browser setup so the clip opens
+    # on the session navigation, not a blank page during runner/session setup.
+    page: Page = request.getfixturevalue("page")
     try:
         page.goto(f"{live_server}/c/{session_id}")
         expect(page.get_by_role("textbox", name="Message the agent")).to_be_visible(timeout=20_000)
@@ -142,5 +150,7 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
             "message; a successful reply must not be shown as the error"
         )
     finally:
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        _stop_respawned_runner(respawned)
+        try:
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        finally:
+            _stop_respawned_runner(respawned)

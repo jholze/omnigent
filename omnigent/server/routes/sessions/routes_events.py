@@ -53,6 +53,7 @@ from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_run
 from omnigent.runner.launch_failure import (
     classify_native_turn_error,
     diagnose_client_update_required,
+    is_native_error_report,
 )
 from omnigent.runner.routing import RunnerRouter, routing_host_id
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -369,7 +370,7 @@ def _native_failure_message(detail: str, *, borrowed: bool, recognized: bool) ->
     """
     if not detail:
         return _NATIVE_FAILURE_WITHOUT_DETAIL
-    if not borrowed or recognized or detail.casefold().startswith("api error:"):
+    if not borrowed or recognized or is_native_error_report(detail):
         return detail
     return _NATIVE_FAILURE_WITHOUT_DETAIL
 

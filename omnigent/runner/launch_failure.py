@@ -284,6 +284,19 @@ def classify_native_turn_error(code: str, message: str) -> str:
     return code
 
 
+def is_native_error_report(message: str) -> bool:
+    """Return whether native harness text is the harness's own error line.
+
+    Claude Code writes its API errors into the transcript as assistant text
+    beginning ``API Error:``, so that line is a failure reason even when the
+    classifier has no specific code for it.
+
+    :param message: Assistant or status text, e.g. ``"API Error: 400 ..."``.
+    :returns: ``True`` for Claude Code's API error line.
+    """
+    return message.casefold().startswith("api error:")
+
+
 def diagnose_client_update_required(message: str) -> FailureDiagnosis | None:
     """Explain Claude Code's refusal of a model its installed version predates.
 

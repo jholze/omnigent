@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -3313,37 +3314,40 @@ async def test_relay_persist_error_once_emits_debug_row() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("relayed_message", "expected_message"),
+    ("relayed_error", "expected_message"),
     [
+        # No error at all: synthesized wholesale.
+        (
+            None,
+            "The turn failed but the runner reported no detail. See the runner log for details.",
+        ),
         # Blank message: substituted wholesale with the stand-in.
         (
-            "   ",
+            {"code": "runner_error", "message": "   "},
             "The turn failed but the runner reported no detail. See the runner log for details.",
         ),
         # Complete the recognizable prefix with a stand-in reason.
         (
-            "turn setup failed: ",
+            {"code": "runner_error", "message": "turn setup failed: "},
             "turn setup failed: no reason reported (see the runner log for details)",
         ),
     ],
 )
 async def test_relay_repairs_failed_error_without_reason(
-    relayed_message: str,
+    relayed_error: dict[str, str] | None,
     expected_message: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Repair blank and dropped-reason failure messages from older runners."""
+    """Repair missing, blank and dropped-reason failure messages from older runners."""
     from omnigent.runtime import session_stream
     from omnigent.server.routes import sessions as sessions_module
 
     sessions_module._runner_relay_tasks.clear()
     release = asyncio.Event()
-    events: list[dict[str, Any]] = [
-        {
-            "type": "session.status",
-            "status": "failed",
-            "error": {"code": "runner_error", "message": relayed_message},
-        },
-    ]
+    failed_event: dict[str, Any] = {"type": "session.status", "status": "failed"}
+    if relayed_error is not None:
+        failed_event["error"] = relayed_error
+    events: list[dict[str, Any]] = [failed_event]
     fake_runner = _ScriptedRunnerClient(release, events)
     store = _RecordingLabelStore(live_status="running")
     session_id = "7c2f1a9e5d3b4c8fa1e6d0b2c4a8e7f3"
@@ -3351,23 +3355,32 @@ async def test_relay_repairs_failed_error_without_reason(
 
     collector = None
     try:
-        handle = await sessions_module._ensure_runner_relay_ready(
-            session_id,
-            "runner_relay_reasonless_failure",
-            fake_runner,  # type: ignore[arg-type]
-            conversation_store=store,  # type: ignore[arg-type]
-        )
-        assert handle is not None
-        # Subscribe before releasing the event producer.
-        collector = await start_session_stream_collector(session_id)
-        release.set()
-        await asyncio.wait_for(handle.task, timeout=_TASK_TIMEOUT_S)
+        with caplog.at_level(logging.ERROR, logger="omnigent.server.routes.sessions"):
+            handle = await sessions_module._ensure_runner_relay_ready(
+                session_id,
+                "runner_relay_reasonless_failure",
+                fake_runner,  # type: ignore[arg-type]
+                conversation_store=store,  # type: ignore[arg-type]
+            )
+            assert handle is not None
+            # Subscribe before releasing the event producer.
+            collector = await start_session_stream_collector(session_id)
+            release.set()
+            await asyncio.wait_for(handle.task, timeout=_TASK_TIMEOUT_S)
 
         event = await asyncio.wait_for(collector.queue.get(), timeout=_TASK_TIMEOUT_S)
         assert event.get("type") == "session.status"
         assert event.get("status") == "failed"
         assert event["error"]["code"] == "runner_error"
         assert event["error"]["message"] == expected_message
+        # The repaired reason is what the failure log row carries too.
+        logged = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.ERROR
+            and record.getMessage().startswith(f"session turn failed for {session_id}")
+        ]
+        assert logged and logged[-1].endswith(f"): {expected_message}"), logged
     finally:
         release.set()
         if collector is not None:
