@@ -20,6 +20,7 @@ import { type CodeFont, codeFontFamilyForEditor, readCodeFont } from "@/lib/code
 import { splitWorkspaceFileCitation } from "@/components/ai-elements/streamdown-security";
 import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { CodexTerminalPalette, codexTerminalTheme } from "./CodexTerminalPalette";
+import { TerminalLocalEcho } from "./terminalLocalEcho";
 
 // Card background colors derived from the app's CSS palette.
 // Light: --card: oklch(1.000 0 0) = pure white.
@@ -646,6 +647,7 @@ export class TerminalSession {
   private readonly dataDispose: { dispose: () => void };
   private readonly osc52Dispose: { dispose: () => void };
   private readonly codexPalette: CodexTerminalPalette | null;
+  private readonly localEcho: TerminalLocalEcho;
   private readonly onClipboardRequest?: TerminalClipboardListener;
   /** Whether this visible, interactive attach may write the local clipboard. */
   private clipboardEnabled: boolean;
@@ -754,6 +756,23 @@ export class TerminalSession {
       this.term.resize(80, 24);
     }
 
+    const term = this.term;
+    this.localEcho = new TerminalLocalEcho({
+      write: (data) => term.write(data),
+      get cols() {
+        return term.cols;
+      },
+      get cursorX() {
+        return term.buffer.active.cursorX;
+      },
+      get onAlternateScreen() {
+        return term.buffer.active.type === "alternate";
+      },
+      get mouseTrackingActive() {
+        return term.modes.mouseTrackingMode !== "none";
+      },
+    });
+
     this.ws = new WebSocket(url);
     // Default is Blob, which forces an async read per chunk. ArrayBuffer
     // keeps the path synchronous and matches xterm.js's preferred input.
@@ -800,7 +819,7 @@ export class TerminalSession {
       "message",
       (ev) => {
         if (ev.data instanceof ArrayBuffer) {
-          const bytes = new Uint8Array(ev.data);
+          const bytes = this.localEcho.reconcile(new Uint8Array(ev.data));
           this.term.write(this.codexPalette?.write(bytes) ?? bytes);
           const now = performance.now();
           if (now - lastActivityTs > 300) {
@@ -838,6 +857,7 @@ export class TerminalSession {
       // local input during a momentary WebSocket hiccup.
       this.lastUserInputAt = performance.now();
       if (this.ws.readyState !== WebSocket.OPEN) return;
+      this.localEcho.onInput(d);
       this.ws.send(INPUT_ENCODER.encode(d));
     });
 
@@ -849,6 +869,7 @@ export class TerminalSession {
       // the CSI-u sequence once, on keydown.
       if (e.type === "keydown") {
         e.preventDefault();
+        this.localEcho.noteNonPrintableInput();
         onInput?.();
         this.lastUserInputAt = performance.now();
         if (this.ws.readyState === WebSocket.OPEN) {
@@ -1017,6 +1038,7 @@ export class TerminalSession {
     this.resizeObserver.disconnect();
     this.dataDispose.dispose();
     this.osc52Dispose.dispose();
+    this.localEcho.dispose();
     try {
       this.ws.close();
     } catch {
