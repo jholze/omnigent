@@ -798,8 +798,8 @@ def test_terminal_error_from_hook_run_exempts_routing_handoff_only_while_replay_
     The runner records the replay before the route-turn hook blocks and clears
     it once delivered, so the reason text alone (another hook could print it)
     never hides a block, nor does a record left by another session or one
-    already delivered. The hook's own session marker stands in for a replay
-    record whose write failed.
+    already delivered. The session's routing marker outlives the replay and
+    therefore does not count either.
     """
     routed = _hook_run_params(
         status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
@@ -816,10 +816,8 @@ def test_terminal_error_from_hook_run_exempts_routing_handoff_only_while_replay_
     clear_pending_replay(tmp_path)
     assert _hook_run_error(routed, tmp_path) is not None
 
-    assert write_turn_routing_marker(tmp_path, session_id="conv_other", decision_id="decision_1")
-    assert _hook_run_error(routed, tmp_path) is not None
     assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
-    assert _hook_run_error(routed, tmp_path) is None
+    assert _hook_run_error(routed, tmp_path) is not None
     (tmp_path / MARKER_FILE).unlink()
 
     _owe_replay(tmp_path)
@@ -944,6 +942,49 @@ async def test_handle_event_failed_hook_run_leaves_turn_lifecycle_alone(tmp_path
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_event_routing_shaped_block_after_replay_posts_failed_edge(
+    tmp_path: Path,
+) -> None:
+    """Once the replay has landed, a block using the routing words is a real rejection.
+
+    The session marker the route-turn hook left behind must not exempt it: the
+    forwarder posts the failed edge and owns the terminal boundary as for any
+    other hook rejection.
+    """
+    _seed_active_turn(tmp_path, "turn_123")
+    assert write_turn_routing_marker(tmp_path, session_id="conv_x", decision_id="decision_1")
+    client = _RecordingClient()
+    usage_coalescer = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
+    elicitation_tracker = fwd._CodexElicitationTaskTracker()
+    forwarder_state = fwd._CodexForwarderState()
+
+    await fwd._handle_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        event={
+            "method": "hook/completed",
+            "params": _hook_run_params(
+                status="blocked", entries=[{"kind": "feedback", "text": _ROUTING_HANDOFF_NOTICE}]
+            ),
+        },
+        usage_coalescer=usage_coalescer,
+        elicitation_tracker=elicitation_tracker,
+        expected_thread_id="thread_123",
+        forwarder_state=forwarder_state,
+    )
+
+    assert len(client.posts) == 1
+    path, body = client.posts[0]
+    assert path == "/v1/sessions/conv_x/events"
+    assert body["data"]["status"] == "failed"
+    assert body["data"]["output"].startswith(f"Blocked by hook: {_ROUTING_HANDOFF_NOTICE}")
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id is None
 
 
 @pytest.mark.asyncio
