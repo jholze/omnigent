@@ -1294,11 +1294,12 @@ def test_codex_default_model_names_a_concrete_variant() -> None:
     """The codex launch defaults are concrete slugs in codex's own spelling.
 
     A family alias is not safe for launch code that pins a concrete model, and
-    codex's backend 400s the hyphenated Databricks spelling. Luna leads; Sol
-    stays behind it for a codex whose bundled catalog predates GPT-6 Luna.
+    codex's backend 400s the hyphenated Databricks spelling. The preference
+    leads with Luna; CODEX_DEFAULT_MODEL is the trailing Sol arm, which a path
+    that cannot read the installed catalog can pin on an older codex too.
     """
     assert CODEX_LAUNCH_DEFAULT_PREFERENCE == ("gpt-6-luna", "gpt-5.6-sol")
-    assert CODEX_LAUNCH_DEFAULT_PREFERENCE[0] == CODEX_DEFAULT_MODEL
+    assert CODEX_LAUNCH_DEFAULT_PREFERENCE[-1] == CODEX_DEFAULT_MODEL
     for model in CODEX_LAUNCH_DEFAULT_PREFERENCE:
         assert not model.startswith("databricks-")
         assert codex_spawn_model(model) == model

@@ -1,9 +1,9 @@
 """E2E: an unpinned native Codex session launches on Omnigent's Codex default.
 
 With a provider that pins no model and a Codex catalog whose own default
-marker sits on ``gpt-6-astra`` while ``gpt-6-luna`` (Omnigent's
+marker sits on ``gpt-6-astra`` while ``gpt-5.6-sol`` (Omnigent's
 ``CODEX_DEFAULT_MODEL``) is also servable, a new native Codex session without
-a model pick must launch on Luna, not adopt the catalog's Astra default row.
+a model pick must launch on Sol, not adopt the catalog's Astra default row.
 """
 
 from __future__ import annotations
@@ -284,7 +284,7 @@ def test_unpinned_native_codex_session_launches_on_omnigent_default(
     page: Page,
     unpinned_codex_astra_session: tuple[str, str, Path],
 ) -> None:
-    """A Default (unpinned) launch runs Luna, not Codex's Astra catalog default."""
+    """A Default (unpinned) launch runs Sol, not Codex's Astra catalog default."""
     base_url, session_id, tmp_dir = unpinned_codex_astra_session
     page.goto(f"{base_url}/c/{session_id}")
 
