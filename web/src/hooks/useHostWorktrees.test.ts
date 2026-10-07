@@ -1,6 +1,6 @@
 import { createElement, type ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { type DefaultOptions, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useHostWorktrees } from "./useHostWorktrees";
@@ -16,8 +16,10 @@ function response(status: number, body: unknown) {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
 }
 
-function wrapper(queries: DefaultOptions["queries"] = { retry: false, retryDelay: 0 }) {
-  const client = new QueryClient({ defaultOptions: { queries } });
+function wrapper() {
+  // The hook sets its own `retry`, so only the delay matters here: keep retries
+  // instant so the retrying error cases do not wait on exponential backoff.
+  const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
   return ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client }, children);
 }
