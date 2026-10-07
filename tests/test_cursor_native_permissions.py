@@ -641,21 +641,22 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
     (so the server clears the card at once), then cancelled; a stopping supervisor
     cancels and joins its parked tasks before its HTTP client closes.
     """
-    pending = [CursorPendingToolCall("call_cleanup", tool_name, {})]
+    pending = [
+        CursorPendingToolCall("call_cleanup", tool_name, {}),
+        CursorPendingToolCall("call_cleanup_2", tool_name, {}),
+    ]
     posts, sent = _install_supervisor_fakes(
         monkeypatch, tmp_path, pending=pending, pane=_IDLE_PANE
     )
-    parked = asyncio.Event()
     cancelled = asyncio.Event()
     late_verdict = asyncio.Event()
-    verdict_tasks: list[asyncio.Task] = []
+    verdict_tasks: dict[str, asyncio.Task] = {}
     released_while_parked: list[bool] = []
 
-    async def park(*_args, **_kwargs):
+    async def park(_client, *, session_id: str, payload: dict):
         current = asyncio.current_task()
         assert current is not None
-        verdict_tasks.append(current)
-        parked.set()
+        verdict_tasks[payload["elicitation_id"]] = current
         try:
             await late_verdict.wait()
             return {"action": "accept"}
@@ -666,7 +667,7 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
     release = cnp._post_external_elicitation_resolved
 
     async def release_recording_task_state(client, session_id: str, elicitation_id: str):
-        released_while_parked.append(not cancelled.is_set())
+        released_while_parked.append(not verdict_tasks[elicitation_id].done())
         await release(client, session_id, elicitation_id)
 
     client_closed_after_tasks: list[bool] = []
@@ -674,7 +675,7 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
 
     class _ClosingClient(_FakeAsyncCM):
         async def __aexit__(self, *exc: object) -> bool:
-            client_closed_after_tasks.append(all(task.done() for task in verdict_tasks))
+            client_closed_after_tasks.append(all(task.done() for task in verdict_tasks.values()))
             return await super().__aexit__(*exc)
 
     monkeypatch.setattr(cnp, "_park_cursor_elicitation", park)
@@ -686,21 +687,24 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
         tmp_path, session_id="conv_cleanup", auto_accept_approvals=False
     )
     try:
-        await asyncio.wait_for(parked.wait(), timeout=2)
+        assert await _wait_for(lambda: len(verdict_tasks) == 2, timeout_s=2.0)
         if resolved_in_terminal:
             pending.clear()
             assert await _wait_for(
-                lambda: any(
-                    body.get("type") == "external_elicitation_resolved" for _, body in posts
+                lambda: (
+                    sum(body.get("type") == "external_elicitation_resolved" for _, body in posts)
+                    == 2
                 )
             )
-            assert released_while_parked == [True]
-            assert await _wait_for(lambda: all(task.cancelled() for task in verdict_tasks))
+            assert released_while_parked == [True, True]
+            assert await _wait_for(
+                lambda: all(task.cancelled() for task in verdict_tasks.values())
+            )
         else:
             await _stop(supervisor)
             assert client_closed_after_tasks == [True]
         assert cancelled.is_set()
-        assert all(task.cancelled() for task in verdict_tasks)
+        assert all(task.cancelled() for task in verdict_tasks.values())
         late_verdict.set()
         for _ in range(10):
             await asyncio.sleep(0)
@@ -1145,6 +1149,11 @@ async def test_send_cursor_keys_reports_undelivered_keystroke(
     assert await cnp._send_cursor_keys(tmp_path, "conv_dead", "Escape", "Enter") is False
     assert attempts == ["Escape"]
 
+
+async def test_send_cursor_keys_reports_delivered_keystroke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A clean tmux send reports success."""
     monkeypatch.setattr(cnp, "send_cursor_pane_keys", lambda *_a, **_k: None)
     assert await cnp._send_cursor_keys(tmp_path, "conv_live", "y") is True
 
