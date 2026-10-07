@@ -81,7 +81,7 @@ journey needs no server or runner; registering it here rides hook spawn cost
 on the same nightly/release regression comparison as everything else
 (`omnigent/__init__` re-exports lazily so this stays ~interpreter-sized). The
 import-graph side of the guarantee is pinned deterministically by
-`tests/test_claude_native_message_display_hook.py`.
+`tests/harnesses/claude_native/test_claude_native_message_display_hook.py`.
 
 ### Full-turn (runner + mock LLM)
 
@@ -369,6 +369,18 @@ reseed; Postgres and MySQL are fresh per run), runs the benchmark, and uploads
 `benchmark-results-<backend>-<run_id>.json`. The workspace notebook pulls those
 artifacts.
 
+`.github/workflows/benchmark-release.yml` gates release cuts (called from
+`release.yml`). It benchmarks the previous stable release and the candidate
+concurrently on **one** runner, because hosted VMs vary in speed by up to ~1.5x
+between runs and a cross-runner comparison reports that as a regression. Each
+side gets its own checkout, venv, `HOME`, and copy of a corpus seeded at the
+baseline's schema. Dispatch it with `baseline_ref` == `candidate_ref` for an A/A
+noise check.
+
+`compare.py` (used by the release and PR gates) flags a regression on run-median
+P50 or P95. Journeys with fewer than 20 samples per run (the capped full-turn and
+`cli_startup` journeys) gate on P50 only, since their P95 is the slowest sample.
+
 Schema changes need no manual step: the seed always targets the current
 migrated schema (migrations run when the store is constructed), the reuse
 marker records the head read at seed time (so old corpora auto-reseed), and
@@ -409,3 +421,35 @@ seeding.
   handles, not frames on the persistent server↔runner WebSocket tunnel.
   Counting those (for a true per-turn round-trip figure) would mean
   instrumenting the tunnel transport's `RequestFrame` dispatch.
+
+
+### Project-order latency
+
+The default suite includes **four scenarios at 1,000 projects**: order GET,
+manual order PUT, and both project-list endpoints in manual mode. This keeps
+one latency signal per endpoint without multiplying the report by sort mode
+and project count. Alphabetical/reset behavior and size limits remain covered
+by store/API tests. For a focused run:
+
+```bash
+uv run --no-sync dev/benchmarks/omnigent/run.py \
+  --journeys project_order_save_1000,project_order_get_custom_1000,project_order_projects_custom_1000,project_order_session_projects_custom_1000 \
+  --iterations 100 --runs 3 --output /tmp/project-order-benchmark.json
+```
+
+These journeys share the `benchmark-project-order-1000` account, using
+the benchmark server's trusted identity header. Setup creates exactly the
+specified number of empty projects via the API, outside timing; repeated runs
+reuse them. Existing corpus sessions and the local user's preference are
+untouched. Use a benchmark database, as with the rest of this suite.
+
+Saves alternate between two manual orders. Persistence checks run outside each
+operation's latency timer; they do contribute to request counters and wall-clock
+throughput. Read samples validate exact counts and ordering. The large-project
+case guards against work that scales poorly with project count; the existing
+`list_projects` journey continues covering the local user's seeded sessions.
+
+The existing nightly backend matrix collects these names automatically. PR
+comparisons start gating them once a nightly baseline includes the new names;
+until then the comparator labels them as new. Existing regression thresholds
+are unchanged.
