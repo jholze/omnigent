@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import sys
 import types
 import unittest
@@ -433,21 +434,21 @@ def _make_capture_client(captured: dict, *, base_url: str | None = None):
             raise AttributeError(name)
 
     class _FakeChat:
-        completions = _FakeCompletions()
+        def __init__(self) -> None:
+            self.completions = _FakeCompletions()
 
         def __getattr__(self, name: str) -> object:
             raise AttributeError(name)
 
     class _FakeClient:
-        base_url: str | None = None
-        chat = _FakeChat()
+        def __init__(self, base_url: str | None) -> None:
+            self.base_url = base_url
+            self.chat = _FakeChat()
 
         def __getattr__(self, name: str) -> object:
             raise AttributeError(name)
 
-    client = _FakeClient()
-    client.base_url = base_url
-    return client
+    return _FakeClient(base_url)
 
 
 def _capture_forwarded_messages(messages, *, databricks):
@@ -608,6 +609,73 @@ def test_databricks_orphan_tool_result_forwarded_unchanged() -> None:
     forwarded = _capture_forwarded_messages(messages, databricks=True)
     tool_message = next(m for m in forwarded if m.get("role") == "tool")
     assert "name" not in tool_message
+
+
+def test_databricks_request_body_serializes_resolvable_tool_name() -> None:
+    """The HTTP body the gateway receives carries each parallel tool result's name."""
+    from openai import AsyncOpenAI
+
+    captured_body: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_body["json"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    client = AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://host.example.com/ai-gateway/openai/v1",
+        http_client=http_client,
+    )
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                },
+                {
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "get_time", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "content": "18C"},
+        {"role": "tool", "tool_call_id": "call_b", "content": "22:00"},
+    ]
+
+    async def _run_inner() -> None:
+        _wrap_client_for_reasoning_models(client, databricks=True)
+        await client.chat.completions.create(model="kimi", messages=messages, stream=False)
+        await client.close()
+
+    _run(_run_inner())
+
+    sent = {
+        m["tool_call_id"]: m.get("name")
+        for m in captured_body["json"]["messages"]
+        if m.get("role") == "tool"
+    }
+    assert sent == {"call_a": "get_weather", "call_b": "get_time"}
 
 
 class TestOpenAIAgentsSDKExecutor(unittest.TestCase):

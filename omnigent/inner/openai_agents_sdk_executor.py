@@ -994,6 +994,9 @@ def _wrap_client_for_reasoning_models(
     attribute accesses fall through to the real client.
 
     :param client: The ``AsyncOpenAI`` (or compatible) client to wrap.
+    :param databricks: When ``True``, also stamp a resolvable ``name`` on each
+        ``role: tool`` message so the Databricks AI Gateway accepts parallel
+        tool results.
     :returns: The same *client* object with ``chat`` replaced by the filter
         proxy. The object is modified in-place and returned for chaining.
     """
