@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -54,25 +55,26 @@ def _trust_tmp_bridge_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 def relay(request: pytest.FixtureRequest) -> Iterator[_Relay]:
     """Stand-in tool relay that allows every policy call and records each POST.
 
-    Indirect params tune the response for the delivered-but-unhelpful cases:
-    ``response_delay_s`` holds the answer back and ``status`` returns a non-2xx.
+    Indirect params model the delivered-but-unhelpful cases: ``response_delay_s``
+    holds the answer back past the hook's budget, and ``required_token`` rejects
+    any other bearer with 401 (a stale advertisement after a relay restart).
     """
     options: dict[str, Any] = getattr(request, "param", {})
     response_delay_s: float = options.get("response_delay_s", 0.0)
-    status: int = options.get("status", 200)
+    required_token: str | None = options.get("required_token")
     received: list[_Request] = []
 
     class _Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
+            authorization = self.headers.get("Authorization")
             raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            received.append(
-                _Request(self.path, self.headers.get("Authorization"), json.loads(raw))
-            )
+            received.append(_Request(self.path, authorization, json.loads(raw)))
             if response_delay_s:
                 time.sleep(response_delay_s)
+            rejected = required_token is not None and authorization != f"Bearer {required_token}"
             body = json.dumps({"result": "POLICY_ACTION_ALLOW"}).encode()
             try:
-                self.send_response(status)
+                self.send_response(401 if rejected else 200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -221,20 +223,13 @@ def test_observer_hook_falls_back_to_the_python_observer(
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="the hooks' fast path needs curl")
-@pytest.mark.parametrize(
-    "relay",
-    [
-        pytest.param({"response_delay_s": _SLOW_RELAY_S}, id="slow-response"),
-        pytest.param({"status": 500}, id="http-error"),
-    ],
-    indirect=True,
-)
-def test_delivered_observation_is_not_replayed_by_the_python_observer(
+@pytest.mark.parametrize("relay", [{"response_delay_s": _SLOW_RELAY_S}], indirect=True)
+def test_delivered_observation_is_not_replayed_after_a_slow_relay_response(
     tmp_path: Path, relay: _Relay
 ) -> None:
-    """A reachable relay owns the observation: once curl hands off the payload, a
-    slow or error response must not fall back to the interpreter-spawning Python
-    observer, which would respawn the interpreter and double-record the call."""
+    """Once curl hands off the payload, a relay that is slow to answer (it finishes
+    recording in the background) must not fall back to the interpreter-spawning
+    Python observer, which would respawn the interpreter and double-record."""
     bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
     ran_marker = tmp_path / "python-observer.ran"
     fake_python = _fake_python(tmp_path, f"cat >/dev/null; : > {shlex.quote(str(ran_marker))}")
@@ -254,3 +249,39 @@ def test_delivered_observation_is_not_replayed_by_the_python_observer(
     # The relay recorded the observation once and the Python observer never replayed it.
     assert [request.path for request in relay.received] == ["/hook/observe-tool"]
     assert not ran_marker.exists()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the hooks' fast path needs curl")
+@pytest.mark.parametrize("relay", [{"required_token": "fresh"}], indirect=True)
+def test_stale_env_token_replays_through_the_python_observer(
+    tmp_path: Path, relay: _Relay
+) -> None:
+    """A relay restart can leave a stale token in the env file while the JSON
+    advertisement already carries the new one. curl (reading the env) is rejected
+    with 401, so the hook must replay into the Python observer, which reads the
+    fresh JSON token and records the observation instead of dropping it."""
+    bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
+    (bridge_dir / "tool_relay.env").write_text(
+        f"OMNIGENT_RELAY_URL='{relay.url}'\nOMNIGENT_RELAY_TOKEN='stale'\n"
+    )
+    (bridge_dir / "tool_relay.json").write_text(json.dumps({"url": relay.url, "token": "fresh"}))
+    settings = build_hook_settings(bridge_dir, python_executable=sys.executable)
+    [command] = [
+        c for c in _every_tool_call_commands(settings, "PostToolUse") if "observe-tool" in c
+    ]
+
+    proc = _run_hook(command, "PostToolUse")
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    # curl is rejected with the stale env token, then the Python observer records
+    # with the fresh JSON token, so the observation reaches the relay exactly once.
+    assert [request.authorization for request in relay.received] == [
+        "Bearer stale",
+        "Bearer fresh",
+    ]
+    assert all(request.path == "/hook/observe-tool" for request in relay.received)
+    assert all(
+        request.payload == {**_PAYLOAD, "hook_event_name": "PostToolUse"}
+        for request in relay.received
+    )
