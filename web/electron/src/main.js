@@ -1149,6 +1149,10 @@ function detectExternalSignIn(serverUrl, { signal } = {}) {
     return Promise.resolve(null);
   }
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(null);
+      return;
+    }
     let settled = false;
     let foreign = null;
     let hops = 0;
@@ -1179,10 +1183,11 @@ function detectExternalSignIn(serverUrl, { signal } = {}) {
         request.abort();
         return;
       }
-      // Leaving the origin is the signal: stop here (manual mode then finishes
-      // with this 3xx response) so the foreign sign-in page is never fetched.
+      // Leaving the origin is the signal; abort so the foreign sign-in page is
+      // never fetched and the probe resolves deterministically.
       if (offOrigin) {
         foreign = redirectUrl;
+        request.abort();
         return;
       }
       if (hops++ >= MAX_SIGN_IN_PROBE_HOPS) {
