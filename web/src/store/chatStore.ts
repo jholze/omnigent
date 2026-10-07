@@ -539,11 +539,10 @@ export interface PendingUserMessage {
 }
 
 /**
- * A send the server is not known to have taken, retained in the transcript so
- * the user can retry it. Each failed send keeps its own entry: a newer composer
- * draft is left alone, and a second failure does not displace the first. A
- * committed item under `stableId` proves delivery and drops the entry (see
- * `retractDeliveredSends`).
+ * A send the server is not known to have taken, retained in the transcript for
+ * retry. Each failure keeps its own entry, so a newer composer draft is left
+ * alone and a second failure never displaces the first. A committed item under
+ * `stableId` proves delivery and drops it (see `retractDeliveredSends`).
  */
 export interface FailedUserMessage {
   /** The send's stable id; a committed item under it proves delivery. */
@@ -1482,9 +1481,8 @@ const sendChains = new Map<string | symbol, SendChain>();
 const inFlightSends = new Map<string, boolean>();
 
 /**
- * Retained failed messages whose retry is in flight, by stable id. `send()`'s
- * failure path carries a refused message's refusal over to the re-retained
- * entry, since the first attempt's persisted item cannot prove this one.
+ * Retained messages whose retry is in flight, by stable id, so `send()`'s failure
+ * path can carry a refused message's refusal over to the re-retained entry.
  */
 const retriedFailedMessages = new Map<string, FailedUserMessage>();
 
@@ -2569,9 +2567,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       const callerHandlesError = opts?.onError !== undefined;
       opts?.onError?.(message);
       // Retain the failed message in the transcript so the user can retry it —
-      // a failed send has no server-side record, so nothing else holds it. Keyed
-      // by the session it was meant for, so it stays with that chat even after
-      // a switch away, and never touches whatever the composer holds now.
+      // a failed send has no server-side record, so nothing else holds it. It
+      // stays with the session it was meant for and never touches the composer.
       const draftSessionId = postedSessionId ?? submitConversationId;
       // A coded error confirms refusal; a transport failure leaves delivery
       // unknown unless this retries a previously refused send.

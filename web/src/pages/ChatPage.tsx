@@ -2922,14 +2922,10 @@ function ComposerImpl(
     // setMentionedItems is a stable useState setter (from useMentionBrowser).
   }, [pendingComposerAttachments, setMentionedItems]);
 
-  // Restore the text (and attachments) of a first message the user stopped
-  // before it was dispatched, so they can fix and resend instead of retyping.
-  // The composer is empty in the normal case — `submit` clears it
-  // optimistically — so only fill it when the user hasn't already started
-  // something new; their in-progress text wins. Files are re-validated on the
-  // way in, so one the current limits reject is dropped with the same inline
-  // reason a fresh attach gives. A send that FAILED is not restored here: it
-  // stays in the transcript as a retained message with its own Retry.
+  // Restore a first message the user stopped before it was dispatched, so they
+  // can fix and resend instead of retyping. Only fill an empty composer: text
+  // typed meanwhile wins. Files are re-validated on the way in. A send that
+  // FAILED is retained in the transcript instead (see `failedUserMessages`).
   useEffect(() => {
     if (failedSendDraft === null) return;
     if (failedSendDraft.conversationId !== conversationId) return;

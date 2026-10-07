@@ -1,10 +1,7 @@
-"""E2E: a web send that fails stays in the transcript, retryable, beside newer drafts.
+"""E2E: a failed web send stays in the transcript, retryable, beside newer drafts.
 
-The failure is injected at the message POST in the browser; the attachment
-upload stays real. A failed send must be retained as its own message with a
-"Failed to send · Retry" footer: it must not replace what the user typed since,
-and a second failure must not displace the first. A send whose POST reached
-the server but lost its response must not be offered for a blind resend.
+The failure is injected at the message POST; the attachment upload stays real.
+A send whose POST reached the server but lost its response must not be re-offered.
 """
 
 from __future__ import annotations

@@ -63,9 +63,8 @@ interface FailedSendMessageProps {
 
 /**
  * A send the server is not known to have taken, kept in the transcript with a
- * compact footer: "Failed to send · Retry" for a message that can be resent
- * (editable, attachments removable), or "Send unconfirmed · Check" while its
- * delivery is still unknown and a resend could duplicate it.
+ * compact footer: "Failed to send · Retry" (editable, attachments removable), or
+ * "Send unconfirmed · Check" while a resend could still duplicate it.
  */
 export function FailedSendMessage({
   message,
