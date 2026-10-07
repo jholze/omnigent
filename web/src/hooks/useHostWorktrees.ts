@@ -120,11 +120,8 @@ export async function fetchHostWorktrees(
   return body.data;
 }
 
-/**
- * A 400 is the host's own answer for this path (git failed or hit its timeout
- * there); repeating the request only multiplies that timeout. Other failures
- * keep React Query's default number of retries.
- */
+// A 400 is the host's answer for this path (git failed or timed out there), so
+// retrying only multiplies that timeout. Other failures keep the default retries.
 function shouldRetryHostWorktrees(failureCount: number, error: Error): boolean {
   if (error instanceof ApiError && error.status === 400) return false;
   return failureCount < 3;

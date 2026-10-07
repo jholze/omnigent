@@ -1,8 +1,7 @@
-"""Starting a session does not wait for the host's git worktree discovery.
+"""Starting a session does not wait for the host's git worktree listing.
 
-The composer lists the picked directory's worktrees for its worktree control.
-On a host whose ``git worktree list`` is slow that request can take minutes,
-so an ordinary start in the picked directory must not wait for it.
+The composer lists the picked directory's worktrees for its worktree control;
+a slow host must not hold an ordinary start in that directory.
 """
 
 from __future__ import annotations
