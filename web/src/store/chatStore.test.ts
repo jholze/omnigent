@@ -5865,9 +5865,8 @@ describe("chatStore — stop", () => {
   });
 
   it("keeps the just-sent prompt bubble when stop interrupts before input.consumed", () => {
-    // A POSTed-but-not-yet-consumed prompt is still optimistic; stop() (the
-    // Stop button and the composer's Escape shortcut both route through it)
-    // must leave it in the transcript until the server reconciles it.
+    // A POSTed-but-unconsumed prompt is still optimistic; stop() (both the Stop
+    // button and composer Escape) must keep it until the server reconciles it.
     useChatStore.setState({
       conversationId: "conv_abc",
       pendingUserMessages: [
@@ -5899,12 +5898,16 @@ describe("chatStore — stop", () => {
   });
 
   it("lets the server's terminal status settle a bubble that stop kept (non-native)", () => {
-    // stop() no longer wipes the optimistic bubble, so on an SDK session the
-    // server's own terminal edge must still drop a prompt it never consumed.
+    // On a non-native (SDK) session a prompt the server never consumed is dropped
+    // by the terminal status edge, not by the local stop.
     useChatStore.setState({
       conversationId: "conv_abc",
       pendingUserMessages: [
-        { tempId: "pend_dangling", content: [{ type: "input_text", text: "never consumed" }] },
+        {
+          tempId: "pend_dangling",
+          content: [{ type: "input_text", text: "never consumed" }],
+          posted: true,
+        },
       ],
       activeResponse: { responseId: "resp_1", state: "streaming", error: null },
       status: "streaming",

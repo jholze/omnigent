@@ -121,7 +121,9 @@ def _stop_running_turn(
     expect(interrupt_button).to_be_visible(timeout=60_000)
     id_at_stop = _bubble_id(page, sentinel)
 
-    interrupt_posts.clear()
+    # Attribute only interrupts POSTed from here on. A prior turn's interrupt was
+    # already recorded before this baseline, avoiding the clear()/route-append race.
+    posts_before = len(interrupt_posts)
     if control == "escape":
         composer = _composer(page)
         composer.focus()
@@ -145,11 +147,33 @@ def _stop_running_turn(
         "sentinel": sentinel,
         "bubble_id_at_stop": id_at_stop,
         "optimistic_at_stop": bool(id_at_stop and id_at_stop.startswith("pend_")),
-        "interrupt_posted": bool(interrupt_posts),
+        "interrupt_posted": len(interrupt_posts) > posts_before,
         "interrupt_button_reverted_at_s": reverted_at_s,
         "counts_from_stop": counts,
     }
     _log.info("stop via %s: %s", control, result)
+    return result
+
+
+def _arm_and_stop(
+    page: Page,
+    mock_url: str,
+    sentinel_suffix: str,
+    interrupt_posts: list[str],
+    *,
+    control: str,
+) -> dict[str, Any]:
+    """Send a fresh sentinel and stop its turn with *control*, retrying with a new
+    sentinel until the stop fires while the prompt is still optimistic."""
+    result: dict[str, Any] = {}
+    for attempt in range(1, _MAX_ARM_ATTEMPTS + 1):
+        sentinel = f"sentinel-{uuid.uuid4().hex[:8]}"
+        _arm_delayed_reply(mock_url, sentinel)
+        _send_from_composer(page, f"{sentinel} {sentinel_suffix}")
+        result = _stop_running_turn(page, sentinel, interrupt_posts, control=control)
+        if result["optimistic_at_stop"]:
+            return result
+        _log.info("attempt %d: prompt committed before %s stop; re-sending", attempt, control)
     return result
 
 
@@ -184,53 +208,51 @@ def test_escape_stop_keeps_prompt(
     _composer(page)
     expect(page.locator(_USER)).to_have_count(0)
 
-    # --- Esc while the agent is running. ---
-    esc: dict[str, Any] = {}
-    for attempt in range(1, _MAX_ARM_ATTEMPTS + 1):
-        sentinel = f"sentinel-{uuid.uuid4().hex[:8]}"
-        _arm_delayed_reply(mock_llm_server_url, sentinel)
-        _send_from_composer(page, f"{sentinel} keep me when Esc stops the agent")
-        esc = _stop_running_turn(page, sentinel, interrupt_posts, control="escape")
-        if esc["optimistic_at_stop"]:
-            break
-        _log.info("attempt %d: prompt already committed before Esc; re-sending", attempt)
-
+    # --- Esc, then the Stop button: each must keep its prompt through the stop. ---
+    esc = _arm_and_stop(
+        page,
+        mock_llm_server_url,
+        "keep me when Esc stops the agent",
+        interrupt_posts,
+        control="escape",
+    )
     _reload_to_chat(page)
     esc_after_reload = _count_after_reload(page, esc["sentinel"])
     _log.info("Esc sentinel bubbles after reload: %d", esc_after_reload)
 
-    # --- Control: the Stop button on a second running turn. ---
-    control_sentinel = f"sentinel-{uuid.uuid4().hex[:8]}"
-    _arm_delayed_reply(mock_llm_server_url, control_sentinel)
-    _send_from_composer(page, f"{control_sentinel} keep me when Stop is clicked")
-    button = _stop_running_turn(page, control_sentinel, interrupt_posts, control="button")
-
+    button = _arm_and_stop(
+        page,
+        mock_llm_server_url,
+        "keep me when Stop is clicked",
+        interrupt_posts,
+        control="button",
+    )
     _reload_to_chat(page)
-    button_after_reload = _count_after_reload(page, control_sentinel)
+    button_after_reload = _count_after_reload(page, button["sentinel"])
     _log.info("Stop sentinel bubbles after reload: %d", button_after_reload)
 
     failures: list[str] = []
-    if not esc["interrupt_posted"]:
-        failures.append("Esc did not interrupt the running agent (no interrupt event POSTed)")
-    if esc["counts_from_stop"] != [1] * len(esc["counts_from_stop"]):
-        failures.append(
-            "Esc removed the just-sent prompt from the chat: sentinel bubble counts sampled "
-            f"every 0.5s from the keypress = {esc['counts_from_stop']} (bubble id at keypress "
-            f"{esc['bubble_id_at_stop']!r}; bubbles after reload = {esc_after_reload})"
-        )
-    if esc_after_reload < 1:
-        failures.append("the prompt stopped with Esc is missing after a reload")
-    if not button["interrupt_posted"]:
-        failures.append("control: Stop button did not interrupt (no interrupt event POSTed)")
-    if button["counts_from_stop"] != [1] * len(button["counts_from_stop"]):
-        failures.append(
-            "control: the Stop button also removed the just-sent prompt: sentinel bubble "
-            f"counts sampled every 0.5s from the click = {button['counts_from_stop']} (bubble "
-            f"id at click {button['bubble_id_at_stop']!r}; bubbles after reload = "
-            f"{button_after_reload})"
-        )
-    if button_after_reload < 1:
-        failures.append(
-            "control: the prompt stopped with the Stop button is missing after a reload"
-        )
+    for leg, result, after_reload in (
+        ("Esc", esc, esc_after_reload),
+        ("Stop button", button, button_after_reload),
+    ):
+        if not result["optimistic_at_stop"]:
+            failures.append(
+                f"{leg}: never caught the prompt while it was still optimistic in "
+                f"{_MAX_ARM_ATTEMPTS} attempts (bubble id at stop "
+                f"{result['bubble_id_at_stop']!r}) — the regression window was not exercised"
+            )
+        if not result["interrupt_posted"]:
+            failures.append(f"{leg}: did not interrupt the running agent (no interrupt POSTed)")
+        if result["counts_from_stop"] != [1] * len(result["counts_from_stop"]):
+            failures.append(
+                f"{leg}: removed the just-sent prompt from the chat; sentinel bubble counts "
+                f"sampled every 0.5s from the stop = {result['counts_from_stop']} (bubble id "
+                f"at stop {result['bubble_id_at_stop']!r}; bubbles after reload = {after_reload})"
+            )
+        if after_reload != 1:
+            failures.append(
+                f"{leg}: expected exactly one '{result['sentinel']}' bubble after reload, "
+                f"found {after_reload}"
+            )
     assert not failures, "\n".join(failures)
