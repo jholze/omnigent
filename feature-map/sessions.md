@@ -208,9 +208,10 @@ plain `uv run pytest`, which starts a private server for the test.
   tab, open it in another tab and the agent browser, and confirm both are signed
   in. Another session should be signed out. Log out and refresh the same-session
   tabs; all should be signed out. Enable **Browser → Remember Logins Across
-  Sessions**, sign in once, and verify another session and an app restart keep
-  the login. Disable it to restore isolation; clear saved browser data and
-  re-enable it to verify the saved login is gone. These menu flows are covered
+  Sessions**; the checkbox changes immediately without a popup. Sign in once
+  and verify another session and an app restart keep the login. Disable it to
+  restore isolation; clear saved browser data and re-enable it to verify the
+  saved login is gone. These menu flows are covered
   by the same Electron test.
 
 ## Gotchas

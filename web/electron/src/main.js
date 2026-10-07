@@ -3584,24 +3584,18 @@ async function updateBrowserStorage(item) {
   browserStorageBusy = true;
   const clearing = !item;
   try {
-    const { response } = await dialog.showMessageBox(activeWindow(), {
-      type: "question",
-      message: clearing
-        ? "Clear saved browser data?"
-        : enabled
-          ? "Stop sharing browser logins?"
-          : "Remember browser logins across sessions?",
-      detail: clearing
-        ? "This signs you out of sites in the shared browser and deletes its cookies, site storage, and cache. All open browser pages will close."
-        : enabled
-          ? "All open browser pages will close. Each session will use separate temporary storage again. Saved logins remain until you choose Clear Saved Browser Data."
-          : "Cookies and site storage will be saved on this device and shared by all sessions, agents, windows, and connected servers, including other Omnigent accounts in this desktop profile. All open browser pages will close; sign in once after enabling.",
-      buttons: [clearing ? "Clear Data" : enabled ? "Disable" : "Enable", "Cancel"],
-      defaultId: 1,
-      cancelId: 1,
-    });
-    if (response !== 0) return;
-    if (!clearing) {
+    if (clearing) {
+      const { response } = await dialog.showMessageBox(activeWindow(), {
+        type: "question",
+        message: "Clear saved browser data?",
+        detail:
+          "This signs you out of sites in the shared browser and deletes its cookies, site storage, and cache. All open browser pages will close.",
+        buttons: ["Clear Data", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+      });
+      if (response !== 0) return;
+    } else {
       const settings = loadSettings();
       settings.browser_remember_logins = !enabled;
       saveSettings(settings);

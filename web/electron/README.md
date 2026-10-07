@@ -478,12 +478,12 @@ This includes browser tabs opened by agents and sessions on other connected
 servers or Omnigent accounts in the same desktop profile. The profile is
 separate from the app's own sign-in and your external browser.
 
-The setting is off by default. Changing it closes open browser pages; after
-enabling, sign into your sites once in the shared browser. Disabling returns
-to temporary storage per conversation and keeps the saved profile available
-for later. **Browser → Clear Saved Browser Data…** deletes its cookies, site
-storage, and cache, including while the setting is off. Signing out of an
-Omnigent server does not clear this shared browser profile.
+The setting is off by default. Changing it takes effect immediately and closes
+open browser pages; after enabling, sign into your sites once in the shared
+browser. Disabling returns to temporary storage per conversation and keeps
+the saved profile available for later. **Browser → Clear Saved Browser Data…**
+deletes its cookies, site storage, and cache, including while the setting is
+off. Signing out of an Omnigent server does not clear this shared profile.
 
 ### Local network permission
 

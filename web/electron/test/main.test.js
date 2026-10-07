@@ -1858,7 +1858,28 @@ describe("Databricks auth mode wiring", () => {
 });
 
 describe("browser storage menu", () => {
-  it("keeps private storage and existing views when enabling is cancelled", async (t) => {
+  it("toggles browser storage immediately without a popup", async (t) => {
+    const h = loadNavigationHarness({ registerFallbacks: false });
+    t.after(h.cleanup);
+    const closed = [];
+    h.api.windows.get(h.win).browserRegistry.closeAll = () => closed.push("closed");
+    h.electron.dialog.showMessageBox = () => assert.fail("toggling must not open a popup");
+    h.api.buildMenu();
+    const item = h.calls.appMenu.getMenuItemById("remember_browser_logins");
+    assert.equal(item.checked, false);
+    for (const enabled of [true, false, true]) {
+      // oxlint-disable-next-line no-await-in-loop -- Toggle the same setting sequentially.
+      await item.click(item);
+      assert.equal(item.checked, enabled);
+      assert.equal(
+        JSON.parse(fs.readFileSync(h.settingsPath, "utf8")).browser_remember_logins,
+        enabled,
+      );
+    }
+    assert.equal(closed.length, 3);
+  });
+
+  it("keeps saved storage and existing views when clearing is cancelled", async (t) => {
     const h = loadNavigationHarness({ registerFallbacks: false });
     t.after(h.cleanup);
     h.api.windows.get(h.win).browserRegistry.closeAll = () => assert.fail("views must stay open");
@@ -1868,11 +1889,7 @@ describe("browser storage menu", () => {
       return { response: options.cancelId };
     };
     h.api.buildMenu();
-    const item = h.calls.appMenu.getMenuItemById("remember_browser_logins");
-    assert.equal(item.checked, false);
-    item.checked = true;
-    await item.click(item);
-    assert.equal(item.checked, false);
+    await h.calls.appMenu.getMenuItemById("clear_saved_browser_data").click();
     assert.equal(fs.existsSync(h.settingsPath), false);
     assert.equal(
       h.api.browserRegistryForSender({ sender: h.webContents }),
