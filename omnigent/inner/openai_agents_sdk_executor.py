@@ -960,9 +960,9 @@ def _message_item_text(item: object) -> str:
     """Visible text carried by a ``message_output_item``.
 
     Reads the raw message's content parts directly (pydantic or
-    dict-shaped) so no SDK import is needed at module level; parts
-    without a ``text`` field (e.g. refusals, which this executor never
-    renders) contribute nothing.
+    dict-shaped) so no SDK import is needed at module level. Refusal
+    parts count as text: the SDK's text helpers skip them, but their
+    message is exactly what the user should see.
 
     :param item: A run item whose ``.type`` is ``"message_output_item"``.
     :returns: The concatenated part text, ``""`` when the item has none.
@@ -973,9 +973,10 @@ def _message_item_text(item: object) -> str:
         return ""
     parts: list[str] = []
     for part in content:
-        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
+        for field in ("text", "refusal"):
+            value = part.get(field) if isinstance(part, dict) else getattr(part, field, None)
+            if isinstance(value, str):
+                parts.append(value)
     return "".join(parts)
 
 
@@ -1796,6 +1797,13 @@ class OpenAIAgentsSDKExecutor(Executor):
                 final_text = agents_sdk.ItemHelpers.text_message_outputs(result.new_items)
             if not final_text:
                 final_text = response_text
+            if not final_text:
+                # The SDK's text helpers skip refusal parts; surface a refusal-only reply.
+                final_text = "".join(
+                    _message_item_text(item)
+                    for item in result.new_items
+                    if getattr(item, "type", None) == "message_output_item"
+                )
 
             if not _is_empty_turn(final_text, saw_tool_activity, result.new_items):
                 break  # got real output: text, tool activity, or output items
@@ -1813,13 +1821,9 @@ class OpenAIAgentsSDKExecutor(Executor):
                 # attempt may have appended a stray empty assistant item.
                 await self._rewind_sdk_session(state, current_item_count)
 
-        # ``final_text`` / ``result`` are from the surfaced (last) attempt.
-        # If the turn is still empty after every retry, fail loud with a
-        # retryable error so the workflow's retry policy can reissue. A
-        # silent ``TurnComplete("")`` would end a turn the user watched
-        # start with no reply, no error, and no notice. Token usage plays
-        # no part: a completed-but-empty response often still bills
-        # tokens, and the user gets nothing to see either way.
+        # ``final_text`` / ``result`` are from the surfaced (last) attempt. A turn
+        # still empty after every retry fails loud with a retryable error; token
+        # usage plays no part because a completed-but-empty response still bills.
         assert result is not None
         if _is_empty_turn(final_text, saw_tool_activity, result.new_items):
             logger.error(

@@ -32,6 +32,8 @@ from omnigent.inner.executor import (
 )
 from omnigent.inner.openai_agents_sdk_executor import (
     OpenAIAgentsSDKExecutor,
+    _count_output_items,
+    _message_item_text,
     _normalize_content_blocks_for_chat,
     _normalize_responses_items_for_chat,
     _ReasoningBlockFilterStream,
@@ -2747,13 +2749,8 @@ def test_turn_usage_cached_tokens_multi_call_sums_across_responses() -> None:
 
 
 # ── Empty-turn retry / fail-loud ────────────────────────────────────
-# The gateway occasionally returns a completed turn with nothing to
-# show: no text, no tool calls, and no output-bearing items (including
-# a message item whose content is empty). ``run_turn`` retries such a
-# turn once (``_EMPTY_TURN_MAX_ATTEMPTS``) and, if still empty,
-# surfaces a loud retryable ``ExecutorError`` instead of a silent empty
-# ``TurnComplete`` — a turn the user watched start must never end with
-# zero feedback.
+# An empty turn (no text, tool calls, or output-bearing items) is retried once,
+# then failed loud with a retryable ``ExecutorError``, never a silent ``TurnComplete``.
 
 
 @dataclass
@@ -2774,21 +2771,35 @@ class _FakeMessageTextPart:
     text: str = ""
 
 
+@dataclass
+class _FakeMessageRefusalPart:
+    """A ``refusal`` content part of a raw assistant message."""
+
+    refusal: str = ""
+
+
 class _FakeMessageOutputItem:
     """A run item shaped like the SDK's ``MessageOutputItem``.
 
     Carries its text both on ``raw_item.content[].text`` (what the
     executor's emptiness check reads) and as a plain ``text`` attribute
-    (what the fake ``ItemHelpers`` reads). Counts as output only when
-    the text is non-empty.
+    (what the fake ``ItemHelpers`` reads). Counts as output when it
+    carries text or a refusal.
 
     :param text: The assistant text the item carries, e.g. ``"hello"``.
+    :param refusal: A refusal carried instead of text. Like the real SDK
+        text helpers, the fake ``ItemHelpers`` never sees it.
     """
 
-    def __init__(self, text: str = "") -> None:
+    def __init__(self, text: str = "", refusal: str | None = None) -> None:
         self.type = "message_output_item"
         self.text = text
-        self.raw_item = types.SimpleNamespace(content=[_FakeMessageTextPart(text=text)])
+        part: object = (
+            _FakeMessageRefusalPart(refusal=refusal)
+            if refusal is not None
+            else _FakeMessageTextPart(text=text)
+        )
+        self.raw_item = types.SimpleNamespace(content=[part])
 
 
 def _empty_raw_response() -> _FakeRawResponse:
@@ -3224,6 +3235,88 @@ def test_message_item_with_text_counts_as_output() -> None:
         assert not any(isinstance(e, ExecutorError) for e in events)
 
     _run(_t())
+
+
+def test_refusal_only_reply_is_surfaced_not_retried() -> None:
+    """
+    A message whose only content is a refusal is a real reply: it is
+    surfaced as the turn's text, with no retry and no error.
+
+    What breaks if this fails: a deterministic model refusal is retried
+    as if the gateway had hiccuped and then surfaced as a misleading
+    retryable "empty completion" error (or, earlier, as a silent turn).
+    """
+
+    async def _t() -> None:
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = None
+        _FakeRunner.next_results = [
+            _FakeResult(
+                events=[],
+                # The SDK reports a plain-text final output of "" for a
+                # refusal-only message; its text helpers skip refusals.
+                final_output="",
+                new_items=[_FakeMessageOutputItem(refusal="I can't help with that.")],
+                raw_responses=[_nonempty_raw_response()],
+            ),
+        ]
+        executor = _make_databricks_executor()
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=_fake_agents_sdk(),
+        ):
+            events = await _collect(
+                executor.run_turn(
+                    [{"role": "user", "content": "hi", "session_id": "s1"}],
+                    [],
+                    "Be helpful.",
+                )
+            )
+
+        assert len(_FakeRunner.last_calls) == 1, (
+            f"Expected 1 run_streamed call (no retry), got {len(_FakeRunner.last_calls)}"
+        )
+        assert [e.text for e in events if isinstance(e, TextChunk)] == ["I can't help with that."]
+        turn_completes = [e for e in events if isinstance(e, TurnComplete)]
+        assert len(turn_completes) == 1
+        assert turn_completes[0].response == "I can't help with that."
+        assert not any(isinstance(e, ExecutorError) for e in events)
+
+    _run(_t())
+
+
+def test_count_output_items_by_item_shape() -> None:
+    """
+    ``_count_output_items`` counts a message item by what it would render:
+    text or a refusal (pydantic- or dict-shaped parts) counts; an empty
+    message, a message without a raw item, or a bookkeeping item does not.
+
+    What breaks if this fails: the emptiness check either retries real
+    replies or lets a contentless message pass as output.
+    """
+    dict_text = types.SimpleNamespace(
+        type="message_output_item",
+        raw_item=types.SimpleNamespace(content=[{"type": "output_text", "text": "from a dict"}]),
+    )
+    dict_refusal = types.SimpleNamespace(
+        type="message_output_item",
+        raw_item=types.SimpleNamespace(content=[{"type": "refusal", "refusal": "no"}]),
+    )
+    cases = [
+        (_FakeMessageOutputItem(text="a real reply"), 1),
+        (_FakeMessageOutputItem(text=""), 0),
+        (_FakeMessageOutputItem(refusal="I can't help with that."), 1),
+        (dict_text, 1),
+        (dict_refusal, 1),
+        (types.SimpleNamespace(type="message_output_item", raw_item=None), 0),
+        (_FakeReasoningItem(), 0),
+        (types.SimpleNamespace(type="tool_call_item"), 1),
+    ]
+    for item, expected in cases:
+        assert _count_output_items([item]) == expected, f"{item!r} should count as {expected}"
+    assert _message_item_text(_FakeMessageOutputItem(text="a real reply")) == "a real reply"
+    assert _message_item_text(_FakeMessageOutputItem(refusal="no")) == "no"
+    assert _message_item_text(dict_refusal) == "no"
 
 
 def test_empty_turn_retry_rewinds_sdk_session() -> None:
