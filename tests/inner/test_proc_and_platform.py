@@ -610,6 +610,27 @@ def test_resolve_cli_binary_returns_none_when_absent(monkeypatch, tmp_path):
     assert _platform.resolve_cli_binary("tool", env_var="OMNIGENT_TESTCLI_PATH") is None
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a non-root user so a mode-0o000 directory is actually unsearchable",
+)
+def test_resolve_cli_binary_skips_unsearchable_fallback_dir(monkeypatch, tmp_path):
+    """A fallback dir that exists but can't be searched reads as "CLI not there".
+
+    A root-owned 0700 /usr/local/bin seen by a non-root host daemon makes
+    Path.is_file() raise PermissionError on Python 3.12/3.13.
+    """
+    locked = tmp_path / "locked-bin"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        monkeypatch.setattr(_platform.shutil, "which", lambda name: None)
+        monkeypatch.setattr(_platform, "_cli_fallback_dirs", lambda: (locked,))
+        assert _platform.resolve_cli_binary("tool") is None
+    finally:
+        locked.chmod(0o700)
+
+
 def test_resolve_cli_binary_warns_on_bad_override(monkeypatch, tmp_path, caplog):
     """A set-but-unresolvable override warns (so a misconfig surfaces) and then
     falls back to PATH rather than launching nothing."""
