@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -59,6 +60,31 @@ def test_workspace_tab_hover_tooltip(
     expect(tab).to_have_attribute("data-state", expected_state)
 
 
+@pytest.fixture
+def no_seeded_file_leftovers(terminal_session: tuple[str, str]) -> Iterator[None]:
+    """Fail at teardown if the journey's cleanup missed a copy of the seed file.
+
+    The filesystem API writes it under the listing's ``base``; the scripted
+    terminal (``cwd: .``) writes a copy into the runner's cwd, i.e. pytest's.
+    """
+    base_url, session_id = terminal_session
+    listing = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}/resources/environments/default/filesystem",
+        timeout=10.0,
+    )
+    listing.raise_for_status()
+    seeded_files = (
+        Path(listing.json()["base"]) / _TERMINAL_PANEL_FILE,
+        Path.cwd() / _TERMINAL_PANEL_FILE,
+    )
+    yield
+    leftovers = [path for path in seeded_files if path.exists()]
+    for path in leftovers:
+        path.unlink()
+    assert not leftovers, f"seeded files left behind: {leftovers}"
+
+
+@pytest.mark.usefixtures("no_seeded_file_leftovers")
 def test_right_panel_terminals_and_file_viewer(
     page: Page,
     terminal_session: tuple[str, str],
@@ -87,8 +113,7 @@ def test_right_panel_terminals_and_file_viewer(
         timeout=10.0,
     )
     listing.raise_for_status()
-    # The API seeds into the workspace it reports as ``base``; the scripted
-    # terminal (``cwd: .``) writes a copy into the runner's cwd, i.e. pytest's.
+    # Both places the journey writes the seed; see ``no_seeded_file_leftovers``.
     workspace_file = Path(listing.json()["base"]) / _TERMINAL_PANEL_FILE
     test_file = Path.cwd() / _TERMINAL_PANEL_FILE
     if test_file.exists():
