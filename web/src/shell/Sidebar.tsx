@@ -4747,7 +4747,8 @@ function ConversationRowImpl({
               <DialogTitle>Stop session?</DialogTitle>
               <DialogDescription>
                 This terminates the running session for <span className="font-medium">{label}</span>{" "}
-                and stops its runner. The conversation and its history are kept.
+                and stops its runner. Open side shells will also close, and side chats may stop. The
+                conversation and its history are kept.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>

@@ -92,6 +92,9 @@ describe("sidebar Stop session item", () => {
 
     // The confirm dialog gates the mutation — nothing fires on item click.
     expect(mocks.stop.mutate).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Stop session?" })).toHaveAccessibleDescription(
+      "This terminates the running session for My Session and stops its runner. Open side shells will also close, and side chats may stop. The conversation and its history are kept.",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
     expect(mocks.stop.mutate).toHaveBeenCalledTimes(1);
