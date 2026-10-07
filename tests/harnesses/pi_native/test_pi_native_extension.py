@@ -433,7 +433,7 @@ def test_distinct_messages_with_identical_usage_are_not_collapsed(
     _run_extension_script(node, extension_path, script)
 
 
-def test_usage_baseline_survives_native_restart(tmp_path: Path) -> None:
+def test_usage_baseline_survives_native_restart() -> None:
     """A relaunched Pi process restarts its cumulative counters at 0, so its first
     flush falls below the server peak and is clamped; assert the baseline advances.
     """
@@ -552,8 +552,7 @@ function launchExtension() {
   assert.equal(afterRestart[0].data.cumulative_input_tokens, 150000, JSON.stringify(postedEvents));
   assert.equal(afterRestart[0].data.cumulative_output_tokens, 30000, JSON.stringify(postedEvents));
   const data = afterRestart[afterRestart.length - 1].data;
-  // Must ADVANCE from the restored baseline (150000 + 900, 30000 + 250), not the
-  // lone 900/250 turn the unfixed extension reports (clamped away, frozen).
+  // Totals must advance from the restored baseline: 150000 + 900 / 30000 + 250.
   assert.equal(data.cumulative_input_tokens, 150900, JSON.stringify(data));
   assert.equal(data.cumulative_output_tokens, 30250, JSON.stringify(data));
   assert.equal(data.model, "databricks-claude-sonnet-4-6");
@@ -564,9 +563,7 @@ function launchExtension() {
     _run_extension_script(node, extension_path, script)
 
 
-def test_session_start_readiness_not_blocked_by_hung_usage_post(
-    tmp_path: Path,
-) -> None:
+def test_session_start_readiness_not_blocked_by_hung_usage_post() -> None:
     """A stalled baseline re-assertion POST must not wedge session startup.
 
     ``session_start`` restores a persisted baseline and re-asserts it to the
@@ -655,9 +652,13 @@ const ctx = {
   // resolves, but readiness must already be established by then.
   const starting = handlers.session_start({}, ctx);
   starting.catch(() => {});
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  const readyPath = path.join(bridgeDir, "input_ready");
+  const deadline = Date.now() + 5000;
+  while ((!fs.existsSync(readyPath) || !usagePostAttempted) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   assert.ok(
-    fs.existsSync(path.join(bridgeDir, "input_ready")),
+    fs.existsSync(readyPath),
     "input_ready must be written before the baseline POST so a hung POST cannot wedge startup",
   );
   assert.ok(usagePostAttempted, "the baseline re-assertion POST should have been attempted");
@@ -723,7 +724,7 @@ def test_agent_end_dedupes_real_shaped_messages_by_timestamp(
     _run_extension_script(node, extension_path, script)
 
 
-def test_restore_ignores_malformed_persisted_state(tmp_path: Path) -> None:
+def test_restore_ignores_malformed_persisted_state() -> None:
     """A corrupt ``cumulative_usage.json`` (e.g. a crash mid-write) is ignored on
     restore: the counters start fresh, session_start re-asserts nothing, and the
     first real turn posts only its own total with no crash.
@@ -821,7 +822,7 @@ function usageEvents() {
     _run_extension_script(node, extension_path, script)
 
 
-def test_restore_never_lowers_a_higher_live_total(tmp_path: Path) -> None:
+def test_restore_never_lowers_a_higher_live_total() -> None:
     """A stale/lower persisted total must never claw a higher live total down.
 
     The restore is raise-only: if the counters already hold a higher total than

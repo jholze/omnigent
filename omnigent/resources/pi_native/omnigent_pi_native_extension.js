@@ -1634,8 +1634,8 @@ module.exports = function (pi) {
   // message never double-counts. ``usageModel`` tracks the latest message's
   // model (mirrors a mid-session model switch). ``lastPostedUsageKey`` dedups
   // the POST itself so a flush with no new tokens is skipped. The set restarts
-  // empty after a relaunch, which is safe: a restored baseline already subsumes
-  // every pre-relaunch message and the product never re-emits their usage.
+  // empty after a relaunch; safe, since the restored baseline already subsumes
+  // every pre-relaunch message's usage.
   const countedUsageMessages = new Set();
   let cumulativeInputTokens = 0;
   let cumulativeOutputTokens = 0;
