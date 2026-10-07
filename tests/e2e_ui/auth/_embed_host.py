@@ -46,7 +46,15 @@ def _build_is_current() -> bool:
     if not _DIST_INDEX.exists():
         return False
     built_at = _DIST_INDEX.stat().st_mtime
-    return _newest_mtime([_HARNESS_SRC, _WEB_DIR / "src"]) <= built_at
+    # Rebuild when a dependency manifest changes too, not just the harness or
+    # web sources, so a lockfile bump can't leave tests on a stale bundle.
+    sources = [
+        _HARNESS_SRC,
+        _WEB_DIR / "src",
+        _WEB_DIR / "package.json",
+        _REPO_ROOT / "pnpm-lock.yaml",
+    ]
+    return _newest_mtime(sources) <= built_at
 
 
 def build_embed_host() -> Path:

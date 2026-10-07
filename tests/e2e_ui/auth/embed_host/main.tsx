@@ -1,8 +1,6 @@
-// Stand-in host page for the embedded web UI. It renders the real embed island
-// (`web/src/embed.tsx`) inside its own React tree and router, the way the
-// Databricks monolith does, and supplies a host fetcher whose user session the
-// test can expire. The e2e suite builds this file with Vite from a copy under
-// `web/.e2e-embed-host/` (see tests/e2e_ui/auth/_embed_host.py).
+// Stand-in host page: renders the real embed island (`web/src/embed.tsx`) in its
+// own React tree with a host fetcher the test can expire, like the Databricks
+// monolith. Built with Vite from a copy under `web/.e2e-embed-host/`; see _embed_host.py.
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";

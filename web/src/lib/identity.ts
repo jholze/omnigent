@@ -547,7 +547,7 @@ export async function authenticatedFetch(
     // trigger web's standalone OIDC redirect.
     !getOmnigentHostConfig().fetcher &&
     res.status === 401 &&
-    !input.toString().includes("/v1/me") &&
+    !input.toString().includes(IDENTITY_PROBE_PATH) &&
     !input.toString().includes("/auth/") &&
     !isOnLoginPath()
   ) {

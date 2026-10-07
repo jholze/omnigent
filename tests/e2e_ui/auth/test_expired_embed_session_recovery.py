@@ -43,7 +43,9 @@ _RECOVERY_TIMEOUT_S = 20.0
 
 
 @pytest.fixture(scope="session")
-def embed_host_build() -> None:
+def embed_host_build(built_spa: None) -> None:
+    # Depend on built_spa so a clean targeted run installs web dependencies
+    # before the Vite build the embed-host harness runs.
     build_embed_host()
 
 
@@ -156,7 +158,8 @@ def _expect_single_reload_recovery(page: Page, stuck_surface: Locator) -> None:
     url_before = page.url
     deadline = time.monotonic() + _RECOVERY_TIMEOUT_S
     while time.monotonic() < deadline:
-        if _page_loads(page) == 2:
+        loads = _page_loads(page)
+        if loads is not None and loads >= 2:
             break
         page.wait_for_timeout(250)
     else:
