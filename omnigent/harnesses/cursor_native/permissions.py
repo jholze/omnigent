@@ -906,10 +906,13 @@ async def supervise_cursor_transcript_elicitations(
                     entry = active.pop(tool_call_id)
                     task = entry["task"]
                     if isinstance(task, asyncio.Task) and not task.done():
-                        await _cancel_cursor_elicitation_tasks((task,))
+                        # Release the card while its hook request is still parked so
+                        # the server clears it now; a severed request instead waits
+                        # out the server's re-park grace and reads as unanswered.
                         await _post_external_elicitation_resolved(
                             client, session_id, str(entry["elicitation_id"])
                         )
+                        await _cancel_cursor_elicitation_tasks((task,))
                 # Calls that vanished before settling were auto-approved — drop
                 # their debounce timer silently (no card was ever shown).
                 for tool_call_id in [tcid for tcid in first_seen if tcid not in seen_ids]:

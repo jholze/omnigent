@@ -635,6 +635,13 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
     resolved_in_terminal: bool,
     tool_name: str,
 ) -> None:
+    """Obsolete parked verdicts are cancelled before a late web verdict can type.
+
+    A prompt answered in the terminal is released while its hook request is
+    still parked, so the server clears the card at once instead of holding it
+    through the severed-request grace; then the task is cancelled. A stopping
+    supervisor cancels its parked tasks outright.
+    """
     pending = [CursorPendingToolCall("call_cleanup", tool_name, {})]
     posts, sent = _install_supervisor_fakes(
         monkeypatch, tmp_path, pending=pending, pane=_IDLE_PANE
@@ -643,6 +650,7 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
     cancelled = asyncio.Event()
     late_verdict = asyncio.Event()
     verdict_tasks: list[asyncio.Task] = []
+    released_while_parked: list[bool] = []
 
     async def park(*_args, **_kwargs):
         current = asyncio.current_task()
@@ -656,7 +664,14 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
             cancelled.set()
             raise
 
+    release = cnp._post_external_elicitation_resolved
+
+    async def release_recording_task_state(client, session_id: str, elicitation_id: str):
+        released_while_parked.append(not cancelled.is_set())
+        await release(client, session_id, elicitation_id)
+
     monkeypatch.setattr(cnp, "_park_cursor_elicitation", park)
+    monkeypatch.setattr(cnp, "_post_external_elicitation_resolved", release_recording_task_state)
     supervisor = _start_supervisor(
         tmp_path, session_id="conv_cleanup", auto_accept_approvals=False
     )
@@ -669,6 +684,7 @@ async def test_supervisor_cancels_obsolete_verdict_before_it_can_send_keys(
                     body.get("type") == "external_elicitation_resolved" for _, body in posts
                 )
             )
+            assert released_while_parked == [True]
         else:
             await _stop(supervisor)
         assert cancelled.is_set()
@@ -716,6 +732,35 @@ async def test_send_keys_stops_sequence_when_terminal_command_cannot_run(
     monkeypatch.setattr(cnp, "send_cursor_pane_keys", fail)
     assert not await cnp._send_cursor_keys(tmp_path, "conv_keys", "Escape", "Enter")
     assert attempts == ["Escape"]
+
+
+async def test_cancelled_verdict_task_sends_no_further_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cancelling a verdict task between keys stops the rest of the sequence."""
+    sent: list[str] = []
+    monkeypatch.setattr(cnp, "send_cursor_pane_keys", lambda _bridge, key: sent.append(key))
+    task = asyncio.create_task(
+        cnp._run_one_approval(
+            _QueueClient([httpx.Response(200, json={"action": "decline"})]),  # type: ignore[arg-type]
+            session_id="conv_cancel_mid_sequence",
+            bridge_dir=tmp_path,
+            prompt=CursorApprovalPrompt(
+                operation_type="shell",
+                message="Run this command?",
+                preview="rm -rf build",
+                accept_key="y",
+                decline_key="Escape",
+            ),
+            elicitation_id="elic_cancel_mid_sequence",
+        )
+    )
+    # The decline sequence pauses before its Enter, so the cancel lands between keys.
+    assert await _wait_for(lambda: sent == ["Escape"])
+    await cnp._cancel_cursor_elicitation_tasks((task,))
+    assert task.cancelled()
+    await asyncio.sleep(cnp._KEY_ENTER_SETTLE_S + cnp._KEY_INTERVAL_S)
+    assert sent == ["Escape"]
 
 
 async def test_supervise_transcript_yolo_auto_accepts_without_card(

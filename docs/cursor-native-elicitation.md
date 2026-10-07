@@ -15,9 +15,11 @@ the TUI prompt. The failure mode is benign: if detection ever breaks, the embedd
 still works and the user answers there.
 
 Pending verdict requests belong to the transcript supervisor. When a call resolves
-in the terminal, its parked request is cancelled before clearing the web card.
-When the supervisor stops, it cancels and joins every remaining verdict task before
-closing its HTTP client, so a late web answer cannot start typing into a retired terminal.
+in the terminal, the supervisor first releases the web card (`external_elicitation_resolved`,
+sent while the hook request is still parked so the server clears the card immediately)
+and then cancels and joins the parked request. When the supervisor stops, it cancels
+and joins every remaining verdict task before closing its HTTP client, so a late web
+answer cannot start typing into a retired terminal.
 
 One exception: a session the *caller* launched with `--yolo` / `--force` / `-f` has already
 declared it wants no approvals, and a card mirrored to a piloted parent is a stall nobody can
