@@ -22,18 +22,34 @@ from omnigent.util.json_types import JsonObject as _JsonObject
 _logger = logging.getLogger("omnigent.runner.app")
 
 
-def trailing_user_item_id(items: list[_JsonObject]) -> str | None:
-    """Server item id of the last persisted user message in ``items``.
+def pending_user_item_ids(items: list[_JsonObject]) -> list[str]:
+    """Server item ids of the unanswered user messages at the tail of ``items``.
 
-    This is the id the server repeat-forwards for an unacknowledged user turn,
-    so dedup must key on it rather than the last raw item, which may be a later
-    item the input conversion drops.
+    A reconnect recovery turn answers every user message that trails the last
+    completed turn at once, so dedup must key on all of them, not just the last
+    — otherwise a repeated forward of an earlier pending message reads as new
+    input and runs a second time. Non-input items the history conversion drops
+    (e.g. reasoning) are skipped; an assistant reply, tool call, tool output,
+    error, or compaction ends the pending run.
     """
+    ids: list[str] = []
     for item in reversed(items):
-        if item.get("type") == "message" and item.get("role") == "user":
+        item_type = item.get("type")
+        if item_type == "message" and item.get("role") == "user":
             item_id = item.get("id")
-            return item_id if isinstance(item_id, str) and item_id else None
-    return None
+            if isinstance(item_id, str) and item_id:
+                ids.append(item_id)
+            continue
+        if item_type in (
+            "message",
+            "function_call",
+            "function_call_output",
+            "error",
+            "compaction",
+        ):
+            break
+    ids.reverse()
+    return ids
 
 
 class _LoadHistoryAsInputFn(Protocol):
@@ -58,7 +74,7 @@ def build_session_history(
     *,
     _background_tasks: set[asyncio.Task[Any]],
     _last_server_item_id: dict[str, str],
-    _last_server_user_item_id: dict[str, str],
+    _last_server_user_item_id: dict[str, list[str]],
     _persist_cancellation_items: Callable[[str, list[_JsonObject]], Coroutine[Any, Any, None]],
     _session_histories: dict[str, list[_JsonObject]],
     _session_spec_cache: dict[str, _SpecEntry | None],
@@ -155,9 +171,11 @@ def build_session_history(
                 break
             after_cursor = last_id
 
-        _trailing_user_id = trailing_user_item_id(all_items)
-        if _trailing_user_id is not None:
-            _last_server_user_item_id[session_id] = _trailing_user_id
+        _pending_user_ids = pending_user_item_ids(all_items)
+        if _pending_user_ids:
+            _last_server_user_item_id[session_id] = _pending_user_ids
+        else:
+            _last_server_user_item_id.pop(session_id, None)
 
         if drop_item_id is not None:
             all_items = [it for it in all_items if it.get("id") != drop_item_id]

@@ -53,6 +53,8 @@ class _HoldableTunnelProxy(_TunnelIngressProxy):
     def __init__(self, backend_host: str, backend_port: int) -> None:
         super().__init__(backend_host, backend_port)
         self._hold = threading.Event()
+        # Chunks parked by a hold, so a test can see bytes are actually in flight.
+        self.held_chunks = 0
 
     def hold(self) -> None:
         """Stop forwarding bytes while keeping every socket open."""
@@ -64,6 +66,8 @@ class _HoldableTunnelProxy(_TunnelIngressProxy):
     def _pipe(self, source: socket.socket, destination: socket.socket) -> None:
         try:
             while chunk := source.recv(65536):
+                if self._hold.is_set():
+                    self.held_chunks += 1
                 while self._hold.is_set():
                     if source.fileno() == -1 or destination.fileno() == -1:
                         return
@@ -260,8 +264,15 @@ def test_send_racing_the_tunnel_close_is_delivered_without_an_error(
         proxy.hold()
         view.mark("send clicked with tunnel bytes held")
         _send_from_composer(page, "Deliver this across the recycle.")
-        # Leave the forward in flight on the tunnel before the close aborts it.
-        page.wait_for_timeout(1_500)
+        # Hold the outbound request inside the proxy, then cut the tunnel below:
+        # this exercises recovery from interrupted delivery, not a lost response.
+        _watch(
+            page,
+            view,
+            lambda: proxy.held_chunks > 0,
+            timeout=10.0,
+            what="tunnel bytes to be parked inside the proxy",
+        )
         view.sample(page)
         started = time.monotonic()
         _caption(page, "runner tunnel severed with the send in flight; runner reconnecting")

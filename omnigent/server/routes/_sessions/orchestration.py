@@ -5207,6 +5207,47 @@ def _is_runner_tunnel_drop(exc: BaseException) -> bool:
     return isinstance(exc, ConnectionError | httpx.ConnectError)
 
 
+def _runner_addressed_by(
+    runner_client: httpx.AsyncClient,
+    conv: Conversation,
+    runner_router: RunnerRouter | None,
+    *,
+    what: str,
+    session_id: str,
+) -> str | None:
+    """
+    Return the runner *runner_client* routes to, else the session's bound runner.
+
+    A request handler resolves its client before awaits that can rebind the
+    session (a host restart, a sub-agent's parent-binding repair). The
+    reconnect wait and dedup checks must name the runner the request actually
+    goes to, so they are keyed on the client rather than the refreshed row.
+
+    :param runner_client: HTTP client the request is sent through.
+    :param conv: The session's current conversation row.
+    :param runner_router: Router that handed out *runner_client*; ``None`` or a
+        client it did not create falls back to ``conv.runner_id``.
+    :param what: Request label for the mismatch log line.
+    :param session_id: Session/conversation identifier.
+    :returns: The runner id the reconnect logic should wait for and check.
+    """
+    if runner_router is None:
+        return conv.runner_id
+    client_runner_id = runner_router.runner_id_for_client(runner_client)
+    if client_runner_id is None:
+        return conv.runner_id
+    if client_runner_id != conv.runner_id:
+        _logger.warning(
+            "%s for session=%s addresses runner %s while the session is now bound to %s",
+            what,
+            session_id,
+            client_runner_id,
+            conv.runner_id,
+            extra={"session_id": session_id},
+        )
+    return client_runner_id
+
+
 async def _post_across_runner_reconnect(
     post: Callable[[], Awaitable[httpx.Response]],
     *,
@@ -5232,11 +5273,13 @@ async def _post_across_runner_reconnect(
     :param runner_router: Router used to wait for the runner to reconnect;
         ``None`` fails a drop immediately.
     :param grace_s: Maximum seconds to wait for the runner to re-register.
-    :param repeat_requires_capability: When set, repeat only if the reconnected
-        runner still advertises this ``HelloFrame`` capability and carries the
-        same forward-dedup epoch it had before the drop. A runner that predates
-        the capability, or a replacement process whose dedup cache is empty,
-        cannot dedup the repeat, so the original drop is raised instead.
+    :param repeat_requires_capability: When set, repeat an in-flight drop only if
+        the reconnected runner still advertises this ``HelloFrame`` capability
+        and carries the same forward-dedup epoch it had before the drop. A runner
+        that predates the capability, or a replacement process whose dedup cache
+        is empty, cannot dedup the repeat, so the original drop is raised instead.
+        A never-delivered ``httpx.ConnectError`` drop skips the epoch check, since
+        repeating a request the runner never received cannot double-run it.
     :returns: The runner's response.
     :raises httpx.HTTPError: On another failure, when the runner never returns
         within *grace_s* (the original drop), or when the retry fails too.
@@ -5277,9 +5320,18 @@ async def _post_across_runner_reconnect(
                 extra={"session_id": session_id},
             )
             raise
-        if repeat_requires_capability is not None and (
-            pre_drop_dedup_epoch is None
-            or runner_router.runner_dedup_epoch(runner_id) != pre_drop_dedup_epoch
+        # ``httpx.ConnectError`` means the request never reached the runner, so
+        # repeating it cannot double-run and needs no dedup epoch. The epoch only
+        # matters for the in-flight bare ``ConnectionError`` shape, where the
+        # first request may have been delivered before the tunnel dropped.
+        in_flight_drop = not isinstance(exc, httpx.ConnectError)
+        if (
+            repeat_requires_capability is not None
+            and in_flight_drop
+            and (
+                pre_drop_dedup_epoch is None
+                or runner_router.runner_dedup_epoch(runner_id) != pre_drop_dedup_epoch
+            )
         ):
             _logger.warning(
                 "Runner %s reconnected as a different process (dedup epoch changed); "
@@ -5373,7 +5425,13 @@ async def _ensure_native_terminal_ready(
             _post_ensure,
             what=f"{display_name} terminal ensure",
             session_id=session_id,
-            runner_id=conv.runner_id,
+            runner_id=_runner_addressed_by(
+                runner_client,
+                conv,
+                runner_router,
+                what=f"{display_name} terminal ensure",
+                session_id=session_id,
+            ),
             runner_router=runner_router,
             grace_s=_NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S,
         )
@@ -6776,7 +6834,13 @@ async def _forward_event_to_runner(
             _post_forward,
             what="Message forward",
             session_id=session_id,
-            runner_id=conv.runner_id,
+            runner_id=_runner_addressed_by(
+                runner_client,
+                conv,
+                runner_router,
+                what="Message forward",
+                session_id=session_id,
+            ),
             runner_router=runner_router,
             grace_s=_RUNNER_FORWARD_RECONNECT_GRACE_S,
             repeat_requires_capability=FORWARD_DEDUP_CAPABILITY,
@@ -6926,6 +6990,7 @@ async def _forward_event_to_runner(
         # The forward could not be (re)delivered across the reconnect (runner
         # unreachable, timed out, or lacking dedup); the message is persisted and
         # ``create_session`` replays it as a recovery turn, so publish ``idle``.
+        # The send-racing-tunnel-close web E2E asserts on this message text.
         _logger.exception(
             "Forward to runner failed for session=%s",
             session_id,

@@ -110,6 +110,30 @@ class _CatchUpServerClient(_HistoryServerClient):
         return self._Resp({})
 
 
+_SECOND_PENDING_USER_MESSAGE = {
+    "id": "msg_002",
+    "type": "message",
+    "role": "user",
+    "content": [{"type": "input_text", "text": "and this too"}],
+}
+
+
+class _TwoPendingHistoryServerClient(_HistoryServerClient):
+    """Returns two pre-persisted, unanswered user messages from GET /items."""
+
+    async def get(self, url: str, **kwargs: Any) -> _HistoryServerClient._Resp:
+        del kwargs
+        if url.rstrip("/").endswith("/items"):
+            return self._Resp(
+                {
+                    "object": "list",
+                    "data": [_PENDING_USER_MESSAGE, _SECOND_PENDING_USER_MESSAGE],
+                    "has_more": False,
+                }
+            )
+        return self._Resp({})
+
+
 def _build_sdk_app(
     server_client: Any,
     resource_registry: SessionResourceRegistry | None = None,
@@ -318,6 +342,62 @@ async def test_recovery_turn_from_history_absorbs_the_forward_of_the_resumed_ite
         assert next_resp.status_code == 200, next_resp.text
         _ = next_resp.text  # drain
         assert len(harness.posted_bodies) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeat_order", ["oldest_first", "newest_first"])
+async def test_recovery_turn_from_history_absorbs_the_forwards_of_every_resumed_item(
+    repeat_order: str,
+) -> None:
+    """A recovery turn that resumes two pending messages absorbs a repeat of either.
+
+    Two sends can be persisted before the runner comes back; the recovery turn
+    answers both at once, so both ids must enter the dedup ledger. Registering
+    only the newest would let the server's repeat of the older forward read as
+    new input and run a second turn.
+    """
+    from tests.runner.conftest import _ordered_user_texts
+
+    app, _pm, harness = _build_sdk_app(_TwoPendingHistoryServerClient())
+
+    async with _runner_client(app) as client:
+        init_resp = await client.post(
+            "/v1/sessions",
+            json=_session_init_payload(suppress_recovery_turn=False),
+        )
+        assert init_resp.status_code == 201, init_resp.text
+
+        # Let the recovery turn run and complete; it carries both messages.
+        await asyncio.sleep(0.1)
+        assert len(harness.posted_bodies) == 1
+        assert _ordered_user_texts(harness.posted_bodies[0])[-2:] == [
+            "hello from history",
+            "and this too",
+        ]
+
+        repeats = [("msg_001", "hello from history"), ("msg_002", "and this too")]
+        if repeat_order == "newest_first":
+            repeats.reverse()
+        for item_id, text in repeats:
+            forward_resp = await client.post(
+                f"/v1/sessions/{SESSION_ID}/events",
+                params={"stream": "true"},
+                json={
+                    "type": "message",
+                    "role": "user",
+                    "agent_id": AGENT_ID,
+                    "content": [{"type": "input_text", "text": text}],
+                    "persisted_item_id": item_id,
+                },
+            )
+            assert forward_resp.status_code == 202, forward_resp.text
+            assert forward_resp.json()["detail"] == "Message already accepted; not run again.", (
+                item_id
+            )
+        assert len(harness.posted_bodies) == 1, (
+            "Repeats of items the recovery turn resumed must not run again; "
+            f"got {len(harness.posted_bodies)} harness calls"
+        )
 
 
 @pytest.mark.asyncio

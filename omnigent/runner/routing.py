@@ -302,6 +302,24 @@ class RunnerRouter:
         session = self._registry.get(runner_id)
         return session.hello.dedup_epoch if session is not None else None
 
+    def runner_id_for_client(self, client: httpx.AsyncClient) -> str | None:
+        """
+        Return the runner a client handed out by this router routes to.
+
+        A caller resolves its client before awaits that can rebind the session
+        to another runner, so retry logic asks the client which runner it
+        addresses instead of trusting the refreshed conversation row.
+
+        :param client: A client previously returned by this router.
+        :returns: The runner id the client was created for, or ``None`` for a
+            client this router did not create.
+        """
+        with self._lock:
+            for runner_id, cached in self._clients.items():
+                if cached is client:
+                    return runner_id
+        return None
+
     async def wait_for_runner(self, runner_id: str, *, timeout_s: float) -> bool:
         """
         Wait until *runner_id* has a live tunnel or *timeout_s* elapses.
