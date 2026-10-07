@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { ImportSessionsPanel } from "./ImportSessionsPanel";
 import { useHosts } from "@/hooks/useHosts";
-import { importLocalSessions } from "@/lib/sessionsApi";
+import { importLocalSessions, type LocalImportResult } from "@/lib/sessionsApi";
 import { bindConversationForTest } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
 
@@ -176,7 +176,45 @@ describe("ImportSessionsPanel", () => {
         25,
         expect.any(Function),
         "session-exact",
+        false,
       ),
+    );
+  });
+
+  it("ignores Enter and clicks while an import is already running", async () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_1", name: "mac-laptop", owner: "alice", status: "online" }],
+    } as unknown as ReturnType<typeof useHosts>);
+    let finish: (result: LocalImportResult) => void = () => {};
+    importLocalSessionsMock.mockImplementation(
+      () =>
+        new Promise<LocalImportResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+
+    renderPanel();
+    fireEvent.change(screen.getAllByRole("combobox")[1], {
+      target: { value: "session" },
+    });
+    const idInput = screen.getByTestId("import-session-id");
+    fireEvent.change(idInput, { target: { value: "session-exact" } });
+    fireEvent.keyDown(idInput, { key: "Enter" });
+    await waitFor(() => expect(importLocalSessionsMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.keyDown(idInput, { key: "Enter" });
+    fireEvent.click(screen.getByTestId("import-submit"));
+    expect(importLocalSessionsMock).toHaveBeenCalledTimes(1);
+
+    finish({
+      imported: 1,
+      alreadyImported: 0,
+      failed: 0,
+      sessions: [{ id: "c1", title: "Exact session" }],
+      failures: [],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("import-result")).toHaveTextContent("Imported 1"),
     );
   });
 

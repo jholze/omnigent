@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
-from omnigent.entities import NewConversationItem, parse_item_data
+from omnigent.entities import Conversation, NewConversationItem, parse_item_data
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_plugins import NativeCodingAgent
 from omnigent.host.frames import HostImportLocalByIdFrame, HostImportLocalFrame, encode_host_frame
 from omnigent.native.native_coding_agents import native_coding_agent_for_harness
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
@@ -28,19 +29,24 @@ from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_access, require_user
 from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
-from omnigent.server.routes._session_create_validation import resolve_project_session_create
+from omnigent.server.routes._session_create_validation import (
+    ProjectCreateResolution,
+    resolve_project_session_create,
+)
 from omnigent.server.routes._sessions.common import _session_status_cache
 from omnigent.server.schemas import SessionCreateRequest
 from omnigent.session_import import (
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
     ImportSource,
+    local_session_identity_matches,
     title_from_items,
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.conversation_store import (
     MAX_IMPORTED_TRANSCRIPT_ITEMS,
     ConversationAlreadyExistsError,
+    ConversationNotFoundError,
     ConversationReplacementConflictError,
     ConversationReplacementTooLargeError,
     ConversationStoreOperationUnsupportedError,
@@ -255,7 +261,7 @@ async def _serialize_source_import(body: ImportSessionRequest) -> AsyncIterator[
         yield
 
 
-def _ensure_import_replacement_safe(existing: Any) -> None:
+def _ensure_import_replacement_safe(existing: Conversation) -> None:
     """Reject replacing an active session: a runner event would write into the new transcript."""
     status = _session_status_cache.get(existing.id, existing.live_status)
     runner_live = existing.runner_id is not None and runner_seen_is_fresh(
@@ -269,7 +275,7 @@ def _ensure_import_replacement_safe(existing: Any) -> None:
         )
 
 
-def _ensure_import_source_matches(existing: Any, source: ImportSource) -> None:
+def _ensure_import_source_matches(existing: Conversation, source: ImportSource) -> None:
     """Reject replacing a session imported from another harness; lookup is by external id alone."""
     stored = existing.labels.get(IMPORT_SOURCE_LABEL_KEY)
     if stored is None:
@@ -396,7 +402,7 @@ def create_imports_router(
         user_id: str | None,
         project_id: str | None,
         host_id: str | None,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[NativeCodingAgent, ProjectCreateResolution]:
         """Validate import agent/host/project metadata without mutating it."""
         native_agent = native_coding_agent_for_harness(f"{source}-native")
         if native_agent is None:
@@ -424,7 +430,7 @@ def create_imports_router(
         return native_agent, resolved_create
 
     async def _replace_imported_transcript(
-        existing: Any,
+        existing: Conversation,
         items: list[NewConversationItem],
     ) -> None:
         """Replace one authorized imported transcript through the store."""
@@ -437,6 +443,13 @@ def create_imports_router(
                 expected_runner_last_seen=existing.runner_last_seen,
                 expected_live_status=existing.live_status,
             )
+        except ConversationNotFoundError as exc:
+            # The import lock serializes imports only; a session delete can land
+            # between the lookup and the swap.
+            raise OmnigentError(
+                "This session was deleted before its snapshot could be replaced.",
+                code=ErrorCode.NOT_FOUND,
+            ) from exc
         except ConversationReplacementConflictError as exc:
             raise OmnigentError(str(exc), code=ErrorCode.CONFLICT) from exc
         except ConversationReplacementTooLargeError as exc:
@@ -653,8 +666,14 @@ def create_imports_router(
             session_source = session.get("source")
             # Exact requests must not let another harness/id reach deduplication
             # or mutation; check the host identity before looking up a session.
+            # Qwen qualifies a bare recording id to <project>:<id>, so compare
+            # through the harness's canonicalization contract, not literally.
             if body.session_id is not None and (
-                external_session_id != body.session_id or session_source != body.source
+                session_source != body.source
+                or not isinstance(external_session_id, str)
+                or not local_session_identity_matches(
+                    body.source, body.session_id, external_session_id
+                )
             ):
                 _fail(
                     external_session_id,
@@ -689,6 +708,9 @@ def create_imports_router(
                 conversation_store.find_conversation_by_external_session_id,
                 external_session_id,
             )
+            if existing is not None and not body.force:
+                counts["already_imported"] += 1
+                continue
             try:
                 items = [ImportItemInput.model_validate(raw).to_item() for raw in raw_items]
             except (OmnigentError, ValueError) as exc:
@@ -702,9 +724,6 @@ def create_imports_router(
             session_workspace = session.get("workspace")
 
             if existing is not None:
-                if not body.force:
-                    counts["already_imported"] += 1
-                    continue
                 if not items:
                     _fail(
                         external_session_id,

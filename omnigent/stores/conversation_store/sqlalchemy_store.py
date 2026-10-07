@@ -2616,7 +2616,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             strip_nul_bytes(json.dumps(item.data.model_dump(exclude_none=True))) for item in items
         ]
         encoded_data = self._encode_item_data_batch(raw_jsons)
-        prepared_rows: list[tuple[NewConversationItem, dict[str, object], str | None]] = []
+        prepared_rows: list[tuple[dict[str, object], str | None]] = []
         for item, data in zip(items, encoded_data, strict=True):
             search = self._item_search_text(item)
             values: dict[str, object] = {
@@ -2632,7 +2632,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             }
             if search is not None:
                 values["search_text"] = search
-            prepared_rows.append((item, values, search))
+            prepared_rows.append((values, search))
 
         def write(session: Session) -> Conversation:
             self._lock_conversation(session, conversation_id)
@@ -2670,18 +2670,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                     f"conversation {conversation_id!r} is active"
                 )
 
-            old_item_ids = list(
-                session.execute(
-                    select(SqlConversationItem.id)
-                    .where(
-                        SqlConversationItem.workspace_id == workspace_id,
-                        SqlConversationItem.conversation_id == conversation_id,
-                    )
-                    .order_by(SqlConversationItem.position)
-                    .limit(MAX_IMPORTED_TRANSCRIPT_ITEMS + 1)
-                ).scalars()
+            old_item_count = session.scalar(
+                select(func.count())
+                .select_from(SqlConversationItem)
+                .where(
+                    SqlConversationItem.workspace_id == workspace_id,
+                    SqlConversationItem.conversation_id == conversation_id,
+                )
             )
-            if len(old_item_ids) > MAX_IMPORTED_TRANSCRIPT_ITEMS:
+            if old_item_count is not None and old_item_count > MAX_IMPORTED_TRANSCRIPT_ITEMS:
                 raise ConversationReplacementTooLargeError(
                     f"existing transcript exceeds {MAX_IMPORTED_TRANSCRIPT_ITEMS} items"
                 )
@@ -2694,20 +2691,18 @@ class SqlAlchemyConversationStore(ConversationStore):
                 )
             )
             row.updated_at = now
-            row.next_position = 0
 
             for start in range(0, len(prepared_rows), IMPORTED_TRANSCRIPT_WRITE_BATCH_SIZE):
                 chunk = prepared_rows[start : start + IMPORTED_TRANSCRIPT_WRITE_BATCH_SIZE]
                 row_values: list[dict[str, object]] = []
                 fts_rows: list[tuple[str, str, str]] = []
-                for offset, (_item, prepared, search) in enumerate(chunk, start=start):
+                for offset, (prepared, search) in enumerate(chunk, start=start):
                     values = dict(prepared)
                     values["position"] = offset
                     row_values.append(values)
                     if search is not None:
                         fts_rows.append((cast(str, values["id"]), conversation_id, search))
-                if row_values:
-                    session.execute(insert(SqlConversationItem), row_values)
+                session.execute(insert(SqlConversationItem), row_values)
                 insert_fts_bulk(session, fts_rows)
             row.next_position = len(prepared_rows)
             return _to_conversation(row, meta, _fetch_labels(session, conversation_id))

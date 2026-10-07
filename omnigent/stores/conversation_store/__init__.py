@@ -754,7 +754,8 @@ class ConversationStore(ABC):
     ) -> Conversation:
         """Atomically replace imported items while keeping the conversation identity.
 
-        Unsupported backends raise before mutating; the ``expected_*`` values guard the commit."""
+        Unsupported backends raise before mutating; the ``expected_*`` values guard the commit.
+        Items skip ``append``'s id dedup, so callers must pass unique ids."""
         _ = (
             conversation_id,
             items,

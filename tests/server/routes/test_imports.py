@@ -321,13 +321,13 @@ async def test_force_import_replaces_existing_session(
     assert [item["content"][0]["text"] for item in items.json()["data"]] == ["new prompt"]
 
 
-@pytest.mark.parametrize("live_status", ["running", "launching"])
+@pytest.mark.parametrize("scenario", ["running", "launching"])
 async def test_force_import_rejects_active_session(
     client: httpx.AsyncClient,
     db_uri: str,
-    live_status: str,
+    scenario: str,
 ) -> None:
-    """Replacement must not delete a conversation with a live turn."""
+    """Replacement must not delete a conversation with a live or launching runner."""
     from omnigent.server.routes._sessions.common import _session_status_cache
 
     _seed_claude_agent(db_uri)
@@ -349,12 +349,12 @@ async def test_force_import_rejects_active_session(
     created = await client.post("/v1/imports", json=payload)
     assert created.status_code == 201
     session_id = created.json()["session_id"]
-    if live_status == "running":
-        store.set_session_live_status(session_id, live_status)
+    if scenario == "running":
+        store.set_session_live_status(session_id, "running")
     else:
         # ``launching`` is a transient relay/cache status and is not persisted
         # by the live-status codec, but it still means the runner is starting.
-        _session_status_cache[session_id] = live_status
+        _session_status_cache[session_id] = "launching"
 
     payload["force"] = True
     payload["items"] = [
@@ -375,7 +375,7 @@ async def test_force_import_rejects_active_session(
     assert replaced.status_code == 409
     existing = store.get_conversation(session_id)
     assert existing is not None
-    assert existing.live_status == ("running" if live_status == "running" else None)
+    assert existing.live_status == ("running" if scenario == "running" else None)
     assert [item.data.content[0]["text"] for item in store.list_items(session_id).data] == [
         "old prompt"
     ]
@@ -908,6 +908,87 @@ async def test_local_exact_import_rejects_mismatched_host_identity(
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
+@pytest.mark.parametrize("force", [False, True], ids=["ordinary", "replacement"])
+async def test_local_exact_import_accepts_qwen_bare_id_qualified_response(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    force: bool,
+) -> None:
+    """A bare Qwen id resolves to its project-qualified identity, not a mismatch."""
+    from omnigent.server.routes import imports as imports_module
+    from omnigent.server.routes.imports import _import_conversation_id
+
+    agent_id = builtin_agent_id("qwen-native-ui")
+    SqlAlchemyAgentStore(db_uri).create(
+        agent_id, name="qwen-native-ui", bundle_location="builtin://qwen-native-ui"
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    bare_id = "019f8648-2797-7170-bf73-837f2655c47e"
+    # Qwen qualifies a bare recording id by project before returning it.
+    qualified_id = f"-repo:{bare_id}"
+    if force:
+        existing = store.create_conversation(
+            agent_id=agent_id,
+            title="Old snapshot",
+            conversation_id=_import_conversation_id("qwen", qualified_id),
+        )
+        store.set_external_session_id(existing.id, qualified_id)
+        store.set_labels(existing.id, {IMPORT_SOURCE_LABEL_KEY: "qwen"})
+        store.append(
+            existing.id,
+            [
+                NewConversationItem(
+                    type="message",
+                    response_id="qwen:old",
+                    data=MessageData(
+                        role="user",
+                        content=[{"type": "input_text", "text": "old prompt"}],
+                    ),
+                )
+            ],
+        )
+
+    async def _fake_stream(**_kwargs: object):
+        yield {
+            "external_session_id": qualified_id,
+            "workspace": None,
+            "items": [_user_message_item("qwen:new", "latest prompt")],
+            "title": "Qwen snapshot",
+            "source": "qwen",
+        }
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    async with _local_import_client(store, db_uri, host_conn) as client:
+        response = await client.post(
+            f"/v1/imports/local{'/stream' if stream else ''}",
+            json={
+                "host_id": host_conn.host_id,
+                "source": "qwen",
+                "session_id": bare_id,
+                "force": force,
+            },
+        )
+
+    assert response.status_code == 200
+    if stream:
+        events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+        assert [event for event in events if event["event"] == "failed"] == []
+        assert (events[-1]["imported"], events[-1]["failed"]) == (1, 0)
+    else:
+        body = response.json()
+        assert (body["imported"], body["failed"]) == (1, 0)
+    conversation = store.find_conversation_by_external_session_id(qualified_id)
+    assert conversation is not None
+    assert [item.data.content[0]["text"] for item in store.list_items(conversation.id).data] == [
+        "latest prompt"
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
 async def test_local_import_force_rejects_active_snapshot(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1270,6 +1351,132 @@ async def test_local_import_force_rejects_empty_transcript(
     assert [item.data.content[0]["text"] for item in store.list_items(conversation.id).data] == [
         "old prompt"
     ]
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
+async def test_local_import_skips_already_imported_before_validating_items(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A plain re-import stays already-imported even when its host payload no longer parses."""
+    from omnigent.server.routes import imports as imports_module
+
+    _seed_claude_agent(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    external_id = "claude-local-already-imported-malformed"
+    frame: dict[str, object] = {
+        "external_session_id": external_id,
+        "workspace": None,
+        "items": [_user_message_item("claude:old", "old prompt")],
+        "title": "Snapshot",
+        "source": "claude",
+    }
+
+    async def _fake_stream(**_kwargs: object):
+        yield dict(frame)
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    async with _local_import_client(store, db_uri, host_conn) as client:
+        created = await client.post(
+            "/v1/imports/local",
+            json={"host_id": host_conn.host_id, "source": "claude", "session_id": external_id},
+        )
+        assert created.status_code == 200
+        assert created.json()["imported"] == 1
+
+        frame["items"] = [{"type": "message", "response_id": "claude:new", "data": {}}]
+        response = await client.post(
+            f"/v1/imports/local{'/stream' if stream else ''}",
+            json={"host_id": host_conn.host_id, "source": "claude", "limit": 5},
+        )
+        # The same payload is rejected once a replacement has to read it.
+        forced = await client.post(
+            "/v1/imports/local",
+            json={
+                "host_id": host_conn.host_id,
+                "source": "claude",
+                "session_id": external_id,
+                "force": True,
+            },
+        )
+
+    assert response.status_code == 200
+    if stream:
+        events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+        assert [event["event"] for event in events] == ["done"]
+        tally = events[-1]
+    else:
+        tally = response.json()
+    assert (tally["imported"], tally["already_imported"], tally["failed"]) == (0, 1, 0)
+    assert tally["failures"] == []
+    assert (forced.json()["imported"], forced.json()["failed"]) == (0, 1)
+    conversation = store.find_conversation_by_external_session_id(external_id)
+    assert conversation is not None
+    assert [item.data.content[0]["text"] for item in store.list_items(conversation.id).data] == [
+        "old prompt"
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
+async def test_local_import_force_reports_snapshot_deleted_before_replacement(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A snapshot deleted after the lookup is one per-session failure, not a stream error."""
+    from omnigent.server.routes import imports as imports_module
+
+    _seed_claude_agent(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    external_id = "claude-local-deleted-replacement"
+
+    async def _fake_stream(**_kwargs: object):
+        yield {
+            "external_session_id": external_id,
+            "workspace": None,
+            "items": [_user_message_item("claude:new", "latest prompt")],
+            "title": "Snapshot",
+            "source": "claude",
+        }
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    replace = store.replace_imported_transcript
+
+    def _delete_then_replace(conversation_id: str, *args: object, **kwargs: object) -> object:
+        # Runs on the route's worker thread, after the lookup and guards passed.
+        asyncio.run(store.delete_conversation(conversation_id))
+        return replace(conversation_id, *args, **kwargs)  # type: ignore[arg-type]
+
+    async with _local_import_client(store, db_uri, host_conn) as client:
+        created = await client.post(
+            "/v1/imports/local",
+            json={"host_id": host_conn.host_id, "source": "claude", "session_id": external_id},
+        )
+        assert created.status_code == 200
+        assert created.json()["imported"] == 1
+
+        monkeypatch.setattr(store, "replace_imported_transcript", _delete_then_replace)
+        response = await client.post(
+            f"/v1/imports/local{'/stream' if stream else ''}",
+            json={
+                "host_id": host_conn.host_id,
+                "source": "claude",
+                "session_id": external_id,
+                "force": True,
+            },
+        )
+
+    assert response.status_code == 200
+    failure = _single_local_import_failure(response, stream)
+    assert failure["reason"] == "This session was deleted before its snapshot could be replaced."
+    assert store.find_conversation_by_external_session_id(external_id) is None
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])

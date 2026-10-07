@@ -112,7 +112,7 @@ export function ImportSessionsPanel() {
           queryClient.invalidateQueries({ queryKey: sessionItemsQueryKey(id) }),
         ]).then(
           () => undefined,
-          () => undefined,
+          (err: unknown) => console.error("import cache invalidation failed", err),
         ),
       );
     };
@@ -123,9 +123,14 @@ export function ImportSessionsPanel() {
       };
       const res =
         mode === "session"
-          ? replaceExisting
-            ? await importLocalSessions(hostId, source, limit, onSession, exactSessionId, true)
-            : await importLocalSessions(hostId, source, limit, onSession, exactSessionId)
+          ? await importLocalSessions(
+              hostId,
+              source,
+              limit,
+              onSession,
+              exactSessionId,
+              replaceExisting,
+            )
           : await importLocalSessions(hostId, source, limit, onSession);
       // Keep the cleanup correct for buffered/mock callers that return session
       // refs without invoking the incremental callback.
@@ -146,6 +151,8 @@ export function ImportSessionsPanel() {
   }
 
   function requestImport(): void {
+    // Enter in the ID field bypasses the button's loading state.
+    if (submitting) return;
     if (mode === "session" && replaceExisting) {
       setConfirmReplaceOpen(true);
       return;

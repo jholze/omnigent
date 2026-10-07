@@ -868,15 +868,17 @@ def test_replace_imported_transcript_encodes_before_mutating(
     ]
 
 
+@pytest.mark.parametrize("live_status", ["running", "waiting"])
 def test_replace_imported_transcript_rechecks_liveness_at_commit(
     db_uri: str,
+    live_status: str,
 ) -> None:
     """A live-state change after preparation prevents replacement."""
     store = SqlAlchemyConversationStore(db_uri)
     conversation = store.create_conversation()
     store.append(conversation.id, [_replacement_item("old")])
     expectations = _replacement_expectations(store, conversation.id)
-    store.set_session_live_status(conversation.id, "running")
+    store.set_session_live_status(conversation.id, live_status)
 
     with pytest.raises(ConversationReplacementConflictError):
         store.replace_imported_transcript(
