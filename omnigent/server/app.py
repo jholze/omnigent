@@ -517,8 +517,7 @@ def _session_id_from_request(request: Request) -> str | None:
     return match.group(1) if match else None
 
 
-# Retry hint (seconds) sent with a 503 for an upstream RESOURCE_EXHAUSTED: the
-# budget frees as soon as the dependency's in-flight calls complete.
+# Retry-After hint (seconds) for the upstream RESOURCE_EXHAUSTED 503.
 _UPSTREAM_RESOURCE_EXHAUSTED_RETRY_AFTER_S = 1
 
 

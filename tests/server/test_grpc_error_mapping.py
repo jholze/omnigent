@@ -142,7 +142,13 @@ async def test_resource_exhausted_maps_to_retryable_503(
     exhausted.assert_called()
     assert response.status_code == 503, response.text
     assert response.headers.get("Retry-After") == "1", dict(response.headers)
-    assert response.json()["error"]["code"] == ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED
+    error = response.json()["error"]
+    assert error["code"] == ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED
+    assert (
+        error["message"] == "A backing service is at its concurrent request limit; retry shortly."
+    )
+    # The upstream details stay in the server log, never in the client body.
+    assert _LIMIT_DETAILS not in response.text
     (record,) = [r for r in caplog.records if r.name == "omnigent.server.app"]
     assert record.levelno == logging.WARNING
     assert not record.getMessage().startswith("Unhandled exception:")
@@ -150,6 +156,7 @@ async def test_resource_exhausted_maps_to_retryable_503(
     assert record.attributes["http_status"] == "503"
     assert record.attributes["error_category"] == ErrorCategory.UPSTREAM.value
     assert record.attributes["error_impact"] == ErrorImpact.TRANSIENT.value
+    assert record.attributes["code"] == ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED
     assert response.headers.get("X-Request-Id") == record.attributes["request_id"]
 
 

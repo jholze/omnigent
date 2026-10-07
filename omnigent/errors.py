@@ -309,9 +309,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # a server fault; the distinct code keeps it separable from our own authz
     # FORBIDDEN in dashboards and client handling.
     ErrorCode.UPSTREAM_PERMISSION_DENIED: 403,
-    # 503: the dependency's saturated request budget frees as its in-flight
-    # calls finish, so a short retry is expected to succeed; the response
-    # carries a Retry-After hint. Never a bare 500: the fault is not ours.
+    # Upstream resource exhaustion maps to a retryable 503; the cvar explains why.
     ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED: 503,
     # 400: the referenced cursor row is gone, so this exact request can never
     # succeed — the fix is to restart the enumeration without the cursor. The
