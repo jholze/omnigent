@@ -2062,6 +2062,38 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+async def _unsubscribe_retired_thread(
+    client: CodexAppServerClient,
+    *,
+    thread_id: str,
+) -> None:
+    """
+    Release the forwarder's subscription to a thread retired by rotation.
+
+    Codex keeps a thread and its stdio MCP servers loaded while any
+    connection stays subscribed to it. On a native ``/clear`` the TUI
+    unsubscribes, but the forwarder's own ``thread/resume`` subscription
+    would otherwise pin the retired thread -- and its MCP processes -- for
+    the life of the app server. Best effort: a failed unsubscribe is logged,
+    never fatal to the live forwarder.
+
+    :param client: Codex app-server connection the forwarder subscribes on.
+    :param thread_id: Retired Codex thread id, e.g. ``"thread_old"``.
+    :returns: None.
+    """
+    try:
+        await client.request("thread/unsubscribe", {"threadId": thread_id})
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - unsubscribe is best-effort cleanup.
+        _logger.warning(
+            "Codex forwarder could not unsubscribe retired thread %s after "
+            "rotation; its MCP servers may linger until the app server stops",
+            thread_id,
+            exc_info=True,
+        )
+
+
 async def supervise_forwarder(
     *,
     base_url: str,
@@ -2073,6 +2105,7 @@ async def supervise_forwarder(
     client: CodexAppServerClient | None = None,
     auth: httpx.Auth | None = None,
     ap_transport: httpx.AsyncBaseTransport | None = None,
+    on_session_rotated: Callable[[str, str], None] | None = None,
 ) -> None:
     """
     Mirror Codex app-server notifications into an Omnigent session.
@@ -2095,6 +2128,11 @@ async def supervise_forwarder(
     :param auth: Optional HTTP auth for long-lived remote sessions.
     :param ap_transport: Optional HTTP transport for the Omnigent client,
         e.g. ``httpx.MockTransport(...)`` for tests.
+    :param on_session_rotated: Optional callback invoked as
+        ``on_session_rotated(old_session_id, new_session_id)`` after a native
+        ``/clear`` rotates Omnigent ownership onto a fresh session. The runner
+        uses it to move its app-server/forwarder teardown bookkeeping onto the
+        session that now owns the terminal.
     :returns: None. Runs until cancelled or the app-server connection
         closes.
     """
@@ -2163,6 +2201,8 @@ async def supervise_forwarder(
         try:
             async for event in client.iter_events():
                 try:
+                    retiring_session_id = target.session_id
+                    retiring_thread_id = target.thread_id
                     rotated = await _maybe_rotate_session_on_thread_started(
                         ap_client=ap_client,
                         target=target,
@@ -2175,6 +2215,16 @@ async def supervise_forwarder(
                         subscribe_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await subscribe_task
+                        # Release this connection's subscription to the retired
+                        # thread so Codex can idle-unload it and stop its stdio
+                        # MCP servers; the forwarder's own thread/resume would
+                        # otherwise pin the old thread for the app server's life.
+                        await _unsubscribe_retired_thread(client, thread_id=retiring_thread_id)
+                        # Ownership moved to the rotated session; let the runner
+                        # move its teardown bookkeeping so deleting or reaping
+                        # the new session reaches this app server.
+                        if on_session_rotated is not None:
+                            on_session_rotated(retiring_session_id, target.session_id)
                         # Fresh thread after a /clear rotation — start its
                         # own active signal so the new subscription parks
                         # until the rotated thread's first turn.
