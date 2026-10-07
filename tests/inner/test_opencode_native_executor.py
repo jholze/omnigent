@@ -186,6 +186,26 @@ async def test_run_turn_omits_model_when_no_override(
     assert "model" not in prompt_reqs[0][2]
 
 
+async def test_run_turn_pins_variant_without_model_override(
+    fake_server: _FakeServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A variant-only pin reaches the prompt even with no model override.
+
+    A spec that sets ``executor.variant`` but no model leaves OpenCode on its
+    own default model; the variant must still ride the prompt rather than be
+    dropped because the bridge state has no ``model_override``.
+    """
+    _seed_state(tmp_path, variant_override="max")
+    executor = _executor(tmp_path, monkeypatch)
+    events = await _run(executor, "hello")
+    assert [type(e) for e in events] == [TurnComplete]
+    prompt_reqs = [r for r in fake_server.requests if r[1].endswith("/prompt_async")]
+    assert len(prompt_reqs) == 1
+    body = prompt_reqs[0][2]
+    assert body["variant"] == "max"
+    assert "model" not in body
+
+
 async def test_run_turn_no_user_content_errors(
     fake_server: _FakeServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
