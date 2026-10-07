@@ -3,9 +3,9 @@
 With a Unity Catalog model-services listing that advertises
 ``system.ai.gpt-6-luna`` (a major-only tiered arm) next to older GPT-5.x ids,
 a new native Codex session that pins no model must launch on the newest
-advertised generation instead of lagging on a GPT-5.x id. Both a listing that
-also carries a release-curated arm and one made only of versioned ids are
-covered, because the discovery ranker treats those two cases differently.
+advertised generation instead of lagging on a GPT-5.x id. The workspace does
+not advertise Omnigent's static launch default, so a launch that fell back to
+it instead of ranking the live listing would be caught here.
 """
 
 from __future__ import annotations
@@ -56,20 +56,13 @@ _HEALTH_POLL_INTERVAL_S = 0.5
 _TUI_BANNER_TIMEOUT_MS = 120_000
 
 
-@dataclass(frozen=True)
-class WorkspaceListing:
-    """The codex-servable ids a mock workspace advertises."""
-
-    id: str
-    model_ids: tuple[str, ...]
-
-
-LISTINGS = (
-    WorkspaceListing(
-        "curated-arm-advertised",
-        ("system.ai.gpt-6-luna", "system.ai.gpt-5-5", "system.ai.gpt-5-4-mini"),
-    ),
-    WorkspaceListing("versioned-ids-only", ("system.ai.gpt-6-luna", "system.ai.gpt-5-4-mini")),
+# A workspace advertising the newest major-only tiered arm next to older
+# GPT-5.x ids. Omnigent's static launch default is deliberately absent, so a
+# fallback launch cannot masquerade as a correctly ranked discovery.
+_ADVERTISED_MODEL_IDS = (
+    "system.ai.gpt-6-luna",
+    "system.ai.gpt-5-5",
+    "system.ai.gpt-5-4-mini",
 )
 
 
@@ -103,9 +96,10 @@ class MockWorkspace(ThreadingHTTPServer):
     """A Databricks workspace that only answers the Unity Catalog model-services listing."""
 
     def __init__(self, model_ids: tuple[str, ...]) -> None:
-        super().__init__(("127.0.0.1", 0), _MockWorkspaceHandler)
+        # Set the attributes the handler reads before the socket can accept.
         self.model_ids = model_ids
         self.requests: list[str] = []
+        super().__init__(("127.0.0.1", 0), _MockWorkspaceHandler)
 
     @property
     def url(self) -> str:
@@ -201,60 +195,60 @@ def dedicated_databricks_codex_stack(
 
     workspace = MockWorkspace(model_ids)
     workspace_thread = threading.Thread(target=workspace.serve_forever, daemon=True)
-    workspace_thread.start()
-    _write_databricks_provider_config(config_home)
-    _write_databrickscfg(home_dir, workspace.url)
-
-    port = _find_free_port()
-    base_url = f"http://127.0.0.1:{port}"
-    server_log = server_tmp / "server.log"
-    runner_log = server_tmp / "runner.log"
-    binding_token = secrets.token_urlsafe(32)
-    runner_id = token_bound_runner_id(binding_token)
-    shared_env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith(("OPENAI_", "DATABRICKS_"))
-    }
-    shared_env.update(
-        {
-            "PYTHONPATH": f"{_REPO_ROOT}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
-            "OMNIGENT_CONFIG_HOME": str(config_home),
-            "OMNIGENT_CODEX_NATIVE_STATE_DIR": str(state_dir),
-            "CODEX_HOME": str(source_codex_home),
-            "HOME": str(home_dir),
-            "OMNIGENT_CODEX_PATH": str(codex_path),
-            "TMPDIR": str(tmp_dir),
-        }
-    )
-    server_env = {**shared_env, "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token}
-    runner_env = {
-        **shared_env,
-        "OMNIGENT_RUNNER_ID": runner_id,
-        "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
-        "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
-        "RUNNER_SERVER_URL": base_url,
-        "OMNIGENT_PROCESS_LOG_FILE": str(server_tmp / "runner-process.log"),
-    }
-    server_command = [
-        sys.executable,
-        "-c",
-        "from omnigent.cli import main; main()",
-        "server",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--database-uri",
-        f"sqlite:///{server_tmp / 'test.db'}",
-        "--artifact-location",
-        str(artifact_dir),
-    ]
-
     proc: subprocess.Popen[bytes] | None = None
     runner_proc: subprocess.Popen[bytes] | None = None
-    with open(server_log, "w") as log_handle, open(runner_log, "w") as runner_log_handle:
-        try:
+    try:
+        workspace_thread.start()
+        _write_databricks_provider_config(config_home)
+        _write_databrickscfg(home_dir, workspace.url)
+
+        port = _find_free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        server_log = server_tmp / "server.log"
+        runner_log = server_tmp / "runner.log"
+        binding_token = secrets.token_urlsafe(32)
+        runner_id = token_bound_runner_id(binding_token)
+        shared_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("OPENAI_", "DATABRICKS_"))
+        }
+        shared_env.update(
+            {
+                "PYTHONPATH": f"{_REPO_ROOT}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+                "OMNIGENT_CONFIG_HOME": str(config_home),
+                "OMNIGENT_CODEX_NATIVE_STATE_DIR": str(state_dir),
+                "CODEX_HOME": str(source_codex_home),
+                "HOME": str(home_dir),
+                "OMNIGENT_CODEX_PATH": str(codex_path),
+                "TMPDIR": str(tmp_dir),
+            }
+        )
+        server_env = {**shared_env, "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token}
+        runner_env = {
+            **shared_env,
+            "OMNIGENT_RUNNER_ID": runner_id,
+            "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
+            "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
+            "RUNNER_SERVER_URL": base_url,
+            "OMNIGENT_PROCESS_LOG_FILE": str(server_tmp / "runner-process.log"),
+        }
+        server_command = [
+            sys.executable,
+            "-c",
+            "from omnigent.cli import main; main()",
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--database-uri",
+            f"sqlite:///{server_tmp / 'test.db'}",
+            "--artifact-location",
+            str(artifact_dir),
+        ]
+
+        with open(server_log, "w") as log_handle, open(runner_log, "w") as runner_log_handle:
             proc = subprocess.Popen(
                 server_command, env=server_env, stdout=log_handle, stderr=subprocess.STDOUT
             )
@@ -273,25 +267,25 @@ def dedicated_databricks_codex_stack(
                 server_log=server_log,
                 runner_log=runner_log,
             )
-        finally:
-            for child in (runner_proc, proc):
-                if child is not None and child.poll() is None:
-                    child.send_signal(signal.SIGTERM)
-                    try:
-                        child.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        child.kill()
-                        child.wait(timeout=5)
-            workspace.shutdown()
-            workspace_thread.join(timeout=5)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+    finally:
+        for child in (runner_proc, proc):
+            if child is not None and child.poll() is None:
+                child.send_signal(signal.SIGTERM)
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        workspace.shutdown()
+        workspace_thread.join(timeout=5)
+        workspace.server_close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def _launch_candidates(listing: WorkspaceListing) -> dict[str, str]:
+def _launch_candidates(model_ids: tuple[str, ...]) -> dict[str, str]:
     """Ids the TUI could plausibly name: the listing plus Omnigent's static launch default."""
     return {
-        comparable_model_id(model_id): model_id
-        for model_id in (*listing.model_ids, CODEX_DEFAULT_MODEL)
+        comparable_model_id(model_id): model_id for model_id in (*model_ids, CODEX_DEFAULT_MODEL)
     }
 
 
@@ -304,14 +298,13 @@ def _launched_model(pane_text: str, candidates: dict[str, str]) -> str | None:
     return None
 
 
-@pytest.fixture(params=LISTINGS, ids=lambda listing: listing.id)
+@pytest.fixture
 def databricks_codex_gpt6_session(
     request: pytest.FixtureRequest,
     built_spa: None,
     tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[tuple[CodexStack, str, WorkspaceListing]]:
+) -> Iterator[tuple[CodexStack, str]]:
     """A runner-bound, unpinned native Codex session on a GPT-6-advertising workspace."""
-    listing: WorkspaceListing = request.param
     if request.config.getoption("--ui-base-url"):
         pytest.skip("Databricks-discovery native Codex e2e requires an isolated spawned server")
     codex_path = os.environ.get("OMNIGENT_CODEX_PATH") or shutil.which("codex")
@@ -322,11 +315,11 @@ def databricks_codex_gpt6_session(
     if shutil.which("tmux") is None:
         pytest.skip("tmux is required for native Codex terminals")
 
-    server_tmp = tmp_path_factory.mktemp(f"e2e_ui_dbx_codex_{listing.id}")
-    with dedicated_databricks_codex_stack(listing.model_ids, server_tmp, codex_path) as stack:
+    server_tmp = tmp_path_factory.mktemp("e2e_ui_dbx_codex")
+    with dedicated_databricks_codex_stack(_ADVERTISED_MODEL_IDS, server_tmp, codex_path) as stack:
         session_id = _create_native_codex_session(stack.base_url, stack.runner_id)
         try:
-            yield stack, session_id, listing
+            yield stack, session_id
         finally:
             with suppress(httpx.HTTPError):
                 httpx.delete(f"{stack.base_url}/v1/sessions/{session_id}", timeout=10.0)
@@ -335,10 +328,10 @@ def databricks_codex_gpt6_session(
 @pytest.mark.timeout(420)
 def test_unpinned_databricks_codex_session_launches_newest_advertised_generation(
     request: pytest.FixtureRequest,
-    databricks_codex_gpt6_session: tuple[CodexStack, str, WorkspaceListing],
+    databricks_codex_gpt6_session: tuple[CodexStack, str],
 ) -> None:
     """An unpinned Databricks Codex launch runs the newest advertised GPT, not an older GPT-5.x."""
-    stack, session_id, listing = databricks_codex_gpt6_session
+    stack, session_id = databricks_codex_gpt6_session
     # Request the page only now so a recording starts at the user's first
     # navigation rather than during server boot.
     page: Page = request.getfixturevalue("page")
@@ -351,7 +344,7 @@ def test_unpinned_databricks_codex_session_launches_newest_advertised_generation
 
     # The SPA renders the pane on a WebGL canvas, so read the TUI text from the
     # managed tmux pane instead.
-    candidates = _launch_candidates(listing)
+    candidates = _launch_candidates(_ADVERTISED_MODEL_IDS)
     deadline = time.monotonic() + _TUI_BANNER_TIMEOUT_MS / 1000
     pane_text = ""
     launched: str | None = None
@@ -364,7 +357,7 @@ def test_unpinned_databricks_codex_session_launches_newest_advertised_generation
             break
         page.wait_for_timeout(1_000)
 
-    listed = ", ".join(listing.model_ids)
+    listed = ", ".join(_ADVERTISED_MODEL_IDS)
     assert stack.workspace.requests, (
         "the launch never consulted the workspace model-services listing"
     )

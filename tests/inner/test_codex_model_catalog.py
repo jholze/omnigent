@@ -50,7 +50,8 @@ def _catalog(**overrides: Any) -> dict[str, Any]:  # type: ignore[explicit-any]
 
 
 def test_the_added_entry_carries_the_clone_sources_fields() -> None:
-    extended = extended_model_catalog(_catalog())
+    # A non-None upgrade on the clone source keeps the clearing assertion honest.
+    extended = extended_model_catalog(_catalog(upgrade={"to": "gpt-6-sol"}))
 
     assert extended is not None
     glm = next(m for m in extended["models"] if m["slug"] == _GLM_SLUG)

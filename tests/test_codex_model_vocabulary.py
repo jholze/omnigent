@@ -50,7 +50,6 @@ _CATALOG: list[dict[str, object]] = [
         ("gpt-6-nova", "gpt-6-nova"),
         # A numeric second segment is still the minor version, not a tier.
         ("system.ai.gpt-6-1", "gpt-6.1"),
-        ("gpt-6-luna", "gpt-6-luna"),
         # GLM is spawnable only under the id the gateway serves it as, which
         # is the slug omnigent writes into the session's catalog.
         ("databricks-glm-5-2", "system.ai.glm-5-2"),
