@@ -72,6 +72,7 @@ def test_undo_still_works_after_mention_insert(
     page.keyboard.press("Tab")
     expect(textarea).to_have_value("alpha bravo ")
 
-    # The attach must not have cleared the native undo history.
+    # The attach must keep the native undo history, so the first Undo restores
+    # the deleted ``@rep`` token instead of leaving the attached draft.
     page.keyboard.press("ControlOrMeta+z")
-    expect(textarea).not_to_have_value("alpha bravo ")
+    expect(textarea).to_have_value("alpha bravo @rep")
