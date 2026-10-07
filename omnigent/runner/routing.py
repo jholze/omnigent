@@ -271,6 +271,20 @@ class RunnerRouter:
         """
         return self._registry.get(runner_id) is not None
 
+    def runner_supports(self, runner_id: str, capability: str) -> bool:
+        """
+        Return whether the connected *runner_id* advertised *capability*.
+
+        :param runner_id: Runner UUID, e.g.
+            ``"runner_0123456789abcdef"``.
+        :param capability: A ``HelloFrame`` capability token, e.g.
+            ``"message-forward-dedup-v1"``.
+        :returns: ``True`` when a live session advertised it; ``False``
+            when the runner is offline or predates the capability.
+        """
+        session = self._registry.get(runner_id)
+        return session is not None and capability in session.hello.capabilities
+
     async def wait_for_runner(self, runner_id: str, *, timeout_s: float) -> bool:
         """
         Wait until *runner_id* has a live tunnel or *timeout_s* elapses.

@@ -3764,6 +3764,14 @@ def create_runner_app(
                 conv_id, deque(maxlen=_ACCEPTED_FORWARD_IDS_PER_SESSION)
             ).append(item_id)
 
+    def _forget_forwarded_item(conv_id: str, item_id: object) -> None:
+        """Undo ``_accept_forwarded_item`` when the turn never started, so a repeat can retry."""
+        if isinstance(item_id, str) and item_id:
+            _ids = _accepted_forward_item_ids.get(conv_id)
+            if _ids is not None:
+                with contextlib.suppress(ValueError):
+                    _ids.remove(item_id)
+
     def _release_live_turn_markers(conv_id: str) -> None:
         """Clear ``_live_response_id`` and the process-manager in-flight marker atomically.
 
@@ -6277,9 +6285,6 @@ def create_runner_app(
             message_body = dict(body)
             message_body["conversation_id"] = conversation_id
 
-            if _is_native_harness(conversation_id):
-                resource_registry.note_session_turn_started(conversation_id)
-
             _seq = _ingest_next_seq.get(conversation_id, 0)
             _ingest_next_seq[conversation_id] = _seq + 1
             _cond = _ingest_cond.get(conversation_id)
@@ -6308,6 +6313,12 @@ def create_runner_app(
                             "detail": "Message already accepted; not run again.",
                         },
                     )
+
+                if _is_native_harness(conversation_id):
+                    # Flip the memo to running only once we commit to a turn; a
+                    # deduplicated repeat starts none and would strand it there.
+                    resource_registry.note_session_turn_started(conversation_id)
+
                 _raw_content = message_body.get("content")
                 if isinstance(_raw_content, list):
                     message_body["content"] = await _resolve_forwarded_message_content(
@@ -6441,6 +6452,9 @@ def create_runner_app(
                 if stream:
                     response = await _stream_message_to_harness(message_body, conversation_id)
                     if not isinstance(response, StreamingResponse):
+                        # The dispatch failed, so no turn runs; drop the accept
+                        # marker so a repeated forward retries instead of 202.
+                        _forget_forwarded_item(conversation_id, _persisted_item_id)
                         _on_proxy_stream_end(
                             conversation_id,
                             error=_harness_error_response_error(response),
@@ -7530,6 +7544,9 @@ def create_runner_app(
                     and new_items[-1].get("role") == "user"
                 ):
                     _begin_turn_slot(session_id)
+                    # Catch-up owns this trailing user item; the server may still
+                    # forward it after the reconnect, so dedup that repeat here.
+                    _accept_forwarded_item(session_id, _last_server_item_id.get(session_id))
                     _publish_turn_status(session_id, "running")
                     agent_id = _session_agent_ids.get(session_id)
                     msg_body: _JsonObject = {

@@ -227,7 +227,7 @@ def _dump_view(
                 "answer_persisted_count": json.dumps(snapshot.get("items", [])).count(_ANSWER),
                 "snapshot_status": snapshot.get("status"),
                 "snapshot_last_error": snapshot.get("last_task_error") or snapshot.get("error"),
-                "video": page.video.path() if page.video else None,
+                "video": str(page.video.path()) if page.video else None,
             },
             indent=1,
         )
@@ -296,9 +296,10 @@ def test_send_racing_the_tunnel_close_is_delivered_without_an_error(
             _caption(page, "reply arrived after the reconnect; no error was shown")
             page.wait_for_timeout(2_500)
             view.sample(page)
-        _dump_view(page, view, web_stack, session_id, tmp_path)
     finally:
-        # A failing run stops filming on the error state; delivery is checked on the server.
+        # Capture debug artifacts and stop filming even when the run fails above.
+        with contextlib.suppress(Exception):
+            _dump_view(page, view, web_stack, session_id, tmp_path)
         page.context.close()
 
     def _persisted_replies() -> int:
@@ -313,6 +314,8 @@ def test_send_racing_the_tunnel_close_is_delivered_without_an_error(
     replies = _persisted_replies()
     server_log = web_stack.process_log.read_text()
     problems = []
+    if not view.post_statuses:
+        problems.append("no message send was observed, so the race was never exercised")
     if any(status >= 400 for status in view.post_statuses):
         problems.append(f"the send was answered {view.post_statuses!r}")
     if view.pill_texts or view.toast_texts:

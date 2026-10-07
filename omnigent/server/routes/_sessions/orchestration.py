@@ -92,6 +92,7 @@ from omnigent.runner.subagent_routing import (
     harness_family,
     subagent_routing_enabled,
 )
+from omnigent.runner.transports.ws_tunnel.frames import FORWARD_DEDUP_CAPABILITY
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runtime import (
     get_policy_store,
@@ -5214,6 +5215,7 @@ async def _post_across_runner_reconnect(
     runner_id: str | None,
     runner_router: RunnerRouter | None,
     grace_s: float,
+    repeat_requires_capability: str | None = None,
 ) -> httpx.Response:
     """
     Send a runner request, repeating it once if its tunnel drops and the runner returns.
@@ -5231,6 +5233,9 @@ async def _post_across_runner_reconnect(
     :param runner_router: Router used to wait for the runner to reconnect;
         ``None`` fails a drop immediately.
     :param grace_s: Maximum seconds to wait for the runner to re-register.
+    :param repeat_requires_capability: When set, repeat only if the reconnected
+        runner advertised this ``HelloFrame`` capability. A runner that predates
+        it cannot dedup the repeat, so the original drop is raised instead.
     :returns: The runner's response.
     :raises httpx.HTTPError: When the request fails for another reason, the
         runner never re-registers within *grace_s* (the original drop), or the
@@ -5252,6 +5257,18 @@ async def _post_across_runner_reconnect(
             extra={"session_id": session_id},
         )
         if not await runner_router.wait_for_runner(runner_id, timeout_s=grace_s):
+            raise
+        if repeat_requires_capability is not None and not runner_router.runner_supports(
+            runner_id, repeat_requires_capability
+        ):
+            _logger.warning(
+                "Runner %s reconnected but lacks %s; not repeating %s for session=%s",
+                runner_id,
+                repeat_requires_capability,
+                what,
+                session_id,
+                extra={"session_id": session_id},
+            )
             raise
         _logger.info(
             "Runner %s reconnected; repeating %s for session=%s",
@@ -6742,6 +6759,7 @@ async def _forward_event_to_runner(
             runner_id=conv.runner_id,
             runner_router=runner_router,
             grace_s=_RUNNER_FORWARD_RECONNECT_GRACE_S,
+            repeat_requires_capability=FORWARD_DEDUP_CAPABILITY,
         )
         # httpx only raises on transport errors, so a rejection (e.g. a 400 on a
         # malformed body, or a 501 from a runner with no process manager) would
@@ -6885,12 +6903,9 @@ async def _forward_event_to_runner(
                     attempted_override=_overridden,
                 )
     except (httpx.HTTPError, ConnectionError) as exc:
-        # Transport failure the runner did not outlive (a tunnel drop already
-        # waited for it to re-register). The message is persisted (invariant
-        # I1), and a trailing user item is what ``create_session`` replays as
-        # a recovery turn when the runner reconnects, so this really is a
-        # queued message rather than a failure. Keep publishing ``idle`` so
-        # the composer is released for a retry.
+        # The runner did not outlive the tunnel drop, but the message is
+        # persisted and ``create_session`` replays the trailing user item as a
+        # recovery turn on reconnect, so publish ``idle`` to free the composer.
         _logger.exception(
             "Forward to runner failed for session=%s",
             session_id,

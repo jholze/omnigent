@@ -11986,6 +11986,8 @@ async def test_message_forward_repeats_after_the_runner_tunnel_reconnects(
 
     wait_for_runner = AsyncMock(return_value=True)
     monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
+    # The reconnected runner advertises forward dedup, so the repeat is safe.
+    monkeypatch.setattr(RunnerRouter, "runner_supports", lambda self, rid, cap: True)
     # A MockTransport runner never emits the relay's ready heartbeat; the relay
     # has its own coverage.
     monkeypatch.setattr(routes_events, "_ensure_runner_relay_ready", AsyncMock(return_value=None))
@@ -12019,6 +12021,66 @@ async def test_message_forward_repeats_after_the_runner_tunnel_reconnects(
     messages = [record.getMessage() for record in caplog.records]
     assert any("Message forward lost the runner tunnel" in message for message in messages)
     assert not any("Forward to runner failed" in message for message in messages)
+
+
+async def test_message_forward_not_repeated_when_the_reconnected_runner_lacks_dedup(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A reconnected runner that cannot dedup a repeat is not sent one; the send fails as before.
+
+    An older runner predates the forward-dedup capability, so repeating a
+    forward it already took would run the turn twice. The server must fall back
+    to the pre-reconnect behavior: fail the drop as 503 ``runner_unavailable``
+    and leave the persisted message for the reconnect replay, which the runner
+    performs itself.
+    """
+    from omnigent.runner.routing import RunnerRouter
+    from omnigent.server.routes._sessions import orchestration as orchestration_module
+    from omnigent.server.routes.sessions import routes_events
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    SqlAlchemyConversationStore(db_uri).replace_runner_id(session["id"], "sdk-runner")
+    forwards = 0
+
+    def runner(request: httpx.Request) -> httpx.Response:
+        nonlocal forwards
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            forwards += 1
+            raise ConnectionError("tunnel closed before request completed")
+        return httpx.Response(200, json={})
+
+    wait_for_runner = AsyncMock(return_value=True)
+    monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
+    monkeypatch.setattr(RunnerRouter, "runner_supports", lambda self, rid, cap: False)
+    monkeypatch.setattr(routes_events, "_ensure_runner_relay_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(runner), base_url="http://runner"
+    ) as fake_runner:
+        _route_to_runner(monkeypatch, fake_runner)
+        resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            },
+        )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"]["code"] == "runner_unavailable"
+    wait_for_runner.assert_awaited_once_with(
+        "sdk-runner", timeout_s=orchestration_module._RUNNER_FORWARD_RECONNECT_GRACE_S
+    )
+    # No repeat against a runner that cannot dedup it; the persisted message
+    # remains for the reconnect replay.
+    assert forwards == 1
+    items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
+    assert [item["type"] for item in items] == ["message"]
 
 
 async def test_message_forward_fails_when_the_runner_tunnel_stays_down(

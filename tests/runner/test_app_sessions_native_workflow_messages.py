@@ -1560,6 +1560,114 @@ async def test_catch_up_scan_skips_codex_native_history_entries(
 
 
 @pytest.mark.asyncio
+async def test_catch_up_scan_dedupes_a_repeated_forward_of_the_item_it_took() -> None:
+    """
+    A forward repeated after catch-up took the item is acknowledged, not run twice.
+
+    When a tunnel drops with a message forward in flight, the runner's reconnect
+    catch-up scan finds the persisted user item and starts its turn. The server,
+    which lost that forward's response, repeats the forward on reconnect. The
+    runner must recognise that catch-up already owns the persisted item and
+    acknowledge the repeat instead of running a second turn.
+    """
+    import asyncio as _aio
+
+    from omnigent.runner import app as runner_app_mod
+
+    session_id = "3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a88"
+    agent_id = "880b5afda28ad55ff74cbeb9b5fc67fb"
+    forwarded_item_id = "item_forwarded_user"
+    saved_histories = dict(runner_app_mod._session_histories_ref)
+    runner_app_mod._session_histories_ref.clear()
+
+    # Empty at create (status idle); the forwarded user item surfaces only on
+    # the reconnect catch-up GET below.
+    server_client = _FakeServerClient([])
+    spec = AgentSpec(spec_version=1, name="catchup-forward-dedup")
+    hc = _ScriptedHarnessClient(
+        [
+            _sse({"type": "response.created", "response": {"id": "resp_catchup"}}),
+            _sse({"type": "response.completed", "response": {"id": "resp_catchup"}}),
+        ]
+    )
+    pm = _FakeProcessManager(hc)
+
+    async def _resolver(
+        resolved_agent_id: str, resolved_session_id: str | None = None
+    ) -> AgentSpec:
+        del resolved_agent_id, resolved_session_id
+        return spec
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=server_client,  # type: ignore[arg-type]
+    )
+
+    try:
+        async with _runner_client(app) as client:
+            resp = await client.post(
+                "/v1/sessions",
+                json={"session_id": session_id, "agent_id": agent_id},
+            )
+            assert resp.status_code == 201
+            assert resp.json()["status"] == "idle"
+
+            # Catch-up only scans sessions it already tracks; a prior turn put
+            # this SDK session into in-memory history before the reconnect.
+            runner_app_mod._session_histories_ref[session_id] = [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prior output"}],
+                }
+            ]
+            # The server persisted the user message during the drop.
+            server_client._items = [
+                {
+                    "id": forwarded_item_id,
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "deliver this across the recycle"}],
+                }
+            ]
+            hc.posted_bodies.clear()
+
+            await app.state.catch_up_scan()
+            for _ in range(100):
+                if hc.posted_bodies:
+                    break
+                await _aio.sleep(0.02)
+            assert len(hc.posted_bodies) == 1, (
+                "Catch-up must start exactly one turn for the newly persisted "
+                f"user item, got {len(hc.posted_bodies)}."
+            )
+
+            # The server repeats the forward whose response it lost; the runner
+            # already owns this item through catch-up.
+            repeat = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    "type": "message",
+                    "role": "user",
+                    "agent_id": agent_id,
+                    "content": [{"type": "input_text", "text": "deliver this across the recycle"}],
+                    "persisted_item_id": forwarded_item_id,
+                },
+            )
+            assert repeat.status_code == 202, repeat.text
+            assert repeat.json()["status"] == "accepted"
+            await _aio.sleep(0.1)
+            assert len(hc.posted_bodies) == 1, (
+                "The repeated forward must be deduped, not run again; "
+                f"the harness saw {len(hc.posted_bodies)} turns."
+            )
+    finally:
+        runner_app_mod._session_histories_ref.clear()
+        runner_app_mod._session_histories_ref.update(saved_histories)
+
+
+@pytest.mark.asyncio
 async def test_session_creation_stays_idle_for_completed_conversation() -> None:
     """POST /v1/sessions with history ending in an assistant message stays idle.
 

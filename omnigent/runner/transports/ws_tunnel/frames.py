@@ -206,6 +206,10 @@ class WSCloseFrame:
 # not tunneled HTTP responses or terminal WebSocket channel frames.
 EVENT_INGEST_CAPABILITY = "session-event-ingest-v1"
 
+# Hello capability: this runner deduplicates a repeated message forward by the
+# item's persisted id, so the server may safely retry one across a reconnect.
+FORWARD_DEDUP_CAPABILITY = "message-forward-dedup-v1"
+
 
 @dataclass
 class EventReadyFrame:
