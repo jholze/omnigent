@@ -38,7 +38,11 @@ from omnigent.models.model_catalog import (
     resolve_model_provider,
     spec_harness,
 )
-from omnigent.models.model_fallbacks import _SMART_ROUTING_FALLBACKS, CODEX_DEFAULT_MODEL
+from omnigent.models.model_fallbacks import (
+    _SMART_ROUTING_FALLBACKS,
+    CODEX_DEFAULT_MODEL,
+    CODEX_LAUNCH_DEFAULT_PREFERENCE,
+)
 from omnigent.models.model_metadata import (
     ModelCapability,
     ModelCostTier,
@@ -1287,16 +1291,19 @@ def test_static_model_fallbacks_document_ownership(table_key: str) -> None:
 
 
 def test_codex_default_model_names_a_concrete_variant() -> None:
-    """The codex launch default is the current economical Codex model.
+    """The codex launch defaults are concrete slugs in codex's own spelling.
 
-    A family alias is not safe for launch code that pins a concrete model.
-    The dotted slug is the spelling advertised by the installed Codex catalog.
+    A family alias is not safe for launch code that pins a concrete model, and
+    codex's backend 400s the hyphenated Databricks spelling. Luna leads; Sol
+    stays behind it for a codex whose bundled catalog predates GPT-6 Luna.
     """
-    assert CODEX_DEFAULT_MODEL == "gpt-6-luna"
-    assert not CODEX_DEFAULT_MODEL.startswith("databricks-")
-    assert codex_spawn_model(CODEX_DEFAULT_MODEL) == CODEX_DEFAULT_MODEL
-    # A bare family alias has no tier segment after the dotted version.
-    assert re.fullmatch(r"gpt-\d+\.\d+", CODEX_DEFAULT_MODEL) is None
+    assert CODEX_LAUNCH_DEFAULT_PREFERENCE == ("gpt-6-luna", "gpt-5.6-sol")
+    assert CODEX_LAUNCH_DEFAULT_PREFERENCE[0] == CODEX_DEFAULT_MODEL
+    for model in CODEX_LAUNCH_DEFAULT_PREFERENCE:
+        assert not model.startswith("databricks-")
+        assert codex_spawn_model(model) == model
+        # A bare family alias has no tier segment after the dotted version.
+        assert re.fullmatch(r"gpt-\d+\.\d+", model) is None
 
 
 def test_cursor_listing_uses_live_cli_base_models(
