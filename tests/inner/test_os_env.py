@@ -545,7 +545,9 @@ def test_write_bytes_lands_verbatim_through_helper(tmp_path: Path) -> None:
 def test_helper_write_rejects_bad_content_encoding(
     tmp_path: Path, request_extra: dict[str, str], expected_error: str
 ) -> None:
-    """The helper refuses a write it cannot decode instead of writing garbage."""
+    """The helper refuses a write it cannot decode and leaves the existing file untouched."""
+    target = tmp_path / "blob.bin"
+    target.write_bytes(b"keep me")
     result = _handle_helper_request(
         request={"op": "write", "path": "blob.bin", **request_extra},
         cwd=tmp_path,
@@ -553,4 +555,4 @@ def test_helper_write_rejects_bad_content_encoding(
         sandbox=_inactive_policy(),
     )
     assert expected_error in result["error"]
-    assert not (tmp_path / "blob.bin").exists()
+    assert target.read_bytes() == b"keep me"

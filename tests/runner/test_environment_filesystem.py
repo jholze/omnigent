@@ -334,20 +334,30 @@ async def test_write_file_honours_requested_encoding(
 
 
 @pytest.mark.asyncio
-async def test_write_file_rejects_unknown_encoding(
+@pytest.mark.parametrize(
+    ("encoding", "content"),
+    [
+        pytest.param("not-a-codec", "hello", id="unknown-codec"),
+        pytest.param("base64", "hello", id="non-text-codec"),
+        pytest.param("ascii", "café", id="unencodable-content"),
+    ],
+)
+async def test_write_file_rejects_unusable_encoding(
     client: httpx.AsyncClient,
     workspace: Path,
+    encoding: str,
+    content: str,
 ) -> None:
-    """PUT with an unknown ``encoding`` is a 400 that names it, and writes nothing."""
+    """An ``encoding`` that cannot produce bytes gives a 400 naming it; nothing is written."""
     resp = await client.put(
         f"/v1/sessions/conv_test/resources/environments"
         f"/{DEFAULT_ENVIRONMENT_ID}/filesystem/odd.txt",
-        json={"content": "hello", "encoding": "not-a-codec"},
+        json={"content": content, "encoding": encoding},
     )
     assert resp.status_code == 400, resp.text
     error = resp.json()["error"]
     assert error["code"] == "invalid_input"
-    assert "not-a-codec" in error["message"]
+    assert encoding in error["message"]
     assert not (workspace / "odd.txt").exists()
 
 

@@ -1444,6 +1444,11 @@ def register_resource_routes(
                 "use a text codec such as utf-8 or latin-1",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        except UnicodeEncodeError as exc:
+            raise OmnigentError(
+                f"Content cannot be encoded as {encoding!r}: {exc}",
+                code=ErrorCode.INVALID_INPUT,
+            ) from exc
         try:
             existing = await fs.read(relative_path, limit=None)
             if existing.encoding and filesystem_registry is not None:
