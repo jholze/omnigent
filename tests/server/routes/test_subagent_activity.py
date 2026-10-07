@@ -596,3 +596,56 @@ async def test_child_summary_prefers_confirmed_outcome_over_stale_error(
     assert summary.current_task_status == outcome
     assert summary.last_task_error is None
     assert not summary.busy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["warm", "cold"])
+async def test_reactivation_clears_offline_sweep_failure(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, cache_state: str
+) -> None:
+    """Reactivating a swept child drops the failure the summary would show.
+
+    An offline sweep can leave a child ``failed`` with durable error labels.
+    When the child reactivates and republishes running, those labels must clear
+    so the summary stops projecting Failed over the live child, on a warm cache
+    and on a cold one (a restart or another replica) alike.
+    """
+    from omnigent.server.routes._sessions import common, helpers
+    from omnigent.server.schemas import ErrorDetail
+
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation()
+    child = store.create_conversation(
+        kind="sub_agent",
+        parent_conversation_id=parent.id,
+        labels={
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            "omnigent.claude_native.subagent_id": "agent-1",
+        },
+    )
+    await helpers._persist_session_status_error_labels(
+        child.id,
+        ErrorDetail(code="runner_disconnected", message="runner vanished mid-turn"),
+        store,
+    )
+    common._session_status_cache[child.id] = "failed"
+    try:
+        failed = helpers._child_session_summary_from_conversation(
+            store.get_conversation(child.id), parent.id, None
+        )
+        assert failed.current_task_status == "failed"
+        assert failed.last_task_error is not None
+
+        publish_parent = Mock()
+        monkeypatch.setattr(helpers, "_publish_child_status_to_parent", publish_parent)
+        await record_subagent_activity(child.id, "delegated", store)
+
+        refreshed = store.get_conversation(child.id)
+        assert refreshed.labels[CLAUDE_SUBAGENT_OUTCOME_LABEL] == ""
+        if cache_state == "cold":
+            common._session_status_cache.pop(child.id, None)
+        final = helpers._child_session_summary_from_conversation(refreshed, parent.id, None)
+        assert final.current_task_status != "failed"
+        assert final.last_task_error is None
+    finally:
+        common._session_status_cache.pop(child.id, None)

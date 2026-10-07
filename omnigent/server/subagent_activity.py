@@ -280,11 +280,17 @@ async def record_subagent_activity(
                     confirmed=True,
                 )
             elif claude_mirror:
-                from omnigent.server.routes._sessions.helpers import _publish_status
+                from omnigent.server.routes._sessions.helpers import (
+                    _persist_session_status_error_labels,
+                    _publish_status,
+                )
 
                 await asyncio.to_thread(
                     store.set_labels, child.id, {CLAUDE_SUBAGENT_OUTCOME_LABEL: ""}
                 )
+                # Drop a stale offline-sweep failure the summary would otherwise
+                # project as Failed over the now-running child.
+                await _persist_session_status_error_labels(child.id, None, store)
                 _publish_status(child.id, "running")
     except Exception:  # noqa: BLE001 — display metadata must not interrupt child delivery
         _logger.warning("Could not record subagent activity for %s", child_id, exc_info=True)
