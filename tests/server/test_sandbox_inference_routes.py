@@ -240,6 +240,105 @@ async def test_preview_preserves_acp_slug_without_creating_session_or_sandbox(en
     env.launch.assert_not_called()
 
 
+async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env):
+    from omnigent.server.inference_catalog import SandboxInferenceService
+
+    target = env.app.state.sandbox_config.default
+    target.host_config = None
+    rows = [{"id": "system.ai.gpt-6-astra", "displayName": "Astra 6"}]
+    target.gateway_model_options = AsyncMock(return_value=rows)
+    env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
+    before = env.persisted()
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "configured": False,
+        "models": rows,
+        "configuration_revision": None,
+        "provider_label": "AI Gateway",
+        "default_model": None,
+        "status": "ready",
+    }
+    assert response.headers["cache-control"] == "private, no-store"
+    target.gateway_model_options.assert_awaited_once_with("codex-native", None)
+    assert env.persisted() == before
+    env.launch.assert_not_called()
+
+
+@pytest.mark.parametrize("selected", [True, False])
+async def test_gateway_failure_keeps_launch_selection_and_default_usable(env: _Env, selected):
+    from omnigent.server.inference_catalog import SandboxInferenceService
+
+    target = env.app.state.sandbox_config.default
+    target.host_config = None
+    target.gateway_model_options = AsyncMock(side_effect=RuntimeError("private upstream error"))
+    env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
+    preview = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
+    )
+    assert preview.status_code == 200
+    assert preview.json()["status"] == "unavailable"
+    assert preview.json()["configured"] is False
+    assert "private upstream error" not in preview.text
+    agent = await create_test_agent(
+        env.client,
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        include_llm=False,
+    )
+    selection = (
+        {"model_override": "system.ai.gpt-6-astra", "reasoning_effort": "max"} if selected else {}
+    )
+    created = await env.client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "host_type": "managed",
+            "sandbox_provider": "agent_sandbox",
+            **selection,
+        },
+    )
+    assert created.status_code == 201, created.text
+    saved = env.store.get_conversation(created.json()["id"])
+    assert saved is not None
+    assert saved.model_override == selection.get("model_override")
+    assert saved.reasoning_effort == selection.get("reasoning_effort")
+    assert saved.inference_snapshot is None
+    env.launch.assert_awaited_once()
+    # Optional discovery is never a dependency of session provisioning.
+    assert target.gateway_model_options.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "connection", [{"auth": {"type": "provider", "name": "private"}}, {"profile": "private"}]
+)
+async def test_agent_provider_does_not_inherit_ambient_gateway_preview(env: _Env, connection):
+    from omnigent.server.inference_catalog import SandboxInferenceService
+
+    target = env.app.state.sandbox_config.default
+    target.host_config = None
+    target.gateway_model_options = AsyncMock()
+    env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
+    agent = await create_test_agent(
+        env.client,
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "codex"},
+            **connection,
+        },
+        include_llm=False,
+    )
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex/model-options",
+        params={"agent_id": agent["id"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "unconfigured"
+    assert response.json()["models"] == []
+    target.gateway_model_options.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "harness,family,agent_harness",
     [
