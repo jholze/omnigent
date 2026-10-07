@@ -197,12 +197,15 @@ def _patch_login_env(
     if not real_resolver:
         monkeypatch.setattr(cli_mod, "_databricks_workspace_auth_info", _auth_info)
     else:
-        # The real resolver's SDK Config reads every DATABRICKS_* variable;
-        # ambient CI credentials would change which auth path a seeded
-        # profile takes, and so which token it presents.
-        for name in list(os.environ):
-            if name.startswith("DATABRICKS_") and name != "DATABRICKS_CONFIG_FILE":
-                monkeypatch.delenv(name)
+        # The real resolver's SDK Config reads these variables; ambient CI
+        # credentials would change which auth path a seeded profile takes,
+        # and so which token it presents.
+        from databricks.sdk.config import Config
+
+        ambient = {attr.env for attr in Config.attributes() if attr.env}
+        ambient.update(name for name in os.environ if name.startswith("DATABRICKS_"))
+        for name in ambient - {"DATABRICKS_CONFIG_FILE"}:
+            monkeypatch.delenv(name, raising=False)
 
     login_calls: list[str] = []
 
@@ -617,13 +620,15 @@ def test_login_stale_retry_presents_the_profile_it_just_logged_into(
                 fh.write(f"\n[{profile}]\nhost = {host}\nauth_type = databricks-cli\n")
             return 0, f"Profile {profile} was successfully saved\n"
         if argv[:2] == ["auth", "token"]:
-            # Like the real CLI: the host-keyed lookup is ambiguous once two
-            # profiles share the host, and only the OAuth profile the login
-            # wrote has a grant to mint from.
-            if "--profile" not in argv or argv[argv.index("--profile") + 1] != _PROFILE:
+            # Like the real CLI, the host-keyed lookup is ambiguous once two
+            # profiles share the host; a per-profile mint returns that
+            # profile's own token.
+            tokens = {"workspace-pat": "tok-stale", _PROFILE: "tok-fresh"}
+            profile = argv[argv.index("--profile") + 1] if "--profile" in argv else None
+            if profile not in tokens:
                 return 1, ""
             minted = {
-                "access_token": "tok-fresh",
+                "access_token": tokens[profile],
                 "token_type": "Bearer",
                 "expiry": "2099-01-01T00:00:00Z",
             }
