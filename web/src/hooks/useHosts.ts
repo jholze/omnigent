@@ -5,7 +5,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
 import type { NativeModelOption } from "@/lib/types";
@@ -202,9 +202,22 @@ export function useHostModelOptions(
     // Retry failed prefetches on selection without restarting exhausted retries.
     if (becameSelected && isError && !isFetching) void refetch();
   }, [canRefresh, isError, isFetching, refetch]);
-  // Only the first attempt is an initial load. Once the catalog has failed, the
-  // poll refetches in the background so a picker that already settled stays usable.
-  return { ...query, isLoading: query.isLoading && query.errorUpdateCount === 0 };
+  // React Query drops a data-less query's error and status while it refetches.
+  // Keep the last failure until the catalog arrives, so a picker that already
+  // settled stays settled, with its message, while the poll retries in the background.
+  const [lastFailure, setLastFailure] = useState<{ key: string; error: Error } | null>(null);
+  useEffect(() => {
+    if (query.isError) setLastFailure({ key: pollerKey, error: query.error });
+    else if (query.isSuccess) setLastFailure(null);
+  }, [pollerKey, query.isError, query.isSuccess, query.error]);
+  const lastError = lastFailure?.key === pollerKey ? lastFailure.error : null;
+  const error = query.error ?? (query.isPending ? lastError : null);
+  return {
+    ...query,
+    error,
+    isError: error !== null,
+    isLoading: query.isLoading && lastError === null,
+  };
 }
 
 interface InstallHarnessResult {

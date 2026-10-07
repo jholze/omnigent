@@ -484,12 +484,16 @@ describe("useHostModelOptions", () => {
       await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
       expect(result.current.isFetching).toBe(true);
       expect(result.current.isLoading).toBe(false);
+      expect(result.current.isError).toBe(true);
+      expect(result.current.error?.name).toBe("TimeoutError");
 
       answer?.(
         mockResponse({ models: [{ id: "opus", model: "claude-opus-5", displayName: "Opus 5" }] }),
       );
       await waitFor(() => expect(result.current.isSuccess).toBe(true));
       expect(result.current.data?.map((model) => model.displayName)).toEqual(["Opus 5"]);
+      expect(result.current.isError).toBe(false);
+      expect(result.current.error).toBeNull();
     } finally {
       vi.useRealTimers();
     }
