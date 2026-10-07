@@ -2487,13 +2487,6 @@ def create_app(
                 "A backing service is at its concurrent request limit; retry shortly.",
                 code=ErrorCode.UPSTREAM_RESOURCE_EXHAUSTED,
             )
-            add_audit_attrs(
-                code=str(exhausted.code),
-                http_status=str(exhausted.http_status),
-                error_category=exhausted.category.value,
-                error_impact=exhausted.impact.value,
-                error_phase=exhausted.phase.value,
-            )
             _logger.warning(
                 "Upstream call refused at a backing service's request limit: %s",
                 exc,
