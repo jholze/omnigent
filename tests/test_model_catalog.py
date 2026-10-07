@@ -40,6 +40,7 @@ from omnigent.models.model_catalog import (
 )
 from omnigent.models.model_fallbacks import (
     _SMART_ROUTING_FALLBACKS,
+    BACKGROUND_TITLE_CODEX_ECONOMY_MODEL,
     CODEX_DEFAULT_MODEL,
     CODEX_LAUNCH_DEFAULT_PREFERENCE,
 )
@@ -1303,8 +1304,22 @@ def test_codex_default_model_names_a_concrete_variant() -> None:
     for model in CODEX_LAUNCH_DEFAULT_PREFERENCE:
         assert not model.startswith("databricks-")
         assert codex_spawn_model(model) == model
-        # A bare family alias has no tier segment after the dotted version.
-        assert re.fullmatch(r"gpt-\d+\.\d+", model) is None
+        # A bare family alias has no tier segment after the version.
+        assert re.fullmatch(r"gpt-\d+(\.\d+)?", model) is None
+
+
+def test_background_title_codex_economy_model_stays_catalog_compatible() -> None:
+    """The codex background-title pin names an arm older codex CLIs still serve.
+
+    Background titles launch with ``--model`` without reading the installed
+    codex catalog, so the economy pin stays on a GPT-5.x arm; GPT-6 Luna ships
+    only from codex 0.157.0 and its backend rejects it on older CLIs.
+    """
+    assert BACKGROUND_TITLE_CODEX_ECONOMY_MODEL == "gpt-5.6-luna"
+    assert BACKGROUND_TITLE_CODEX_ECONOMY_MODEL.startswith("gpt-5.")
+    assert codex_spawn_model(BACKGROUND_TITLE_CODEX_ECONOMY_MODEL) == (
+        BACKGROUND_TITLE_CODEX_ECONOMY_MODEL
+    )
 
 
 def test_cursor_listing_uses_live_cli_base_models(

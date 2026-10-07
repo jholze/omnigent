@@ -240,12 +240,13 @@ _BACKGROUND_TITLE_FALLBACKS: dict[str, StaticModelFallback] = {
         ),
     ),
     "codex": StaticModelFallback(
-        model_ids=("gpt-6-luna",),
+        model_ids=("gpt-5.6-luna",),
         owner="Background session titles (omnigent.runner.background_titles.service)",
         provenance=(
-            "codex's own dotted catalog slug for its cheapest current arm (GPT-6 Luna, "
-            "bundled from codex 0.157.0) — the gateway's hyphenated spelling 400s on "
-            "codex's backend"
+            "codex's own dotted catalog slug for a broadly compatible cheap arm; a "
+            "title launch pins --model without reading the installed catalog, so it "
+            "names the GPT-5.6 Luna arm older CLIs still serve rather than GPT-6 Luna "
+            "(codex 0.157.0+) — the gateway's hyphenated spelling 400s on codex's backend"
         ),
         discovery_gap=(
             "a background title never consults the session's live model catalog, "
@@ -257,5 +258,7 @@ _BACKGROUND_TITLE_FALLBACKS: dict[str, StaticModelFallback] = {
 #: The claude-family arm background session titles pin.
 BACKGROUND_TITLE_CLAUDE_ECONOMY_MODEL = _BACKGROUND_TITLE_FALLBACKS["claude"].model_ids[0]
 
-#: The codex-family arm background session titles pin.
+#: The codex-family arm background session titles pin. The title launch pins
+#: --model without reading the installed catalog, so it stays on the GPT-5.6
+#: arm older CLIs serve; GPT-6 Luna ships only from codex 0.157.0.
 BACKGROUND_TITLE_CODEX_ECONOMY_MODEL = _BACKGROUND_TITLE_FALLBACKS["codex"].model_ids[0]
