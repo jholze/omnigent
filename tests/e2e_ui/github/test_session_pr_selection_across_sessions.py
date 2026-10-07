@@ -237,35 +237,37 @@ def gh_stubbed_server(
     }
     server_log = (tmp_path / "server.log").open("w")
     runner_log = (tmp_path / "runner.log").open("w")
-    server = subprocess.Popen(
-        [
-            server_executable(),
-            "-m",
-            "omnigent.cli",
-            "server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{tmp_path / 'test.db'}",
-            "--artifact-location",
-            str(tmp_path / "artifacts"),
-            "--agent",
-            str(agent_yaml),
-        ],
-        env=server_env,
-        cwd=compat_server_cwd(),
-        stdout=server_log,
-        stderr=subprocess.STDOUT,
-    )
-    runner = subprocess.Popen(
-        [sys.executable, "-m", "omnigent.runner._entry"],
-        env=runner_env,
-        stdout=runner_log,
-        stderr=subprocess.STDOUT,
-    )
+    server: subprocess.Popen[bytes] | None = None
+    runner: subprocess.Popen[bytes] | None = None
     try:
+        server = subprocess.Popen(
+            [
+                server_executable(),
+                "-m",
+                "omnigent.cli",
+                "server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--database-uri",
+                f"sqlite:///{tmp_path / 'test.db'}",
+                "--artifact-location",
+                str(tmp_path / "artifacts"),
+                "--agent",
+                str(agent_yaml),
+            ],
+            env=server_env,
+            cwd=compat_server_cwd(),
+            stdout=server_log,
+            stderr=subprocess.STDOUT,
+        )
+        runner = subprocess.Popen(
+            [sys.executable, "-m", "omnigent.runner._entry"],
+            env=runner_env,
+            stdout=runner_log,
+            stderr=subprocess.STDOUT,
+        )
         deadline = time.monotonic() + _HEALTH_TIMEOUT_S
         last_error = "not polled yet"
         while time.monotonic() < deadline:
@@ -368,6 +370,12 @@ def _wait_github_loaded(page: Page) -> None:
     expect(rail.get_by_text("Loading GitHub…", exact=True)).to_have_count(0, timeout=30_000)
 
 
+def _hold(page: Page, ms: int) -> None:
+    """Keep an asserted state on screen while the journey is being recorded."""
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        page.wait_for_timeout(ms)
+
+
 def test_selected_pr_survives_switching_sessions(
     request: pytest.FixtureRequest,
     pr_sessions: tuple[str, str, str],
@@ -381,19 +389,19 @@ def test_selected_pr_survives_switching_sessions(
     page.goto(f"{base_url}/c/{session_a}")
     _open_github_tab(page)
     _link_pr(page, OPEN_PR, OPEN_LABEL)
-    page.wait_for_timeout(1_500)
+    _hold(page, 1_500)
     _link_pr(page, MERGED_PR, MERGED_LABEL)
     # The merged PR was seen last, so it is the session's default selection.
     expect(rail.get_by_label("Pull request status: Merged")).to_be_visible(timeout=30_000)
     page.screenshot(path=tmp_path / "1-session-a-default-merged.png", animations="disabled")
-    page.wait_for_timeout(2_500)
+    _hold(page, 2_500)
 
     picker.click()
     page.get_by_role("option", name=OPEN_LABEL, exact=True).click()
     expect(picker).to_have_text(OPEN_LABEL)
     expect(rail.get_by_label("Pull request status: Open")).to_be_visible(timeout=30_000)
     page.screenshot(path=tmp_path / "2-session-a-picked-open.png", animations="disabled")
-    page.wait_for_timeout(2_500)
+    _hold(page, 2_500)
 
     page.get_by_role("link", name=SESSION_B_TITLE, exact=True).click()
     expect(page).to_have_url(re.compile(rf"/c/{session_b}"))
@@ -401,13 +409,13 @@ def test_selected_pr_survives_switching_sessions(
     _link_pr(page, OPEN_PR, OPEN_LABEL)
     expect(picker).to_have_text(OPEN_LABEL)
     page.screenshot(path=tmp_path / "3-session-b-open.png", animations="disabled")
-    page.wait_for_timeout(2_000)
+    _hold(page, 2_000)
 
     page.get_by_role("link", name=SESSION_A_TITLE, exact=True).click()
     expect(page).to_have_url(re.compile(rf"/c/{session_a}"))
     _open_github_tab(page)
     _wait_github_loaded(page)
-    page.wait_for_timeout(3_000)
+    _hold(page, 3_000)
     page.screenshot(path=tmp_path / "4-session-a-after-switch.png", animations="disabled")
     expect(picker).to_have_text(OPEN_LABEL, timeout=10_000)
     expect(rail.get_by_label("Pull request status: Open")).to_be_visible()

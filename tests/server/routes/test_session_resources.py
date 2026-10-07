@@ -2995,6 +2995,39 @@ async def test_github_info_proxies_to_runner(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_github_info_unassociated_pr_returns_typed_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """A runner 400 for a PR the session no longer tracks passes through typed.
+
+    When the panel asks for a remembered PR the session has since dropped,
+    the runner rejects it with a 400 ``detail``. The proxy re-derives a typed
+    ``invalid_input`` 400 instead of flattening it to a generic 502, so the
+    client can tell this authoritative rejection from a transient gateway
+    failure and forget only the stale selection.
+    """
+    fake_runner = _FakeRunnerClient(
+        responses={
+            "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/github": (
+                400,
+                {"detail": "This pull request is not associated with the session"},
+            ),
+        },
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.get(
+        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/github",
+        params={"pr_url": "https://github.com/o/r/pull/1"},
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_input"
+    assert body["error"]["message"] == "This pull request is not associated with the session"
+
+
+@pytest.mark.asyncio
 async def test_github_changes_proxies_to_runner(client: httpx.AsyncClient) -> None:
     """GET /resources/github/changes proxies the PR file list to the runner."""
     fake_runner = _FakeRunnerClient(payload={"object": "list", "data": [], "has_more": False})

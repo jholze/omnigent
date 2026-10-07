@@ -70,6 +70,7 @@ import { useResizableColumn } from "@/hooks/useResizableColumn";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { ApiError } from "@/lib/sessionsApi";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import {
   fetchGithubFileContents,
@@ -848,13 +849,13 @@ export function GithubPanel({ conversationId }: { conversationId: string }) {
     },
     [conversationId],
   );
-  // A remembered PR is tentative until the runner serves it again: the session
-  // may no longer track it (the runner rejects the URL), so fall back then.
+  // A remembered PR is tentative until the runner serves it again. Only a 400
+  // (the session no longer tracks that URL) drops it; other failures keep it.
   useEffect(() => {
     if (!restored) return;
     if (info.data) {
       setSelection({ sessionId: conversationId, url: restored });
-    } else if (info.error && !(info.error instanceof RunnerOfflineError)) {
+    } else if (info.error instanceof ApiError && info.error.status === 400) {
       forgetSelection();
     }
   }, [conversationId, restored, info.data, info.error, forgetSelection]);

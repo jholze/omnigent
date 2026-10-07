@@ -95,6 +95,7 @@ import { useGithubInfo, useGithubChangedFiles } from "@/hooks/useGithub";
 import { GithubPanel, deriveGithubPanelState, LARGE_DIFF_THRESHOLD } from "./GithubPanel";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { ApiError } from "@/lib/sessionsApi";
 
 function file(
   path: string,
@@ -912,7 +913,9 @@ describe("remembered session PR", () => {
   it("forgets a remembered PR the session no longer tracks", async () => {
     const stale = "https://github.com/example/project/pull/99";
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: stale });
-    const rejected = failing(new Error("This pull request is not associated with the session"));
+    const rejected = failing(
+      new ApiError("This pull request is not associated with the session", 400, "invalid_input"),
+    );
     vi.mocked(useGithubInfo).mockImplementation((_conversationId, options) =>
       options?.prUrl === stale ? rejected : served(options?.prUrl ?? merged),
     );
@@ -921,10 +924,14 @@ describe("remembered session PR", () => {
     expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBeUndefined();
   });
 
-  it("keeps the remembered PR while the runner is offline", () => {
+  it.each([
+    ["the runner is offline", new RunnerOfflineError()],
+    ["the gateway fails", new ApiError("502 Bad Gateway", 502, null)],
+    ["the network fails", new TypeError("Failed to fetch")],
+  ])("keeps the remembered PR while %s", (_failure, error) => {
     writeSessionWorkspaceState("conv_1", { selectedPrUrl: open });
-    const offline = failing(new RunnerOfflineError());
-    vi.mocked(useGithubInfo).mockImplementation(() => offline);
+    const transient = failing(error);
+    vi.mocked(useGithubInfo).mockImplementation(() => transient);
     renderPanel();
     expect(useGithubInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: open });
     expect(readSessionWorkspaceState("conv_1").selectedPrUrl).toBe(open);

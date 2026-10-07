@@ -15,6 +15,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { authenticatedFetch } from "@/lib/identity";
+import { apiErrorFromResponse } from "@/lib/sessionsApi";
 import { isTempConvId } from "@/lib/tempConversationId";
 import {
   isRunnerUnavailable503,
@@ -158,18 +159,10 @@ export interface GithubFileDiffResponse {
   after: string | null;
 }
 
-/** Surface the server's error message (e.g. a git failure) rather than a bare
- *  status code, mirroring the workspace hooks. */
-async function errorFromResponse(res: Response): Promise<Error> {
-  let message = `${res.status} ${res.statusText}`;
-  try {
-    const body = (await res.json()) as { error?: { message?: string } };
-    if (body?.error?.message) message = body.error.message;
-  } catch {
-    // Non-JSON body (gateway/front-door error) — keep the status line.
-  }
-  return new Error(message);
-}
+// Carries the server's message plus its status and machine-readable code, so
+// callers can tell an authoritative rejection (a 400 for a PR the session no
+// longer tracks) from a transient gateway/network failure.
+const errorFromResponse = apiErrorFromResponse;
 
 /** Classify a 404 body from the GitHub resource endpoint.
  *
