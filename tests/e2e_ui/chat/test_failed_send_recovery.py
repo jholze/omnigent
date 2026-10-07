@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -115,7 +116,7 @@ def _send(page: Page, composer: Locator, text: str) -> None:
     page.get_by_role("button", name="Send", exact=True).click()
 
 
-def _wait_until(page: Page, predicate, timeout_ms: int) -> bool:  # type: ignore[no-untyped-def]
+def _wait_until(page: Page, predicate: Callable[[], bool], timeout_ms: int) -> bool:
     for _ in range(max(1, timeout_ms // 100)):
         if predicate():
             return True

@@ -4544,11 +4544,9 @@ describe("chatStore — send while streaming (queueing)", () => {
   });
 
   it("surfaces a failed send without settling the live turn", async () => {
-    // A send that fails while a turn is streaming used to roll its optimistic
-    // bubble back and stop there — no error block, no status change. That
-    // silence is why a message that never reaches the agent looks like it was
-    // never typed. The failure must show on the retained message; the live
-    // turn must not be touched.
+    // A send that fails mid-stream must surface on the retained message without
+    // touching the live turn: rolling the bubble back silently is why a message
+    // that never reaches the agent looks like it was never typed.
     useChatStore.setState({
       conversationId: "conv_abc",
       boundAgentId: "agent_xyz",
@@ -5419,10 +5417,9 @@ describe("chatStore — send (file attachments)", () => {
 });
 
 describe("chatStore — retained failed sends", () => {
-  // A failed send keeps its own entry in the transcript: a newer composer draft
-  // is never clobbered and a second failure never displaces the first. A network
-  // failure on the POST only proves the acknowledgement was lost; the committed
-  // item arriving under the send's stable id proves delivery.
+  // Each failed send keeps its own retained entry — a newer composer draft is
+  // never clobbered and a second failure never displaces the first. A committed
+  // item under the send's stable id proves delivery; a failed POST only lost the ack.
 
   beforeEach(() => {
     useChatStore.setState({
@@ -5943,6 +5940,22 @@ describe("chatStore — retained failed sends", () => {
 
     const [edited] = useChatStore.getState().failedUserMessages;
     expect(edited).toMatchObject({ text: "resend me", files: [], replyDraft });
+    expect(edited!.stableId).not.toBe(stableId);
+  });
+
+  it("treats a duplicated attachment as a changed message, not a no-op edit", () => {
+    const stableId = "f".repeat(32);
+    const keep = new File(["keep"], "keep.txt");
+    const drop = new File(["drop"], "drop.txt");
+    retain(stableId, { files: [keep, drop] });
+
+    // Same count and file set but a different multiset: the swapped-in duplicate
+    // is a new payload, so the edit must mint a fresh id rather than keep the old
+    // one the server would dedupe to the original body.
+    useChatStore.getState().editFailedMessage(stableId, "resend me", [keep, keep]);
+
+    const [edited] = useChatStore.getState().failedUserMessages;
+    expect(edited!.files).toEqual([keep, keep]);
     expect(edited!.stableId).not.toBe(stableId);
   });
 

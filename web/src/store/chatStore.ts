@@ -2257,7 +2257,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const unchanged =
       text === message.text &&
       files.length === message.files.length &&
-      files.every((file) => message.files.includes(file));
+      files.every((file, i) => file === message.files[i]);
     if (unchanged) return;
     // A changed body is a new message: the server dedupes a repeated stable id
     // to the item it already holds, so the edit must go out under a fresh id.
@@ -6651,7 +6651,13 @@ function reconcileFailedSendsWithSnapshot(
     itemIds,
     "persisted",
   );
-  return { failedUserMessages: retracted.failedUserMessages ?? flagged };
+  const next = retracted.failedUserMessages ?? flagged;
+  // Nothing flagged or retracted: keep the existing array so identity-based
+  // change detection skips a re-render, mirroring `retractDeliveredSends`.
+  const changed =
+    next.length !== s.failedUserMessages.length ||
+    next.some((m, i) => m !== s.failedUserMessages[i]);
+  return changed ? { failedUserMessages: next } : {};
 }
 
 /**
