@@ -7,7 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { authenticatedFetch } from "@/lib/identity";
-import { ApiError } from "@/lib/sessionsApi";
+import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
 import type { NativeModelOption } from "@/lib/types";
 
 export interface Host {
@@ -93,28 +93,58 @@ export function useHosts(options: UseHostsOptions = {}) {
   });
 }
 
-async function fetchHostModelOptions(
+// Client deadline for one model-options request. The server gives the host 15 s
+// and replies 504 after that, so this only fires when the request itself is stuck.
+export const MODEL_OPTIONS_TIMEOUT_MS = 30_000;
+
+/** The host did not answer: either the client deadline or the server's 504. */
+function isHostTimeout(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "TimeoutError") ||
+    (error instanceof ApiError && error.status === 504)
+  );
+}
+
+async function readHostModelOptions(
   hostId: string,
   harness: string,
+  signal: AbortSignal,
 ): Promise<NativeModelOption[]> {
   const res = await authenticatedFetch(
     `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/model-options`,
+    { signal },
   );
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: unknown };
-      if (typeof body.detail === "string" && body.detail) detail = body.detail;
-    } catch {
-      // Non-JSON error body — keep the status-line detail.
-    }
-    throw new Error(detail);
-  }
+  if (!res.ok) throw await apiErrorFromResponse(res);
   const body = (await res.json()) as { models?: NativeModelOption[]; error?: string };
   const models = body.models ?? [];
   // Backward compatibility with servers that encoded probe failure in a 200.
   if (models.length === 0 && body.error) throw new Error(body.error);
   return models;
+}
+
+async function fetchHostModelOptions(
+  hostId: string,
+  harness: string,
+): Promise<NativeModelOption[]> {
+  // Race the whole request, body included, against the deadline so the query
+  // settles even when the transport never answers or ignores the abort.
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const reason = new DOMException(
+        `host '${hostId}' did not return model options within ${MODEL_OPTIONS_TIMEOUT_MS / 1000}s`,
+        "TimeoutError",
+      );
+      controller.abort(reason);
+      reject(reason);
+    }, MODEL_OPTIONS_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([readHostModelOptions(hostId, harness, controller.signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // A shared request may start from an inactive observer while another needs retries.
@@ -156,9 +186,12 @@ export function useHostModelOptions(
     refetchInterval: canRefresh ? 15_000 : false,
     ...(!poll && { refetchOnWindowFocus: false, refetchOnReconnect: false }),
     // Retry boot-probe races while any picker uses this catalog. Persistent
-    // failures surface after bounded backoff (~22 s).
-    retry: (failureCount) =>
-      (modelCatalogPollers.get(queryClient)?.get(pollerKey) ?? 0) > 0 && failureCount < 6,
+    // failures surface after bounded backoff (~22 s). A host that is not
+    // answering is not a boot race: the 15 s poll tries it again instead.
+    retry: (failureCount, error) =>
+      !isHostTimeout(error) &&
+      (modelCatalogPollers.get(queryClient)?.get(pollerKey) ?? 0) > 0 &&
+      failureCount < 6,
     retryDelay: (attempt) => Math.min(5_000, 1_000 * 2 ** attempt),
   });
   const previouslyRefreshing = useRef(canRefresh);
@@ -169,7 +202,9 @@ export function useHostModelOptions(
     // Retry failed prefetches on selection without restarting exhausted retries.
     if (becameSelected && isError && !isFetching) void refetch();
   }, [canRefresh, isError, isFetching, refetch]);
-  return query;
+  // Only the first attempt is an initial load. Once the catalog has failed, the
+  // poll refetches in the background so a picker that already settled stays usable.
+  return { ...query, isLoading: query.isLoading && query.errorUpdateCount === 0 };
 }
 
 interface InstallHarnessResult {

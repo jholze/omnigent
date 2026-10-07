@@ -4,6 +4,7 @@ import { startTransition, Suspense, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  MODEL_OPTIONS_TIMEOUT_MS,
   useDetectedCredentials,
   useHostModelOptions,
   useHosts,
@@ -411,6 +412,84 @@ describe("useHostModelOptions", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       await waitFor(() => expect(result.current.isError).toBe(true));
       expect(result.current.error?.message).toBe("the codex model probe failed — see the host log");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a hung model-options request within a bounded deadline", async () => {
+    fetchMock.mockReturnValue(new Promise<Response>(() => {}));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper,
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      expect(result.current.isLoading).toBe(true);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+
+      await vi.advanceTimersByTimeAsync(MODEL_OPTIONS_TIMEOUT_MS - 1_000);
+      expect(result.current.isLoading).toBe(true);
+
+      // Past the deadline, but before the 15 s poll fires again: the query has
+      // settled to an error and a retry (due 1 s after the failure) did not run.
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.isError).toBe(true);
+      expect(result.current.error?.name).toBe("TimeoutError");
+      expect(init?.signal?.aborted).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces the server's host-deadline 504 without retrying", async () => {
+    const detail = "host 'host_1' did not resolve model options within 15s";
+    fetchMock.mockResolvedValue(mockResponse({ detail }, 504));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper,
+      });
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      expect(result.current.error?.message).toBe(detail);
+      // Retries would fire at 1 s, 3 s and 7 s; the poll only refetches at 15 s.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("polls in the background after a timeout and fills in once the host answers", async () => {
+    let answer: ((response: Response) => void) | undefined;
+    fetchMock.mockReturnValueOnce(new Promise<Response>(() => {})).mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      }),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper,
+      });
+      await vi.advanceTimersByTimeAsync(MODEL_OPTIONS_TIMEOUT_MS + 1_000);
+      await waitFor(() => expect(result.current.isError).toBe(true));
+
+      // The 15 s poll re-requests the catalog; a picker that already settled
+      // must not spin again while the new request is pending.
+      await vi.advanceTimersByTimeAsync(15_000);
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      expect(result.current.isFetching).toBe(true);
+      expect(result.current.isLoading).toBe(false);
+
+      answer?.(
+        mockResponse({ models: [{ id: "opus", model: "claude-opus-5", displayName: "Opus 5" }] }),
+      );
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(result.current.data?.map((model) => model.displayName)).toEqual(["Opus 5"]);
     } finally {
       vi.useRealTimers();
     }
