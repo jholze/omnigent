@@ -3581,14 +3581,14 @@ def _build_host_daemon_env(
         such as ``None`` / ``""`` for local daemon mode.
     :returns: Environment dict for ``subprocess.Popen``.
     """
-    from omnigent.host.connect import (
-        _RUNNER_ENV_ALLOWLIST,
-        _RUNNER_ENV_ALLOWLIST_PREFIXES,
-    )
     from omnigent.host.identity import (
         HOST_ID_ENV_VAR,
         HOST_NAME_ENV_VAR,
         HOST_TOKEN_ENV_VAR,
+    )
+    from omnigent.host.runner_env import (
+        _RUNNER_ENV_ALLOWLIST,
+        _RUNNER_ENV_ALLOWLIST_PREFIXES,
     )
 
     identity_env_vars = frozenset(
