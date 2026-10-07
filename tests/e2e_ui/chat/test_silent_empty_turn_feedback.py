@@ -1,12 +1,9 @@
 """A turn the user watched start and stop must never end with no feedback.
 
-Mid-session the user sends a prompt; Omnigent shows the working indicator, then
-stops with no assistant reply, no error, and no notice. The trigger
-is a completed-but-empty model response: the stream completes normally but its
-only output item is an empty assistant message, so the turn resolves silently.
-
-The final assertion fails on the unfixed build (nothing renders for turn 2) and
-passes once the empty turn surfaces feedback: a reply, an error pill, or notice.
+Mid-session, a completed-but-empty model response (the stream completes, but its
+only output item is an empty assistant message) used to resolve silently: no
+reply, no error, no notice. The executor now retries once and then surfaces a
+retryable error notice that names the empty completion.
 """
 
 from __future__ import annotations
@@ -23,6 +20,9 @@ _WORKING = '[data-testid="working-indicator"]'
 
 _TURN1_TOKEN = "SILENT-STOP-TURN-ONE"
 _TURN2_TOKEN = "SILENT-STOP-TURN-TWO"
+# Deeper than the executor's retry window (2 attempts), so the fault stays active
+# until the turn fails loud and the mock's non-empty fallback is never reached.
+_EMPTY_REPLIES = 5
 
 
 def _send(page: Page, text: str) -> None:
@@ -40,9 +40,7 @@ def test_turn_that_stops_must_leave_feedback(
 ) -> None:
     base_url, session_id = seeded_session
 
-    # Both queues are deep: turn 1 so a background title request can't drain the
-    # one real reply, turn 2 so a fix that retries the empty turn still runs out
-    # on the same fault and must surface feedback rather than loop silently.
+    # Turn 1 is queued deep too, so a background title request cannot drain it.
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": "hello from turn one"}] * 3,
@@ -51,7 +49,7 @@ def test_turn_that_stops_must_leave_feedback(
     )
     configure_mock_llm(
         mock_llm_server_url,
-        [{"text": ""}] * 3,
+        [{"text": ""}] * _EMPTY_REPLIES,
         key="silent-stop-t2",
         match=_TURN2_TOKEN,
     )
@@ -68,9 +66,13 @@ def test_turn_that_stops_must_leave_feedback(
     expect(page.locator(_WORKING).first).to_be_visible(timeout=30_000)
     expect(page.locator(_WORKING)).to_have_count(0, timeout=90_000)
 
-    feedback = page.locator(_ASSISTANT).nth(1).or_(page.get_by_test_id("error-pill").first).first
+    pill = page.get_by_test_id("error-pill").first
     expect(
-        feedback,
-        "turn 2 started and stopped but left no feedback at all: no assistant "
-        "reply and no error/notice pill rendered (silent stop)",
+        pill,
+        "turn 2 started and stopped but surfaced no error notice (silent stop)",
     ).to_be_visible(timeout=15_000)
+    expect(page.get_by_test_id("error-headline").first).to_contain_text(
+        "ran into an error during this turn"
+    )
+    pill.click()
+    expect(page.get_by_test_id("error-message-content").first).to_contain_text("empty completion")
