@@ -43,6 +43,7 @@ from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
     touch_connect_marker,
 )
+from omnigent.runner.transports.ws_tunnel.diagnostics import TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
@@ -560,6 +561,7 @@ async def serve_tunnel(
             server_recycle = False
             attempt += 1
             connection_id = uuid.uuid4().hex
+            diagnostics = TunnelDiagnostics()
             try:
                 activity_kwargs = {"on_activity": on_activity} if on_activity is not None else {}
                 renewal_signal: asyncio.Future[str | None] = (
@@ -586,6 +588,7 @@ async def serve_tunnel(
                         attempt=attempt,
                         disconnected_monotonic=disconnected_monotonic,
                         event_dispatcher=event_dispatcher,
+                        diagnostics=diagnostics,
                         renewal_interval_s=renewal_interval_s,
                         renewal_signal=renewal_signal,
                         on_prepare_renewal=_prepare_renewal,
@@ -864,6 +867,7 @@ async def serve_tunnel(
                     backoff_reset=backoff_reset,
                     delay_s=delay_s,
                     retry_in_s=round(jittered, 3),
+                    **diagnostics.snapshot(),
                 ),
             )
             if connected_this_attempt:
@@ -1114,6 +1118,7 @@ async def _serve_tunnel_once(
     attempt: int = 1,
     disconnected_monotonic: float | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
+    diagnostics: TunnelDiagnostics | None = None,
     renewal_interval_s: float | None = None,
     renewal_signal: asyncio.Future[str | None] | None = None,
     on_prepare_renewal: Callable[[], Awaitable[str | None]] | None = None,
@@ -1160,6 +1165,7 @@ async def _serve_tunnel_once(
     :param disconnected_monotonic: ``time.monotonic()`` when the previous
         connection ended, or ``None``. The gap to this connect is the
         outage the server saw.
+    :param diagnostics: This attempt's observations, retained for disconnect logging.
     :returns: The close details the connection retained once it ended.
     """
     import websockets
@@ -1201,25 +1207,53 @@ async def _serve_tunnel_once(
         else _RUNNER_TUNNEL_CLOSE_TIMEOUT_S
     )
     connection_id = connection_id or uuid.uuid4().hex
-    async with websockets.connect(
-        tunnel_url,
-        additional_headers=headers,
-        close_timeout=close_timeout,
-        max_size=RUNNER_TUNNEL_MAX_MESSAGE_BYTES,
-        ssl=ssl_ctx,
-        # Protocol keepalive aligned to the server's 90 s app-level budget (not the
-        # 20 s library default that drops a busy-but-healthy tunnel — issue #1116).
-        # Also the runner's only liveness probe for a silently-dead server.
-        ping_interval=TUNNEL_KEEPALIVE_PING_INTERVAL_S,
-        ping_timeout=TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
-    ) as ws:
+    diagnostics = diagnostics or TunnelDiagnostics()
+    diagnostics.settings["tunnel_side"] = "runner"
+
+    def _report_diagnostics() -> None:
+        _logger.warning(
+            "Runner %s tunnel scheduling or send delay",
+            runner_id,
+            extra=debug_event(
+                "runner_tunnel_health",
+                session_id=runner_primary_session_id(),
+                runner_id=runner_id,
+                connection_id=connection_id,
+                **diagnostics.snapshot(),
+            ),
+        )
+
+    async with (
+        websockets.connect(
+            tunnel_url,
+            additional_headers=headers,
+            close_timeout=close_timeout,
+            max_size=RUNNER_TUNNEL_MAX_MESSAGE_BYTES,
+            ssl=ssl_ctx,
+            # Protocol keepalive aligned to the server's 90 s app-level budget (not the
+            # 20 s library default that drops a busy-but-healthy tunnel — issue #1116).
+            # Also the runner's only liveness probe for a silently-dead server.
+            ping_interval=TUNNEL_KEEPALIVE_PING_INTERVAL_S,
+            ping_timeout=TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
+        ) as ws,
+        diagnostics.monitoring(_report_diagnostics, connection_id=connection_id),
+    ):
+        diagnostics.settings.update(
+            protocol_ping_interval_s=getattr(ws, "ping_interval", None),
+            protocol_ping_timeout_s=getattr(ws, "ping_timeout", None),
+            protocol_keepalive_source="websockets_connection",
+        )
+
+        async def send_text(data: str) -> None:
+            await diagnostics.send(ws.send, data)
+
         if on_connected is not None:
             on_connected()
         downtime_s = (
             None if disconnected_monotonic is None else time.monotonic() - disconnected_monotonic
         )
         await _send_hello(
-            ws.send,
+            send_text,
             runner_version,
             direct_attach_port=direct_attach_port,
             direct_attach_token=direct_attach_token,
@@ -1227,7 +1261,7 @@ async def _serve_tunnel_once(
             event_dispatcher=event_dispatcher,
         )
         event_generation = (
-            event_dispatcher.connected(ws.send) if event_dispatcher is not None else None
+            event_dispatcher.connected(send_text) if event_dispatcher is not None else None
         )
         # Reconnect work can itself await event delivery; start receiving the
         # new generation's ready frame before that work waits for an ACK.
@@ -1252,6 +1286,7 @@ async def _serve_tunnel_once(
                 attempt=attempt,
                 downtime_s=_round_seconds(downtime_s),
                 pid=os.getpid(),
+                **diagnostics.snapshot(),
             ),
         )
 
@@ -1313,11 +1348,12 @@ async def _serve_tunnel_once(
                     await _handle_tunnel_frame(
                         app,
                         raw,
-                        ws.send,
+                        send_text,
                         dispatch_tasks,
                         ws_channels,
                         on_activity=on_activity,
                         event_dispatcher=event_dispatcher,
+                        diagnostics=diagnostics,
                         event_generation=event_generation,
                     )
             else:
@@ -1379,11 +1415,12 @@ async def _serve_tunnel_once(
                         await _handle_tunnel_frame(
                             app,
                             raw,
-                            ws.send,
+                            send_text,
                             dispatch_tasks,
                             ws_channels,
                             on_activity=on_activity,
                             event_dispatcher=event_dispatcher,
+                            diagnostics=diagnostics,
                             event_generation=event_generation,
                         )
                 finally:
@@ -1391,6 +1428,7 @@ async def _serve_tunnel_once(
                     with contextlib.suppress(asyncio.CancelledError):
                         await shutdown_wait
         finally:
+            diagnostics.freeze()
             if event_dispatcher is not None:
                 event_dispatcher.disconnected(event_generation)
             if reconnect_task is not None:
@@ -1538,6 +1576,7 @@ async def _handle_tunnel_frame(
     *,
     on_activity: Callable[[], None] | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
+    diagnostics: TunnelDiagnostics | None = None,
     event_generation: int | None = None,
 ) -> None:
     """Handle one server-to-runner tunnel frame.
@@ -1553,8 +1592,11 @@ async def _handle_tunnel_frame(
         state map.
     :param on_activity: Optional sync callback fired for non-ping
         frames that represent real runner work.
+    :param diagnostics: Connection-local application frame and heartbeat observations.
     :returns: None.
     """
+    if diagnostics is not None:
+        diagnostics.frame_received()
     try:
         text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
         frame = decode_frame(text)
@@ -1572,7 +1614,11 @@ async def _handle_tunnel_frame(
         if event_dispatcher is not None:
             event_dispatcher.acknowledge(frame)
     elif isinstance(frame, PingFrame):
+        if diagnostics is not None:
+            diagnostics.app_ping_received()
         await send_text(encode_frame(PongFrame(ts=frame.ts)))
+        if diagnostics is not None:
+            diagnostics.app_pong_sent()
     elif isinstance(frame, RequestFrame):
         if on_activity is not None:
             on_activity()
