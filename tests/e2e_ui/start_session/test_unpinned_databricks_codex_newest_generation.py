@@ -1,9 +1,11 @@
-"""E2E: Databricks codex discovery must not default past a GPT-6 tier arm.
+"""E2E: an unpinned Databricks Codex session launches on the newest advertised GPT.
 
-With a workspace whose Unity Catalog model-services listing advertises
-``system.ai.gpt-6-luna`` (the current major-only tiered arm) alongside older
-GPT-5.x variants, an unpinned native Codex session must launch on the newest
-advertised generation — not lag on a GPT-5.x id.
+With a Unity Catalog model-services listing that advertises
+``system.ai.gpt-6-luna`` (a major-only tiered arm) next to older GPT-5.x ids,
+a new native Codex session that pins no model must launch on the newest
+advertised generation instead of lagging on a GPT-5.x id. Both a listing that
+also carries a release-curated arm and one made only of versioned ids are
+covered, because the discovery ranker treats those two cases differently.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -44,66 +47,84 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
 from tests.e2e_ui.start_session.test_unpinned_codex_default_model import _codex_pane_text
 
 _DATABRICKS_PROFILE = "e2e-mock"
-_WORKSPACE_MODELS = (
-    "system.ai.gpt-6-luna",
-    "system.ai.gpt-5-5",
-    "system.ai.gpt-5-4-mini",
-)
 _NEWEST_ADVERTISED = "system.ai.gpt-6-luna"
-# Models the codex TUI could plausibly launch on: the advertised workspace
-# listing plus Omnigent's static launch default (a discovery bypass).
-_LAUNCH_CANDIDATES = {
-    comparable_model_id(model_id): model_id
-    for model_id in (*_WORKSPACE_MODELS, CODEX_DEFAULT_MODEL)
-}
 _MODEL_SERVICES_PATH = "/api/2.1/unity-catalog/model-services"
 _HEALTH_TIMEOUT_S = 60.0
 _HEALTH_POLL_INTERVAL_S = 0.5
-# A cold launch pays workspace discovery plus a codex catalog probe before
-# the session's own codex TUI boots and paints its startup banner.
+# A cold launch pays workspace discovery plus a codex catalog probe before the
+# session's own codex TUI boots and paints its startup banner.
 _TUI_BANNER_TIMEOUT_MS = 120_000
 
 
+@dataclass(frozen=True)
+class WorkspaceListing:
+    """The codex-servable ids a mock workspace advertises."""
+
+    id: str
+    model_ids: tuple[str, ...]
+
+
+LISTINGS = (
+    WorkspaceListing(
+        "curated-arm-advertised",
+        ("system.ai.gpt-6-luna", "system.ai.gpt-5-5", "system.ai.gpt-5-4-mini"),
+    ),
+    WorkspaceListing("versioned-ids-only", ("system.ai.gpt-6-luna", "system.ai.gpt-5-4-mini")),
+)
+
+
 class _MockWorkspaceHandler(BaseHTTPRequestHandler):
-    """Unity Catalog model-services listing for a fake Databricks workspace."""
+    server: MockWorkspace
 
     def do_GET(self) -> None:
-        if self.path.split("?", 1)[0] == _MODEL_SERVICES_PATH:
-            body = json.dumps(
-                {
-                    "model_services": [
-                        {"name": f"model-services/{model_id}"} for model_id in _WORKSPACE_MODELS
-                    ]
-                }
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
+        self.server.requests.append(self.path)
+        if self.path.split("?", 1)[0] != _MODEL_SERVICES_PATH:
+            self.send_response(404)
             self.end_headers()
-            self.wfile.write(body)
             return
-        self.send_response(404)
+        body = json.dumps(
+            {
+                "model_services": [
+                    {"name": f"model-services/{model_id}"} for model_id in self.server.model_ids
+                ]
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *args: object) -> None:
         return
 
 
-def _launched_model(pane_text: str) -> str | None:
-    """Extract the model id the codex TUI reports it launched on.
+class MockWorkspace(ThreadingHTTPServer):
+    """A Databricks workspace that only answers the Unity Catalog model-services listing."""
 
-    The TUI has painted the model as ``model: <id>`` and as a ``<id> <effort>``
-    status-footer across versions, so match any pane token that folds to a
-    launch candidate instead of one banner shape.
-    """
-    for token in re.findall(r"[A-Za-z0-9._/\[\]-]+", pane_text):
-        if comparable_model_id(token) in _LAUNCH_CANDIDATES:
-            return token
-    return None
+    def __init__(self, model_ids: tuple[str, ...]) -> None:
+        super().__init__(("127.0.0.1", 0), _MockWorkspaceHandler)
+        self.model_ids = model_ids
+        self.requests: list[str] = []
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}"
+
+
+@dataclass(frozen=True)
+class CodexStack:
+    """A dedicated server + runner routing native Codex through a mock Databricks workspace."""
+
+    base_url: str
+    runner_id: str
+    workspace: MockWorkspace
+    tmp_dir: Path
+    server_log: Path
+    runner_log: Path
 
 
 def _write_databricks_provider_config(config_home: Path) -> None:
-    """Route native Codex through a Databricks profile provider."""
     config_home.mkdir(parents=True, exist_ok=True)
     (config_home / "config.yaml").write_text(
         f"""\
@@ -118,37 +139,56 @@ providers:
 
 
 def _write_databrickscfg(home_dir: Path, workspace_url: str) -> None:
-    """Point the launch profile at the mock workspace with a plain PAT."""
     (home_dir / ".databrickscfg").write_text(
         f"[{_DATABRICKS_PROFILE}]\nhost = {workspace_url}\ntoken = dapi-e2e-mock-token\n",
         encoding="utf-8",
     )
 
 
-@pytest.fixture
-def databricks_codex_gpt6_session(
-    built_spa: None,
-    tmp_path_factory: pytest.TempPathFactory,
-    request: pytest.FixtureRequest,
-) -> Iterator[tuple[str, str, Path]]:
-    """A runner-bound native Codex session on a GPT-6-advertising workspace.
+def _wait_healthy(
+    base_url: str,
+    runner_id: str,
+    proc: subprocess.Popen[bytes],
+    runner_proc: subprocess.Popen[bytes],
+    server_log: Path,
+    runner_log: Path,
+) -> None:
+    deadline = time.monotonic() + _HEALTH_TIMEOUT_S
+    last_error = "not polled yet"
+    while True:
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"server/runner not healthy within {_HEALTH_TIMEOUT_S:.0f}s "
+                f"(last_error={last_error}).\n"
+                f"Server log:\n{server_log.read_text()[-3000:]}\n"
+                f"Runner log:\n{runner_log.read_text()[-3000:]}"
+            )
+        if proc.poll() is not None:
+            last_error = f"server exited with {proc.returncode}"
+        elif runner_proc.poll() is not None:
+            last_error = f"runner exited with {runner_proc.returncode}"
+        else:
+            try:
+                if httpx.get(f"{base_url}/health", timeout=2).status_code == 200:
+                    status = httpx.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
+                    if status.status_code == 200 and status.json()["online"] is True:
+                        return
+                    last_error = f"runner status {status.status_code}: {status.text[:200]}"
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(_HEALTH_POLL_INTERVAL_S)
 
-    Spawns a dedicated server + runner because the private ``HOME`` (holding
-    ``.databrickscfg``) and ``OMNIGENT_CONFIG_HOME`` must exist before the
-    runner starts, and a cold shared model-catalog store keeps the launch on
-    this test's live workspace discovery.
+
+@contextmanager
+def dedicated_databricks_codex_stack(
+    model_ids: tuple[str, ...], server_tmp: Path, codex_path: str
+) -> Iterator[CodexStack]:
+    """Spawn a server + runner whose only provider is a Databricks profile at a mock workspace.
+
+    A dedicated pair is needed because the private ``HOME`` (``.databrickscfg``)
+    and ``OMNIGENT_CONFIG_HOME`` must exist before the runner starts, and a cold
+    shared catalog store keeps the launch on live workspace discovery.
     """
-    if request.config.getoption("--ui-base-url"):
-        pytest.skip("Databricks-discovery native Codex e2e requires an isolated spawned server")
-    codex_path = os.environ.get("OMNIGENT_CODEX_PATH") or shutil.which("codex")
-    if codex_path is None:
-        pytest.skip("codex CLI is required for native Codex e2e")
-    if not _codex_cli_supports_mocked_app_server(codex_path):
-        pytest.skip("codex CLI >= 0.139.0 is required for mocked app-server e2e")
-    if shutil.which("tmux") is None:
-        pytest.skip("tmux is required for native Codex terminals")
-
-    server_tmp = tmp_path_factory.mktemp("e2e_ui_dbx_codex_gpt6_server")
     config_home = server_tmp / "config-home"
     source_codex_home = server_tmp / "source-codex-home"
     home_dir = server_tmp / "home"
@@ -156,24 +196,19 @@ def databricks_codex_gpt6_session(
     artifact_dir = server_tmp / "artifacts"
     for path in (config_home, source_codex_home, home_dir, state_dir, artifact_dir):
         path.mkdir(parents=True, exist_ok=True)
-    # Keep managed-terminal private dirs on a SHORT path: tmux.sock must fit
-    # the ~108-char unix socket limit, which the pytest basetemp tree exceeds.
+    # tmux.sock must fit the ~108-char unix socket limit the pytest basetemp tree exceeds.
     tmp_dir = Path(tempfile.mkdtemp(prefix="codexgpt6-"))
 
-    workspace = ThreadingHTTPServer(("127.0.0.1", 0), _MockWorkspaceHandler)
+    workspace = MockWorkspace(model_ids)
     workspace_thread = threading.Thread(target=workspace.serve_forever, daemon=True)
     workspace_thread.start()
-    workspace_url = f"http://127.0.0.1:{workspace.server_address[1]}"
-
     _write_databricks_provider_config(config_home)
-    _write_databrickscfg(home_dir, workspace_url)
+    _write_databrickscfg(home_dir, workspace.url)
 
     port = _find_free_port()
     base_url = f"http://127.0.0.1:{port}"
-    log_path = server_tmp / "server.log"
-    runner_log_path = server_tmp / "runner.log"
-    db_path = server_tmp / "test.db"
-
+    server_log = server_tmp / "server.log"
+    runner_log = server_tmp / "runner.log"
     binding_token = secrets.token_urlsafe(32)
     runner_id = token_bound_runner_id(binding_token)
     shared_env = {
@@ -189,8 +224,6 @@ def databricks_codex_gpt6_session(
             "CODEX_HOME": str(source_codex_home),
             "HOME": str(home_dir),
             "OMNIGENT_CODEX_PATH": str(codex_path),
-            # Scope managed-terminal private dirs (tmux sockets) to this
-            # fixture so the test can capture the codex pane's text.
             "TMPDIR": str(tmp_dir),
         }
     )
@@ -203,7 +236,6 @@ def databricks_codex_gpt6_session(
         "RUNNER_SERVER_URL": base_url,
         "OMNIGENT_PROCESS_LOG_FILE": str(server_tmp / "runner-process.log"),
     }
-
     server_command = [
         sys.executable,
         "-c",
@@ -214,106 +246,133 @@ def databricks_codex_gpt6_session(
         "--port",
         str(port),
         "--database-uri",
-        f"sqlite:///{db_path}",
+        f"sqlite:///{server_tmp / 'test.db'}",
         "--artifact-location",
         str(artifact_dir),
     ]
 
-    log_handle = open(log_path, "w")  # noqa: SIM115
-    runner_log_handle = open(runner_log_path, "w")  # noqa: SIM115
     proc: subprocess.Popen[bytes] | None = None
     runner_proc: subprocess.Popen[bytes] | None = None
-    session_id: str | None = None
-    try:
-        proc = subprocess.Popen(
-            server_command, env=server_env, stdout=log_handle, stderr=subprocess.STDOUT
-        )
-        runner_proc = subprocess.Popen(
-            [sys.executable, "-m", "omnigent.runner._entry"],
-            env=runner_env,
-            stdout=runner_log_handle,
-            stderr=subprocess.STDOUT,
-        )
-        deadline = time.monotonic() + _HEALTH_TIMEOUT_S
-        last_error = "not polled yet"
-        while True:
-            if time.monotonic() > deadline:
-                raise RuntimeError(
-                    f"server/runner not healthy within {_HEALTH_TIMEOUT_S:.0f}s "
-                    f"(last_error={last_error}).\n"
-                    f"Server log:\n{log_path.read_text()[-3000:]}\n"
-                    f"Runner log:\n{runner_log_path.read_text()[-3000:]}"
-                )
-            if proc.poll() is not None:
-                last_error = f"server exited with {proc.returncode}"
-            elif runner_proc.poll() is not None:
-                last_error = f"runner exited with {runner_proc.returncode}"
-            else:
-                try:
-                    if httpx.get(f"{base_url}/health", timeout=2).status_code == 200:
-                        status = httpx.get(f"{base_url}/v1/runners/{runner_id}/status", timeout=2)
-                        if status.status_code == 200 and status.json()["online"] is True:
-                            break
-                        last_error = f"runner status {status.status_code}: {status.text[:200]}"
-                except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
-            time.sleep(_HEALTH_POLL_INTERVAL_S)
+    with open(server_log, "w") as log_handle, open(runner_log, "w") as runner_log_handle:
+        try:
+            proc = subprocess.Popen(
+                server_command, env=server_env, stdout=log_handle, stderr=subprocess.STDOUT
+            )
+            runner_proc = subprocess.Popen(
+                [sys.executable, "-m", "omnigent.runner._entry"],
+                env=runner_env,
+                stdout=runner_log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            _wait_healthy(base_url, runner_id, proc, runner_proc, server_log, runner_log)
+            yield CodexStack(
+                base_url=base_url,
+                runner_id=runner_id,
+                workspace=workspace,
+                tmp_dir=tmp_dir,
+                server_log=server_log,
+                runner_log=runner_log,
+            )
+        finally:
+            for child in (runner_proc, proc):
+                if child is not None and child.poll() is None:
+                    child.send_signal(signal.SIGTERM)
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=5)
+            workspace.shutdown()
+            workspace_thread.join(timeout=5)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        session_id = _create_native_codex_session(base_url, runner_id)
-        yield base_url, session_id, tmp_dir
-    finally:
-        if session_id is not None:
+
+def _launch_candidates(listing: WorkspaceListing) -> dict[str, str]:
+    """Ids the TUI could plausibly name: the listing plus Omnigent's static launch default."""
+    return {
+        comparable_model_id(model_id): model_id
+        for model_id in (*listing.model_ids, CODEX_DEFAULT_MODEL)
+    }
+
+
+def _launched_model(pane_text: str, candidates: dict[str, str]) -> str | None:
+    # The TUI paints the model as ``model: <id>`` or as an ``<id> <effort>``
+    # footer depending on the codex version, so match any token folding to a candidate.
+    for token in re.findall(r"[A-Za-z0-9._/\[\]-]+", pane_text):
+        if comparable_model_id(token) in candidates:
+            return token
+    return None
+
+
+@pytest.fixture(params=LISTINGS, ids=lambda listing: listing.id)
+def databricks_codex_gpt6_session(
+    request: pytest.FixtureRequest,
+    built_spa: None,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[CodexStack, str, WorkspaceListing]]:
+    """A runner-bound, unpinned native Codex session on a GPT-6-advertising workspace."""
+    listing: WorkspaceListing = request.param
+    if request.config.getoption("--ui-base-url"):
+        pytest.skip("Databricks-discovery native Codex e2e requires an isolated spawned server")
+    codex_path = os.environ.get("OMNIGENT_CODEX_PATH") or shutil.which("codex")
+    if codex_path is None:
+        pytest.skip("codex CLI is required for native Codex e2e")
+    if not _codex_cli_supports_mocked_app_server(codex_path):
+        pytest.skip("codex CLI >= 0.139.0 is required for mocked app-server e2e")
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux is required for native Codex terminals")
+
+    server_tmp = tmp_path_factory.mktemp(f"e2e_ui_dbx_codex_{listing.id}")
+    with dedicated_databricks_codex_stack(listing.model_ids, server_tmp, codex_path) as stack:
+        session_id = _create_native_codex_session(stack.base_url, stack.runner_id)
+        try:
+            yield stack, session_id, listing
+        finally:
             with suppress(httpx.HTTPError):
-                httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
-        for child in (runner_proc, proc):
-            if child is not None and child.poll() is None:
-                child.send_signal(signal.SIGTERM)
-                try:
-                    child.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=5)
-        workspace.shutdown()
-        workspace_thread.join(timeout=5)
-        runner_log_handle.close()
-        log_handle.close()
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+                httpx.delete(f"{stack.base_url}/v1/sessions/{session_id}", timeout=10.0)
 
 
 @pytest.mark.timeout(420)
 def test_unpinned_databricks_codex_session_launches_newest_advertised_generation(
-    page: Page,
-    databricks_codex_gpt6_session: tuple[str, str, Path],
+    request: pytest.FixtureRequest,
+    databricks_codex_gpt6_session: tuple[CodexStack, str, WorkspaceListing],
 ) -> None:
-    """An unpinned Databricks Codex launch runs GPT-6 Luna, not an older GPT-5.x."""
-    base_url, session_id, tmp_dir = databricks_codex_gpt6_session
-    page.goto(f"{base_url}/c/{session_id}")
+    """An unpinned Databricks Codex launch runs the newest advertised GPT, not an older GPT-5.x."""
+    stack, session_id, listing = databricks_codex_gpt6_session
+    # Request the page only now so a recording starts at the user's first
+    # navigation rather than during server boot.
+    page: Page = request.getfixturevalue("page")
+    page.goto(f"{stack.base_url}/c/{session_id}")
 
     # Attaching the Terminal view is what makes the runner spawn Codex for a
     # terminal-first wrapper session; the launch resolves the model under test.
     _open_terminal_view(page)
     _wait_terminal_connected(page)
 
-    # The Codex TUI startup banner/footer names the model the session
-    # launched on. The SPA renders the pane on a WebGL canvas, so read the
-    # same text from the managed tmux pane.
+    # The SPA renders the pane on a WebGL canvas, so read the TUI text from the
+    # managed tmux pane instead.
+    candidates = _launch_candidates(listing)
     deadline = time.monotonic() + _TUI_BANNER_TIMEOUT_MS / 1000
     pane_text = ""
     launched: str | None = None
     while time.monotonic() < deadline:
-        pane_text = _codex_pane_text(tmp_dir)
-        launched = _launched_model(pane_text)
+        pane_text = _codex_pane_text(stack.tmp_dir)
+        launched = _launched_model(pane_text, candidates)
         if launched is not None:
-            # Let the SPA terminal mirror the banner so a recording of this
-            # run ends on the observable outcome.
+            # Let the SPA terminal mirror the banner so a recording ends on the outcome.
             page.wait_for_timeout(3_000)
             break
         page.wait_for_timeout(1_000)
+
+    listed = ", ".join(listing.model_ids)
+    assert stack.workspace.requests, (
+        "the launch never consulted the workspace model-services listing"
+    )
     assert launched is not None, (
         f"Codex TUI never painted its launch model; last pane text:\n{pane_text}"
     )
     assert comparable_model_id(launched) == comparable_model_id(_NEWEST_ADVERTISED), (
-        f"workspace advertises {', '.join(_WORKSPACE_MODELS)} but the unpinned "
-        f"native Codex session launched on {launched!r} instead of the newest "
-        f"advertised generation {_NEWEST_ADVERTISED!r}; pane text:\n{pane_text}"
+        f"workspace advertises {listed} but the unpinned native Codex session launched on "
+        f"{launched!r} instead of the newest advertised generation {_NEWEST_ADVERTISED!r}; "
+        f"pane text:\n{pane_text}"
     )
