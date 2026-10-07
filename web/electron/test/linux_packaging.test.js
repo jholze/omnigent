@@ -15,12 +15,31 @@ const EXECUTABLE = packageConfig.name.toLowerCase();
 const INSTALL_DIR = `/opt/${PRODUCT_NAME}`;
 const CHROME_SANDBOX = `${INSTALL_DIR}/chrome-sandbox`;
 
+/** Every command the post-install script runs that could modify the host. */
+const HOST_TOOLS = [
+  "chmod",
+  "cp",
+  "rm",
+  "ln",
+  "readlink",
+  "update-alternatives",
+  "update-mime-database",
+  "update-desktop-database",
+  "apparmor_parser",
+];
+
 /** The deb after-install template electron-builder ships: the configured
  * `deb.afterInstall`, else app-builder-lib's default. */
 function debAfterInstallTemplate() {
   const configured = packageConfig.build.deb && packageConfig.build.deb.afterInstall;
   if (configured) return path.resolve(APP_DIR, configured);
-  const electronBuilderDir = path.dirname(require.resolve("electron-builder/package.json"));
+  // The default template lives in electron-builder, which CI does not install here.
+  let electronBuilderDir;
+  try {
+    electronBuilderDir = path.dirname(require.resolve("electron-builder/package.json"));
+  } catch {
+    assert.fail("deb.afterInstall is not configured and electron-builder is not installed");
+  }
   const appBuilderLib = path.dirname(
     require.resolve("app-builder-lib/package.json", { paths: [electronBuilderDir] }),
   );
@@ -45,32 +64,31 @@ function writeStub(dir, name, body) {
   fs.writeFileSync(path.join(dir, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
 }
 
-/** Run the rendered post-install script as dpkg would, with the privileged
- * tools stubbed to record their arguments; returns every recorded call
+/** Run the rendered post-install script as dpkg would, with every host-mutating
+ * tool stubbed to record its arguments; returns the recorded calls
  * ("<tool> <args>") in order. */
 function runPostInstall({ rootCanUnshare, apparmorEnabled = false }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "omnigent-deb-postinst-"));
-  const bin = path.join(tmp, "bin");
-  fs.mkdirSync(bin);
-  const callLog = path.join(tmp, "calls.log");
-  const recordCalls = (name, exitCode = 0) =>
-    writeStub(bin, name, `printf '%s\\n' "${name} $*" >> '${callLog}'\nexit ${exitCode}`);
-  writeStub(bin, "unshare", rootCanUnshare ? "exit 0" : "exit 1");
-  recordCalls("chmod");
-  recordCalls("cp");
-  recordCalls("update-alternatives");
-  recordCalls("update-mime-database");
-  recordCalls("update-desktop-database");
-  recordCalls("apparmor_status", apparmorEnabled ? 0 : 1);
-  recordCalls("apparmor_parser");
-  const script = path.join(tmp, "after-install.sh");
-  fs.writeFileSync(script, renderDebScript(debAfterInstallTemplate()));
-  const result = spawnSync("bash", [script], {
-    encoding: "utf8",
-    env: { PATH: `${bin}:/usr/bin:/bin`, LANG: "C" },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  return fs.existsSync(callLog) ? fs.readFileSync(callLog, "utf8").trim().split("\n") : [];
+  try {
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    const callLog = path.join(tmp, "calls.log");
+    const recordCalls = (name, exitCode = 0) =>
+      writeStub(bin, name, `printf '%s\\n' "${name} $*" >> '${callLog}'\nexit ${exitCode}`);
+    writeStub(bin, "unshare", rootCanUnshare ? "exit 0" : "exit 1");
+    for (const tool of HOST_TOOLS) recordCalls(tool);
+    recordCalls("apparmor_status", apparmorEnabled ? 0 : 1);
+    const script = path.join(tmp, "after-install.sh");
+    fs.writeFileSync(script, renderDebScript(debAfterInstallTemplate()));
+    const result = spawnSync("bash", [script], {
+      encoding: "utf8",
+      env: { PATH: `${bin}:/usr/bin:/bin`, LANG: "C" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return fs.existsSync(callLog) ? fs.readFileSync(callLog, "utf8").trim().split("\n") : [];
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 function chromeSandboxModes(calls) {
