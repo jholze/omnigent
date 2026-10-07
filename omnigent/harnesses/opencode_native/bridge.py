@@ -32,8 +32,12 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from omnigent.native import native_bridge_common
+
+if TYPE_CHECKING:
+    from omnigent.inner.terminal import TerminalInstance
 
 # Env var the runner stamps on the harness process so the executor can
 # locate its bridge directory. Mirrors ``HARNESS_CODEX_NATIVE_BRIDGE_DIR``.
@@ -771,3 +775,20 @@ def split_model_variant(model: str) -> tuple[str, str | None]:
     if not sep:
         return model, None
     return base, variant or None
+
+
+def native_input_ready(session_id: str, instance: TerminalInstance) -> bool:
+    """Provider ``input_ready_probe``: ``opencode serve`` is bound to *session_id*.
+
+    Web turns go to the server over HTTP, which the runner records in bridge
+    state (cleared at each launch) once the server is up.
+
+    :param session_id: Omnigent conversation id currently owning the terminal.
+    :param instance: The live attach terminal; its ``XDG_DATA_HOME`` locates the
+        bridge directory (see :func:`xdg_data_home_for_bridge_dir`).
+    """
+    xdg_data_home = instance.env.get("XDG_DATA_HOME")
+    if not xdg_data_home:
+        return False
+    state = read_bridge_state(Path(xdg_data_home).parent)
+    return state is not None and state.session_id == session_id
