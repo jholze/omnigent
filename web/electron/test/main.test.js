@@ -382,6 +382,26 @@ function loadNavigationHarness({
     session: { defaultSession },
     shell: {},
     systemPreferences: {},
+    // The external-sign-in probe answers directly here, so the window loads in
+    // place; a front-door bounce to another origin is covered by the e2e suite.
+    net: {
+      request: () => {
+        const request = Object.assign(new EventEmitter(), {
+          followRedirect() {},
+          abort() {
+            setImmediate(() => request.emit("abort"));
+          },
+          end() {
+            setImmediate(() => {
+              const response = new EventEmitter();
+              request.emit("response", response);
+              setImmediate(() => response.emit("end"));
+            });
+          },
+        });
+        return request;
+      },
+    },
   };
 
   const localRequires = {

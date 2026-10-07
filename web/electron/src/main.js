@@ -24,6 +24,7 @@ const {
   ipcMain,
   nativeImage,
   nativeTheme,
+  net,
   screen,
   session,
   shell,
@@ -53,6 +54,7 @@ const {
   normalizeSavedServerUrl,
   fetchServerManifest,
   isDatabricksManagedServerUrl,
+  isDatabricksAppsServerUrl,
   databricksWorkspaceUiUrl,
   PRE_MANIFEST_BASELINE,
   parseManifestAuth,
@@ -1124,6 +1126,106 @@ function focusAfterBrowserSignIn(win) {
   if (process.platform === "darwin") app.focus({ steal: true });
 }
 
+/** Short probe timeout: connecting must never stall behind it, so it fails open. */
+const EXTERNAL_SIGN_IN_PROBE_TIMEOUT_MS = 5000;
+/** Guard against a redirect loop while probing a front door. */
+const MAX_SIGN_IN_PROBE_HOPS = 10;
+
+/**
+ * Return the first off-origin redirect an unauthenticated navigation to
+ * `serverUrl` is bounced to — an external SSO front door — or null. Carries the
+ * session cookies so an already-signed-in server is not mistaken for one, and
+ * fails open rather than blocking a connect.
+ *
+ * @param {string} serverUrl
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<string | null>}
+ */
+function detectExternalSignIn(serverUrl, { signal } = {}) {
+  let serverOrigin;
+  try {
+    serverOrigin = new URL(serverUrl).origin;
+  } catch {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let foreign = null;
+    let hops = 0;
+    const request = net.request({
+      url: serverUrl,
+      session: session.defaultSession,
+      useSessionCookies: true,
+      redirect: "manual",
+    });
+    const timer = setTimeout(() => request.abort(), EXTERNAL_SIGN_IN_PROBE_TIMEOUT_MS);
+    timer.unref?.();
+    const onAbort = () => request.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(foreign);
+    };
+    request.on("redirect", (_status, _method, redirectUrl) => {
+      if (settled || foreign) return;
+      let offOrigin;
+      try {
+        offOrigin = new URL(redirectUrl).origin !== serverOrigin;
+      } catch {
+        // An unparseable Location isn't a page the window could load either.
+        request.abort();
+        return;
+      }
+      // Leaving the origin is the signal: stop here (manual mode then finishes
+      // with this 3xx response) so the foreign sign-in page is never fetched.
+      if (offOrigin) {
+        foreign = redirectUrl;
+        return;
+      }
+      if (hops++ >= MAX_SIGN_IN_PROBE_HOPS) {
+        request.abort();
+        return;
+      }
+      request.followRedirect();
+    });
+    request.on("response", (response) => {
+      response.on("data", () => {});
+      response.on("end", finish);
+      response.on("error", finish);
+    });
+    request.on("abort", finish);
+    request.on("error", finish);
+    request.end();
+  });
+}
+
+/**
+ * Hand sign-in to the system browser (on an explicit connect) and return the
+ * window to the connect screen: the IdP's security-key / biometric step has no
+ * prompt UI in the Electron window.
+ */
+function requireBrowserSignIn(win, serverUrl, { interactive = false } = {}) {
+  if (win.isDestroyed()) return;
+  console.warn("[omnigent] connect: sign-in moved to the system browser", {
+    origin: originOf(serverUrl),
+    interactive,
+  });
+  if (interactive) void shell.openExternal(serverUrl);
+  const server = serverDisplayName(serverUrl);
+  const message = interactive
+    ? `${server} signs you in through your browser. Finish there, then select Connect.`
+    : `${server} signs you in through your browser. Select Connect to open it.`;
+  const params = new URLSearchParams({ error: message, url: serverUrl });
+  if (windows.get(win)?.ephemeral) params.set("ephemeral", "1");
+  pinWindow(win, null);
+  setWindowServerUrl(win, null);
+  win.webContents.stop();
+  void loadSetupPage(win, params.toString());
+}
+
 /** Embedded-auth connections retain their existing reload-to-sign-in recovery. */
 function registerSessionExpiryAccess() {
   registerSessionExpiryReload(
@@ -2037,7 +2139,9 @@ async function loadServerUrl(
     }
     let target = loadUrl ?? (routePath ? resolveServerPath(serverUrl, routePath) : serverUrl);
     let manifest = null;
-    if (usesBrowserAuth(serverUrl)) {
+    let signInCookie = null;
+    const databricksBrowserAuth = usesBrowserAuth(serverUrl);
+    if (databricksBrowserAuth) {
       reportConnectionProgress(win, attempt, "authenticating");
       const auth = getDatabricksAuth();
       win.webContents.stop();
@@ -2095,6 +2199,7 @@ async function loadServerUrl(
       manifest = await fetchServerManifest(serverUrl, { signal });
       assertCurrent();
       const cookieName = oidcSessionCookie(serverUrl, manifest, windowState?.ephemeral);
+      signInCookie = cookieName;
       if (cookieName) {
         if (windowState) {
           windowState.authKind = "oidc";
@@ -2128,6 +2233,24 @@ async function loadServerUrl(
       }
     }
     assertCurrent();
+    // A Databricks App, or a server whose manifest a front door hid, can bounce
+    // unauthenticated requests to a sign-in page on another origin demanding a
+    // security key the Electron window cannot prompt for. Hand those to the
+    // browser; an embedded-rollback workspace stays in-window (login is same-origin).
+    if (
+      !databricksBrowserAuth &&
+      !signInCookie &&
+      (isDatabricksAppsServerUrl(serverUrl) || manifest?.manifestVersion < 1)
+    ) {
+      const externalSignIn = await detectExternalSignIn(serverUrl, { signal });
+      assertCurrent();
+      if (externalSignIn) {
+        requireBrowserSignIn(win, serverUrl, { interactive });
+        throw Object.assign(new Error("sign-in continues in the system browser"), {
+          code: "EXTERNAL_BROWSER_SIGN_IN",
+        });
+      }
+    }
     reportConnectionProgress(win, attempt, "connecting");
     if (manifest) {
       setWindowServerManifest(win, manifest);
@@ -3799,6 +3922,9 @@ function registerIpc() {
       return {};
     } catch (error) {
       if (error.name === "AbortError") return { cancelled: true };
+      // Sign-in moved to the system browser; the window already shows how to
+      // finish, so this isn't a connect error for the page to report.
+      if (error.code === "EXTERNAL_BROWSER_SIGN_IN") return { browserSignIn: true };
       // The overlay now covers this page and reconnects on its own.
       if (reconnectOverlay.isShown(win)) return { reconnecting: true };
       throw error;

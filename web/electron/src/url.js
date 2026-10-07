@@ -281,6 +281,25 @@
   }
 
   /**
+   * True for a Databricks App host (``*.databricksapps.com``). Apps serve their
+   * content behind the workspace SSO front door and never use the OAuth bridge.
+   *
+   * @param {string | null | undefined} rawUrl
+   * @returns {boolean}
+   */
+  function isDatabricksAppsServerUrl(rawUrl) {
+    let url;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      return false;
+    }
+    if (url.protocol !== "https:") return false;
+    const host = url.hostname.toLowerCase();
+    return host === DATABRICKS_APPS_HOST_SUFFIX || host.endsWith(`.${DATABRICKS_APPS_HOST_SUFFIX}`);
+  }
+
+  /**
    * Probe timeout for Databricks workspace detection. Deliberately short: a
    * slow or unreachable host must not stall the connect flow — on timeout we
    * fall back to loading the URL exactly as entered.
@@ -530,6 +549,7 @@
     expandDatabricksWorkspaceUrl,
     isDatabricksManagedServerUrl,
     isDatabricksOAuthServerUrl,
+    isDatabricksAppsServerUrl,
     WELL_KNOWN_MANIFEST_PATH,
     MANIFEST_FETCH_TIMEOUT_MS,
     PRE_MANIFEST_BASELINE,
