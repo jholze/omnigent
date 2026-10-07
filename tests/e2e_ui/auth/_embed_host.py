@@ -65,6 +65,11 @@ def build_embed_host() -> Path:
         if _build_is_current():
             return _DIST_DIR
         _HARNESS_BUILD_DIR.mkdir(exist_ok=True)
+        # Drop stale copies so a renamed or deleted harness source can't linger
+        # and get bundled; dist/ is the build output, not a source, so keep it.
+        for stale in _HARNESS_BUILD_DIR.iterdir():
+            if stale.is_file():
+                stale.unlink()
         for source in _HARNESS_SRC.iterdir():
             if source.is_file():
                 shutil.copy2(source, _HARNESS_BUILD_DIR / source.name)
@@ -91,9 +96,14 @@ def serve_embed_host(page: Page, base_url: str) -> None:
     def handler(route: Route) -> None:
         relative = urlparse(route.request.url).path[len(EMBED_BASENAME) :].lstrip("/")
         asset = (dist_dir / relative).resolve()
-        if relative.startswith("assets/") and asset.is_relative_to(dist_root) and asset.is_file():
-            content_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
-            route.fulfill(status=200, body=asset.read_bytes(), content_type=content_type)
+        if relative.startswith("assets/"):
+            # A missing/escaping asset is a build problem; 404 so it surfaces
+            # clearly instead of a confusing MIME error from served HTML.
+            if asset.is_relative_to(dist_root) and asset.is_file():
+                content_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
+                route.fulfill(status=200, body=asset.read_bytes(), content_type=content_type)
+            else:
+                route.fulfill(status=404, body=f"missing asset: {relative}")
             return
         route.fulfill(status=200, body=index_html, content_type="text/html; charset=utf-8")
 

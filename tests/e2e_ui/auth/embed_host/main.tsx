@@ -7,6 +7,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import { OmnigentApp, setOmnigentHostConfig } from "../src/embed";
 
+// Keep in sync with EMBED_BASENAME in _embed_host.py and `base` in vite.config.ts.
 const BASENAME = "/embed-host";
 // Wording the embedding host uses when its user session has expired; the host
 // fetcher rejects with it before any HTTP response reaches the web UI. Keep in
