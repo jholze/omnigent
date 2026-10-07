@@ -104,6 +104,7 @@ def test_start_registers_host_daemon_with_cp1252_stdio(live_server: str, tmp_pat
             f"{output}"
         )
         assert "Started the host daemon in the background" in output, output
+        assert host_logs, f"the host daemon produced no host log; CLI output:\n{output}"
         assert "charmap" not in host_log and "UnicodeEncodeError" not in host_log, (
             f"the host daemon could not encode its status output:\n{host_log[-3000:]}"
         )
