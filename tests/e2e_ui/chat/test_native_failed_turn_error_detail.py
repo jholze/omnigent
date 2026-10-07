@@ -77,13 +77,15 @@ def test_detail_less_native_failure_surfaces_readable_error(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """Shape 1: a native turn that fails with no detail must not fail silently."""
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
-    session_id = _create_native_codex_session(live_server, runner_id)
-    # Create the recorded page only after non-browser setup so the clip opens
-    # on the session navigation, not a blank page during runner/session setup.
-    page: Page = request.getfixturevalue("page")
+    respawned: subprocess.Popen[bytes] | None = None
+    session_id: str | None = None
     try:
+        respawned = _ensure_runner_online(live_server, tmp_path_factory)
+        runner_id = str(_server_state["runner_id"])
+        session_id = _create_native_codex_session(live_server, runner_id)
+        # Create the recorded page only after non-browser setup so the clip opens
+        # on the session navigation, not a blank page during runner/session setup.
+        page: Page = request.getfixturevalue("page")
         page.goto(f"{live_server}/c/{session_id}")
         expect(page.get_by_role("textbox", name="Message the agent")).to_be_visible(timeout=20_000)
 
@@ -102,7 +104,8 @@ def test_detail_less_native_failure_surfaces_readable_error(
         expect(native_failure_pill.first).to_be_visible(timeout=15_000)
     finally:
         try:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            if session_id is not None:
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         finally:
             _stop_respawned_runner(respawned)
 
@@ -113,13 +116,15 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """Shape 3: a successful reply must never be published as the failure reason."""
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
-    session_id = _create_native_codex_session(live_server, runner_id)
-    # Create the recorded page only after non-browser setup so the clip opens
-    # on the session navigation, not a blank page during runner/session setup.
-    page: Page = request.getfixturevalue("page")
+    respawned: subprocess.Popen[bytes] | None = None
+    session_id: str | None = None
     try:
+        respawned = _ensure_runner_online(live_server, tmp_path_factory)
+        runner_id = str(_server_state["runner_id"])
+        session_id = _create_native_codex_session(live_server, runner_id)
+        # Create the recorded page only after non-browser setup so the clip opens
+        # on the session navigation, not a blank page during runner/session setup.
+        page: Page = request.getfixturevalue("page")
         page.goto(f"{live_server}/c/{session_id}")
         expect(page.get_by_role("textbox", name="Message the agent")).to_be_visible(timeout=20_000)
 
@@ -151,6 +156,7 @@ def test_native_failure_does_not_show_assistant_reply_as_the_error(
         )
     finally:
         try:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            if session_id is not None:
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         finally:
             _stop_respawned_runner(respawned)

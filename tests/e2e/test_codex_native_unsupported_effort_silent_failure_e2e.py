@@ -582,15 +582,15 @@ def test_supported_effort_low_turn_completes(fake_codex_rig: _Rig) -> None:
 def test_unsupported_effort_minimal_failure_is_surfaced(fake_codex_rig: _Rig) -> None:
     """Require a visible reason when astra rejects minimal effort."""
     session_id = _create_pinned_session(fake_codex_rig, reasoning_effort="minimal")
+    # The rig log is module-scoped; ignore turns earlier tests appended.
+    log_before = len(fake_codex_rig.codex_requests())
     _send_user_message(fake_codex_rig, session_id, "Say hello.")
     outcome = _wait_for_turn_outcome(fake_codex_rig, session_id)
 
-    # A fix may reject the unsupported effort before ever dispatching the turn,
-    # which is equally non-silent. Only when a turn actually ran must it have
-    # run astra at minimal effort -- otherwise a setup regression (a supported
-    # model/effort reaching the fake) could dispatch a passing turn without
-    # exercising the reported failure at all.
-    requests = fake_codex_rig.codex_requests()
+    # A fix may reject the effort pre-dispatch (also non-silent); if a turn did
+    # run, it must be astra at minimal effort, or the reported failure was never
+    # exercised.
+    requests = fake_codex_rig.codex_requests()[log_before:]
     dispatched = any(line.startswith("turn ") for line in requests.splitlines())
     if dispatched:
         assert f"model={_ASTRA_MODEL} effort=minimal" in requests, (

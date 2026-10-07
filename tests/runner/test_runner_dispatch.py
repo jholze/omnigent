@@ -2373,12 +2373,7 @@ async def test_runner_failed_status_carries_setup_error_message(
 async def test_runner_setup_failure_with_empty_message_still_names_a_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A setup failure whose exception stringifies empty must still name a cause.
-
-    A setup-phase exception with an empty ``str()`` (e.g. a bare
-    ``TimeoutError()``) used to publish ``turn setup failed: `` with nothing
-    after the colon. The published failure must name the cause instead.
-    """
+    """Blank setup exceptions still publish their class as the failure cause."""
     conv = "conv_setup_failure_empty_message"
 
     async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
