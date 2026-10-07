@@ -34,8 +34,9 @@ for _name, _errors in (("stdout", "strict"), ("stderr", "backslashreplace")):
 
 _TUNNEL_HOST_ID = re.compile(r"/v1/hosts/([0-9a-f]{32})/tunnel")
 
-# Registration grace (30s) plus daemon claim and startup, with headroom.
-_START_DEADLINE_S = 120.0
+# Startup deadline. With the 30s cleanup below it stays well under CI's 180s
+# per-test timeout, leaving headroom for the assertions in between.
+_START_DEADLINE_S = 90.0
 
 
 def _legacy_stdio_env(base: Path) -> dict[str, str]:
@@ -122,6 +123,6 @@ def test_start_registers_host_daemon_with_cp1252_stdio(live_server: str, tmp_pat
             cwd=cwd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=60,
+            timeout=30,
             check=False,
         )
