@@ -2524,9 +2524,8 @@ function ComposerImpl(
   // re-fires this effect and drains. `boundAgentId` is a dep because the flush
   // needs it: on navigate-back the binding lands after the status settles, and
   // without this dep the effect wouldn't re-fire to drain a queue for the
-  // returned-to conversation. `sharedQueue`: another window's follow-up can
-  // leave the queue without any local status change; `sharedQueueStale`: the
-  // stream's snapshot landing frees a flush held for it the same way.
+  // returned-to conversation. `sharedQueue`/`sharedQueueStale`: shared-queue
+  // updates can free the head without a local status change.
   useEffect(() => {
     if (unreachable) return;
     maybeFlushQueuedHead();

@@ -51,11 +51,11 @@ message is only sent to the server when it's flushed or steered.
   only when it is the session-wide head, so two windows drain one message per
   turn in the order both display. A client's share lives as long as its SSE
   stream (plus a short grace), so a closed window cannot strand the others.
-  Until a connection's `session.queue` snapshot has arrived (the stream
-  announces one with `X-Omnigent-Stream-Features: queue`) the client treats
-  the queue as unknown: an idle send queues rather than overtake a follow-up it
-  has not seen yet, and the flush waits for the snapshot (with a bounded
-  fallback). An older server's stream carries no announcement, so sends there
+  From the first connection attempt, and again from the moment a stream drops,
+  until the next `session.queue` snapshot has arrived (the stream announces one
+  with `X-Omnigent-Stream-Features: queue`) the client treats the queue as
+  unknown: an idle send queues rather than overtake a follow-up it has not seen
+  yet, and the flush waits for the snapshot (with a bounded fallback). An older server's stream carries no announcement, so sends there
   behave as before. A window queues at most 50 follow-ups per session (the
   server's share bound): the composer refuses the next one and keeps its text,
   so every queued message has its own ordering slot and none is hidden from

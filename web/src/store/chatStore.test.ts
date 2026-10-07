@@ -17879,6 +17879,95 @@ describe("chatStore — queue shared across windows of a session", () => {
     expect(eventPosts(id)).toHaveLength(1);
   });
 
+  it("holds an idle send from the moment the stream drops until the next snapshot lands", async () => {
+    const sinks: StreamSink[] = [];
+    let answerReconnect!: () => void;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (/\/v1\/sessions\/[^/]+\/stream$/.test(url)) {
+        const sink = pushableStream();
+        sinks.push(sink);
+        const response = mockResponse(null, { bodyStream: sink.stream });
+        response.headers.set("x-omnigent-stream-features", "queue");
+        if (sinks.length === 1) return response;
+        // The reconnect request hangs until the test lets it answer.
+        return new Promise<Response>((resolve) => {
+          answerReconnect = () => resolve(response);
+        });
+      }
+      if (url.endsWith("/queue") && (init as RequestInit)?.method === "PUT") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return defaultFetchHandler(input as RequestInfo, init as RequestInit);
+    });
+    onTestFinished(() => {
+      for (const sink of sinks) {
+        try {
+          sink.close();
+        } catch {
+          // Already closed.
+        }
+      }
+    });
+    const id = "conv_reconnecting";
+    seedSession(id, []);
+    await useChatStore.getState().switchTo(id);
+    await tick();
+    useChatStore.setState({ boundAgentId: "agent_xyz" });
+    // The first connection's snapshot: nothing queued anywhere.
+    handleSessionEvent({ type: "session_queue", conversationId: id, messages: [] }, id);
+    expect(useChatStore.getState().sharedQueueStale).toBe(false);
+    expect(composerWouldQueue(id)).toBe(false);
+    // The stream drops and the reconnect request is still pending: another window
+    // may have queued meanwhile, so an idle send waits instead of posting.
+    await reconnect(sinks);
+    expect(useChatStore.getState().sharedQueueStale).toBe(true);
+    expect(composerWouldQueue(id)).toBe(true);
+    fetchMock.mockClear();
+    useChatStore.getState().enqueueMessage("mine");
+    await tick();
+    expect(eventPosts(id)).toEqual([]);
+    // The reconnect answers and its snapshot shows nothing ahead of ours: it flushes.
+    answerReconnect();
+    await tick();
+    await tick();
+    handleSessionEvent({ type: "session_queue", conversationId: id, messages: [] }, id);
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(eventPosts(id)).toHaveLength(1);
+  });
+
+  it("publishes a failed send's retry flag at once instead of after the fallback", async () => {
+    acceptQueuePuts();
+    await tick();
+    const sendSpy = vi.fn((...args: unknown[]) => {
+      const opts = args[3] as { onError?: (error: Error) => void } | undefined;
+      opts?.onError?.(new Error("boom"));
+      return Promise.resolve();
+    });
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [{ queueId: "q_1", text: "mine", conversationId: "conv_abc" }],
+    });
+    await tick();
+    fetchMock.mockClear();
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    // The message is back in the queue flagged for retry, and the other windows
+    // learn that now (no turn will start, so nothing is left to wait for).
+    expect(useChatStore.getState().queuedMessages).toMatchObject([
+      { queueId: "q_1", requiresRetry: true },
+    ]);
+    expect(queuePuts("conv_abc").at(-1)).toMatchObject({
+      messages: [{ queue_id: "q_1", requires_retry: true }],
+    });
+  });
+
   it("waits behind a follow-up another window holds, then flushes once it is gone", async () => {
     const sendSpy = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({

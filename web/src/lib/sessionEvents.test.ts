@@ -1806,6 +1806,7 @@ describe("session.queue (FLAT envelope)", () => {
       { queue_id: 1, client_id: "c_desktop", seq: 1, text: "x" },
       { queue_id: "q_1", client_id: "c_desktop", seq: Number.NaN, text: "x" },
       { queue_id: "q_1", client_id: "c_desktop", seq: 1, text: "x", attachments: ["a.png", 3] },
+      "not an object",
     ];
     for (const entry of malformed) {
       const out = parse("session.queue", {

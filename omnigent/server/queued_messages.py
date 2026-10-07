@@ -26,11 +26,10 @@ from omnigent.server.schemas import QueuedMessageInput
 # ~5-minute stream cap and page refreshes don't flicker the queue.
 _DETACH_GRACE_S = 15.0
 
-# Every stream of a conversation receives the whole merged list on each change,
-# so one user may hold only this many populated shares per conversation. A
-# stream-less share beyond the cap gives way (oldest first); a populated share
-# whose client holds a stream is refused instead of evicting another's queue.
-_MAX_SHARES_PER_USER = 8
+# Max populated shares per user per conversation (each change rebroadcasts the
+# whole merged list). Stream-less excess is evicted oldest first; a populated
+# share whose client holds a stream is refused instead of evicting another's.
+MAX_SHARES_PER_USER = 8
 
 _ShareKey = tuple[str, str]
 
@@ -205,7 +204,7 @@ def replace(
     :param messages: The client's complete current queue for this
         conversation, head first. An empty list clears its share.
     :raises ShareLimitExceeded: If the share would become populated while
-        the user already holds :data:`_MAX_SHARES_PER_USER` populated shares
+        the user already holds :data:`MAX_SHARES_PER_USER` populated shares
         for the conversation whose clients all hold streams (stream-less ones
         beyond the cap are dropped instead, oldest first).
     """
@@ -306,15 +305,13 @@ def _make_room_locked(conversation_id: str, queue: _ConversationQueue, keep: _Sh
         for other, share in queue.shares.items()
         if other[0] == keep[0] and other != keep and share.entries
     ]
-    excess = len(others) - (_MAX_SHARES_PER_USER - 1)
+    excess = len(others) - (MAX_SHARES_PER_USER - 1)
     if excess <= 0:
         return False
     detached = [other for other, share in others if share.connections == 0]
     if len(detached) < excess:
-        if not queue.shares:
-            _queues.pop(conversation_id, None)
         raise ShareLimitExceeded(
-            f"at most {_MAX_SHARES_PER_USER} populated queue shares per user and conversation"
+            f"at most {MAX_SHARES_PER_USER} populated queue shares per user and conversation"
         )
     for other in detached[:excess]:
         _drop_share_locked(conversation_id, queue, other)

@@ -1955,7 +1955,8 @@ function releaseHeldQueueShare(conversationId: string): void {
 
 /**
  * The session started a turn (`running`, or `waiting` when it parked before this
- * window saw `running`) or failed to: a share held for a settled send can go.
+ * window saw `running`) or failed to — including a send that failed client-side:
+ * a share held for a settled send can go.
  */
 function noteTurnEdgeForHeldShare(conversationId: string): void {
   const held = heldQueueShares.get(conversationId);
@@ -3710,6 +3711,9 @@ function queuedSendOptions(
           ],
         };
       });
+      // No turn will start: let other windows see the retry flag now, not
+      // after the fallback.
+      noteTurnEdgeForHeldShare(message.conversationId);
       setterFor(message.conversationId)((s) => ({
         blocks: [...s.blocks, makeClientErrorBlock(error, "")],
       }));
@@ -5929,6 +5933,10 @@ export async function startStreamPump(
         if (reason !== "dropped") break;
         if (!controller.signal.aborted && !isConversationDisposed(id)) {
           markLivePreviewsInterrupted(id, set);
+          // The dropped connection's view may already miss a follow-up another
+          // window queued: hold idle sends until the next snapshot or the fallback.
+          if (!get().sharedQueueStale) set({ sharedQueueStale: true });
+          if (snapshotFallback === null) armSnapshotFallback();
         }
       } finally {
         controller.signal.removeEventListener("abort", onOuterAbort);

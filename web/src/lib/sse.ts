@@ -992,7 +992,10 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
     }
     const messages: SharedQueuedMessage[] = [];
     for (const raw of rawMessages) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        console.warn("session.queue: dropping a frame with a malformed entry", raw);
+        return null;
+      }
       const entry = raw as Record<string, unknown>;
       const rawAttachments = entry.attachments ?? [];
       if (

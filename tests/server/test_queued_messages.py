@@ -187,23 +187,23 @@ async def test_cleared_share_republished_while_detached_gets_full_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Clearing a detached share cancels its expiry; a later share starts a fresh window."""
-    # Grace 2 s: the first timer would fire at 2.0 s; the fresh share published at
-    # ~0.5 s expires at ~2.5 s, so a check at ~2.2 s sits between the two.
-    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 2.0)
+    # Grace 3 s: the first timer would fire at 3.0 s; the fresh share published at
+    # ~1.5 s expires at ~4.5 s, so a check at ~3.75 s sits mid-way between the two.
+    monkeypatch.setattr(queued_messages, "_DETACH_GRACE_S", 3.0)
     collector = await start_session_stream_collector(CONV)
     try:
         queued_messages.replace(
             CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_1", "d1")]
         )
         await collector.next_event()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
         queued_messages.replace(CONV, client_id=DESKTOP, user_id=None, messages=[])
         assert (await collector.next_event())["messages"] == []
         queued_messages.replace(
             CONV, client_id=DESKTOP, user_id=None, messages=[_msg("q_2", "d2")]
         )
         await collector.next_event()
-        await asyncio.sleep(1.7)
+        await asyncio.sleep(2.25)
         # The first share's timer would have fired by now; the new share outlives it.
         assert _order(queued_messages.snapshot(CONV)) == [(DESKTOP, "d2")]
         expired = await collector.next_event()
@@ -271,7 +271,7 @@ async def test_stream_less_shares_are_capped_per_user() -> None:
             CONV, client_id="c_bob", user_id="bob@example.com", messages=[_msg("q_1", "b")]
         )
         await collector.next_event()
-        cap = queued_messages._MAX_SHARES_PER_USER
+        cap = queued_messages.MAX_SHARES_PER_USER
         for i in range(cap + 1):
             queued_messages.replace(
                 CONV, client_id=f"c_{i}", user_id=ALICE, messages=[_msg("q_1", f"a{i}")]
@@ -291,7 +291,7 @@ async def test_populated_shares_with_streams_beyond_the_cap_are_refused() -> Non
     """A user's streams can't inflate the merged list: the cap refuses rather than evicts."""
     collector = await start_session_stream_collector(CONV)
     try:
-        cap = queued_messages._MAX_SHARES_PER_USER
+        cap = queued_messages.MAX_SHARES_PER_USER
         for i in range(cap):
             queued_messages.attach(CONV, client_id=f"c_{i}", user_id=ALICE)
             queued_messages.replace(
