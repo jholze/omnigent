@@ -772,8 +772,9 @@ async def test_supervisor_cancels_obsolete_verdict_when_release_fails(
         await _stop(supervisor)
 
 
+@pytest.mark.parametrize("cancel_twice", [False, True])
 async def test_cancelled_verdict_task_finishes_its_key_sequence(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cancel_twice: bool
 ) -> None:
     """A verdict task cancelled between keys still sends the rest of the sequence."""
     sent: list[str] = []
@@ -795,10 +796,16 @@ async def test_cancelled_verdict_task_finishes_its_key_sequence(
     )
     # The decline sequence pauses before its Enter, so the cancel lands between keys.
     assert await _wait_for(lambda: sent == ["Escape"])
-    await cnp._cancel_cursor_elicitation_tasks((task,))
+    task.cancel()
+    if cancel_twice:
+        # A shutdown re-cancel while the task drains its delivery must not cut it short.
+        await asyncio.sleep(0)
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
     assert task.cancelled()
     # Escape alone leaves cursor at its reason prompt; the owed Enter still goes out.
-    assert sent == ["Escape", "Enter"]
+    assert await _wait_for(lambda: sent == ["Escape", "Enter"])
 
 
 async def test_supervise_transcript_yolo_auto_accepts_without_card(

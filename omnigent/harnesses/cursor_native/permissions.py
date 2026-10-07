@@ -43,7 +43,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Collection
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -167,7 +167,10 @@ async def _deliver_verdict_keys(bridge_dir: Path, session_id: str, *keys: str) -
     try:
         return await asyncio.shield(delivery)
     except asyncio.CancelledError:
-        await delivery
+        # A repeated cancel must not cut the sequence either; the task's own
+        # cancellation is what propagates, never a delivery error.
+        with suppress(asyncio.CancelledError, Exception):
+            await asyncio.shield(delivery)
         raise
 
 
