@@ -8119,7 +8119,8 @@ async def _relay_runner_stream_once(
                                 else None
                             )
                             if status == "failed":
-                                # Normalize failures from runners that predate this guard.
+                                # A failed edge must carry a usable reason even
+                                # when the runner reports none.
                                 status_error = _ensure_relayed_failure_reason(status_error)
                                 await _persist_session_status_error_labels(
                                     session_id,

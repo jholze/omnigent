@@ -257,6 +257,9 @@ else:
 
 def _free_port() -> int:
     with socket.socket() as sock:
+        # SO_REUSEADDR lets the chosen port be rebound immediately once this
+        # probe socket closes, avoiding a TIME_WAIT race before the server binds.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
 
@@ -548,7 +551,7 @@ def _wait_for_turn_outcome(rig: _Rig, session_id: str) -> _TurnOutcome:
             error_label=str(labels.get("omnigent.last_task_error_message", "") or ""),
             items=items,
         )
-        if status == "failed" or error_messages or assistant_texts:
+        if status == "failed" or error_messages or assistant_texts or last.error_label.strip():
             return last
         time.sleep(_POLL_INTERVAL_S)
     raise AssertionError(
@@ -582,25 +585,22 @@ def test_unsupported_effort_minimal_failure_is_surfaced(fake_codex_rig: _Rig) ->
     _send_user_message(fake_codex_rig, session_id, "Say hello.")
     outcome = _wait_for_turn_outcome(fake_codex_rig, session_id)
 
-    # The turn must actually have run astra at minimal effort; otherwise a
-    # setup regression (a supported model/effort reaching the fake) could pass
-    # this test without exercising the reported failure at all.
+    # A fix may reject the unsupported effort before ever dispatching the turn,
+    # which is equally non-silent. Only when a turn actually ran must it have
+    # run astra at minimal effort -- otherwise a setup regression (a supported
+    # model/effort reaching the fake) could dispatch a passing turn without
+    # exercising the reported failure at all.
     requests = fake_codex_rig.codex_requests()
-    assert f"model={_ASTRA_MODEL} effort=minimal" in requests, (
-        "the fake Codex app-server never ran a turn with the reported "
-        f"model/effort; log:\n{requests}\n{fake_codex_rig.log_tails()}"
-    )
-
-    if outcome.assistant_texts and outcome.session_status != "failed":
-        # Rejecting the unsupported effort before dispatch is also non-silent;
-        # require that explicit rejection rather than a plain assistant reply.
-        assert outcome.surfaced_errors(), (
-            "the unsupported effort produced an assistant reply with no error; "
-            f"items={json.dumps(outcome.items)[:1500]}\n{fake_codex_rig.log_tails()}"
+    dispatched = any(line.startswith("turn ") for line in requests.splitlines())
+    if dispatched:
+        assert f"model={_ASTRA_MODEL} effort=minimal" in requests, (
+            "the fake Codex app-server ran a turn, but not with the reported "
+            f"model/effort; log:\n{requests}\n{fake_codex_rig.log_tails()}"
         )
-        return
 
-    # A failed outcome must surface through an item or last_task_error.
+    # Whether the effort was rejected before dispatch or the dispatched turn
+    # failed, the outcome must not be silent: a readable reason must surface
+    # through an error item or last_task_error.
     assert outcome.surfaced_errors(), (
         "codex-native turn with an effort the model doesn't offer "
         f"(model={_ASTRA_MODEL!r}, effort='minimal') ended "

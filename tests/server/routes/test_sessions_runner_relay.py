@@ -3326,10 +3326,20 @@ async def test_relay_persist_error_once_emits_debug_row() -> None:
             {"code": "runner_error", "message": "   "},
             "The turn failed but the runner reported no detail. See the runner log for details.",
         ),
-        # Complete the recognizable prefix with a stand-in reason.
+        # Complete a recognizable dropped-reason prefix with a stand-in reason.
         (
             {"code": "runner_error", "message": "turn setup failed: "},
             "turn setup failed: no reason reported (see the runner log for details)",
+        ),
+        (
+            {"code": "runner_error", "message": "background turn drain failed: "},
+            "background turn drain failed: no reason reported (see the runner log for details)",
+        ),
+        # An unrecognized bare-colon message is left untouched: the repair is
+        # narrowly scoped to the known dropped-reason prefixes.
+        (
+            {"code": "runner_error", "message": "custom harness failure:"},
+            "custom harness failure:",
         ),
     ],
 )
