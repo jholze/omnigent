@@ -135,7 +135,10 @@ def _wait_for_model_input(base_url: str, session_id: str, model: str, expected: 
             params={"include_usage": "true"},
             timeout=10,
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            # A transient non-2xx while the server settles is "not yet", not fatal.
+            time.sleep(0.25)
+            continue
         by_model = response.json().get("usage_by_model") or {}
         seen = by_model.get(model)
         if isinstance(seen, dict) and seen.get("input_tokens") == expected:
@@ -222,3 +225,12 @@ def test_restart_reasserts_persisted_baseline_server_never_recorded(
     # persisted baseline rather than suppress it as an already-posted total.
     _launch_extension(node, config_path, only_restore=True)
     _wait_for_model_input(base_url, session_id, _MODEL, 160_000)
+
+    # The restore raises input and output together, so a regression that
+    # re-asserted input while dropping output would pass the check above.
+    usage = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}",
+        params={"include_usage": "true"},
+        timeout=10,
+    ).json()
+    assert (usage.get("usage_by_model") or {})[_MODEL]["output_tokens"] == 32_000

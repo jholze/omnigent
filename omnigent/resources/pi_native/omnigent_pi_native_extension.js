@@ -1722,7 +1722,9 @@ module.exports = function (pi) {
     const statePath = usageStatePath();
     if (!statePath) return;
     try {
-      const tmp = `${statePath}.tmp`;
+      // Per-pid temp name: an exiting Pi process and its relaunched successor
+      // can flush concurrently, and a shared temp path could persist a torn file.
+      const tmp = `${statePath}.${process.pid}.tmp`;
       fs.writeFileSync(
         tmp,
         JSON.stringify({
