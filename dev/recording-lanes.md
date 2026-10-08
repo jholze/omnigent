@@ -63,9 +63,10 @@ Recording is **best-effort**:
   facet with no usable clip at all.
 - Name the blocker you observed — the command you ran, the limit you requested,
   and the error it returned — not an inferred platform ceiling. `sys_os_shell`
-  takes `timeout` (seconds; default 120); a recording run that ends at a limit
-  you did not request means your call did not set it, so fix the call and rerun
-  instead of reporting a hard ceiling.
+  takes `timeout` (seconds; default 120). If a run ends at a limit you did not
+  request, verify the `timeout` argument you passed and inspect the returned
+  error before attributing the stop to a platform ceiling; when the argument was
+  wrong, fix the call and rerun.
 - Do not block the verdict, fix, or PR because footage is missing or rejected.
   Explain the gap and continue with the available evidence.
 
