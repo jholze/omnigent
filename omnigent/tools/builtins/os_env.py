@@ -44,11 +44,9 @@ _logger = logging.getLogger(__name__)
 
 
 # ── JSON Schemas ──────────────────────────────────────────────
-# Mirror the inner :mod:`omnigent.inner.session` schemas
-# verbatim so the LLM sees the same parameter shapes regardless
-# of which path serves the request. Duplicated literally rather
-# than imported because session.py won't ship with AP-only
-# deployments — copying these here is the cost of layering.
+# AP-side parameter shapes for the four tools. Only ``sys_os_shell`` closes its
+# schema and rejects undeclared names at runtime; the runner relay accepts
+# ``sys_os_edit`` aliases, so the other three stay open.
 
 
 _OS_READ_SCHEMA: dict[str, Any] = {
