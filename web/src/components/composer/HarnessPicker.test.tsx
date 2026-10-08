@@ -395,7 +395,7 @@ describe("HarnessPickerEntry Edit flyout dismissal (#7069)", () => {
     const flyout = screen.getByTestId("config-menu");
     expect(flyout).toHaveClass("composer-agent-config-menu", "overflow-y-auto");
     expect(flyout.className).toContain(
-      "max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height,24rem))]",
+      "max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))]",
     );
   });
 

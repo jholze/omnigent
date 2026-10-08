@@ -77,7 +77,7 @@ describe("HarnessPickerConfigRow hover", () => {
     const submenu = screen.getByTestId("model-menu");
     expect(submenu).toHaveClass("composer-agent-config-menu", "overflow-y-auto");
     expect(submenu.className).toContain(
-      "max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height,24rem))]",
+      "max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))]",
     );
   });
 
