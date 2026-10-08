@@ -3,8 +3,8 @@
 // users can select rendered text and attach review comments — parity with the
 // Markdown (TipTap) and code (Monaco/Shiki) comment surfaces.
 //
-// The iframe stays sandboxed WITHOUT `allow-same-origin` (see HTML_PREVIEW_SANDBOX),
-// so the parent can't touch its DOM directly. All selection capture and
+// The default iframe has an opaque origin; an embedded host may provide its own
+// isolated content frame. All selection capture and
 // highlight painting happens inside the iframe via the injected bridge, relayed
 // over a private MessageChannel. See htmlCommentBridge.ts for the protocol and
 // trust model.
@@ -15,7 +15,7 @@ import { MessageSquarePlusIcon } from "lucide-react";
 import type { Comment } from "@/hooks/useComments";
 import { useCanEdit } from "@/hooks/usePermissions";
 import { useIsEmbedded } from "@/lib/embedded";
-import { getEmbedRoot } from "@/lib/host";
+import { getEmbedRoot, getOmnigentHtmlPreviewFrame } from "@/lib/host";
 import { randomUUID } from "@/lib/randomUUID";
 import { type ActiveSelection, HTML_PREVIEW_SANDBOX } from "./codeViewerHelpers";
 import {
@@ -90,9 +90,10 @@ export function HtmlCommentViewer({
 }: HtmlCommentViewerProps) {
   const canEdit = useCanEdit(conversationId);
   const loadBridgeExternally = useIsEmbedded();
+  const HtmlPreviewFrame = getOmnigentHtmlPreviewFrame();
 
-  // A fresh nonce + srcDoc per content load. Changing srcDoc reloads the iframe
-  // document, which re-runs the bridge and (via the new nonce) re-establishes
+  // A fresh nonce + srcDoc per content load. The nonce key remounts either frame,
+  // which re-runs the bridge and (via the new nonce) re-establishes
   // the channel — clearing any stale highlights from the previous content.
   const { nonce, srcDoc } = useMemo(() => {
     const n = genNonce();
@@ -224,8 +225,8 @@ export function HtmlCommentViewer({
     // The port pins this closure, so mutable values in handleInbound must come from refs.
     channel.port1.onmessage = (ev) => handleInbound(ev.data);
     portRef.current = channel.port1;
-    // targetOrigin "*" is required: the sandboxed frame has an opaque ("null")
-    // origin, so we cannot name a concrete origin. The transferred port + the
+    // targetOrigin "*" supports the default frame and strict host fallbacks,
+    // which have an opaque ("null") origin. The transferred port + the
     // nonce are the trust mechanism, not the origin.
     win.postMessage({ source: BRIDGE_SOURCE, nonce, type: BRIDGE_MSG.init }, "*", [channel.port2]);
     clearReadyTimer();
@@ -264,7 +265,9 @@ export function HtmlCommentViewer({
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, []);
 
-  const preview = (
+  const preview = HtmlPreviewFrame ? (
+    <HtmlPreviewFrame key={nonce} htmlContent={srcDoc} iframeRef={setIframeRef} onLoad={onLoad} />
+  ) : (
     <iframe
       key={nonce}
       ref={setIframeRef}
