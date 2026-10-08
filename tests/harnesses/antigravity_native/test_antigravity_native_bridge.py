@@ -2575,6 +2575,11 @@ def test_prune_orphaned_bridge_dirs_removes_expired_bridge(
     unrelated = conversations / "index.json"
     unrelated.write_text("{}", encoding="utf-8")
     os.utime(unrelated, (_RETENTION_NOW - 60, _RETENTION_NOW - 60))
+    # A recent name that merely contains ".db" is not a conversation database;
+    # it must not keep an otherwise expired bridge alive.
+    backup = conversations / "7d5e1c2a.db.backup"
+    backup.write_bytes(b"stale copy")
+    os.utime(backup, (_RETENTION_NOW - 60, _RETENTION_NOW - 60))
 
     assert _mod.prune_orphaned_bridge_dirs() == 1
     assert not dead_dir.exists()
