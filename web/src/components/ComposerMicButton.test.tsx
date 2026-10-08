@@ -330,6 +330,35 @@ describe("ComposerMicButton", () => {
     expect(onVoiceSend).toHaveBeenCalledTimes(1);
   });
 
+  it("Enter during IME composition does not stop or send", () => {
+    const onVoiceSend = vi.fn();
+    render(<ComposerMicButton onTranscript={vi.fn()} onVoiceSend={onVoiceSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    act(() => handlers.start?.({}));
+
+    const composing = new KeyboardEvent("keydown", {
+      key: "Enter",
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const processing = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(processing, "keyCode", { value: 229 });
+    act(() => {
+      window.dispatchEvent(composing);
+      window.dispatchEvent(processing);
+    });
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    expect(composing.defaultPrevented).toBe(false);
+    expect(processing.defaultPrevented).toBe(false);
+  });
+
   it("Shift+Enter and Alt+Enter while listening insert a newline and do not send", () => {
     const onVoiceSend = vi.fn();
     render(<ComposerMicButton onTranscript={vi.fn()} onVoiceSend={onVoiceSend} />);

@@ -516,22 +516,17 @@ export const ComposerMicButton = ({
     [isListening, Ctor, serverAvailable, toggleServer],
   );
 
-  // ⌘⌥V starts a take, or ends it and keeps the text. Clicking the mic while
-  // a take is live sends; the chord does not. Enabled whenever dictation
-  // could run (Web Speech OR the server path) and the composer isn't
-  // disabled, so the chord is inert when it can't do anything.
+  // ⌘⌥V starts a take or ends it and keeps the text. A click or Enter sends.
+  // Inert unless dictation can run and the composer is enabled.
   useVoiceDictationHotkey(toggle, enableHotkey && (Boolean(Ctor) || serverAvailable) && !disabled);
 
-  // While listening, Enter finishes the take and sends (plain Enter and the
-  // Cmd/Ctrl+Enter send chord). Shift+Enter and Alt+Enter stay newlines.
-  // Esc cancels (end the take, discard back to the pre-dictation snapshot)
-  // and must not reach the composer's "stop response" handler. Bound in the
-  // capture phase so it preempts the composer. Path-aware: a live server take
-  // is torn down via the DictationSession, a Web Speech take via the recognizer.
+  // Enter, including Cmd/Ctrl+Enter, flushes and sends. Shift/Alt+Enter stay
+  // newlines, and an IME confirmation is not a send. Esc cancels the take.
+  // Capture phase, so neither key reaches the composer's stop handler.
   useEffect(() => {
     if (!isListening) return;
     const handler = (e: globalThis.KeyboardEvent): void => {
-      if (e.repeat) return;
+      if (e.repeat || e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         e.stopPropagation();

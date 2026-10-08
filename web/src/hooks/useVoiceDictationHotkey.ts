@@ -1,7 +1,5 @@
-// ⌘⌥V (Ctrl+Alt+V on Win/Linux) toggles voice dictation, reachable from
-// anywhere in the app so you can start or stop talking without leaving the
-// keyboard (WhisperFlow-style). Stopping with the chord keeps the text.
-// Clicking the mic, or pressing Enter while it is live, sends instead.
+// ⌘⌥V (Ctrl+Alt+V on Win/Linux) toggles voice dictation from the keyboard.
+// The chord keeps the text. A mic click or Enter while listening sends.
 //
 // Why this chord: single-modifier letter combos collide with OS/browser
 // defaults (⌘M minimizes the window on macOS; most ⌘⇧-letter combos are browser

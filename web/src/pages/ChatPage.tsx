@@ -4054,7 +4054,7 @@ function ComposerImpl(
                   // submit(), not the form handler: while a turn is running the
                   // form's submit button is Interrupt, and ending dictation
                   // must not abort that turn.
-                  submit({ voiceDraft });
+                  submit({ voiceDraft, resetNativeInputSession: true });
                 }}
               />
               <TooltipProvider>
