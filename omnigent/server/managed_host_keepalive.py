@@ -23,10 +23,13 @@ Rate-limited per runner at a provider-scoped cadence
 write that wakes a controller reconcile — so agent_sandbox refreshes fast (short
 window) while other providers stay on the cheap default.
 
-Refreshes run on a bounded worker pool. A runner has at most one queued or
-running refresh, and its throttle timestamp is recorded when a worker starts
-rather than when a job enters the queue. This keeps one stalled provider from
-starving unrelated live runners while retaining the existing active-tunnel gate.
+Refreshes run on a small bounded worker pool with at most one queued or running
+attempt per runner, so one stalled provider call cannot starve unrelated live
+runners. The tunnel loop wakes from the remaining due time
+(:func:`next_keepalive_delay_s`) rather than a fixed cadence, so a tick that
+finds an attempt still outstanding retries shortly instead of a full interval
+later. Each attempt is recorded as a bounded ``managed_keepalive`` outcome that
+names identifiers and error types, never provider exception payloads.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ import contextvars
 import logging
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -52,10 +55,10 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Keep provider I/O isolated from the tunnel event loop without allowing one
-# stalled provider call to serialize every active runner's refresh.
+# Keep provider I/O off the tunnel event loop without letting one stalled
+# provider call serialize every active runner's refresh.
 _KEEPALIVE_MAX_WORKERS = 8
-# Retry an early/queued tick without polling the worker pool aggressively.
+# Wake delay once a runner is due but its previous attempt is still outstanding.
 _KEEPALIVE_RETRY_DELAY_S = 1.0
 
 
@@ -81,8 +84,10 @@ class _KeepAliveOutcome(StrEnum):
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by runner_id
 _runner_interval_s: dict[str, float] = {}
 
-# Growth threshold for pruning expired scheduling state, not a hard size cap.
-# Unexpired entries are retained so active runners keep their retry backoff.
+# Cap on the per-runner throttle map before stale entries are pruned. Runners
+# are transient, so without this a long-lived server accumulates one dead key
+# per session.
+# ponytail: prune-on-grow, not a background sweep: swap if profiling says so.
 _THROTTLE_MAX_ENTRIES = 4096
 
 _conversation_store: ConversationStore | None = None
@@ -90,7 +95,7 @@ _host_store: HostStore | None = None
 _sandbox_config: ManagedSandboxDeployment | None = None
 _executor: ThreadPoolExecutor | None = None
 
-# runner_id -> monotonic seconds when its last worker actually started.
+# runner_id -> monotonic seconds of its last keep_alive attempt (its submission).
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by runner_id
 _last_kept: dict[str, float] = {}
 
@@ -99,17 +104,11 @@ _last_kept: dict[str, float] = {}
 # provider from stacking a second job for the same runner behind the first.
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by runner_id
 _inflight: set[str] = set()
-# runner_id -> monotonic time before which another submission should not be
-# attempted after executor rejection or cancellation.
-# custom-lint: disable-next=workspace-scoped-cache -- keyed by runner_id
-_retry_after: dict[str, float] = {}
+# Guards every shared scheduling map above plus _inflight.
 _state_lock = threading.Lock()
-# Kept as a named alias for tests and callers that inspect the single-flight
-# guard. All shared throttle, cadence, and reservation state uses this lock.
-_inflight_lock = _state_lock
 
-# Set only on a worker, after it leaves the executor queue. Direct unit-test
-# calls to _keep_alive_for_runner have no queue delay, so the field is omitted.
+# Queue delay of the attempt a worker is running, read by _keep_alive_for_runner
+# for its outcome record. A direct call (tests) has no queue, so it stays None.
 _queue_delay_s: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "managed_keepalive_queue_delay_s", default=None
 )
@@ -153,46 +152,39 @@ def _interval_for(runner_id: str) -> float:
 
 
 def keepalive_interval_s(runner_id: str) -> float:
-    """Return the provider cadence used by *runner_id*'s keepalive scheduling.
+    """Seconds between keep_alive attempts for *runner_id*: the per-runner throttle
+    window in :func:`touch`, and the cadence :func:`next_keepalive_delay_s` paces
+    the runner tunnel's loop by.
 
     Provider-scoped: agent_sandbox refreshes fast because its window is short;
-    other providers keep the cheaper default so they are not over-called. The loop
-    uses :func:`next_keepalive_delay_s` to sleep the remaining cadence or a
-    bounded retry delay, while the per-runner throttle in :func:`touch` uses this
-    provider interval.
+    other providers keep the cheaper default so they are not over-called.
     """
     return _interval_for(runner_id)
 
 
 def next_keepalive_delay_s(runner_id: str, *, now: float | None = None) -> float:
-    """Return the next runner-local wake delay from the worker-start stamp.
+    """Seconds the runner tunnel's loop should sleep before its next :func:`touch`.
 
-    The tunnel loop wakes at the remaining provider interval once a worker has
-    started. An early tick, or a provider call still queued/running, retries at
-    a bounded short delay instead of deferring the refresh for another full
-    cadence. No provider or sandbox policy is changed here.
+    The remainder of the runner's interval since its last attempt, so a tick that
+    arrived early or was declined does not push the refresh out a whole cadence.
+    Once the interval has elapsed, the only reason the tick did not submit is an
+    attempt still queued or running, so retry after a short bounded delay rather
+    than spinning or sleeping a full interval.
 
     :param runner_id: Runner whose refresh schedule is being advanced.
-    :param now: Optional monotonic timestamp for deterministic tests.
+    :param now: Monotonic timestamp to schedule from; defaults to the clock.
     :returns: Non-negative seconds until the next ``touch`` call.
     """
     current = time.monotonic() if now is None else now
     interval = _interval_for(runner_id)
-    managed_keepalive_enabled = (
-        _sandbox_config is not None and _host_store is not None and _executor is not None
-    )
+    if _sandbox_config is None or _host_store is None or _executor is None:
+        # touch() is a no-op, so stale throttle state must not make the loop spin.
+        return interval
     with _state_lock:
         last = _last_kept.get(runner_id)
         inflight = runner_id in _inflight
-        retry_after = _retry_after.get(runner_id)
-    if not managed_keepalive_enabled:
-        # A stale worker-start stamp must not make a disabled hook spin at zero.
+    if last is None:
         delay = interval
-    elif retry_after is not None:
-        remaining_retry = retry_after - current
-        delay = remaining_retry if remaining_retry > 0 else _KEEPALIVE_RETRY_DELAY_S
-    elif last is None:
-        delay = _KEEPALIVE_RETRY_DELAY_S if inflight else interval
     else:
         remaining = interval - (current - last)
         delay = remaining if remaining > 0 else _KEEPALIVE_RETRY_DELAY_S
@@ -206,10 +198,7 @@ def next_keepalive_delay_s(runner_id: str, *, now: float | None = None) -> float
             interval_s=round(interval, 3),
             delay_s=round(max(0.0, delay), 3),
             inflight=inflight,
-            retry_after_s=(
-                round(max(0.0, retry_after - current), 3) if retry_after is not None else None
-            ),
-            worker_start_age_s=(round(max(0.0, current - last), 3) if last is not None else None),
+            last_attempt_age_s=(round(max(0.0, current - last), 3) if last is not None else None),
         ),
     )
     return max(0.0, delay)
@@ -220,7 +209,9 @@ def touch(runner_id: str) -> None:
 
     Non-blocking and fail-safe: the provider call runs on a worker thread so a
     slow backend cannot delay the tunnel ping loop that calls this, and every
-    failure is logged and swallowed. Safe to call on every ping.
+    failure is logged and swallowed. Safe to call on every ping. A runner has at
+    most one queued or running attempt; a tick that finds one outstanding is
+    declined and retried by the loop once it clears.
 
     The worker runs inside a snapshot of THIS caller's ``contextvars``
     (``copy_context().run``), which is load-bearing rather than tidiness: the
@@ -242,94 +233,53 @@ def touch(runner_id: str) -> None:
     interval = _interval_for(runner_id)
     with _state_lock:
         last = _last_kept.get(runner_id)
-        retry_after = _retry_after.get(runner_id)
-        if retry_after is not None and now >= retry_after:
-            _retry_after.pop(runner_id, None)
-            retry_after = None
-        if retry_after is not None and now < retry_after:
-            return
         if last is not None and now - last < interval:
             return
         if runner_id in _inflight:
-            # A reservation spans both queued and running work. Do not let a
-            # slow provider accumulate duplicate jobs for one runner.
+            # Previous attempt for this runner has not finished; skip rather than
+            # queue a duplicate. _last_kept stays untouched, so the loop keeps
+            # the runner due and retries as soon as the in-flight one clears.
             return
         _inflight.add(runner_id)
-        should_prune = max(len(_last_kept), len(_retry_after)) > _THROTTLE_MAX_ENTRIES
+        _last_kept[runner_id] = now
+        should_prune = len(_last_kept) > _THROTTLE_MAX_ENTRIES
     if should_prune:
         _prune_throttle(now)
+    ctx = contextvars.copy_context()
     try:
-        ctx = contextvars.copy_context()
-        future = executor.submit(ctx.run, _run_keepalive_job, runner_id, now)
-    except Exception as exc:  # noqa: BLE001 - submission is best effort
+        executor.submit(ctx.run, _run_keepalive_job, runner_id)
+    except Exception as exc:  # noqa: BLE001 - a rejecting pool must not wedge the runner
+        # The stamp above stands as the attempt, so the retry is paced by the
+        # interval instead of hammering a shut-down or broken pool.
         with _state_lock:
             _inflight.discard(runner_id)
-            _retry_after[runner_id] = now + _KEEPALIVE_RETRY_DELAY_S
-            should_prune = len(_retry_after) > _THROTTLE_MAX_ENTRIES
-        if should_prune:
-            _prune_throttle(now)
         _emit_outcome(
             runner_id,
             _KeepAliveOutcome.SUBMISSION_FAILED,
             error_type=_bounded_error_type(exc),
-            queue_delay_s=0.0,
         )
-        return
-    with _state_lock:
-        _retry_after.pop(runner_id, None)
-    future.add_done_callback(
-        lambda completed: ctx.run(_release_cancelled_job, completed, runner_id)
-    )
 
 
 def _prune_throttle(now: float) -> None:
-    """Drop stale throttle entries and expired submission-retry deadlines."""
+    """Drop throttle entries older than two slow intervals (their runners are gone)."""
     cutoff = now - 2 * resolve_managed_keepalive_interval_s()
     with _state_lock:
-        stale = [rid for rid, seen in _last_kept.items() if seen < cutoff]
-        for runner_id in stale:
+        for runner_id in [rid for rid, seen in _last_kept.items() if seen < cutoff]:
             _last_kept.pop(runner_id, None)
             _runner_interval_s.pop(runner_id, None)
-        for runner_id, retry_after in list(_retry_after.items()):
-            if retry_after <= now:
-                _retry_after.pop(runner_id, None)
 
 
-def _release_cancelled_job(future: Future[None], runner_id: str) -> None:
-    """Release a reservation when an accepted executor job is cancelled."""
-    if future.cancelled():
-        retry_at = time.monotonic()
-        with _state_lock:
-            _inflight.discard(runner_id)
-            _retry_after[runner_id] = retry_at + _KEEPALIVE_RETRY_DELAY_S
-            should_prune = len(_retry_after) > _THROTTLE_MAX_ENTRIES
-        if should_prune:
-            _prune_throttle(retry_at)
-        _emit_outcome(
-            runner_id,
-            _KeepAliveOutcome.SUBMISSION_FAILED,
-            error_type="cancelled",
-            queue_delay_s=0.0,
-        )
-
-
-def _run_keepalive_job(runner_id: str, queued_at: float) -> None:
-    """Stamp the actual worker start, then resolve the runner's sandbox."""
+def _run_keepalive_job(runner_id: str) -> None:
+    """Worker entry: record how long the attempt waited for a worker, then refresh."""
     started_at = time.monotonic()
-    queue_delay_s = max(0.0, started_at - queued_at)
     with _state_lock:
-        _retry_after.pop(runner_id, None)
-        _last_kept[runner_id] = started_at
-        should_prune = max(len(_last_kept), len(_retry_after)) > _THROTTLE_MAX_ENTRIES
-    if should_prune:
-        _prune_throttle(started_at)
+        queued_at = _last_kept.get(runner_id)
+    queue_delay_s = max(0.0, started_at - queued_at) if queued_at is not None else None
     token = _queue_delay_s.set(queue_delay_s)
     try:
         _keep_alive_for_runner(runner_id)
     finally:
         _queue_delay_s.reset(token)
-        with _state_lock:
-            _inflight.discard(runner_id)
 
 
 def _bounded_error_type(exc: BaseException) -> str:
@@ -480,8 +430,8 @@ def _keep_alive_for_runner(runner_id: str) -> None:
                 # server log (onboarding-layer loggers do not surface there); the
                 # provider logs the new deadline at debug. A provider returns
                 # False when it attempted but could not confirm the extension (and
-                # logged its own warning); the structured outcome below remains
-                # explicit about the soft failure.
+                # logged its own warning); the structured outcome then names the
+                # soft failure instead of a success line.
                 outcome = (
                     _KeepAliveOutcome.SOFT_FAILED
                     if extended is False
@@ -538,3 +488,6 @@ def _keep_alive_for_runner(runner_id: str) -> None:
             error_type=_bounded_error_type(exc),
             queue_delay_s=queue_delay_s,
         )
+    finally:
+        with _state_lock:
+            _inflight.discard(runner_id)

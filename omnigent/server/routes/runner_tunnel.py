@@ -928,8 +928,9 @@ async def _keepalive_loop(runner_id: str) -> None:
     can refresh a managed sandbox faster than the 30s liveness ping (which is
     what lets the sandbox's shutdown window be short) or slower to save calls.
     Fires once immediately so a freshly connected (or reconnected) runner
-    extends its sandbox right away, then every
-    :func:`managed_host_keepalive.next_keepalive_delay_s`. Best-effort:
+    extends its sandbox right away, then sleeps whatever
+    :func:`managed_host_keepalive.next_keepalive_delay_s` says remains until the
+    runner's next refresh is due. Best-effort:
     :func:`managed_host_keepalive.touch` swallows its own errors and no-ops when
     the host has no extendable sandbox, so this loop only ever ends when it is
     cancelled at tunnel teardown.
