@@ -2345,11 +2345,9 @@ class TestSkillsFilterTranslation(unittest.TestCase):
 
 class TestHermeticLaunchConnectorOptOut(unittest.TestCase):
     """
-    ``skills: none`` forwards ``setting_sources=[]``, so the CLI never reads
-    a project's ``disableClaudeAiConnectors`` opt-out and would still
-    auto-fetch the logged-in account's claude.ai connectors. The launch must
-    carry that opt-out in its invocation-local settings; other filters leave
-    connectors to the host settings the CLI loads normally.
+    ``skills: none`` forwards ``setting_sources=[]``, so the CLI never reads a
+    project's ``disableClaudeAiConnectors`` opt-out; the launch must carry that
+    opt-out itself, while other filters leave connectors to the host settings.
     """
 
     def _capture_launch_options(self, skills_filter):
