@@ -831,8 +831,11 @@ export class TerminalSession {
     // closing mark) needs the PTY cursor and that bookkeeping realigned.
     const textarea = this.term.textarea;
     let imeCommitPending = false;
+    let imeComposing = false;
+    // Caret of a commit whose trailing mark onData actually suppressed; the
+    // compositionend cleanup only trims that known tail, never live text.
+    let imeCorrectionCaret: number | null = null;
     if (textarea) {
-      let imeComposing = false;
       let imeGeneration = 0;
       // Snapshot at keydown; focus and input also resync IMEs without keydown.
       let valueBeforeInput = textarea.value;
@@ -856,6 +859,7 @@ export class TerminalSession {
           imeComposing = true;
           imeGeneration += 1;
           imeCommitPending = true;
+          imeCorrectionCaret = null;
         },
         { signal },
       );
@@ -868,9 +872,15 @@ export class TerminalSession {
           // of this one; a keyboard that kept the closing mark leaves it
           // after the caret.
           setTimeout(() => {
-            if (generation !== imeGeneration || this.disposed) return;
+            if (generation !== imeGeneration || this.disposed) {
+              imeCorrectionCaret = null;
+              return;
+            }
             imeCommitPending = false;
-            const caret = textarea.selectionStart;
+            // Trim only the tail a commit actually carried past the caret;
+            // with no suppressed mark there is nothing stray to drop.
+            const caret = imeCorrectionCaret;
+            imeCorrectionCaret = null;
             if (caret !== null && caret < textarea.value.length) unstageTail(caret);
           }, 0);
         },
@@ -964,16 +974,24 @@ export class TerminalSession {
     );
 
     this.dataDispose = this.term.onData((d) => {
-      const data =
-        imeCommitPending && textarea
-          ? (imeCommitBeforeCaret(d, textarea.value, textarea.selectionStart) ?? d)
-          : d;
-      if (data.length === 0) return;
+      let data = d;
+      // Correct only the commit flushed after compositionend, never data
+      // emitted mid-composition.
+      if (imeCommitPending && !imeComposing && textarea) {
+        const corrected = imeCommitBeforeCaret(d, textarea.value, textarea.selectionStart);
+        if (corrected !== null) {
+          data = corrected;
+          imeCorrectionCaret = textarea.selectionStart;
+        }
+      }
+      // xterm emitting nothing is not a user action; a commit trimmed to empty
+      // still is, so refresh input trust before dropping the empty send.
+      if (d.length === 0) return;
       onInput?.();
       // Stamp before the readyState guard so clipboard trust still reflects
       // local input during a momentary WebSocket hiccup.
       this.lastUserInputAt = performance.now();
-      if (this.ws.readyState !== WebSocket.OPEN) return;
+      if (data.length === 0 || this.ws.readyState !== WebSocket.OPEN) return;
       this.ws.send(INPUT_ENCODER.encode(data));
     });
 

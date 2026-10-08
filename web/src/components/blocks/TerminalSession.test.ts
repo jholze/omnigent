@@ -794,6 +794,49 @@ describe("TerminalSession", () => {
     return { session, states, container, socket: FakeWebSocket.instances.at(-1)! };
   }
 
+  // Let xterm's and the session's zero-delay IME timers drain.
+  const settle = () =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+  // Decode the binary keystroke frames the session sent, in order.
+  const sentText = (socket: FakeWebSocket) =>
+    socket.sent
+      // instanceof Uint8Array fails across jsdom realms.
+      .filter((frame) => typeof frame !== "string")
+      .map((frame) => new TextDecoder().decode(frame as Uint8Array))
+      .join("");
+
+  // Synthetic IME event sequence bound to one textarea.
+  const imeDriver = (textarea: HTMLTextAreaElement) => ({
+    fire229: (type: string) => {
+      const ev = new KeyboardEvent(type, { key: "Process", bubbles: true, cancelable: true });
+      Object.defineProperty(ev, "keyCode", { get: () => 229 });
+      textarea.dispatchEvent(ev);
+    },
+    setField: (value: string, caret: number) => {
+      textarea.value = value;
+      textarea.selectionStart = caret;
+      textarea.selectionEnd = caret;
+    },
+    insertText: (data: string) =>
+      textarea.dispatchEvent(
+        new InputEvent("input", { data, inputType: "insertText", bubbles: true, composed: true }),
+      ),
+    compositionInput: (data: string) =>
+      textarea.dispatchEvent(
+        new InputEvent("input", {
+          data,
+          inputType: "insertCompositionText",
+          bubbles: true,
+          composed: true,
+        }),
+      ),
+    composition: (type: string, data: string) =>
+      textarea.dispatchEvent(new CompositionEvent(type, { data, bubbles: true })),
+  });
+
   it("reports 'connected' and sends an initial resize on socket open", () => {
     // WHY: the open handler must push a resize frame before the user sees the
     // default 80x24, then surface kind:"connected" to React. readyState is
@@ -1278,43 +1321,16 @@ describe("TerminalSession", () => {
 
   it("realigns the cursor and composition anchor after an IME auto-pair", async () => {
     // The PTY must receive the pair, cursor-left, then candidate; never preedit.
-    const settle = () =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 25);
-      });
     const { socket, session } = makeSession();
     socket.open();
     const term = (session as unknown as { term: Terminal }).term;
     const textarea = term.textarea!;
     textarea.focus();
-
-    const fire229 = (type: string) => {
-      const ev = new KeyboardEvent(type, { key: "Process", bubbles: true, cancelable: true });
-      Object.defineProperty(ev, "keyCode", { get: () => 229 });
-      textarea.dispatchEvent(ev);
-    };
-    const compositionInput = (data: string) =>
-      textarea.dispatchEvent(
-        new InputEvent("input", {
-          data,
-          inputType: "insertCompositionText",
-          bubbles: true,
-          composed: true,
-        }),
-      );
+    const { fire229, setField, insertText, composition, compositionInput } = imeDriver(textarea);
 
     fire229("keydown");
-    textarea.value = "()";
-    textarea.selectionStart = 1;
-    textarea.selectionEnd = 1;
-    textarea.dispatchEvent(
-      new InputEvent("input", {
-        data: "()",
-        inputType: "insertText",
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    setField("()", 1);
+    insertText("()");
     fire229("keyup");
     await settle();
 
@@ -1324,93 +1340,53 @@ describe("TerminalSession", () => {
 
     // Compose "ni" at the in-pair caret.
     fire229("keydown");
-    textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    textarea.value = "(n";
-    textarea.selectionStart = 2;
-    textarea.selectionEnd = 2;
-    textarea.dispatchEvent(new CompositionEvent("compositionupdate", { data: "n", bubbles: true }));
+    composition("compositionstart", "");
+    setField("(n", 2);
+    composition("compositionupdate", "n");
     compositionInput("n");
     fire229("keyup");
     await settle();
     fire229("keydown");
-    textarea.value = "(ni";
-    textarea.selectionStart = 3;
-    textarea.selectionEnd = 3;
-    textarea.dispatchEvent(
-      new CompositionEvent("compositionupdate", { data: "ni", bubbles: true }),
-    );
+    setField("(ni", 3);
+    composition("compositionupdate", "ni");
     compositionInput("ni");
     fire229("keyup");
     await settle();
 
     // Commit the selected candidate.
-    textarea.value = "(你";
-    textarea.selectionStart = 2;
-    textarea.selectionEnd = 2;
-    textarea.dispatchEvent(
-      new CompositionEvent("compositionupdate", { data: "你", bubbles: true }),
-    );
-    textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "你", bubbles: true }));
+    setField("(你", 2);
+    composition("compositionupdate", "你");
+    composition("compositionend", "你");
     compositionInput("你");
     await settle();
 
-    // instanceof Uint8Array fails across jsdom realms.
-    const sentBytes = socket.sent
-      .filter((frame) => typeof frame !== "string")
-      .map((frame) => new TextDecoder().decode(frame as Uint8Array))
-      .join("");
-    expect(sentBytes).toBe(`()${CURSOR_LEFT_CSI}你`);
+    expect(sentText(socket)).toBe(`()${CURSOR_LEFT_CSI}你`);
     session.dispose();
   });
 
   it("realigns even when the auto-pair event reports only the typed character", async () => {
     // Some keyboards report only "(" in InputEvent.data for the pair.
-    const settle = () =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 25);
-      });
     const { socket, session } = makeSession();
     socket.open();
     const term = (session as unknown as { term: Terminal }).term;
     const textarea = term.textarea!;
     textarea.focus();
+    const { fire229, setField, insertText } = imeDriver(textarea);
 
-    const fire229 = (type: string) => {
-      const ev = new KeyboardEvent(type, { key: "Process", bubbles: true, cancelable: true });
-      Object.defineProperty(ev, "keyCode", { get: () => 229 });
-      textarea.dispatchEvent(ev);
-    };
     fire229("keydown");
-    textarea.value = "()";
-    textarea.selectionStart = 1;
-    textarea.selectionEnd = 1;
-    textarea.dispatchEvent(
-      new InputEvent("input", {
-        data: "(",
-        inputType: "insertText",
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    setField("()", 1);
+    insertText("(");
     fire229("keyup");
     await settle();
 
     expect(textarea.value).toBe("(");
     expect(textarea.selectionStart).toBe(1);
-    const sentBytes = socket.sent
-      .filter((frame) => typeof frame !== "string")
-      .map((frame) => new TextDecoder().decode(frame as Uint8Array))
-      .join("");
-    expect(sentBytes).toBe(`()${CURSOR_LEFT_CSI}`);
+    expect(sentText(socket)).toBe(`()${CURSOR_LEFT_CSI}`);
     session.dispose();
   });
 
   it("encodes the realigning arrow per application-cursor-keys mode", async () => {
     // DECCKM expects SS3 arrows rather than CSI.
-    const settle = () =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 25);
-      });
     const { socket, session } = makeSession();
     socket.open();
     const term = (session as unknown as { term: Terminal }).term;
@@ -1420,32 +1396,15 @@ describe("TerminalSession", () => {
     expect(term.modes.applicationCursorKeysMode).toBe(true);
     const textarea = term.textarea!;
     textarea.focus();
+    const { fire229, setField, insertText } = imeDriver(textarea);
 
-    const fire229 = (type: string) => {
-      const ev = new KeyboardEvent(type, { key: "Process", bubbles: true, cancelable: true });
-      Object.defineProperty(ev, "keyCode", { get: () => 229 });
-      textarea.dispatchEvent(ev);
-    };
     fire229("keydown");
-    textarea.value = "()";
-    textarea.selectionStart = 1;
-    textarea.selectionEnd = 1;
-    textarea.dispatchEvent(
-      new InputEvent("input", {
-        data: "()",
-        inputType: "insertText",
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    setField("()", 1);
+    insertText("()");
     fire229("keyup");
     await settle();
 
-    const sentBytes = socket.sent
-      .filter((frame) => typeof frame !== "string")
-      .map((frame) => new TextDecoder().decode(frame as Uint8Array))
-      .join("");
-    expect(sentBytes).toBe(`()${CURSOR_LEFT_SS3}`);
+    expect(sentText(socket)).toBe(`()${CURSOR_LEFT_SS3}`);
     session.dispose();
   });
 
@@ -1453,48 +1412,16 @@ describe("TerminalSession", () => {
     // A keyboard that re-asserts its own view of the field puts ')' back
     // after the caret; xterm's value-end slice must not carry it into the
     // commit, and the next candidate must anchor at the caret again.
-    const settle = () =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 25);
-      });
     const { socket, session } = makeSession();
     socket.open();
     const term = (session as unknown as { term: Terminal }).term;
     const textarea = term.textarea!;
     textarea.focus();
-
-    const fire229 = (type: string) => {
-      const ev = new KeyboardEvent(type, { key: "Process", bubbles: true, cancelable: true });
-      Object.defineProperty(ev, "keyCode", { get: () => 229 });
-      textarea.dispatchEvent(ev);
-    };
-    const setField = (value: string, caret: number) => {
-      textarea.value = value;
-      textarea.selectionStart = caret;
-      textarea.selectionEnd = caret;
-    };
-    const composition = (type: string, data: string) =>
-      textarea.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
-    const compositionInput = (data: string) =>
-      textarea.dispatchEvent(
-        new InputEvent("input", {
-          data,
-          inputType: "insertCompositionText",
-          bubbles: true,
-          composed: true,
-        }),
-      );
+    const { fire229, setField, insertText, composition, compositionInput } = imeDriver(textarea);
 
     fire229("keydown");
     setField("()", 1);
-    textarea.dispatchEvent(
-      new InputEvent("input", {
-        data: "()",
-        inputType: "insertText",
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    insertText("()");
     fire229("keyup");
     await settle();
 
@@ -1523,11 +1450,7 @@ describe("TerminalSession", () => {
     compositionInput("好");
     await settle();
 
-    const sentBytes = socket.sent
-      .filter((frame) => typeof frame !== "string")
-      .map((frame) => new TextDecoder().decode(frame as Uint8Array))
-      .join("");
-    expect(sentBytes).toBe(`()${CURSOR_LEFT_CSI}你好`);
+    expect(sentText(socket)).toBe(`()${CURSOR_LEFT_CSI}你好`);
     expect(textarea.value).toBe("(你好");
     session.dispose();
   });
