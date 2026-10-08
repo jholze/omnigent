@@ -96,7 +96,10 @@ def _request() -> CreateResponseRequest:
     return CreateResponseRequest(model="agent", input="hi")
 
 
-async def test_main_turn_and_steering_use_their_own_input_identity() -> None:
+@pytest.mark.parametrize("steering_outcome", ["executor_accepted", "executor_refused", "error"])
+async def test_main_turn_and_steering_use_their_own_input_identity(
+    steering_outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
     observed: list[dict[str, object]] = []
     gate = asyncio.Event()
     ctx = _ctx("resp_delivery")
@@ -113,12 +116,17 @@ async def test_main_turn_and_steering_use_their_own_input_identity() -> None:
             observed.append(current_input_attributes())
             if len(observed) == 3:
                 gate.set()
+            if len(observed) == 2:
+                if steering_outcome == "error":
+                    raise RuntimeError("private failure")
+                return steering_outcome == "executor_accepted"
             return True
 
     executor = RecordingExecutor(
         events=[TurnComplete(response="done")], on_iter=begin, block_event=gate
     )
     adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    caplog.set_level(logging.INFO, logger=_ADAPTER_LOGGER)
     await asyncio.wait_for(
         adapter.run_turn(
             CreateResponseRequest(model="agent", input="first", input_stable_id="a" * 32), ctx
@@ -131,6 +139,24 @@ async def test_main_turn_and_steering_use_their_own_input_identity() -> None:
         {},
     ]
     assert current_input_attributes() == {}
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None)
+        in {"native_input_steering_started", "native_input_steering_finished"}
+    ]
+    assert [record.event_name for record in records] == [
+        "native_input_steering_started",
+        "native_input_steering_finished",
+    ]
+    for record in records:
+        assert record.attributes["input_stable_id"] == "b" * 32
+        assert record.attributes["response_id"] == "resp_delivery"
+        assert "second" not in repr(record.attributes)
+        assert "private failure" not in repr(record.attributes)
+    assert records[1].attributes["outcome"] == steering_outcome
+    if steering_outcome == "error":
+        assert records[1].attributes["exception_type"] == "RuntimeError"
 
 
 @pytest.mark.parametrize("declined", [False, True])

@@ -1035,13 +1035,14 @@ def test_stale_completed_turn_steer_retries_once_as_new_turn(
             CodexAppServerResponseError({"code": -32600, "message": "invalid turn id"}),
             id="other-json-rpc-error",
         ),
+        pytest.param(asyncio.CancelledError(), id="cancelled"),
     ],
 )
 @pytest.mark.parametrize("live_injection", [False, True])
 def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    error: Exception,
+    error: BaseException,
     caplog: pytest.LogCaptureFixture,
     live_injection: bool,
 ) -> None:
@@ -1065,9 +1066,16 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     )
     _seed_bridge(tmp_path, active_turn_id="turn_maybe_active")
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
+    caplog.set_level(logging.INFO, logger=codex_native_executor.__name__)
 
     with input_delivery_scope({"input_stable_id": "a" * 32}, response_id="resp_delivery"):
-        if live_injection:
+        if isinstance(error, asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                if live_injection:
+                    asyncio.run(executor.enqueue_session_message("main", "do not duplicate"))
+                else:
+                    _collect_turn_events(executor, "do not duplicate")
+        elif live_injection:
             assert (
                 asyncio.run(executor.enqueue_session_message("main", "do not duplicate")) is False
             )
@@ -1079,6 +1087,35 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.active_turn_id == "turn_maybe_active"
+    rpc_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None)
+        in {"codex_native_delivery_attempt", "codex_native_delivery_finished"}
+    ]
+    assert [record.event_name for record in rpc_records] == [
+        "codex_native_delivery_attempt",
+        "codex_native_delivery_finished",
+    ]
+    assert (
+        rpc_records[0].attributes["native_rpc_attempt_id"]
+        == rpc_records[1].attributes["native_rpc_attempt_id"]
+    )
+    for record in rpc_records:
+        assert record.attributes["input_stable_id"] == "a" * 32
+        assert record.attributes["response_id"] == "resp_delivery"
+        assert record.attributes["requested_native_turn_id"] == "turn_maybe_active"
+        assert "do not duplicate" not in repr(record.attributes)
+    assert rpc_records[1].attributes["exception_type"] == type(error).__name__
+    assert rpc_records[1].attributes["outcome"] == (
+        "cancelled" if isinstance(error, asyncio.CancelledError) else "rpc_error"
+    )
+    if isinstance(error, asyncio.CancelledError):
+        assert not any(
+            getattr(record, "event_name", None) == "codex_turn_injection_failed"
+            for record in caplog.records
+        )
+        return
 
     from omnigent.debug_logging import record_to_row
 
