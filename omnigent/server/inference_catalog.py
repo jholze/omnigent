@@ -149,11 +149,7 @@ def _resolve_alias(provider: ProviderEntry, harness: str, model: str) -> str:
 def ambient_gateway_providers(
     host_config: dict[str, Any] | None, model_discovery: dict[str, Any] | None
 ) -> dict[str, ProviderEntry]:
-    """Gateways an unbound target can list through ``sandbox.model_discovery``.
-
-    Empty for targets with inference bindings, which preview through
-    :meth:`SandboxInferenceService.prepare` instead.
-    """
+    """Gateways an unbound target can list through ``sandbox.model_discovery``."""
     raw = host_config or {}
     discovery = model_discovery or {}
     if not discovery or parse_inference_config(raw):
@@ -332,11 +328,9 @@ class SandboxInferenceService:
     async def ambient_catalog(
         self, provider: str | None, harness: str, user_id: str | None
     ) -> dict[str, Any] | None:
-        """Preview an unbound target's gateway through server-side discovery alone.
+        """Advisory preview of an unbound target's gateway via server-side discovery.
 
-        The result is advisory: no snapshot, revision, or default marker is
-        produced, the sandbox keeps resolving its own inference credential, and
-        "Harness default" stays a valid choice. ``None`` means this harness has
+        No snapshot, revision, or default marker; ``None`` when this harness has
         no discoverable gateway on the target.
         """
         deployment = getattr(self._state, "sandbox_config", None)
