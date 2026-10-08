@@ -5,14 +5,11 @@ auto-inserts ``()`` and leaves its caret between the pair → compose ``ni`` and
 select 你 → the terminal should receive ``()`` plus one cursor-left, then 你.
 
 CI has no physical IME, so the keyboard's event sequence is replayed at xterm's
-helper textarea as the report recorded it: ``keydown(229)`` → textarea ``()`` /
-caret 1 → ``input`` → ``keyup(229)`` → composition ``ni`` → textarea ``(你)`` /
-caret 2 → ``compositionend`` → ``input``. xterm's listeners do not check
-``isTrusted``, so its CompositionHelper runs exactly as with a real IME. The
-contract is read off the attach WebSocket: the bytes the PTY receives. That
-byte contract is program-independent — the shell program only decides whether
-it then echoes a clean line, so the PTY echo is captured for context, not
-asserted on.
+helper textarea. xterm's listeners do not check ``isTrusted``, so its
+CompositionHelper runs exactly as with a real IME. The contract is read off the
+attach WebSocket: the bytes the PTY receives. That byte contract is
+program-independent — the shell program only decides whether it then echoes a
+clean line, so the PTY echo is captured for context, not asserted on.
 """
 
 from __future__ import annotations

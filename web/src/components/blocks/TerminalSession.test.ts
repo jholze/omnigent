@@ -1534,4 +1534,28 @@ describe("TerminalSession", () => {
     expect(sentText(socket)).toBe(`${sentBefore}abb`);
     session.dispose();
   });
+
+  it("abandons the deferred realignment when composition starts before the timer", async () => {
+    // If the IME begins composing before the zero-delay realignment runs, the
+    // stale cursor-left must be dropped, never injected into the live
+    // composition, and the in-pair field must survive untouched.
+    const { socket, session } = makeSession();
+    socket.open();
+    const term = (session as unknown as { term: Terminal }).term;
+    const textarea = term.textarea!;
+    textarea.focus();
+    const { fire229, setField, insertText, composition } = imeDriver(textarea);
+
+    fire229("keydown");
+    setField("()", 1);
+    insertText("()");
+    // Composition starts before the zero-delay realignment timer drains.
+    composition("compositionstart", "");
+    await settle();
+
+    expect(sentText(socket)).not.toContain(CURSOR_LEFT_CSI);
+    expect(textarea.value).toBe("()");
+    expect(textarea.selectionStart).toBe(1);
+    session.dispose();
+  });
 });
