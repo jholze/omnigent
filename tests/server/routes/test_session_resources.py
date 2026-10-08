@@ -4882,7 +4882,10 @@ async def test_codex_side_dispatch_forwards_without_pending_input_diagnostics(
 
 
 @pytest.mark.asyncio
-async def test_kiro_native_dispatch_clears_pending_when_injection_fails() -> None:
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_kiro_native_dispatch_clears_pending_when_injection_fails(
+    cancelled: bool, caplog: pytest.LogCaptureFixture
+) -> None:
     """A failed Kiro tmux injection must not leave a ghost pending input."""
     from omnigent.runtime import pending_inputs
     from omnigent.server.routes.sessions import _dispatch_session_event_to_runner
@@ -4891,18 +4894,30 @@ async def test_kiro_native_dispatch_clears_pending_when_injection_fails() -> Non
     store = _ConversationStore()
     conv = store.get_conversation("823dbd1aab969b5a813fac59bb977a77")
     assert conv is not None
-    client = _FakeRunnerClient(
+
+    class _FailingForwardClient(_FakeRunnerClient):
+        def _make_response(self, method: str, url: str) -> httpx.Response:
+            if cancelled and url.endswith("/events"):
+                raise asyncio.CancelledError()
+            return super()._make_response(method, url)
+
+    client = _FailingForwardClient(
         responses={
             "/v1/sessions/823dbd1aab969b5a813fac59bb977a77/events": (500, {"error": "tmux failed"})
         }
     )
     body = SessionEventInput(
         type="message",
-        data={"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        data={
+            "role": "user",
+            "content": [{"type": "input_text", "text": "private prompt"}],
+            "stable_id": "a" * 32,
+        },
     )
+    caplog.set_level("INFO")
 
     try:
-        with pytest.raises(HTTPException):
+        with pytest.raises(asyncio.CancelledError if cancelled else HTTPException):
             await _dispatch_session_event_to_runner(
                 "823dbd1aab969b5a813fac59bb977a77",
                 conv,
@@ -4921,6 +4936,18 @@ async def test_kiro_native_dispatch_clears_pending_when_injection_fails() -> Non
         ]
         assert store.appended_items == []
         assert pending_inputs.snapshot_for("823dbd1aab969b5a813fac59bb977a77") == []
+        [record] = [
+            record
+            for record in caplog.records
+            if getattr(record, "event_name", None) == "native_input_forward_finished"
+        ]
+        forwarded = client.post_json_calls[1][1]
+        attrs = record.attributes
+        assert attrs["outcome"] == ("cancelled" if cancelled else "error")
+        assert attrs["input_stable_id"] == "a" * 32
+        for key in ("pending_id", "delivery_attempt_id", "input_enqueued_at_ms"):
+            assert attrs[key] == forwarded[key]
+        assert "private prompt" not in repr(attrs)
     finally:
         pending_inputs.reset_for_tests()
 

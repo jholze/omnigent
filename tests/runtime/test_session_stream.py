@@ -874,6 +874,17 @@ def test_sse_retains_nested_delivery_ids_without_consumed_content() -> None:
     assert session_stream._sse_safe_attributes(event)["response_id"] == "resp_envelope"
     event["response"] = {"id": "resp_object"}
     assert session_stream._sse_safe_attributes(event)["response_id"] == "resp_object"
+    failed = {
+        "type": "response.failed",
+        "response": {"id": "resp_failed", "error": {"message": "private failure"}},
+        "input_stable_id": "a" * 32,
+    }
+    assert session_stream._sse_safe_attributes(failed) == {
+        "response_id": "resp_failed",
+        "input_stable_id": "a" * 32,
+    }
+    failed["input_stable_id"] = "private prompt"
+    assert session_stream._sse_safe_attributes(failed) == {"response_id": "resp_failed"}
 
 
 def test_sse_consumed_id_extraction_is_event_specific_and_type_checked() -> None:

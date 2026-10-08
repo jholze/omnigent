@@ -23,7 +23,8 @@ and codes rather than put content in an allowed field.
 | `item_id` / `error_item_id` | Durable conversation items. Join the saved error's SSE `item_id` to the settlement's `error_item_id`. |
 | `matched_item_id` / `matched_response_id` | The later native record that matched a newer input and caused earlier entries to settle. These belong to that later record. |
 | `delivery_id` | Claude's existing local delivery trace ID. Its attempts and timing now carry the input identifiers too. |
-| `thread_id` / `native_turn_id` | Codex's native thread and the turn named by the RPC response, when available. |
+| `thread_id` | The Codex thread named by the RPC request. |
+| `native_turn_id` | On attempt, error, and cancellation records, the requested steer target. On a successful RPC result, the turn returned by Codex. An unsuccessful record does not establish that Codex accepted or recognized the target. |
 | `native_rpc_attempt_id` | Pairs one Codex RPC attempt with its accepted, failed, or cancelled result, including attempts recovered by retrying. |
 | `requested_native_turn_id` | The target of that specific steer; absent for a new turn start. |
 | `initial_native_turn_id` | Bridge state before a complete injection, which can differ from the target of a recovered RPC attempt. |
@@ -79,6 +80,9 @@ SSE logging retains `item.response_id` and the `item_id` and
 event clears a pending bubble; it is not proof of delivery. Join it to
 `native_input_settled` to distinguish a native match from a skipped message.
 `error_item_persisted` also includes its durable item and response IDs.
+A runner's `response.failed` event can carry top-level `input_stable_id`.
+SSE logging retains this validated ID to connect the failure to its original
+web submission, even before a transcript item exists.
 
 ## Verification
 

@@ -13,10 +13,12 @@ from omnigent.errors import ElicitationDeclinedError
 from omnigent.inner.executor import (
     Executor,
     ExecutorConfig,
+    ExecutorError,
     ExecutorEvent,
     Message,
     TextChunk,
     ToolSpec,
+    TurnCancelled,
     TurnComplete,
 )
 from omnigent.native.input_diagnostics import current_input_attributes
@@ -236,16 +238,68 @@ async def test_abnormal_exit_schedules_interrupt_once() -> None:
     assert not adapter._bg_tasks
 
 
-async def test_clean_exit_schedules_no_interrupt() -> None:
+async def test_clean_exit_schedules_no_interrupt(caplog: pytest.LogCaptureFixture) -> None:
     """Clean TurnComplete exit schedules no abnormal-exit interrupt."""
     executor = _FakeExecutor(events=[TurnComplete(response="done")])
     adapter = ExecutorAdapter(executor_factory=lambda: executor)
 
-    await adapter.run_turn(_request(), _ctx("resp_clean"))
+    caplog.set_level(logging.INFO, logger=_ADAPTER_LOGGER)
+    await adapter.run_turn(
+        CreateResponseRequest(model="agent", input="private prompt", input_stable_id="a" * 32),
+        _ctx("resp_clean"),
+    )
     # No background interrupt task was created.
     assert not adapter._bg_tasks
     await adapter.on_shutdown()
     assert executor.interrupt_calls == []
+    [record] = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "native_input_execution_finished"
+    ]
+    assert record.attributes["outcome"] == "executor_returned"
+    assert record.attributes["input_stable_id"] == "a" * 32
+    assert record.attributes["response_id"] == "resp_clean"
+    assert "private prompt" not in repr(record.attributes)
+
+
+@pytest.mark.parametrize(
+    ("terminal_event", "outcome"),
+    [
+        (TurnCancelled(), "cancelled"),
+        (ExecutorError(message="private failure", undelivered=False), "error"),
+        (ExecutorError(message="private failure", undelivered=True), "reported_undelivered"),
+    ],
+)
+async def test_terminal_event_records_one_correlated_input_outcome(
+    terminal_event: ExecutorEvent, outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    executor = _FakeExecutor(events=[terminal_event])
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    ctx = _ctx("resp_terminal")
+    request = CreateResponseRequest(
+        model="agent", input="private prompt", input_stable_id="a" * 32
+    )
+    caplog.set_level(logging.INFO, logger=_ADAPTER_LOGGER)
+    try:
+        if isinstance(terminal_event, ExecutorError):
+            with pytest.raises(RuntimeError, match="private failure"):
+                await adapter.run_turn(request, ctx)
+        else:
+            await adapter.run_turn(request, ctx)
+        [record] = [
+            record
+            for record in caplog.records
+            if getattr(record, "event_name", None) == "native_input_execution_finished"
+        ]
+        assert record.attributes["outcome"] == outcome
+        assert record.attributes["input_stable_id"] == "a" * 32
+        assert record.attributes["response_id"] == "resp_terminal"
+        assert "private" not in repr(record.attributes)
+        assert ctx.cancelled.is_set() == isinstance(terminal_event, TurnCancelled)
+        assert current_input_attributes() == {}
+    finally:
+        await adapter.on_shutdown()
 
 
 async def test_orphan_tool_callback_safe_fails() -> None:
