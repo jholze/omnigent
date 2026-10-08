@@ -565,6 +565,34 @@ class OidcSessionControllerTest {
         )
     }
 
+    @Test
+    fun `debug faults clear the cookie or forget the grant without revoking it`() {
+        connectWithCookie()
+        store.grants[ORIGIN] = OidcRefreshGrant("grant-1", null)
+        val reports = mutableListOf<String>()
+
+        OidcAuthDebugMenu.run(OidcAuthDebugMenu.CLEAR_SESSION_COOKIE, controller) { reports += it }
+        OidcAuthDebugMenu.run(OidcAuthDebugMenu.CLEAR_REFRESH_TOKEN, controller) { reports += it }
+        OidcAuthDebugMenu.run(OidcAuthDebugMenu.CLEAR_SESSION_COOKIE, controller) { reports += it }
+        OidcAuthDebugMenu.run(OidcAuthDebugMenu.CLEAR_REFRESH_TOKEN, controller) { reports += it }
+
+        assertEquals(
+            listOf(
+                "Session cookie cleared. Leave and reopen the app, or navigate, to renew it silently.",
+                "Refresh token forgotten. The next renewal asks you to sign in.",
+                "No session cookie was available to clear.",
+                "No saved refresh token for this server. Sign in first.",
+            ),
+            reports,
+        )
+        assertNull(jar.values["ap_session"])
+        assertNull(store.grants[ORIGIN])
+        assertFalse(server.requests.any { it.endsWith("/oauth/revoke") })
+
+        controller.onSignInRequested()
+        assertEquals("ask:Sign in to omni.example to continue.", host.events.last())
+    }
+
     private fun connectWithCookie() {
         jar.values["ap_session"] = "still-good"
         server.accepted += "still-good"
