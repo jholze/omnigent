@@ -358,6 +358,8 @@ function CanvasSurface() {
         // refits; otherwise the fit effect early-outs and the re-hidden
         // surface would stay hidden forever.
         fittedKeyRef.current = null;
+        // Invalidate any in-flight fit so its resolution cannot re-reveal early.
+        fitGenerationRef.current += 1;
         setViewRestored(false);
       }
       return;

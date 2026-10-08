@@ -304,6 +304,7 @@ describe("CanvasPage", () => {
       sessionsStub([conversation("conv_1", 2)]),
     );
     rerender(pageTree());
+    expect(flowFitView).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
     expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
 
@@ -328,6 +329,7 @@ describe("CanvasPage", () => {
       sessionsStub([conversation("conv_1", 2)]),
     );
     rerender(pageTree());
+    expect(flowFitView).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
     expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
 
@@ -354,6 +356,7 @@ describe("CanvasPage", () => {
     const applyFit = deferFit();
     vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(sessionsStub(rows));
     rerender(pageTree());
+    expect(flowFitView).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
     expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
 
