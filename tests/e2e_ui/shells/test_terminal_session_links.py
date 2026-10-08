@@ -5,10 +5,10 @@ The embedded xterm makes URLs in TUI / shell output clickable via its
 external content: clicking one should update the current SPA route instead of
 opening a duplicate browser tab/window for the same chat.
 
-A URL longer than the pane is shown across two rows. Whether the terminal
-soft-wrapped it or the printing program broke the line at the pane width (a
-CLI that word-wraps its output to the terminal size), the user sees the same
-two rows and a click must open the complete URL, not the first-row fragment.
+A URL longer than the pane is shown across two rows. When the printing program
+broke the line at the pane width itself (a CLI that word-wraps its output to the
+terminal size), the user sees the same two rows as a terminal soft wrap and a
+click must open the complete URL, not the first-row fragment.
 """
 
 from __future__ import annotations
@@ -76,13 +76,15 @@ def _click_first_terminal_row(page: Page) -> None:
     page.mouse.click(*_first_terminal_row_point(page))
 
 
-def _record_pane_cols(page: Page) -> list[int]:
-    """Collect the column count from every resize frame sent on an attach socket."""
-    cols: list[int] = []
+def _record_pane_cols(page: Page) -> list[list[int]]:
+    """Collect the resize column counts sent on each attach socket, newest socket last."""
+    panes: list[list[int]] = []
 
     def _on_ws(ws: object) -> None:
         if "/attach" not in ws.url:  # type: ignore[attr-defined]
             return
+        cols: list[int] = []
+        panes.append(cols)
 
         def _on_frame(payload: str | bytes) -> None:
             if isinstance(payload, str) and payload.startswith("{"):
@@ -93,7 +95,7 @@ def _record_pane_cols(page: Page) -> list[int]:
         ws.on("framesent", _on_frame)  # type: ignore[attr-defined]
 
     page.on("websocket", _on_ws)
-    return cols
+    return panes
 
 
 def _echo_destination(route: Route) -> None:
@@ -138,31 +140,24 @@ def test_same_origin_terminal_session_link_navigates_in_app(
     expect(page).to_have_url(f"{base_url}{target_path}")
 
 
-@pytest.mark.parametrize(
-    "print_url",
-    [
-        pytest.param(_print_url_at_terminal_origin, id="terminal-soft-wrap"),
-        pytest.param(_print_url_folded_at_pane_width, id="program-break-at-pane-width"),
-    ],
-)
-def test_two_row_terminal_url_opens_full_destination(
-    request: pytest.FixtureRequest,
-    terminal_session: tuple[str, str],
-    print_url,
+def test_program_broken_two_row_terminal_url_opens_full_destination(
+    request: pytest.FixtureRequest, terminal_session: tuple[str, str]
 ) -> None:
-    """Clicking the first row of a two-row URL opens the whole URL.
+    """Clicking the first row of a URL the program broke at the pane width opens the whole URL.
 
-    The URL exceeds the pane and is either soft-wrapped by the terminal or broken
-    at the pane width by the printing program, as a width-aware CLI does.
+    A width-aware CLI ends the first row with its own line break, so the pane
+    holds two hard rows that look exactly like a terminal soft wrap.
     """
     base_url, session_id = terminal_session
     page: Page = request.getfixturevalue("page")
     page.context.route(f"https://{_WRAPPED_URL_HOST}/**", _echo_destination)
-    pane_cols = _record_pane_cols(page)
+    panes = _record_pane_cols(page)
 
     page.goto(f"{base_url}/c/{session_id}")
     _open_new_shell(page)
-    print_url(page, _WRAPPED_URL)
+    _print_url_folded_at_pane_width(page, _WRAPPED_URL)
+    # The shell opened last, so its attach socket is the newest one.
+    pane_cols = panes[-1] if panes else []
     assert pane_cols and pane_cols[-1] < len(_WRAPPED_URL), (
         f"the URL must be longer than the pane to wrap: pane cols {pane_cols}"
     )

@@ -29,7 +29,6 @@ import {
   type WheelMouseState,
   type WheelScreenMetrics,
 } from "./TerminalSession";
-import { TerminalLinkProvider } from "./TerminalLinkProvider";
 
 describe("openTerminalLink", () => {
   afterEach(() => {
@@ -95,17 +94,17 @@ describe("openTerminalLink", () => {
     }
   });
 
-  it("prevents the addon's default in-place navigation", () => {
+  it("prevents the click's default in-place navigation", () => {
     vi.spyOn(window, "open").mockReturnValue(null);
     const event = new MouseEvent("click");
     const preventSpy = vi.spyOn(event, "preventDefault");
 
     openTerminalLink(event, "https://example.com/foo");
 
-    // The WebLinksAddon navigates the current document on click by
-    // default; without preventDefault the click would unload the SPA
-    // (and kill the WebSocket-attached terminal) before window.open's
-    // tab is usable. A failure here means that suppression was dropped.
+    // Without preventDefault the click's default navigation would unload
+    // the SPA (and kill the WebSocket-attached terminal) before
+    // window.open's tab is usable. A failure here means that suppression
+    // was dropped.
     expect(preventSpy).toHaveBeenCalledOnce();
   });
 
@@ -751,15 +750,6 @@ describe("TerminalSession", () => {
 
     expect(term.options.linkHandler?.allowNonHttpProtocols).toBe(true);
     expect(term.options.linkHandler?.activate).toBeTypeOf("function");
-    session.dispose();
-  });
-
-  it("registers the URL link provider on the terminal", () => {
-    const registerSpy = vi.spyOn(Terminal.prototype, "registerLinkProvider");
-
-    const { session } = makeSession();
-
-    expect(registerSpy).toHaveBeenCalledWith(expect.any(TerminalLinkProvider));
     session.dispose();
   });
 

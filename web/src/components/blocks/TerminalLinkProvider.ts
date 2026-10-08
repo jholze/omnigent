@@ -9,7 +9,7 @@ import type { IBufferLine, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 // punctuation or the brackets that usually enclose a URL in prose.
 const URL_PATTERN = /(https?|HTTPS?):[/]{2}[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~[\]`()<>]/;
 
-// Rows joined for one URL search are capped at this many characters.
+// Rows joined above and below the hovered row are each capped at this many characters.
 const MAX_JOINED_LENGTH = 2048;
 
 export type TerminalLinkActivate = (event: MouseEvent, uri: string) => void;
@@ -93,19 +93,20 @@ function continuesRowAbove(term: Terminal, rowIndex: number): boolean {
   const row = buffer.getLine(rowIndex);
   const above = buffer.getLine(rowIndex - 1);
   if (!row || !above) return false;
-  return row.isWrapped || splitTokenSpans(above, row, term.cols);
+  return row.isWrapped || continuesFullRowToken(above, row, term.cols);
 }
 
 /**
  * Whether ``row`` holds the tail of a token a width-aware program split at the pane
- * edge: ``above`` is filled to its last column, ``row`` starts with a non-blank, and
- * the fragments together are longer than the pane. Such a program only splits a token
- * that cannot fit on one row, so a shorter pair is two words that met at the edge.
+ * edge: ``above`` is one unbroken token filling every column and ``row`` starts with a
+ * non-blank. A row holding prose keeps its hard break, so a URL that merely ends at the
+ * edge is never glued to the next word; only a lone token exactly as wide as the pane
+ * stays ambiguous.
  */
-function splitTokenSpans(above: IBufferLine, row: IBufferLine, cols: number): boolean {
-  const tail = /\S+$/.exec(above.translateToString(false, 0, cols));
-  const head = /^\S+/.exec(row.translateToString(true));
-  return tail !== null && head !== null && tail[0].length + head[0].length > cols;
+function continuesFullRowToken(above: IBufferLine, row: IBufferLine, cols: number): boolean {
+  return (
+    /^\S+$/.test(above.translateToString(false, 0, cols)) && /^\S/.test(row.translateToString(true))
+  );
 }
 
 /**
@@ -157,7 +158,7 @@ function isUrl(text: string): boolean {
       ? `${url.username}${url.password ? `:${url.password}` : ""}@`
       : "";
     const origin = `${url.protocol}//${credentials}${url.host}`;
-    return text.toLocaleLowerCase().startsWith(origin.toLocaleLowerCase());
+    return text.toLowerCase().startsWith(origin.toLowerCase());
   } catch {
     return false;
   }

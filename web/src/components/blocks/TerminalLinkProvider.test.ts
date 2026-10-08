@@ -77,32 +77,55 @@ describe("TerminalLinkProvider", () => {
     }
   });
 
-  it("joins a URL that starts after other text on its first row", async () => {
-    const prefix = "Open ";
-    const term = await terminalShowing(brokenAtPaneWidth(`${prefix}${URL}`));
+  it.each([
+    [
+      "Open https://example.com/aaaaaaaaaaaaaaa",
+      "README.md shows more",
+      "https://example.com/aaaaaaaaaaaaaaa",
+    ],
+    ["See the console at https://ab.example.io", "for details.", "https://ab.example.io"],
+  ])(
+    "keeps the hard break after a row holding more than one token: %s",
+    async (above, below, url) => {
+      // Word-wrapped prose whose line happens to fill the pane exactly: the URL
+      // fitted on its row, so the next row starts a new word.
+      expect(above).toHaveLength(COLS);
+      const term = await terminalShowing(`${above}\r\n${below}\r\n`);
 
-    const [link] = linksOnRow(term, 1);
-    expect(link.text).toBe(URL);
-    expect(link.range.start).toEqual({ x: prefix.length + 1, y: 1 });
-    expect(link.range.end).toEqual({ x: 26, y: 2 });
-  });
-
-  it("keeps a URL that merely ends at the pane edge apart from the next word", async () => {
-    // Word-wrapped prose whose line happens to fill the pane exactly; the
-    // short URL fitted on one row, so the next row is a new word.
-    const line = "See the console at https://ab.example.io";
-    expect(line).toHaveLength(COLS);
-    const term = await terminalShowing(`${line}\r\nfor details.\r\n`);
-
-    expect(texts(linksOnRow(term, 1))).toEqual(["https://ab.example.io"]);
-    expect(linksOnRow(term, 2)).toEqual([]);
-  });
+      expect(texts(linksOnRow(term, 1))).toEqual([url]);
+      expect(linksOnRow(term, 2)).toEqual([]);
+    },
+  );
 
   it("leaves an indented row out of the URL above it", async () => {
     const term = await terminalShowing(`${URL.slice(0, COLS)}\r\n  ${URL.slice(COLS)}\r\n`);
 
     expect(texts(linksOnRow(term, 1))).toEqual([URL.slice(0, COLS)]);
     expect(linksOnRow(term, 2)).toEqual([]);
+  });
+
+  it("ends an exact-width URL at the pane edge", async () => {
+    const exact = `https://ab.example.io/${"x".repeat(COLS - 22)}`;
+    expect(exact).toHaveLength(COLS);
+    const term = await terminalShowing(`${exact}\r\n\r\nnext paragraph\r\n`);
+
+    const [link] = linksOnRow(term, 1);
+    expect(link.text).toBe(exact);
+    // xterm compares linearized positions, so the exclusive end of a link
+    // filling the row lands on the next row's column 0.
+    expect(link.range).toEqual({ start: { x: 1, y: 1 }, end: { x: 0, y: 2 } });
+  });
+
+  it("maps a URL that wraps early in front of a wide character", async () => {
+    // 21 narrow cells, then ten 2-cell characters: the tenth does not fit in
+    // the last cell, so xterm leaves it empty and wraps the character.
+    const url = "https://wide.example/日本語日本語日本語日";
+    const term = await terminalShowing(`${url}\r\n`);
+    expect(term.buffer.active.getLine(1)?.isWrapped).toBe(true);
+
+    const [link] = linksOnRow(term, 1);
+    expect(link.text).toBe(url);
+    expect(link.range).toEqual({ start: { x: 1, y: 1 }, end: { x: 2, y: 2 } });
   });
 
   it("excludes trailing punctuation and enclosing quotes", async () => {
