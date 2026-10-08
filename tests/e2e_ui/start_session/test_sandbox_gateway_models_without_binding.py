@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import IO
 
 import httpx
 import pytest
@@ -61,7 +63,9 @@ def sandbox_server_config(gateway_url: str) -> dict[str, object]:
     }
 
 
-def spawn_sandbox_server(workdir: Path, gateway_url: str) -> tuple[subprocess.Popen[bytes], str]:
+def spawn_sandbox_server(
+    workdir: Path, gateway_url: str
+) -> tuple[subprocess.Popen[bytes], str, IO[str]]:
     """Start ``omnigent server`` with :func:`sandbox_server_config`; no runner or host attaches."""
     config_path = workdir / "server.yaml"
     config_path.write_text(yaml.safe_dump(sandbox_server_config(gateway_url)))
@@ -86,35 +90,39 @@ def spawn_sandbox_server(workdir: Path, gateway_url: str) -> tuple[subprocess.Po
     )
     apply_server_env(env, _REPO_ROOT)
     port = _find_free_port()
-    log_handle = open(workdir / "server.log", "w")  # noqa: SIM115 - lives for the Popen lifetime
-    proc = subprocess.Popen(
-        [
-            server_executable(),
-            "-m",
-            "omnigent",
-            "server",
-            "-c",
-            str(config_path),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{workdir / 'server.db'}",
-            "--artifact-location",
-            str(artifacts),
-        ],
-        env=env,
-        cwd=compat_server_cwd(),
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
+    log_handle = open(workdir / "server.log", "w")  # noqa: SIM115 - closed by the fixture
+    try:
+        proc = subprocess.Popen(
+            [
+                server_executable(),
+                "-m",
+                "omnigent",
+                "server",
+                "-c",
+                str(config_path),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--database-uri",
+                f"sqlite:///{workdir / 'server.db'}",
+                "--artifact-location",
+                str(artifacts),
+            ],
+            env=env,
+            cwd=compat_server_cwd(),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError:
+        log_handle.close()
+        raise
     base_url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + _HEALTH_TIMEOUT_S
     while time.monotonic() < deadline and proc.poll() is None:
         try:
             if httpx.get(f"{base_url}/health", timeout=1.0).status_code == 200:
-                return proc, base_url
+                return proc, base_url, log_handle
         except httpx.HTTPError:
             pass
         time.sleep(0.2)
@@ -136,7 +144,9 @@ def stop_server(proc: subprocess.Popen[bytes]) -> None:
 
 def agent_id_for(base_url: str, name: str) -> str:
     agents = httpx.get(f"{base_url}/v1/agents", timeout=10.0).json()["data"]
-    return next(agent["id"] for agent in agents if agent["name"] == name)
+    ids = [agent["id"] for agent in agents if agent["name"] == name]
+    assert ids, f"agent {name!r} not offered; found {[agent['name'] for agent in agents]}"
+    return ids[0]
 
 
 @pytest.fixture(scope="module")
@@ -147,7 +157,7 @@ def gateway_sandbox_server(
 ) -> Iterator[str]:
     """A hostless server offering the Islo sandbox; the mock LLM is the ambient gateway."""
     workdir = tmp_path_factory.mktemp("gateway_sandbox_server")
-    proc, base_url = spawn_sandbox_server(workdir, mock_llm_server_url)
+    proc, base_url, log_handle = spawn_sandbox_server(workdir, mock_llm_server_url)
     try:
         httpx.post(
             f"{mock_llm_server_url}/mock/served_models",
@@ -156,7 +166,13 @@ def gateway_sandbox_server(
         ).raise_for_status()
         yield base_url
     finally:
+        # The mock LLM server is session-scoped: leave no gateway listing behind.
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.post(
+                f"{mock_llm_server_url}/mock/served_models", json={"models": []}, timeout=10.0
+            )
         stop_server(proc)
+        log_handle.close()
 
 
 def _open_harness_picker(page: Page) -> None:

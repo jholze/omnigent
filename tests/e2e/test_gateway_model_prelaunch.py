@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -164,5 +165,7 @@ def test_gateway_choice_reaches_managed_codex_first_turn(
             host_tail = host_log.read_text(errors="replace")[-5000:] if host_log.exists() else ""
             raise AssertionError(f"{exc}\n{stack.log_tail()}\n{host_tail}") from exc
         finally:
-            client.delete(f"/v1/sessions/{session_id}")
-            client.delete(f"/v1/sessions/{seed['session_id']}")
+            # Cleanup must not displace the diagnostic raised above.
+            for sid in (session_id, seed["session_id"]):
+                with contextlib.suppress(Exception):
+                    client.delete(f"/v1/sessions/{sid}")

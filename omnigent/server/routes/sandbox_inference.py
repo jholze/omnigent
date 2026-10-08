@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -19,6 +20,8 @@ from omnigent.inference_config import (
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._session_create_validation import validate_session_agent
+
+_logger = logging.getLogger(__name__)
 
 
 def inference_service(request: Request) -> Any:
@@ -197,7 +200,7 @@ def create_sandbox_inference_router(
             ).spec
             harness = actual_harness(spec, harness)
             auth = spec.executor.auth
-            profile = spec.executor.profile
+            profile = spec.executor.config.get("profile") or spec.executor.profile
         try:
             snapshot = await inference_service(request).prepare(
                 provider, harness, user_id, agent_auth=auth
@@ -229,7 +232,19 @@ def create_sandbox_inference_router(
         # An agent's own provider takes precedence over the sandbox's ambient gateway.
         if target is None or not target.managed_launch_supported or auth is not None or profile:
             return result
-        ambient = await inference_service(request).ambient_catalog(provider, harness, user_id)
+        try:
+            ambient = await inference_service(request).ambient_catalog(provider, harness, user_id)
+        except (OmnigentError, ValueError) as exc:
+            _logger.warning(
+                "Gateway model preview failed for %s/%s", provider, harness, exc_info=True
+            )
+            result.update(
+                status="unavailable",
+                error=exc.message
+                if isinstance(exc, OmnigentError)
+                else "Invalid inference configuration",
+            )
+            return result
         if ambient is not None:
             return ambient
         if target.gateway_model_options is not None:
@@ -240,6 +255,9 @@ def create_sandbox_inference_router(
                 )
                 result.update(models=models, status="ready" if models else "empty")
             except Exception:  # noqa: BLE001 - optional preview must not block a default launch
+                _logger.warning(
+                    "AI Gateway model preview failed for %s/%s", provider, harness, exc_info=True
+                )
                 result.update(
                     status="unavailable",
                     error="Could not load AI Gateway models. You can use Harness default.",

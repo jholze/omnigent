@@ -421,8 +421,29 @@ async def test_unbound_gateway_preview_leaves_other_harnesses_unconfigured(
     assert requests == []
 
 
+async def test_malformed_providers_degrade_the_unbound_preview(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+):
+    requests: list[Request] = []
+    target = _discoverable_gateway(env, monkeypatch, requests)
+    target.host_config = {"providers": {"team_gateway": "not-a-mapping"}}
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "unavailable"
+    assert response.json()["configured"] is False
+    assert "must be a mapping" in response.json()["error"]
+    assert requests == []
+
+
 @pytest.mark.parametrize(
-    "connection", [{"auth": {"type": "provider", "name": "private"}}, {"profile": "private"}]
+    "connection",
+    [
+        {"auth": {"type": "provider", "name": "private"}},
+        {"profile": "private"},
+        {"config": {"harness": "codex", "profile": "private"}},
+    ],
 )
 async def test_agent_provider_does_not_inherit_ambient_gateway_preview(
     env: _Env, monkeypatch: pytest.MonkeyPatch, connection
