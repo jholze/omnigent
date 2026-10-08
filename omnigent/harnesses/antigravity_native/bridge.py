@@ -306,7 +306,7 @@ def _agy_orphan_retention_expired(bridge_dir: Path) -> bool:
     # WAL mode the sidecar, not the main file, carries the latest write.
     try:
         for filename in os.listdir(conversations_dir):
-            if ".db" not in filename:
+            if not filename.endswith((".db", ".db-wal", ".db-shm")):
                 continue
             try:
                 if (conversations_dir / filename).stat().st_mtime > activity_cutoff:

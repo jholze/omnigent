@@ -180,12 +180,41 @@ def _kill_tree_uncleanly(proc: subprocess.Popen[bytes]) -> None:
             straggler.kill()
 
 
-def _host_log_path(daemon_log: Path) -> Path:
-    """Return the host's own log file, as announced on the daemon's stdout."""
+def _kill_session_tmux_server(bridge_dir: Path) -> None:
+    """
+    Stop the session's detached tmux server, if the agy terminal advertised one.
+
+    ``_kill_tree_uncleanly`` only reaps the host daemon's process tree, but agy
+    runs under a tmux server that daemonizes and reparents away from it. Left
+    alive, agy keeps writing conversation state and would refresh timestamps
+    after they are aged, so stop it explicitly.
+    """
+    info = antigravity_bridge.read_tmux_info(bridge_dir)
+    if info is None:
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ["tmux", "-S", info["socket_path"], "kill-server"],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+
+
+def _host_log_path(daemon_log: Path, home_dir: Path) -> Path:
+    """
+    Return the host's own log file, as announced on the daemon's stdout.
+
+    The daemon abbreviates a path under its own ``HOME`` to ``~``; resolve that
+    against the daemon's isolated home, not this test process's home.
+    """
     text = daemon_log.read_text(encoding="utf-8", errors="replace")
     match = _HOST_LOG_LINE_RE.search(text)
     assert match is not None, f"host daemon did not announce its log file:\n{text}"
-    return Path(match.group(1)).expanduser()
+    announced = match.group(1)
+    if announced == "~" or announced.startswith("~/"):
+        return home_dir / announced[1:].lstrip("/")
+    return Path(announced)
 
 
 def _sweep_completed(host_log: Path) -> bool:
@@ -300,6 +329,7 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
             history_dbs[0].write_bytes(b"conversation history")
 
         _kill_tree_uncleanly(daemon)
+        _kill_session_tmux_server(bridge_dir)
         assert all(db.is_file() for db in history_dbs), (
             "sanity: the crash itself must not remove the dir (nothing ran cleanup)"
         )
@@ -312,7 +342,7 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
         )
         _wait_for_host_connection(daemon_b, daemon_b_log)
         _online_host_id(http_client)
-        host_b_log = _host_log_path(daemon_b_log)
+        host_b_log = _host_log_path(daemon_b_log, home_dir)
         _wait_until(
             lambda: _sweep_completed(host_b_log) or not all(db.exists() for db in history_dbs),
             _SWEEP_GRACE_S,
@@ -330,6 +360,7 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
         # restart must reclaim it. A relaunch may mint a fresh conversation in
         # the same dir, so the old databases vanishing is the proof.
         _kill_tree_uncleanly(daemon_b)
+        _kill_session_tmux_server(bridge_dir)
         assert all(db.is_file() for db in history_dbs)
         _expire_antigravity_bridge_activity(bridge_dir, agy_state_dir)
         daemon_c_log = tmp_path / "host-daemon-c.log"
@@ -340,7 +371,7 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
         )
         _wait_for_host_connection(daemon_c, daemon_c_log)
         _online_host_id(http_client)
-        host_c_log = _host_log_path(daemon_c_log)
+        host_c_log = _host_log_path(daemon_c_log, home_dir)
         _wait_until(
             lambda: _sweep_completed(host_c_log) or not any(db.exists() for db in history_dbs),
             _SWEEP_GRACE_S,
@@ -356,6 +387,7 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
             if proc is not None and proc.poll() is None:
                 _kill_tree_uncleanly(proc)
         if session_id is not None:
+            _kill_session_tmux_server(antigravity_bridge.bridge_dir_for_bridge_id(session_id))
             with contextlib.suppress(httpx.HTTPError):
                 http_client.delete(f"/v1/sessions/{session_id}", timeout=30.0)
             shutil.rmtree(

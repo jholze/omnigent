@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2604,18 +2605,10 @@ def test_prune_orphaned_bridge_dirs_uses_latest_conversation_activity(
     assert wal.read_bytes() == b"latest turn"
 
 
-def test_prune_orphaned_bridge_dirs_retains_bridge_when_conversation_scan_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def _fail_conversation_listing(
+    monkeypatch: pytest.MonkeyPatch, conversations: Path, database: Path
 ) -> None:
-    """An unreadable conversation store fails closed instead of deleting the bridge."""
-    dead_dir = _dead_owner_bridge(
-        tmp_path / "antigravity-native",
-        monkeypatch,
-        owner_marker_age_s=_mod._ORPHAN_RETENTION_SECONDS + 1,
-    )
-    conversations = _conversations_dir(dead_dir)
-    conversations.mkdir(parents=True)
+    """Make listing the conversations directory raise."""
     real_listdir = os.listdir
 
     def _failing_listdir(path: object = ".") -> list[str]:
@@ -2625,8 +2618,56 @@ def test_prune_orphaned_bridge_dirs_retains_bridge_when_conversation_scan_fails(
 
     monkeypatch.setattr(_mod.os, "listdir", _failing_listdir)
 
+
+def _fail_path_stat(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make ``Path.stat()`` raise for *target* only, leaving other paths intact."""
+    real_stat = Path.stat
+
+    def _failing_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(self) == target:
+            raise PermissionError(f"{target} is unreadable")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "stat", _failing_stat)
+
+
+@pytest.mark.parametrize(
+    "install_failure",
+    [
+        pytest.param(
+            lambda mp, convs, db: _fail_conversation_listing(mp, convs, db),
+            id="directory-listing",
+        ),
+        pytest.param(lambda mp, convs, db: _fail_path_stat(mp, convs), id="directory-stat"),
+        pytest.param(lambda mp, convs, db: _fail_path_stat(mp, db), id="database-stat"),
+    ],
+)
+def test_prune_orphaned_bridge_dirs_retains_bridge_when_conversation_scan_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_failure: Callable[[pytest.MonkeyPatch, Path, Path], None],
+) -> None:
+    """An unreadable conversation store fails closed instead of deleting the bridge.
+
+    Covers each separately handled filesystem probe: the directory listing, the
+    conversations-directory ``stat()``, and the per-database ``stat()``.
+    """
+    dead_dir = _dead_owner_bridge(
+        tmp_path / "antigravity-native",
+        monkeypatch,
+        owner_marker_age_s=_mod._ORPHAN_RETENTION_SECONDS + 1,
+    )
+    conversations = _conversations_dir(dead_dir)
+    conversations.mkdir(parents=True)
+    database = conversations / "7d5e1c2a.db"
+    database.write_bytes(b"history")
+    os.utime(database, (_RETENTION_NOW - _mod._ORPHAN_RETENTION_SECONDS - 1,) * 2)
+
+    install_failure(monkeypatch, conversations, database)
+
     assert _mod.prune_orphaned_bridge_dirs() == 0
     assert dead_dir.exists()
+    assert database.read_bytes() == b"history"
 
 
 def test_prune_orphaned_bridge_dirs_keeps_live_and_unmarked_bridges(
