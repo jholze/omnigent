@@ -19,12 +19,14 @@ from tests.e2e_ui.sessions.test_canvas_page import _serve_list, _session, _stub_
 
 # Samples each visible React Flow tile's screen position and the viewport
 # transform on every animation frame (rAF fires right before paint, so a
-# sample is what that frame shows); CSS-hidden tiles are skipped.
+# sample approximates that frame's geometry); CSS-hidden tiles are skipped.
+# ~20s at 60fps: bounds __canvasFrames so the large-canvas run stays small.
+_MAX_FRAMES = 1200
+
 _FRAME_SAMPLER = """
 (() => {
   window.__canvasFrames = [];
-  // Cap samples so the large-canvas run cannot grow __canvasFrames unbounded.
-  const MAX_FRAMES = 1200;
+  const MAX_FRAMES = __MAX_FRAMES__;
   const visible = (el) =>
     typeof el.checkVisibility === 'function'
       ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
@@ -52,7 +54,7 @@ _FRAME_SAMPLER = """
   };
   requestAnimationFrame(sample);
 })();
-"""
+""".replace("__MAX_FRAMES__", str(_MAX_FRAMES))
 
 # Read the persisted canvas layout (any viewer slot) from localStorage.
 _READ_LAYOUT = (
@@ -93,6 +95,12 @@ def _open_canvas_and_persist_a_move(
     page.goto(f"{live_server}/canvas")
     moved = page.locator(f'.react-flow__node[data-id="{moved_id}"]')
     expect(moved).to_be_visible()
+    # A hidden/inert canvas ignores pointer events, so wait for the restored,
+    # fitted surface before dragging or the move would silently no-op.
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-testid=canvas-flow]');"
+        " return el && !el.hasAttribute('inert') && getComputedStyle(el).opacity === '1'; }"
+    )
     page.wait_for_function(
         f"() => Object.keys((({_READ_LAYOUT})() ?? {{}}).positions ?? {{}}).length"
         f" === {len(sessions)}"
@@ -129,7 +137,12 @@ def _reload_and_assert_first_frames_restored(
     expect(page.locator(".react-flow__node")).to_have_count(total, timeout=30_000)
     page.wait_for_timeout(500)
 
-    frames = [frame for frame in page.evaluate("window.__canvasFrames") if frame["nodes"]]
+    raw_frames = page.evaluate("window.__canvasFrames")
+    assert len(raw_frames) < _MAX_FRAMES, (
+        "frame sampler hit its cap before the view settled; the steady-state "
+        "frame may be truncated"
+    )
+    frames = [frame for frame in raw_frames if frame["nodes"]]
     assert frames, "no frames with visible tiles were sampled after the reload"
 
     # Steady state after the reload: the restored layout in the fitted view.

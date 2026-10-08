@@ -279,7 +279,7 @@ describe("CanvasPage", () => {
     expect(screen.getByTestId("canvas-flow")).not.toHaveAttribute("inert");
   });
 
-  it("marks the surface mounted after the loading screen inert until it is fitted", async () => {
+  it("keeps the surface inert until fitted when it mounts after the loading screen", async () => {
     let applyFit = (_fitted: boolean) => {};
     flowFitView.mockImplementationOnce(
       () =>
@@ -296,6 +296,36 @@ describe("CanvasPage", () => {
     // container to mark. It must still apply once the first page arrives.
     expect(screen.queryByTestId("canvas-flow")).toBeNull();
 
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
+      sessionsStub([conversation("conv_1", 2)]),
+    );
+    rerender(pageTree());
+    expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
+
+    await act(async () => applyFit(true));
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).not.toHaveAttribute("inert");
+  });
+
+  it("re-hides a populated retry after an empty load failure until it is fitted", async () => {
+    let applyFit = (_fitted: boolean) => {};
+    flowFitView.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          applyFit = resolve;
+        }),
+    );
+    // An empty load that failed reveals the surface so the user is not stuck
+    // behind a blank page.
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
+      sessionsStub([], { complete: false, networkConfirmed: false, error: "offline" }),
+    );
+    const { rerender } = renderPage();
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+
+    // Retry on the same instance returns cards: the surface must hide again
+    // until their first fit lands, never painting them under the default view.
     vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
       sessionsStub([conversation("conv_1", 2)]),
     );

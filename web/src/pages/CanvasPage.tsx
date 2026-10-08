@@ -186,6 +186,8 @@ function CanvasSurface() {
   const viewportDirtyRef = useRef(false);
   // The card set the view was last fitted to; a different set refits.
   const fittedKeyRef = useRef<string | null>(null);
+  // Revealed for an empty/failed load; re-hide if content later arrives unfit.
+  const revealedEmptyRef = useRef(false);
   const pendingProjectNameRef = useRef<string | null>(null);
   const flowContainerRef = useRef<HTMLDivElement>(null);
   const aliveRef = useRef(true);
@@ -338,20 +340,28 @@ function CanvasSurface() {
     if (!viewportDirtyRef.current) fitCanvas();
   }, [fitCanvas, loaded, nodes]);
 
-  // An empty canvas has no layout to restore: reveal once sessions and
-  // projects have settled (confirmed or failed). A cached or partial list can
-  // look empty while cards are still arriving; revealing early paints them unfitted.
-  useEffect(() => {
-    if (visibleSessions.length > 0) return;
+  // An empty canvas has no layout to restore, so reveal once sessions and
+  // projects settle. If cards then arrive (e.g. a retry after an empty
+  // failure), re-hide until their first fit so they never paint unfitted.
+  useLayoutEffect(() => {
+    if (visibleSessions.length > 0) {
+      if (revealedEmptyRef.current && !viewportDirtyRef.current) {
+        revealedEmptyRef.current = false;
+        setViewRestored(false);
+      }
+      return;
+    }
     const sessionsSettled = networkConfirmed || error !== null;
     const projectsSettled = projectsQuery.data !== undefined || projectsQuery.isError;
-    if (sessionsSettled && projectsSettled) setViewRestored(true);
+    if (sessionsSettled && projectsSettled) {
+      revealedEmptyRef.current = true;
+      setViewRestored(true);
+    }
   }, [error, networkConfirmed, projectsQuery.data, projectsQuery.isError, visibleSessions]);
 
   // React 18's JSX has no `inert` prop; set the attribute directly so the
-  // invisible surface is not tabbable or read by assistive tech. Depend on
-  // `loaded` so the attribute lands when the container first mounts after the
-  // loading screen, not only when `viewRestored` later flips.
+  // invisible surface is not tabbable or read by assistive tech. `loaded`
+  // dependency applies the attribute when the container first mounts.
   useLayoutEffect(() => {
     if (!loaded) return;
     flowContainerRef.current?.toggleAttribute("inert", !viewRestored);
@@ -449,7 +459,9 @@ function CanvasSurface() {
       }
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
-        if (loaded && !viewportDirtyRef.current) fitCanvas();
+        // Re-fit only an already-restored view; the initial reveal is owned by
+        // the fit and empty-settle effects, never a resize over empty content.
+        if (loaded && viewRestored && !viewportDirtyRef.current) fitCanvas();
       }, RESIZE_REFIT_DELAY_MS);
     });
     observer.observe(container);
@@ -457,7 +469,7 @@ function CanvasSurface() {
       if (timer) clearTimeout(timer);
       observer.disconnect();
     };
-  }, [fitCanvas, loaded]);
+  }, [fitCanvas, loaded, viewRestored]);
 
   const onNodesChange = useCallback((changes: NodeChange<SessionCardNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
