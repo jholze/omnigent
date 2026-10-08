@@ -101,6 +101,7 @@ logger = logging.getLogger(__name__)
 # producer (Databricks Unity Gateway or a generic key/gateway provider).
 _GATEWAY_AUTH_REFRESH_MS = 900_000
 _CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV = "ENABLE_TOOL_SEARCH"
+_CLAUDE_CODE_ENABLE_CLAUDEAI_MCP_ENV = "ENABLE_CLAUDEAI_MCP_SERVERS"
 
 # Claude Code forwards the ANTHROPIC_CUSTOM_HEADERS value verbatim as
 # request headers. The Databricks Unity Gateway only serves Claude requests
@@ -2618,11 +2619,13 @@ class ClaudeSDKExecutor(Executor):
         # With no setting sources the CLI never reads a project's
         # ``disableClaudeAiConnectors`` opt-out and would still auto-fetch the
         # account's connectors; carry the opt-out in the launch settings.
+        hermetic = resolved.setting_sources == []
         settings_payload = _claude_settings_payload(
-            api_key_helper,
-            model_overrides,
-            disable_claude_ai_connectors=resolved.setting_sources == [],
+            api_key_helper, model_overrides, disable_claude_ai_connectors=hermetic
         )
+        if hermetic:
+            # The SDK's bundled CLI predates that setting but honors this knob.
+            env[_CLAUDE_CODE_ENABLE_CLAUDEAI_MCP_ENV] = "false"
 
         # Capture stderr from the CLI subprocess for diagnostics
         stderr_lines: list[str] = []
