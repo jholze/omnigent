@@ -781,6 +781,8 @@ def test_ambient_gateway_providers_exclude_bound_and_undiscoverable_targets():
     ]
     assert ambient_gateway_providers(unbound.host_config, {}) == {}
     assert ambient_gateway_providers(None, unbound.model_discovery) == {}
+    malformed = {**unbound.host_config, "inference": "not-a-mapping"}
+    assert ambient_gateway_providers(malformed, unbound.model_discovery) == {}
 
 
 @pytest.mark.asyncio

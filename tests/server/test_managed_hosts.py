@@ -2238,6 +2238,11 @@ def test_provider_ui_capabilities_advertise_gateway_models_for_unbound_discovery
                 host_config={"providers": {"gateway": "nope"}},
                 model_discovery=discovery,
             ),
+            config(
+                "malformed-inference",
+                host_config={**gateway, "inference": "nope"},
+                model_discovery=discovery,
+            ),
         )
     )
     assert deployment.provider_ui_capabilities() == {
@@ -2246,6 +2251,7 @@ def test_provider_ui_capabilities_advertise_gateway_models_for_unbound_discovery
         "static": {"multi_repo": False},
         "bound": {"multi_repo": False, "inference_models": True},
         "malformed": {"multi_repo": False},
+        "malformed-inference": {"multi_repo": False},
     }
 
 

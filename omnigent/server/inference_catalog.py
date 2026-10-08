@@ -152,12 +152,14 @@ def ambient_gateway_providers(
     """Gateways an unbound target can list through ``sandbox.model_discovery``."""
     raw = host_config or {}
     discovery = model_discovery or {}
-    if not discovery or parse_inference_config(raw):
+    if not discovery:
         return {}
     try:
+        if parse_inference_config(raw):
+            return {}
         providers = load_providers(raw)
-    except OmnigentError:
-        # Startup rejects malformed YAML providers; a programmatic target gets no preview.
+    except (OmnigentError, ValueError):
+        # Startup rejects malformed YAML host_config; a programmatic target gets no preview.
         return {}
     return {
         name: entry

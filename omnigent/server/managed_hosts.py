@@ -809,7 +809,12 @@ class ManagedSandboxDeployment:
                 from omnigent.inference_config import parse_inference_config
                 from omnigent.server.inference_catalog import ambient_gateway_providers
 
-                if parse_inference_config(config.host_config or {}):
+                try:
+                    bound = bool(parse_inference_config(config.host_config or {}))
+                except ValueError:
+                    # Startup rejects malformed YAML; a programmatic target advertises no catalog.
+                    bound = False
+                if bound:
                     caps[config.provider]["inference_models"] = True
                 elif config.gateway_model_options is not None or ambient_gateway_providers(
                     config.host_config, config.model_discovery

@@ -22,6 +22,7 @@ from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._session_create_validation import validate_session_agent
 
 _logger = logging.getLogger(__name__)
+_GATEWAY_HOOK_TIMEOUT_S = 10.0
 
 
 def inference_service(request: Request) -> Any:
@@ -238,10 +239,14 @@ def create_sandbox_inference_router(
         if target.gateway_model_options is not None:
             result["provider_label"] = "AI Gateway"
             try:
-                models = await asyncio.wait_for(
-                    target.gateway_model_options(harness, user_id), timeout=10.0
+                rows = await asyncio.wait_for(
+                    target.gateway_model_options(harness, user_id), timeout=_GATEWAY_HOOK_TIMEOUT_S
                 )
+                # Advisory rows never carry a default marker; Harness default stays a separate row.
+                models = [{**row, "isDefault": False} for row in rows]
                 result.update(models=models, status="ready" if models else "empty")
+                if not models:
+                    result["error"] = "The gateway lists no usable models for this harness."
             except Exception:  # noqa: BLE001 - optional preview must not block a default launch
                 _logger.warning(
                     "AI Gateway model preview failed for %s/%s", provider, harness, exc_info=True

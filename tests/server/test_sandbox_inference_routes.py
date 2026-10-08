@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +22,7 @@ from omnigent.models import model_catalog
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.managed_hosts import ManagedSandboxConfig, ManagedSandboxDeployment
+from omnigent.server.routes import sandbox_inference as sandbox_inference_routes
 from omnigent.server.routes import sessions as sessions_module
 from omnigent.server.routes.sessions import routes_core, routes_events
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -115,6 +116,13 @@ class _Env:
                 if path.is_file()
             ),
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_model_catalog_cache() -> Iterator[None]:
+    model_catalog.clear_model_catalog_cache()
+    yield
+    model_catalog.clear_model_catalog_cache()
 
 
 @pytest_asyncio.fixture
@@ -241,12 +249,16 @@ async def test_preview_preserves_acp_slug_without_creating_session_or_sandbox(en
     env.launch.assert_not_called()
 
 
-async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env):
+@pytest.mark.parametrize(
+    "rows",
+    [[{"id": "system.ai.gpt-6-astra", "displayName": "Astra 6", "isDefault": True}], []],
+    ids=["ready", "empty"],
+)
+async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env, rows):
     from omnigent.server.inference_catalog import SandboxInferenceService
 
     target = env.app.state.sandbox_config.default
     target.host_config = None
-    rows = [{"id": "system.ai.gpt-6-astra", "displayName": "Astra 6"}]
     target.gateway_model_options = AsyncMock(return_value=rows)
     env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
     before = env.persisted()
@@ -254,14 +266,17 @@ async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env):
         "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {
+    expected = {
         "configured": False,
-        "models": rows,
+        "models": [{**row, "isDefault": False} for row in rows],
         "configuration_revision": None,
         "provider_label": "AI Gateway",
         "default_model": None,
-        "status": "ready",
+        "status": "ready" if rows else "empty",
     }
+    if not rows:
+        expected["error"] = "The gateway lists no usable models for this harness."
+    assert response.json() == expected
     assert response.headers["cache-control"] == "private, no-store"
     target.gateway_model_options.assert_awaited_once_with("codex-native", None)
     assert env.persisted() == before
@@ -269,17 +284,25 @@ async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env):
 
 
 @pytest.mark.parametrize("selected", [True, False])
-@pytest.mark.parametrize(
-    "failure", [RuntimeError("private upstream error"), TimeoutError()], ids=["error", "timeout"]
-)
+@pytest.mark.parametrize("failure", ["error", "timeout"])
 async def test_gateway_failure_keeps_launch_selection_and_default_usable(
-    env: _Env, selected, failure
+    env: _Env, monkeypatch: pytest.MonkeyPatch, selected, failure
 ):
     from omnigent.server.inference_catalog import SandboxInferenceService
 
+    async def stalled(harness: str, user_id: str | None) -> list[dict[str, Any]]:
+        await asyncio.sleep(5)
+        return []
+
     target = env.app.state.sandbox_config.default
     target.host_config = None
-    target.gateway_model_options = AsyncMock(side_effect=failure)
+    if failure == "timeout":
+        monkeypatch.setattr(sandbox_inference_routes, "_GATEWAY_HOOK_TIMEOUT_S", 0.05)
+        target.gateway_model_options = AsyncMock(side_effect=stalled)
+    else:
+        target.gateway_model_options = AsyncMock(
+            side_effect=RuntimeError("private upstream error")
+        )
     env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
     preview = await env.client.get(
         "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
@@ -341,7 +364,6 @@ def _discoverable_gateway(
     from omnigent.server.inference_catalog import SandboxInferenceService
 
     monkeypatch.setenv("CATALOG_KEY", "catalog-test-secret")
-    model_catalog.clear_model_catalog_cache()
     target = env.app.state.sandbox_config.default
     target.host_config = copy.deepcopy(_UNBOUND_GATEWAY)
     target.model_discovery = copy.deepcopy(_UNBOUND_DISCOVERY)

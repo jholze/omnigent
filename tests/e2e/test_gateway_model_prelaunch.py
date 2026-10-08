@@ -46,7 +46,7 @@ def _wait(check, description: str, timeout: float = 90):
 
 
 def _bundled_codex_slugs(codex_home: Path, home: Path) -> set[str]:
-    """Models the installed Codex bundles; others fall open to its configured default."""
+    """Model slugs the installed Codex bundles; other requests fall back to its default."""
     env = {
         key: value
         for key, value in os.environ.items()
