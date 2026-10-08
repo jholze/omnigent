@@ -43,7 +43,6 @@ from omnigent.native.native_coding_agents import native_coding_agent_for_harness
 from omnigent.runner.native.orchestration import (
     _cancel_auto_forwarder_task,
     _claude_native_bridge_id_for_session,
-    _session_labels_for_runner_spawn,
 )
 from omnigent.runner.resource_registry import (
     _STATUS_EMITTING_TERMINAL_ROLES,
@@ -51,6 +50,8 @@ from omnigent.runner.resource_registry import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from omnigent.harness_plugins import NativeCodingAgent
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
 
@@ -100,7 +101,12 @@ class SubagentWorkIdForSession(Protocol):
 
 
 class CodexBridgeStateForSession(Protocol):
-    """Resolve a live Codex app-server bridge state for a session."""
+    """Resolve a Codex app-server bridge state and its directory for a session.
+
+    Returns the state (or ``None``) together with the bridge directory it was
+    read from, resolved from a single label lookup so a caller that then clears
+    the turn or publishes against the directory acts on the same bridge.
+    """
 
     async def __call__(
         self,
@@ -108,7 +114,7 @@ class CodexBridgeStateForSession(Protocol):
         *,
         action: str,
         missing_state_log_level: int = logging.WARNING,
-    ) -> CodexNativeBridgeState | None:
+    ) -> tuple[CodexNativeBridgeState | None, Path]:
         raise NotImplementedError
 
 
@@ -705,23 +711,14 @@ class NativeInterruptRunner:
             is_stale_active_turn_error,
         )
         from omnigent.harnesses.codex_native.bridge import (
-            CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
-            bridge_dir_for_bridge_id,
             cancel_pending_mcp_startup,
             clear_active_turn_id_if_matches,
             read_mcp_startup,
         )
 
-        state = await self._codex_bridge_state_for_session(conv_id, action="interrupt")
+        state, bridge_dir = await self._codex_bridge_state_for_session(conv_id, action="interrupt")
         if state is None:
             return Response(status_code=204)
-        labels = await _session_labels_for_runner_spawn(
-            server_client=self._server_client,
-            session_id=conv_id,
-        )
-        bridge_dir = bridge_dir_for_bridge_id(
-            labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or conv_id
-        )
         pending_mcp = cancel_pending_mcp_startup(bridge_dir)
         if state.active_turn_id is None and not pending_mcp:
             self._logger.info(

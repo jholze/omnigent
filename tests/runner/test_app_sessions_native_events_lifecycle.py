@@ -3116,6 +3116,7 @@ def _build_codex_native_runner_for_stale_turn(
     thread_id: str,
     socket_path: str,
     fake_client: _RecordingCodexAppServerClient,
+    bridge_id: str | None = None,
 ) -> tuple[Any, _EventRecordingServerClient, Path]:
     """Wire a codex-native runner app with a seeded active turn.
 
@@ -3134,7 +3135,19 @@ def _build_codex_native_runner_for_stale_turn(
         raise RuntimeError("launch config disabled in test")
 
     monkeypatch.setattr(runner_app_module, "_codex_native_launch_config", _fail_launch_config)
-    bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id(conv_id)
+    if bridge_id is not None:
+        # A fresh Codex CLI session bridges under a non-default id; make the
+        # label lookup resolve to it so state and directory stay consistent.
+        from omnigent.harnesses.codex_native.bridge import CODEX_NATIVE_BRIDGE_ID_LABEL_KEY
+
+        label_value = bridge_id
+
+        async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+            del server_client, session_id
+            return {CODEX_NATIVE_BRIDGE_ID_LABEL_KEY: label_value}
+
+        monkeypatch.setattr(runner_app_module, "_session_labels_for_runner_spawn", _labels)
+    bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id(bridge_id or conv_id)
     codex_native_bridge.write_bridge_state(
         bridge_dir,
         codex_native_bridge.CodexNativeBridgeState(
@@ -3500,6 +3513,95 @@ async def test_events_codex_native_stop_superseded_turn_posts_no_idle_despite_st
     assert not [
         e for e in queued_events if e.get("type") == "session.status" and e.get("status") == "idle"
     ], "a superseded turn must not publish a false idle edge."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["interrupt", "stop_session"])
+async def test_events_codex_native_stop_clears_resolved_bridge_not_conv_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    event_type: str,
+) -> None:
+    """Stale-turn reconcile clears the bridge it read state from, not conv id.
+
+    A fresh Codex CLI session bridges under a non-default id. The handler must
+    resolve the bridge directory and its state together, so the stale turn is
+    cleared in that same directory and the idle it publishes refers to it.
+    Resolving the directory separately could fall back to the conversation id
+    and clear (and idle) a different bridge than the one it read.
+    """
+    from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
+
+    conv_id = f"c0dec0dec0dec0dec0dec0dec0db{event_type[:4]}"
+    bridge_id = f"deadbeefdeadbeefdeadbeefdead{event_type[:4]}"
+    fake_client = _StaleTurnCodexAppServerClient(
+        transport="ws://127.0.0.1:43226",
+        client_name="omnigent-codex-native-runner",
+        error=CodexAppServerResponseError(
+            {"code": -32600, "message": "no active turn to interrupt"}
+        ),
+    )
+    app, _server_client, bridge_dir = _build_codex_native_runner_for_stale_turn(
+        monkeypatch,
+        tmp_path,
+        conv_id,
+        active_turn_id="turn_codex_nondefault",
+        thread_id="thread_codex_nondefault",
+        socket_path="ws://127.0.0.1:43226",
+        fake_client=fake_client,
+        bridge_id=bridge_id,
+    )
+    conv_default_dir = codex_native_bridge.bridge_dir_for_bridge_id(conv_id)
+    assert bridge_dir != conv_default_dir, "test must seed a non-default bridge id."
+
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+
+        app.state.session_resource_registry.note_external_session_status(conv_id, "running")
+
+        stop_resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": event_type},
+        )
+
+        turn_is_active = app.state.session_resource_registry.session_turn_is_active(conv_id)
+
+        from omnigent.runner.app import _session_event_queues_ref
+
+        queue = _session_event_queues_ref.get(conv_id)
+        assert queue is not None, "session create must initialize the event queue."
+        queued_events: list[dict[str, Any]] = []
+        while not queue.empty():
+            item = queue.get_nowait()
+            if isinstance(item, dict):
+                queued_events.append(item)
+
+    assert stop_resp.status_code == 204, (
+        f"codex-native {event_type} on an already-ended turn must be a 204 "
+        f"no-op; got {stop_resp.status_code}: {stop_resp.text}"
+    )
+    # The stale turn is cleared in the bridge the state was read from, proving
+    # the directory was resolved together with the state and not separately.
+    state = codex_native_bridge.read_bridge_state(bridge_dir)
+    assert state is not None and state.active_turn_id is None, (
+        f"stale turn must be cleared in the resolved bridge dir; got {state!r}."
+    )
+    # The conversation-id default directory is never written, so a fallback
+    # resolution to it would have cleared and idled the wrong bridge.
+    assert codex_native_bridge.read_bridge_state(conv_default_dir) is None, (
+        "the conversation-id default bridge dir must not be touched."
+    )
+    assert not turn_is_active, "session must be reconciled to idle, not left active."
+    status_idle = [
+        e for e in queued_events if e.get("type") == "session.status" and e.get("status") == "idle"
+    ]
+    assert len(status_idle) == 1, (
+        f"stale-turn reconcile must publish exactly one idle; got {status_idle!r}."
+    )
 
 
 @pytest.mark.asyncio

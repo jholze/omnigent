@@ -1623,16 +1623,27 @@ def clear_active_turn_id_if_matches(
         as posting ``idle``) with a concurrent ``turn/started`` update, so a
         turn that starts right after the clear cannot be masked by it. The
         lock is a non-reentrant ``flock``, so the callback must be quick and
-        must not call any bridge-state function (doing so self-deadlocks); it
-        should also not raise, since the clear has already been written.
+        must not call any bridge-state function (doing so self-deadlocks). If it
+        raises, the exception is caught and logged: the clear is already
+        written, so a retry would not re-run the callback.
     :returns: ``True`` when bridge state was cleared or did not exist,
         ``False`` when a stale or ambiguous terminal event was ignored.
     """
+
+    def _run_on_cleared() -> None:
+        if on_cleared is None:
+            return
+        try:
+            on_cleared()
+        except Exception:  # noqa: BLE001 - the clear is written; a retry cannot re-run it.
+            _logger.warning(
+                "Codex-native cleared-turn callback raised for %s", bridge_dir, exc_info=True
+            )
+
     with _bridge_state_lock(bridge_dir):
         state = read_bridge_state(bridge_dir)
         if state is None:
-            if on_cleared is not None:
-                on_cleared()
+            _run_on_cleared()
             return True
         if completed_turn_id is None:
             # No-id terminal mid-turn is ambiguous — ignore (clearing posts a premature idle).
@@ -1651,6 +1662,5 @@ def clear_active_turn_id_if_matches(
                 cwd=state.cwd,
             ),
         )
-        if on_cleared is not None:
-            on_cleared()
+        _run_on_cleared()
         return True
