@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
 
 from tests.e2e import test_runner_tunnel_mid_turn_reconnect_grace_e2e as reconnect_lab
 from tests.e2e.conftest import (
@@ -43,6 +44,7 @@ from tests.e2e.test_runner_tunnel_mid_turn_reconnect_grace_e2e import (
 )
 
 _ANSWER = "TUNNEL_CLOSE_WEB_E2E_REPLY_ARRIVED"
+_WEB_UI = Path(__file__).resolve().parents[2] / "omnigent" / "server" / "static" / "web-ui"
 
 pytestmark = [pytest.mark.timeout(300, method="signal")]
 
@@ -124,9 +126,16 @@ def web_stack(
 
 @pytest.fixture
 def browser() -> Iterator[Browser]:
+    # The browser-driven suite needs the built SPA and a Chromium binary; the
+    # non-UI e2e lane ships neither, so skip there like the other web journeys.
+    if not (_WEB_UI / "index.html").is_file():
+        pytest.skip("web UI is not built; run `pnpm --filter web run build`")
     with sync_playwright() as playwright:
         args = ["--no-sandbox"] if os.environ.get("OMNIGENT_PW_NO_SANDBOX") else []
-        browser = playwright.chromium.launch(headless=True, args=args)
+        try:
+            browser = playwright.chromium.launch(headless=True, args=args)
+        except PlaywrightError as exc:
+            pytest.skip(f"Playwright Chromium unavailable: {exc}")
         try:
             yield browser
         finally:
