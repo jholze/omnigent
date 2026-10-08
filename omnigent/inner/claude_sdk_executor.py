@@ -1125,12 +1125,17 @@ def _gateway_model_vocabulary(base_url: str, auth_command: str | None) -> _Gatew
 
 
 def _claude_settings_payload(
-    api_key_helper: str | None, model_overrides: dict[str, str]
+    api_key_helper: str | None,
+    model_overrides: dict[str, str],
+    *,
+    disable_claude_ai_connectors: bool = False,
 ) -> str | None:
     """Serialize the invocation-local settings Claude Code launches with.
 
     :param api_key_helper: The gateway ``apiKeyHelper`` command, or ``None``.
     :param model_overrides: Canonical-to-served model id rewrites.
+    :param disable_claude_ai_connectors: Stop the CLI from auto-fetching the
+        logged-in account's claude.ai MCP connectors.
     :returns: Compact JSON for ``ClaudeAgentOptions.settings``, or ``None``
         when there is nothing to configure.
     """
@@ -1139,6 +1144,8 @@ def _claude_settings_payload(
         settings["apiKeyHelper"] = api_key_helper
     if model_overrides:
         settings["modelOverrides"] = model_overrides
+    if disable_claude_ai_connectors:
+        settings["disableClaudeAiConnectors"] = True
     return json.dumps(settings, separators=(",", ":")) if settings else None
 
 
@@ -2601,7 +2608,14 @@ class ClaudeSDKExecutor(Executor):
         # for the canonical ids the CLI names itself (the refusal-fallback).
         # No-op off the gateway transport.
         model_overrides = await self._apply_gateway_model_vocabulary(env, api_key_helper)
-        settings_payload = _claude_settings_payload(api_key_helper, model_overrides)
+        # ``skills: none`` forwards ``setting_sources=[]``, so the CLI never
+        # reads a project's ``disableClaudeAiConnectors`` opt-out and would
+        # still auto-fetch the account's connectors; carry the opt-out here.
+        settings_payload = _claude_settings_payload(
+            api_key_helper,
+            model_overrides,
+            disable_claude_ai_connectors=self._skills_filter == "none",
+        )
 
         # Capture stderr from the CLI subprocess for diagnostics
         stderr_lines: list[str] = []
