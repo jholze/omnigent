@@ -11,7 +11,7 @@ import java.util.concurrent.Executors
 /** HTTPS compatibility receiver for browsers that fall back from Auth Tab to Custom Tabs. */
 class OAuthCallbackActivity : ComponentActivity() {
     private val executor = Executors.newSingleThreadExecutor()
-    private val callbackHandoff by lazy { DatabricksCallbackHandoff(applicationContext) }
+    private val callbackHandoff by lazy { OAuthCallbackHandoff(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
