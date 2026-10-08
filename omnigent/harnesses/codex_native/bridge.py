@@ -1591,7 +1591,12 @@ def update_thread_id(bridge_dir: Path, thread_id: str, active_turn_id: str | Non
         )
 
 
-def clear_active_turn_id_if_matches(bridge_dir: Path, completed_turn_id: str | None) -> bool:
+def clear_active_turn_id_if_matches(
+    bridge_dir: Path,
+    completed_turn_id: str | None,
+    *,
+    on_cleared: Callable[[], None] | None = None,
+) -> bool:
     """
     Clear the active Codex turn id if a terminal event matches it.
 
@@ -1612,12 +1617,19 @@ def clear_active_turn_id_if_matches(bridge_dir: Path, completed_turn_id: str | N
         ``"turn_abc123"``. ``None`` means Codex did not include an id;
         if a turn is live it is left intact (returns ``False``), and if
         no turn is live the call is a no-op (returns ``True``).
+    :param on_cleared: Optional callback invoked while the state lock is
+        still held, only when the turn is cleared (or no state exists).
+        Running it under the lock serializes a dependent side effect (such
+        as posting ``idle``) with a concurrent ``turn/started`` update, so a
+        turn that starts right after the clear cannot be masked by it.
     :returns: ``True`` when bridge state was cleared or did not exist,
         ``False`` when a stale or ambiguous terminal event was ignored.
     """
     with _bridge_state_lock(bridge_dir):
         state = read_bridge_state(bridge_dir)
         if state is None:
+            if on_cleared is not None:
+                on_cleared()
             return True
         if completed_turn_id is None:
             # No-id terminal mid-turn is ambiguous — ignore (clearing posts a premature idle).
@@ -1636,4 +1648,6 @@ def clear_active_turn_id_if_matches(bridge_dir: Path, completed_turn_id: str | N
                 cwd=state.cwd,
             ),
         )
+        if on_cleared is not None:
+            on_cleared()
         return True

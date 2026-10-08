@@ -570,6 +570,86 @@ def test_active_turn_compare_and_clear_is_atomic_with_concurrent_update(
     assert state.active_turn_id == "turn_b"
 
 
+def test_clear_active_turn_id_on_cleared_runs_only_when_turn_is_cleared(
+    bridge_dir: Path,
+) -> None:
+    """``on_cleared`` fires for a real clear and is skipped for a preserved turn.
+
+    The stale-interrupt reconciler publishes idle through ``on_cleared``, so it
+    must run only when the matching turn is actually cleared. A superseded turn
+    left intact must never trigger that idle.
+
+    :param bridge_dir: Isolated bridge directory fixture.
+    :returns: None.
+    """
+    _seed_active_turn(bridge_dir, "turn_b")
+    calls: list[str] = []
+
+    # A stale terminal for the old id finds the newer turn, so it is refused and
+    # the idle publish does not run.
+    assert (
+        clear_active_turn_id_if_matches(
+            bridge_dir, "turn_a", on_cleared=lambda: calls.append("preserved")
+        )
+        is False
+    )
+    assert calls == []
+
+    # The matching terminal clears the turn and runs the idle publish once.
+    assert (
+        clear_active_turn_id_if_matches(
+            bridge_dir, "turn_b", on_cleared=lambda: calls.append("cleared")
+        )
+        is True
+    )
+    assert calls == ["cleared"]
+
+
+def test_clear_active_turn_id_publishes_idle_before_a_newer_turn_can_land(
+    bridge_dir: Path,
+) -> None:
+    """The idle publish holds the state lock, so a newer turn cannot slip in first.
+
+    A separate harness process can record a ``turn/started`` right after the old
+    turn clears. Because ``on_cleared`` runs under the state lock, that update is
+    serialized after the idle publish and can never be masked by it.
+
+    :param bridge_dir: Isolated bridge directory fixture.
+    :returns: None.
+    """
+    _seed_active_turn(bridge_dir, "turn_a")
+    observed_during_publish: list[str | None] = []
+    update_finished = threading.Event()
+
+    def record_newer_turn() -> None:
+        """Record turn B the way a concurrent forwarder process would."""
+        update_active_turn_id(bridge_dir, "turn_b")
+        update_finished.set()
+
+    update_thread = threading.Thread(target=record_newer_turn)
+
+    def publish_idle() -> None:
+        """Stand in for the runner's idle publish, still under the state lock."""
+        state = read_bridge_state(bridge_dir)
+        observed_during_publish.append(state.active_turn_id if state is not None else None)
+        update_thread.start()
+        assert not update_finished.wait(timeout=0.1), (
+            "turn B landed while the idle publish still held the state lock"
+        )
+
+    cleared = clear_active_turn_id_if_matches(bridge_dir, "turn_a", on_cleared=publish_idle)
+    update_thread.join(timeout=5.0)
+
+    assert cleared is True
+    # The clear applied before the publish observed it, and B was blocked until
+    # the lock released, so the publish could not overwrite a live newer turn.
+    assert observed_during_publish == [None]
+    assert update_finished.is_set()
+    state = read_bridge_state(bridge_dir)
+    assert state is not None
+    assert state.active_turn_id == "turn_b"
+
+
 def test_bridge_startup_error_round_trips_and_is_cleared(bridge_dir: Path) -> None:
     """
     The startup-error breadcrumb round-trips, and ``clear_bridge_state``
