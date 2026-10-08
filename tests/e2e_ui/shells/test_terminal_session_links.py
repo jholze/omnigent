@@ -150,12 +150,10 @@ def test_two_row_terminal_url_opens_full_destination(
     terminal_session: tuple[str, str],
     print_url,
 ) -> None:
-    """Clicking the first row of a URL shown across two rows opens the whole URL.
+    """Clicking the first row of a two-row URL opens the whole URL.
 
-    The shell prints a URL longer than the pane, either letting the terminal
-    soft-wrap it or breaking the line itself at the pane width the way a
-    width-aware CLI does. The user clicks the URL on its first row; the opened
-    destination must be the complete URL, not the text of that row alone.
+    The URL exceeds the pane and is either soft-wrapped by the terminal or broken
+    at the pane width by the printing program, as a width-aware CLI does.
     """
     base_url, session_id = terminal_session
     page: Page = request.getfixturevalue("page")

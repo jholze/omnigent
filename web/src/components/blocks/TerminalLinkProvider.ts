@@ -1,7 +1,6 @@
-// Clickable http(s) URLs in terminal output. Ported from
-// @xterm/addon-web-links (MIT), which only rejoins rows xterm soft-wrapped;
-// this provider also follows a URL across the hard rows a program leaves
-// when it breaks its own output at the pane width.
+// Clickable http(s) URLs in terminal output. Ported from @xterm/addon-web-links
+// (MIT), which only rejoins rows xterm soft-wrapped; this provider also follows
+// a URL across the hard rows a program leaves when it wraps at the pane width.
 
 import type { IBufferLine, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 
@@ -53,11 +52,9 @@ function computeLinks(term: Terminal, lineIndex: number, activate: TerminalLinkA
 }
 
 /**
- * The rows forming the logical line around ``lineIndex`` and the index of
- * its first row. Expansion stops at a row containing whitespace, which ends
- * any URL, or once the joined text exceeds the cap. Rows are read with
- * trailing blanks trimmed so a URL that wrapped early in front of a wide
- * character still matches; ``bufferPosition`` corrects the offset.
+ * Rows forming the logical line around ``lineIndex`` and the index of its first row.
+ * Expansion stops at whitespace, which ends any URL, or at the length cap. Rows are
+ * right-trimmed so a URL wrapped early before a wide char still matches; see bufferPosition.
  */
 function logicalLine(term: Terminal, lineIndex: number): [string[], number] {
   const buffer = term.buffer.active;
@@ -100,11 +97,10 @@ function continuesRowAbove(term: Terminal, rowIndex: number): boolean {
 }
 
 /**
- * Whether ``row`` holds the tail of a token that a width-aware program split
- * at the pane edge: ``above`` is filled to its last column, ``row`` starts
- * with a non-blank, and the two fragments together are longer than the pane.
- * Such a program only splits a token that cannot fit on one row, so a shorter
- * pair is two words that merely met at the edge and must stay apart.
+ * Whether ``row`` holds the tail of a token a width-aware program split at the pane
+ * edge: ``above`` is filled to its last column, ``row`` starts with a non-blank, and
+ * the fragments together are longer than the pane. Such a program only splits a token
+ * that cannot fit on one row, so a shorter pair is two words that met at the edge.
  */
 function splitTokenSpans(above: IBufferLine, row: IBufferLine, cols: number): boolean {
   const tail = /\S+$/.exec(above.translateToString(false, 0, cols));
@@ -113,9 +109,8 @@ function splitTokenSpans(above: IBufferLine, row: IBufferLine, cols: number): bo
 }
 
 /**
- * Map an offset into the joined text back to a 0-based buffer position,
- * walking cells from ``column`` of line ``lineIndex``; ``[-1, -1]`` when the
- * walk leaves the buffer.
+ * Map an offset into the joined text back to a 0-based buffer position, walking cells
+ * from ``column`` of line ``lineIndex``; ``[-1, -1]`` when the walk leaves the buffer.
  */
 function bufferPosition(
   term: Terminal,
