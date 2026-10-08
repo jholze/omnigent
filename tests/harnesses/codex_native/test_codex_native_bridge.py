@@ -507,15 +507,22 @@ def test_clear_active_turn_id_if_matches(
 
 def test_clear_active_turn_id_if_matches_no_state_returns_true(bridge_dir: Path) -> None:
     """
-    With no bridge state on disk, clearing is a no-op that reports cleared.
+    With no bridge state on disk, clearing reports cleared and runs ``on_cleared``.
 
     A missing state file means there is no turn to protect, so the helper
-    returns True (nothing to ignore). A failure (returning False) would
-    make the forwarder treat a normal terminal as stale and never post
-    idle, hanging the spinner.
+    returns True (nothing to ignore) and still fires the idle publish. A
+    failure (returning False) would make the forwarder treat a normal
+    terminal as stale and never post idle, hanging the spinner.
     """
     # bridge_dir exists (fixture) but no state.json was written.
-    assert clear_active_turn_id_if_matches(bridge_dir, "turn_1") is True
+    calls: list[str] = []
+    assert (
+        clear_active_turn_id_if_matches(
+            bridge_dir, "turn_1", on_cleared=lambda: calls.append("cleared")
+        )
+        is True
+    )
+    assert calls == ["cleared"]
 
 
 def test_active_turn_compare_and_clear_is_atomic_with_concurrent_update(
@@ -619,10 +626,12 @@ def test_clear_active_turn_id_publishes_idle_before_a_newer_turn_can_land(
     """
     _seed_active_turn(bridge_dir, "turn_a")
     observed_during_publish: list[str | None] = []
+    update_attempting = threading.Event()
     update_finished = threading.Event()
 
     def record_newer_turn() -> None:
         """Record turn B the way a concurrent forwarder process would."""
+        update_attempting.set()
         update_active_turn_id(bridge_dir, "turn_b")
         update_finished.set()
 
@@ -633,6 +642,9 @@ def test_clear_active_turn_id_publishes_idle_before_a_newer_turn_can_land(
         state = read_bridge_state(bridge_dir)
         observed_during_publish.append(state.active_turn_id if state is not None else None)
         update_thread.start()
+        # Wait until the competing thread is actually attempting its update, so
+        # the block below proves the lock held it, not that it never ran.
+        assert update_attempting.wait(timeout=5.0)
         assert not update_finished.wait(timeout=0.1), (
             "turn B landed while the idle publish still held the state lock"
         )

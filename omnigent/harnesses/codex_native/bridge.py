@@ -1621,7 +1621,10 @@ def clear_active_turn_id_if_matches(
         still held, only when the turn is cleared (or no state exists).
         Running it under the lock serializes a dependent side effect (such
         as posting ``idle``) with a concurrent ``turn/started`` update, so a
-        turn that starts right after the clear cannot be masked by it.
+        turn that starts right after the clear cannot be masked by it. The
+        lock is a non-reentrant ``flock``, so the callback must be quick and
+        must not call any bridge-state function (doing so self-deadlocks); it
+        should also not raise, since the clear has already been written.
     :returns: ``True`` when bridge state was cleared or did not exist,
         ``False`` when a stale or ambiguous terminal event was ignored.
     """

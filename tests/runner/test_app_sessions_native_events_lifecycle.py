@@ -3425,6 +3425,84 @@ async def test_events_codex_native_stop_preserves_newer_turn_without_false_idle(
 
 
 @pytest.mark.asyncio
+async def test_events_codex_native_stop_superseded_turn_posts_no_idle_despite_stale_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A superseded-turn rejection posts no idle even if the bridge is still stale.
+
+    Codex can reject with ``-32600 "expected active turn id ... but found ..."``
+    before the forwarder records the newer turn, so bridge state still names the
+    old turn here. Because a newer turn is live, the handler must leave the
+    recorded id and status untouched rather than clearing the stale id and
+    posting a false idle that would hide the running turn.
+    """
+    from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
+
+    conv_id = "c0dec0dec0dec0dec0dec0dec0desups"
+    fake_client = _StaleTurnCodexAppServerClient(
+        transport="ws://127.0.0.1:43225",
+        client_name="omnigent-codex-native-runner",
+        error=CodexAppServerResponseError(
+            {
+                "code": -32600,
+                "message": "expected active turn id turn_codex_old but found turn_codex_newer",
+            }
+        ),
+    )
+    app, _server_client, bridge_dir = _build_codex_native_runner_for_stale_turn(
+        monkeypatch,
+        tmp_path,
+        conv_id,
+        active_turn_id="turn_codex_old",
+        thread_id="thread_codex_sup",
+        socket_path="ws://127.0.0.1:43225",
+        fake_client=fake_client,
+    )
+
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+
+        app.state.session_resource_registry.note_external_session_status(conv_id, "running")
+
+        stop_resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": "interrupt"},
+        )
+
+        turn_is_active = app.state.session_resource_registry.session_turn_is_active(conv_id)
+
+        from omnigent.runner.app import _session_event_queues_ref
+
+        queue = _session_event_queues_ref.get(conv_id)
+        assert queue is not None, "session create must initialize the event queue."
+        queued_events: list[dict[str, Any]] = []
+        while not queue.empty():
+            item = queue.get_nowait()
+            if isinstance(item, dict):
+                queued_events.append(item)
+
+    assert stop_resp.status_code == 204, (
+        f"a superseded-turn rejection must be a 204 no-op; "
+        f"got {stop_resp.status_code}: {stop_resp.text}"
+    )
+    # The stale old id is left for the forwarder to supersede; the handler must
+    # not clear it and claim idle while a newer turn is live.
+    state = codex_native_bridge.read_bridge_state(bridge_dir)
+    assert state is not None and state.active_turn_id == "turn_codex_old", (
+        f"a superseded turn must not be cleared by the stale-id compare; got {state!r}."
+    )
+    assert turn_is_active, "a superseded (live newer) turn must not be reconciled to idle."
+    assert not [
+        e for e in queued_events if e.get("type") == "session.status" and e.get("status") == "idle"
+    ], "a superseded turn must not publish a false idle edge."
+
+
+@pytest.mark.asyncio
 async def test_events_codex_native_repeated_stop_after_completed_turn_stays_204(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

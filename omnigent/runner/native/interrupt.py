@@ -701,6 +701,7 @@ class NativeInterruptRunner:
         from omnigent.harnesses.codex_native.app_server import (
             CodexAppServerResponseError,
             client_for_transport,
+            is_no_active_turn_error,
             is_stale_active_turn_error,
         )
         from omnigent.harnesses.codex_native.bridge import (
@@ -780,25 +781,54 @@ class NativeInterruptRunner:
                     if not is_stale_active_turn_error(exc):
                         raise
 
-                    # Codex already ended this turn and no idle edge is coming. Clear
-                    # it only if still recorded and publish idle under the bridge lock,
-                    # so a turn starting mid-interrupt is not masked by this idle.
-                    def _publish_idle() -> None:
-                        self._publish_event(conv_id, {"type": "session.status", "status": "idle"})
-                        self._resource_registry.note_external_session_status(conv_id, "idle")
+                    if is_no_active_turn_error(exc):
+                        # The turn ended and no idle edge is coming. Clear it only
+                        # if still recorded and publish idle under the bridge lock,
+                        # so a turn starting mid-interrupt is not masked by this idle.
+                        def _publish_idle() -> None:
+                            # Runs under the bridge state lock: stay quick, do not
+                            # touch bridge state, and never raise (the clear is done).
+                            try:
+                                self._publish_event(
+                                    conv_id, {"type": "session.status", "status": "idle"}
+                                )
+                                self._resource_registry.note_external_session_status(
+                                    conv_id, "idle"
+                                )
+                            except Exception:  # noqa: BLE001 - the clear already succeeded.
+                                self._logger.warning(
+                                    "Codex-native idle publish failed for session=%s",
+                                    conv_id,
+                                    exc_info=True,
+                                )
 
-                    clear_active_turn_id_if_matches(
-                        bridge_dir, state.active_turn_id, on_cleared=_publish_idle
-                    )
-                    self._logger.info(
-                        "Codex-native interrupt reconciled an already-ended turn "
-                        "for session=%s thread=%s turn=%s: %s",
-                        conv_id,
-                        state.thread_id,
-                        state.active_turn_id,
-                        exc.message,
-                    )
-                    # The turn already ended; skip the deferred parent-wake cancel.
+                        cleared = clear_active_turn_id_if_matches(
+                            bridge_dir, state.active_turn_id, on_cleared=_publish_idle
+                        )
+                        self._logger.info(
+                            "Codex-native interrupt reconciled an already-ended turn "
+                            "for session=%s thread=%s turn=%s cleared=%s: %s",
+                            conv_id,
+                            state.thread_id,
+                            state.active_turn_id,
+                            cleared,
+                            exc.message,
+                        )
+                    else:
+                        # A newer turn replaced the one we targeted and is still
+                        # live, so leave its recorded id in place and publish no
+                        # idle; the forwarder owns the newer turn's lifecycle.
+                        self._logger.info(
+                            "Codex-native interrupt targeted a superseded turn for "
+                            "session=%s thread=%s turn=%s; a newer turn is live: %s",
+                            conv_id,
+                            state.thread_id,
+                            state.active_turn_id,
+                            exc.message,
+                        )
+                    # The targeted turn ended or was superseded, so skip the
+                    # deferred parent-wake cancel. A dropped sub-agent completion
+                    # can still leave its parent waiting; reconciled separately.
                     return Response(status_code=204)
         except Exception as exc:  # noqa: BLE001 - surface active-turn interrupt failures.
             self._logger.warning(

@@ -961,6 +961,22 @@ def is_stale_active_turn_error(error: CodexAppServerResponseError) -> bool:
     )
 
 
+def is_no_active_turn_error(error: CodexAppServerResponseError) -> bool:
+    """Whether Codex rejected because the thread has no active turn at all.
+
+    This is the subset of :func:`is_stale_active_turn_error` where the turn
+    genuinely ended. It excludes the superseded-turn rejection (``expected
+    active turn id ... but found ...``), where a newer turn is still live.
+
+    :param error: Structured JSON-RPC response error.
+    :returns: ``True`` only when no turn is currently active.
+    """
+    if error.code != -32600 or error.message is None:
+        return False
+    message = error.message.strip().casefold()
+    return message in {"no active turn to steer", "no active turn to interrupt"}
+
+
 #: JSON-RPC internal-error code codex returns when its thread-store fails.
 _CODEX_INTERNAL_ERROR_CODE = -32603
 
