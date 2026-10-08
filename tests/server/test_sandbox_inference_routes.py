@@ -284,7 +284,7 @@ async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env, row
 
 
 @pytest.mark.parametrize("selected", [True, False])
-@pytest.mark.parametrize("failure", ["error", "timeout"])
+@pytest.mark.parametrize("failure", ["error", "timeout", "invalid-rows"])
 async def test_gateway_failure_keeps_launch_selection_and_default_usable(
     env: _Env, monkeypatch: pytest.MonkeyPatch, selected, failure
 ):
@@ -299,6 +299,8 @@ async def test_gateway_failure_keeps_launch_selection_and_default_usable(
     if failure == "timeout":
         monkeypatch.setattr(sandbox_inference_routes, "_GATEWAY_HOOK_TIMEOUT_S", 0.05)
         target.gateway_model_options = AsyncMock(side_effect=stalled)
+    elif failure == "invalid-rows":
+        target.gateway_model_options = AsyncMock(return_value=[{"displayName": "No id"}])
     else:
         target.gateway_model_options = AsyncMock(
             side_effect=RuntimeError("private upstream error")
@@ -444,6 +446,22 @@ async def test_unbound_gateway_preview_leaves_other_harnesses_unconfigured(
         "status": "unconfigured",
     }
     assert requests == []
+
+
+async def test_configured_discovery_takes_precedence_over_the_provider_hook(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+):
+    requests: list[Request] = []
+    target = _discoverable_gateway(env, monkeypatch, requests)
+    target.gateway_model_options = AsyncMock(return_value=[{"id": "hook/model"}])
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["provider_label"] == "Team AI Gateway"
+    assert [row["id"] for row in response.json()["models"]] == ["gpt-5.5", "gpt-5.5-mini"]
+    assert len(requests) == 1
+    target.gateway_model_options.assert_not_called()
 
 
 async def test_malformed_providers_leave_the_unbound_preview_unconfigured(

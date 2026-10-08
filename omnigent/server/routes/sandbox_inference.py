@@ -242,6 +242,8 @@ def create_sandbox_inference_router(
                 rows = await asyncio.wait_for(
                     target.gateway_model_options(harness, user_id), timeout=_GATEWAY_HOOK_TIMEOUT_S
                 )
+                if not all(isinstance(row.get("id"), str) and row["id"] for row in rows):
+                    raise ValueError("gateway_model_options rows must carry a model id")
                 # Advisory rows never carry a default marker; Harness default stays a separate row.
                 models = [{**row, "isDefault": False} for row in rows]
                 result.update(models=models, status="ready" if models else "empty")

@@ -21,6 +21,15 @@ from tests.e2e._gateway_preview_server import MODEL
 from tests.e2e.conftest import get_mock_requests, set_fallback_mock_llm
 
 _SYSTEM_CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
+_PASSTHROUGH_ENV = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+
+
+def _system_codex_config_present() -> bool:
+    try:
+        return bool(_SYSTEM_CODEX_CONFIG.read_text().strip())
+    except OSError:
+        return _SYSTEM_CODEX_CONFIG.exists()
+
 
 pytestmark = [
     pytest.mark.posix_only,
@@ -29,7 +38,7 @@ pytestmark = [
         not shutil.which("codex") or not shutil.which("tmux"), reason="requires Codex and tmux"
     ),
     pytest.mark.skipif(
-        _SYSTEM_CODEX_CONFIG.exists() and bool(_SYSTEM_CODEX_CONFIG.read_text().strip()),
+        _system_codex_config_present(),
         reason="requires isolated Codex system config to keep model requests local",
     ),
 ]
@@ -47,11 +56,7 @@ def _wait(check, description: str, timeout: float = 90):
 
 def _bundled_codex_slugs(codex_home: Path, home: Path) -> set[str]:
     """Model slugs the installed Codex bundles; other requests fall back to its default."""
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key in {"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
-    }
+    env = {key: value for key, value in os.environ.items() if key in _PASSTHROUGH_ENV}
     listing = subprocess.run(
         ["codex", "debug", "models", "--bundled"],
         env={**env, "CODEX_HOME": str(codex_home), "HOME": str(home)},
@@ -86,11 +91,7 @@ def test_gateway_choice_reaches_managed_codex_first_turn(
     answer = "ASTRA_MAX_LAUNCH_VERIFIED"
     for model in (MODEL, "gpt-6-astra"):
         set_fallback_mock_llm(mock_url, key=model, text=answer)
-    base_env = {
-        key: value
-        for key, value in os.environ.items()
-        if key in {"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
-    }
+    base_env = {key: value for key, value in os.environ.items() if key in _PASSTHROUGH_ENV}
     env = {
         "OMNIGENT_CONFIG_HOME": str(config),
         "CODEX_HOME": str(source),
