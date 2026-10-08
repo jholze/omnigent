@@ -1,16 +1,36 @@
-"""``sys_os_shell`` rejects argument names its schema does not declare."""
+"""``sys_os_*`` tools: UTF-8-safe results and ``sys_os_shell`` argument-name validation."""
 
 from __future__ import annotations
 
 import json
-from typing import Any
+import logging
+from typing import Any, cast
 
+import pytest
+
+from omnigent.inner.os_env import OSEnvironment
 from omnigent.tools.base import ToolContext
-from omnigent.tools.builtins.os_env import SysOsShellTool
+from omnigent.tools.builtins.os_env import SysOsReadTool, SysOsShellTool
 
 
-class _RecordingOSEnv:
-    """Stands in for :class:`OSEnvironment`; records ``shell`` calls."""
+class _FakeOSEnvironment:
+    def __init__(
+        self,
+        result: dict[str, object] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._result = result or {}
+        self._error = error
+
+    async def read(self, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+class _RecordingOSEnvironment:
+    """Records ``shell`` calls so a test can assert what reached the environment."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -20,19 +40,47 @@ class _RecordingOSEnv:
         return {"stdout": "", "stderr": "", "exit_code": 0, "timed_out": False}
 
 
-def _ctx() -> ToolContext:
-    return ToolContext(task_id="task", agent_id="agent", conversation_id="conv")
+def test_invoke_keeps_unicode_readable_and_surrogates_transport_safe(
+    tool_ctx: ToolContext,
+) -> None:
+    result = {"content": "Привет 世界", "path": "recording-\udcff.txt"}
+    tool = SysOsReadTool(cast(OSEnvironment, _FakeOSEnvironment(result=result)))
+
+    serialized = tool.invoke(json.dumps({"path": "recording.txt"}), tool_ctx)
+
+    assert "Привет 世界" in serialized
+    assert "\\udcff" in serialized
+    serialized.encode("utf-8")
+    assert json.loads(serialized) == result
 
 
-def _invoke(tool: SysOsShellTool, arguments: dict[str, Any]) -> dict[str, Any]:
-    return json.loads(tool.invoke(json.dumps(arguments), _ctx()))
+def test_invoke_error_keeps_unicode_readable_and_surrogates_transport_safe(
+    caplog: pytest.LogCaptureFixture,
+    tool_ctx: ToolContext,
+) -> None:
+    error = RuntimeError("ошибка для recording-\udcff.txt")
+    tool = SysOsReadTool(cast(OSEnvironment, _FakeOSEnvironment(error=error)))
+
+    caplog.set_level(logging.CRITICAL + 1, logger="omnigent.tools.builtins.os_env")
+    serialized = tool.invoke(json.dumps({"path": "recording.txt"}), tool_ctx)
+
+    assert "ошибка" in serialized
+    assert "\\udcff" in serialized
+    serialized.encode("utf-8")
+    assert json.loads(serialized) == {"error": str(error)}
 
 
-def test_sys_os_shell_rejects_unknown_argument_names() -> None:
-    os_env = _RecordingOSEnv()
-    tool = SysOsShellTool(os_env)
+def _invoke_shell(
+    tool: SysOsShellTool, arguments: dict[str, Any], tool_ctx: ToolContext
+) -> dict[str, Any]:
+    return json.loads(tool.invoke(json.dumps(arguments), tool_ctx))
 
-    result = _invoke(tool, {"command": "sleep 300", "timeout_seconds": 500})
+
+def test_sys_os_shell_rejects_unknown_argument_names(tool_ctx: ToolContext) -> None:
+    os_env = _RecordingOSEnvironment()
+    tool = SysOsShellTool(cast(OSEnvironment, os_env))
+
+    result = _invoke_shell(tool, {"command": "sleep 300", "timeout_seconds": 500}, tool_ctx)
 
     assert "error" in result, result
     assert "timeout_seconds" in result["error"]
@@ -40,11 +88,11 @@ def test_sys_os_shell_rejects_unknown_argument_names() -> None:
     assert os_env.calls == []
 
 
-def test_sys_os_shell_forwards_declared_arguments() -> None:
-    os_env = _RecordingOSEnv()
-    tool = SysOsShellTool(os_env)
+def test_sys_os_shell_forwards_declared_arguments(tool_ctx: ToolContext) -> None:
+    os_env = _RecordingOSEnvironment()
+    tool = SysOsShellTool(cast(OSEnvironment, os_env))
 
-    result = _invoke(tool, {"command": "sleep 1", "timeout": 500})
+    result = _invoke_shell(tool, {"command": "sleep 1", "timeout": 500}, tool_ctx)
 
     assert result["exit_code"] == 0
     assert os_env.calls == [{"command": "sleep 1", "timeout": 500}]
