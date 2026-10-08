@@ -2610,9 +2610,7 @@ def test_prune_orphaned_bridge_dirs_uses_latest_conversation_activity(
     assert wal.read_bytes() == b"latest turn"
 
 
-def _fail_conversation_listing(
-    monkeypatch: pytest.MonkeyPatch, conversations: Path, database: Path
-) -> None:
+def _fail_conversation_listing(monkeypatch: pytest.MonkeyPatch, conversations: Path) -> None:
     """Make listing the conversations directory raise."""
     real_listdir = os.listdir
 
@@ -2640,7 +2638,7 @@ def _fail_path_stat(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
     "install_failure",
     [
         pytest.param(
-            lambda mp, convs, db: _fail_conversation_listing(mp, convs, db),
+            lambda mp, convs, db: _fail_conversation_listing(mp, convs),
             id="directory-listing",
         ),
         pytest.param(lambda mp, convs, db: _fail_path_stat(mp, convs), id="directory-stat"),

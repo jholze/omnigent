@@ -180,6 +180,17 @@ def _kill_tree_uncleanly(proc: subprocess.Popen[bytes]) -> None:
             straggler.kill()
 
 
+def _tmux_server_running(socket_path: str) -> bool:
+    """Return whether a tmux server still answers on *socket_path*."""
+    result = subprocess.run(
+        ["tmux", "-S", socket_path, "list-sessions"],
+        check=False,
+        capture_output=True,
+        timeout=15,
+    )
+    return result.returncode == 0
+
+
 def _kill_session_tmux_server(bridge_dir: Path) -> None:
     """
     Stop the session's detached tmux server, if the agy terminal advertised one.
@@ -187,18 +198,26 @@ def _kill_session_tmux_server(bridge_dir: Path) -> None:
     ``_kill_tree_uncleanly`` only reaps the host daemon's process tree, but agy
     runs under a tmux server that daemonizes and reparents away from it. Left
     alive, agy keeps writing conversation state and would refresh timestamps
-    after they are aged, so stop it explicitly.
+    after they are aged, so stop it explicitly and confirm it is gone. An
+    already-dead server is fine; a server that will not die surfaces as an error.
     """
     info = antigravity_bridge.read_tmux_info(bridge_dir)
     if info is None:
         return
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(
-            ["tmux", "-S", info["socket_path"], "kill-server"],
-            check=False,
-            capture_output=True,
-            timeout=15,
-        )
+    socket_path = info["socket_path"]
+    if not _tmux_server_running(socket_path):
+        return
+    subprocess.run(
+        ["tmux", "-S", socket_path, "kill-server"],
+        check=False,
+        capture_output=True,
+        timeout=15,
+    )
+    _wait_until(
+        lambda: not _tmux_server_running(socket_path),
+        15,
+        f"session tmux server on {socket_path} did not terminate",
+    )
 
 
 def _host_log_path(daemon_log: Path, home_dir: Path) -> Path:
@@ -252,17 +271,7 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """
-    An unclean host death keeps the session's agy conversation history, until it expires.
-
-    Journey: connect host -> create an antigravity-native session (its per-session
-    dir appears under ``~/.omnigent/antigravity-native/`` and agy starts under
-    its isolated state root) -> SIGKILL the host daemon and its runner tree
-    (crash) -> restart the host -> the bridge dir and the conversation database
-    inside it are still there once the host's startup sweep has run -> crash
-    again, age the bridge past retention, and restart -> the old conversation
-    databases are reclaimed.
-    """
+    """A host restart retains recent agy conversation history and reclaims it once expired."""
     workspace = tmp_path / "agy_ws"
     workspace.mkdir()
     home_dir = tmp_path / "home"
@@ -387,7 +396,9 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
             if proc is not None and proc.poll() is None:
                 _kill_tree_uncleanly(proc)
         if session_id is not None:
-            _kill_session_tmux_server(antigravity_bridge.bridge_dir_for_bridge_id(session_id))
+            # Best-effort during teardown so a tmux race cannot mask the result.
+            with contextlib.suppress(OSError, subprocess.SubprocessError, AssertionError):
+                _kill_session_tmux_server(antigravity_bridge.bridge_dir_for_bridge_id(session_id))
             with contextlib.suppress(httpx.HTTPError):
                 http_client.delete(f"/v1/sessions/{session_id}", timeout=30.0)
             shutil.rmtree(
