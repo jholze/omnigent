@@ -855,6 +855,32 @@ async def test_unbound_gateway_preview_failure_is_redacted_and_keeps_harness_def
 
 
 @pytest.mark.asyncio
+async def test_unbound_gateway_preview_falls_back_to_the_first_configured_gateway():
+    state = _unbound_state()
+    target = state.sandbox_config.default
+    target.host_config["providers"]["second"] = {
+        "kind": "gateway",
+        "display_name": "Second",
+        "openai": {
+            "base_url": "https://second.example/v1",
+            "api_key_ref": "env:POD_INFERENCE_KEY",
+            "wire_api": "responses",
+        },
+    }
+    target.model_discovery["second"] = {
+        "base_url": "https://second.example/v1",
+        "api_key_ref": "env:INFERENCE_CATALOG_KEY",
+    }
+    requests = []
+    preview = await SandboxInferenceService(
+        state, transport=_transport(requests=requests)
+    ).ambient_catalog("islo", "codex-native", "alice")
+    assert preview is not None
+    assert preview["provider_label"] == "Team AI Gateway"
+    assert [request.url.host for request in requests] == ["catalog.example"]
+
+
+@pytest.mark.asyncio
 async def test_unbound_gateway_preview_prefers_the_family_default_gateway():
     state = _unbound_state()
     target = state.sandbox_config.default

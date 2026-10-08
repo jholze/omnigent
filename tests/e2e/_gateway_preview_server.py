@@ -67,7 +67,8 @@ class _LocalSandbox(SandboxHostLauncher):
 
 
 async def _models(harness: str, user_id: str | None) -> list[dict]:
-    assert harness == "codex-native"
+    if harness != "codex-native":
+        return []
     return [
         {
             "id": MODEL,
