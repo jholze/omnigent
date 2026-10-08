@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -610,6 +611,40 @@ def test_clear_active_turn_id_on_cleared_runs_only_when_turn_is_cleared(
         is True
     )
     assert calls == ["cleared"]
+
+
+def test_clear_active_turn_id_logs_on_cleared_error_without_propagating(
+    bridge_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising ``on_cleared`` is logged, not propagated, after the clear lands.
+
+    The clear is already written when the callback runs, so a retry could not
+    re-run it; the reconciler keeps the cleared turn and returns success rather
+    than surface the callback's failure.
+
+    :param bridge_dir: Isolated bridge directory fixture.
+    :param caplog: Captures the swallowed-callback warning.
+    :returns: None.
+    """
+    _seed_active_turn(bridge_dir, "turn_a")
+
+    def boom() -> None:
+        raise RuntimeError("idle publish failed")
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.harnesses.codex_native.bridge"):
+        cleared = clear_active_turn_id_if_matches(bridge_dir, "turn_a", on_cleared=boom)
+
+    assert cleared is True
+    state = read_bridge_state(bridge_dir)
+    assert state is not None
+    assert state.active_turn_id is None
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "cleared-turn callback raised" in r.getMessage()
+    ]
+    assert warnings
 
 
 def test_clear_active_turn_id_publishes_idle_before_a_newer_turn_can_land(
