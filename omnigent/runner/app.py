@@ -3568,11 +3568,9 @@ def create_runner_app(
         action: str,
         missing_state_log_level: int = logging.WARNING,
     ) -> tuple[CodexNativeBridgeState | None, Path]:
-        # Resolve the bridge directory and read its state from one label lookup,
-        # so a caller that then clears the turn or publishes against the
-        # directory acts on the same bridge the state came from. A second
-        # independent lookup can fall back to the conversation id and point at a
-        # different directory, clearing or idling the wrong bridge.
+        # Resolve the directory and read its state from one label lookup, so a
+        # caller clearing or idling the bridge acts on the same one the state
+        # came from; a second lookup can fall back to conv id and pick another.
         from omnigent.harnesses.codex_native.bridge import (
             CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
             bridge_dir_for_bridge_id,

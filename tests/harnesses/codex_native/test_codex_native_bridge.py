@@ -626,6 +626,7 @@ def test_clear_active_turn_id_publishes_idle_before_a_newer_turn_can_land(
     """
     _seed_active_turn(bridge_dir, "turn_a")
     observed_during_publish: list[str | None] = []
+    callback_failures: list[str] = []
     update_attempting = threading.Event()
     update_finished = threading.Event()
 
@@ -642,16 +643,19 @@ def test_clear_active_turn_id_publishes_idle_before_a_newer_turn_can_land(
         state = read_bridge_state(bridge_dir)
         observed_during_publish.append(state.active_turn_id if state is not None else None)
         update_thread.start()
-        # Wait until the competing thread is actually attempting its update, so
-        # the block below proves the lock held it, not that it never ran.
-        assert update_attempting.wait(timeout=5.0)
-        assert not update_finished.wait(timeout=0.1), (
-            "turn B landed while the idle publish still held the state lock"
-        )
+        # Record failures instead of asserting: the production clear wraps this
+        # callback in a broad ``except`` that would otherwise swallow them.
+        if not update_attempting.wait(timeout=5.0):
+            callback_failures.append("competing thread never attempted its update")
+        elif update_finished.wait(timeout=0.1):
+            callback_failures.append(
+                "turn B landed while the idle publish still held the state lock"
+            )
 
     cleared = clear_active_turn_id_if_matches(bridge_dir, "turn_a", on_cleared=publish_idle)
     update_thread.join(timeout=5.0)
 
+    assert callback_failures == []
     assert cleared is True
     # The clear applied before the publish observed it, and B was blocked until
     # the lock released, so the publish could not overwrite a live newer turn.
