@@ -97,15 +97,17 @@ same conversation.
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
+from omnigent.native.input_diagnostics import log_input_event
 
 # A pending entry is evicted this many seconds after it was recorded
 # if it was never drained by a matching persisted message. Covers the
@@ -172,6 +174,7 @@ class DrainedInput:
     created_by: str | None = None
     stable_id: str | None = None
     background_titles_enabled: bool = True
+    # Reconstructed entries without original delivery metadata must remain unknown.
     input_enqueued_at_ms: int | None = None
     delivery_attempt_id: str | None = None
     last_delivery_stage: str = "unknown"
@@ -399,12 +402,23 @@ def delivery_attributes_for(conversation_id: str, pending_id: str) -> dict[str, 
     """Read one pending input's diagnostics without draining or changing its TTL."""
     with _lock:
         entry = _pending.get(conversation_id, {}).get(pending_id)
-        return delivery_attributes(entry) if entry is not None else {}
+        snapshot = copy.copy(entry) if entry is not None else None
+    return delivery_attributes(snapshot) if snapshot is not None else {}
 
 
-def mark_delivery_stage(conversation_id: str, pending_id: str, stage: str) -> None:
+def mark_delivery_stage(
+    conversation_id: str,
+    pending_id: str,
+    stage: Literal["forward_requested", "forward_accepted"],
+) -> None:
     """Remember the latest server-observed stage while an input is still pending."""
     if stage not in {"forward_requested", "forward_accepted"}:
+        log_input_event(
+            logging.getLogger(__name__),
+            "native_input_invalid_delivery_stage",
+            session_id=conversation_id,
+            attributes={"pending_id": pending_id},
+        )
         return
     with _lock:
         entry = _pending.get(conversation_id, {}).get(pending_id)

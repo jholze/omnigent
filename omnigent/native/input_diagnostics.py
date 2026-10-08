@@ -14,6 +14,36 @@ _IDENTIFIERS = {
     "delivery_attempt_id": re.compile(r"[0-9a-f]{32}"),
 }
 INPUT_FIELDS = frozenset((*_IDENTIFIERS, "input_enqueued_at_ms"))
+_DETAIL_IDS = frozenset(
+    {
+        "response_id",
+        "item_id",
+        "error_item_id",
+        "matched_item_id",
+        "matched_response_id",
+        "matched_pending_id",
+        "thread_id",
+        "native_turn_id",
+        "requested_native_turn_id",
+        "native_rpc_attempt_id",
+        "initial_thread_id",
+        "initial_native_turn_id",
+    }
+)
+_DETAIL_LABELS = frozenset(
+    {
+        "last_delivery_stage",
+        "outcome",
+        "stage",
+        "error_code",
+        "exception_type",
+        "cancellation_reason",
+        "match_method",
+        "harness",
+    }
+)
+_DETAIL_ID_PATTERN = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
+_DETAIL_LABEL_PATTERN = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _input_context: ContextVar[dict[str, object] | None] = ContextVar(
     "native_input_delivery", default=None
 )
@@ -38,13 +68,32 @@ def input_attributes(source: Mapping[str, object] | None) -> dict[str, str | int
     return attrs
 
 
+def _diagnostic_attributes(source: Mapping[str, object]) -> dict[str, object]:
+    """Allow named identifiers, short code values, and bounded integers; reject content."""
+    attrs: dict[str, object] = dict(input_attributes(source))
+    for keys, pattern in (
+        (_DETAIL_IDS, _DETAIL_ID_PATTERN),
+        (_DETAIL_LABELS, _DETAIL_LABEL_PATTERN),
+    ):
+        for key in keys & source.keys():
+            value = source[key]
+            if value is None or (isinstance(value, str) and pattern.fullmatch(value)):
+                attrs[key] = value
+    for key in ("pending_age_ms", "rpc_error_code"):
+        value = source.get(key)
+        minimum = 0 if key == "pending_age_ms" else -(2**31)
+        if isinstance(value, int) and not isinstance(value, bool) and minimum <= value < 10**15:
+            attrs[key] = value
+    return attrs
+
+
 @contextlib.contextmanager
 def input_delivery_scope(
     source: Mapping[str, object] | None, *, response_id: str | None = None
 ) -> Iterator[None]:
     """Bind one input, including across to_thread, without inheriting another input's IDs."""
     attrs: dict[str, object] = dict(input_attributes(source))
-    if attrs and response_id is not None:
+    if attrs and response_id is not None and _DETAIL_ID_PATTERN.fullmatch(response_id):
         attrs["response_id"] = response_id
     token = _input_context.set(attrs)
     try:
@@ -78,8 +127,8 @@ def log_input_event(
     attributes: Mapping[str, object] | None = None,
     **fields: object,
 ) -> None:
-    """Emit caller-selected identifiers and bounded outcomes without affecting delivery."""
-    with contextlib.suppress(Exception):
+    """Emit only allowed ID/code fields; callers must never use them for message content."""
+    try:
         # Hooks import native modules at startup; load the logging sink only on use.
         from omnigent.debug_logging import debug_event
 
@@ -87,5 +136,8 @@ def log_input_event(
         if attributes is None and not correlation:
             return
         extra = debug_event(event_name, session_id=session_id)
-        extra["attributes"] = {**correlation, **fields}
+        extra["attributes"] = _diagnostic_attributes({**correlation, **fields})
         logger.info("%s", event_name, extra=extra)
+    except Exception as exc:  # noqa: BLE001 — diagnostics must not interrupt delivery.
+        with contextlib.suppress(Exception):
+            logger.debug("Native input diagnostic could not be emitted (%s)", type(exc).__name__)

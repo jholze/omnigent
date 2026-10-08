@@ -83,6 +83,7 @@ async def test_skipped_message_logs_committed_ids_once_and_keeps_enqueue_identit
     assert saved[lost["error_item_id"]].data.code == "native_prompt_not_recorded"
     assert saved[lost["error_item_id"]].response_id == lost["response_id"]
     assert lost["matched_item_id"] == matched_id
+    assert lost["matched_response_id"] == saved[matched_id].response_id == "resp_native"
     assert lost["matched_pending_id"] == second
     assert lost["match_method"] == "normalized_text"
     assert matched["pending_id"] == second
@@ -122,9 +123,25 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="Test", labels={"omnigent.wrapper": "claude-native-ui"})
-    pending_inputs.record(
-        conv.id, [{"type": "input_text", "text": "original"}], background_titles_enabled=False
+    first = pending_inputs.record(
+        conv.id,
+        [{"type": "input_text", "text": "original"}],
+        stable_id="a" * 32,
+        background_titles_enabled=False,
     )
+    uncertain = pending_inputs.record(
+        conv.id,
+        [{"type": "input_text", "text": "uncertain"}],
+        stable_id="b" * 32,
+        background_titles_enabled=False,
+    )
+    last = pending_inputs.record(
+        conv.id,
+        [{"type": "input_text", "text": "last"}],
+        stable_id="c" * 32,
+        background_titles_enabled=False,
+    )
+    original = pending_inputs.delivery_attributes_for(conv.id, uncertain)
     caplog.set_level(logging.INFO)
     await _persist_external_conversation_item(
         conv.id,
@@ -146,5 +163,40 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
         r for r in caplog.records if getattr(r, "event_name", None) == "native_input_settled"
     ]
     assert record.attributes["outcome"] == "native_transcript_fifo_attributed"
+    assert record.attributes["pending_id"] == first
     assert record.attributes["match_method"] == "fifo_fallback"
     assert "error_item_id" not in record.attributes
+    later_id = await _persist_external_conversation_item(
+        conv.id,
+        conv,
+        SessionEventInput(
+            type="external_conversation_item",
+            data={
+                "item_type": "message",
+                "item_data": {"role": "user", "content": [{"type": "input_text", "text": "last"}]},
+                "source_id": "native:last:0",
+                "response_id": "resp_later",
+            },
+        ),
+        store,
+    )
+    [uncertain_record] = [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "native_input_settled"
+        and r.attributes["outcome"] == "prior_fifo_match_uncertain"
+    ]
+    attrs = uncertain_record.attributes
+    assert attrs["pending_id"] == uncertain
+    assert attrs["input_stable_id"] == "b" * 32
+    assert attrs["delivery_attempt_id"] == original["delivery_attempt_id"]
+    assert attrs["input_enqueued_at_ms"] == original["input_enqueued_at_ms"]
+    assert attrs["matched_item_id"] == later_id
+    assert attrs["matched_pending_id"] == last
+    assert attrs["matched_response_id"] == "resp_later"
+    assert attrs["match_method"] == "normalized_text"
+    saved = {item.id: item for item in store.list_items(conv.id).data}
+    assert saved[later_id].response_id == attrs["matched_response_id"]
+    assert all(item.type != "error" for item in saved.values())
+    assert "item_id" not in attrs and "error_item_id" not in attrs
+    assert pending_inputs.snapshot_for(conv.id) == []

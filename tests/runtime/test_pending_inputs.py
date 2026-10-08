@@ -25,12 +25,31 @@ route tests; this file tests the module in isolation.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from types import SimpleNamespace
 
 import pytest
 
 from omnigent.runtime import pending_inputs
+
+
+def test_unknown_delivery_stage_is_observable_without_overwriting_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=pending_inputs.__name__)
+    pending_id = pending_inputs.record("conv", [_text_block("hello")])
+    pending_inputs.mark_delivery_stage("conv", pending_id, "typo")  # type: ignore[arg-type]
+    assert (
+        pending_inputs.delivery_attributes_for("conv", pending_id)["last_delivery_stage"]
+        == "server_queued"
+    )
+    [record] = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "native_input_invalid_delivery_stage"
+    ]
+    assert record.attributes["pending_id"] == pending_id
 
 
 @pytest.mark.parametrize("hold", [True, False])

@@ -197,6 +197,7 @@ def test_codex_delivery_records_input_and_accepted_native_turn(
 def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A web-started Codex turn returns after app-server accepts it.
@@ -228,12 +229,18 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
     )
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
+    caplog.set_level(logging.INFO, logger=codex_native_executor.__name__)
     events = _collect_turn_events(executor, "first")
     state = read_bridge_state(tmp_path)
 
     assert [type(event) for event in events] == [TurnComplete]
     assert state is not None
     assert state.active_turn_id == "turn_1"
+    assert not any(
+        getattr(record, "event_name", None)
+        in {"codex_native_delivery_attempt", "codex_native_delivery_finished"}
+        for record in caplog.records
+    )
     assert _FakeCodexNativeClient.requests == [
         (
             "turn/start",
@@ -940,6 +947,7 @@ def test_next_web_message_starts_new_codex_turn_after_forwarder_marks_idle(
 def test_stale_completed_turn_steer_retries_once_as_new_turn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Codex's explicit no-active-turn response reconciles and starts once."""
 
@@ -965,7 +973,9 @@ def test_stale_completed_turn_steer_retries_once_as_new_turn(
     _seed_bridge(tmp_path, active_turn_id="turn_completed")
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
-    events = _collect_turn_events(executor, "follow up")
+    caplog.set_level(logging.INFO, logger=codex_native_executor.__name__)
+    with input_delivery_scope({"input_stable_id": "a" * 32}):
+        events = _collect_turn_events(executor, "follow up")
 
     assert [type(event) for event in events] == [TurnComplete]
     assert [method for method, _params in _StaleSteerClient.requests] == [
@@ -976,6 +986,17 @@ def test_stale_completed_turn_steer_retries_once_as_new_turn(
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.active_turn_id == "turn_1"
+    outcomes = [
+        record.attributes
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "codex_native_delivery_finished"
+    ]
+    assert [(a["stage"], a["outcome"], a["native_turn_id"]) for a in outcomes] == [
+        ("turn_steer", "rpc_error", "turn_completed"),
+        ("turn_start", "rpc_accepted", "turn_1"),
+    ]
+    assert outcomes[1]["requested_native_turn_id"] is None
+    assert all(a["input_stable_id"] == "a" * 32 for a in outcomes)
 
 
 @pytest.mark.parametrize(
@@ -1047,9 +1068,12 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     assert "do not duplicate" not in json.dumps(attrs)
 
 
+@pytest.mark.parametrize("recovery_fails", [False, True])
 def test_stale_steer_recovery_preserves_and_steers_concurrent_new_turn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    recovery_fails: bool,
 ) -> None:
     """A concurrent turn B is steered, never cleared or double-started."""
 
@@ -1067,6 +1091,10 @@ def test_stale_steer_recovery_preserves_and_steers_concurrent_new_turn(
                     {"code": -32600, "message": "no active turn to steer"}
                 )
             if method == "turn/steer":
+                if recovery_fails:
+                    raise CodexAppServerResponseError(
+                        {"code": -32603, "message": "second RPC failed"}
+                    )
                 return {"result": {"turnId": "turn_b"}}
             raise AssertionError(f"recovery must not double-start: {method}")
 
@@ -1079,9 +1107,11 @@ def test_stale_steer_recovery_preserves_and_steers_concurrent_new_turn(
     _seed_bridge(tmp_path, active_turn_id="turn_a")
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
-    events = _collect_turn_events(executor, "follow up")
+    caplog.set_level(logging.INFO, logger=codex_native_executor.__name__)
+    with input_delivery_scope({"input_stable_id": "a" * 32}):
+        events = _collect_turn_events(executor, "follow up")
 
-    assert [type(event) for event in events] == [TurnComplete]
+    assert [type(event) for event in events] == [ExecutorError if recovery_fails else TurnComplete]
     assert [
         (method, params.get("expectedTurnId")) for method, params in _RacingSteerClient.requests
     ] == [("turn/steer", "turn_a"), ("turn/steer", "turn_b")]
@@ -1089,6 +1119,27 @@ def test_stale_steer_recovery_preserves_and_steers_concurrent_new_turn(
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.active_turn_id == "turn_b"
+    attempts = [
+        record.attributes
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "codex_native_delivery_attempt"
+    ]
+    outcomes = [
+        record.attributes
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "codex_native_delivery_finished"
+    ]
+    assert len(attempts) == len(outcomes) == 2
+    assert len({a["native_rpc_attempt_id"] for a in attempts}) == 2
+    assert [a["native_rpc_attempt_id"] for a in attempts] == [
+        a["native_rpc_attempt_id"] for a in outcomes
+    ]
+    assert [a["native_turn_id"] for a in outcomes] == ["turn_a", "turn_b"]
+    assert [a["outcome"] for a in outcomes] == [
+        "rpc_error",
+        "rpc_error" if recovery_fails else "rpc_accepted",
+    ]
+    assert all(a["input_stable_id"] == "a" * 32 for a in outcomes)
 
 
 def test_stale_active_turn_mismatch_steer_recovers_to_newer_turn(

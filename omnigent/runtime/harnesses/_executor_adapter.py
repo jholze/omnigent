@@ -431,8 +431,9 @@ class ExecutorAdapter(HarnessApp):
                     session_id=turn_session_id,
                     outcome="executor_stream_ended",
                 )
+                input_outcome_logged = True
         except ElicitationDeclinedError:
-            if input_identity:
+            if input_identity and not input_outcome_logged:
                 log_input_event(
                     _logger,
                     "native_input_execution_finished",
@@ -442,6 +443,7 @@ class ExecutorAdapter(HarnessApp):
                     outcome="cancelled",
                     cancellation_reason="elicitation_declined",
                 )
+                input_outcome_logged = True
             # Fallback for non-SDK executors; SDK-based paths use ctx.cancelled.set() instead.
             _logger.info(
                 "elicitation explicitly declined for response %s — aborting turn",

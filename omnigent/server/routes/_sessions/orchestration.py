@@ -3051,6 +3051,7 @@ async def _persist_external_conversation_item_unlocked(
                 error_item_id=persisted_error.id,
                 response_id=persisted_error.response_id,
                 matched_item_id=persisted.id,
+                matched_response_id=persisted.response_id,
                 matched_pending_id=cleared_pending_id,
                 match_method=match_method,
             )
@@ -3081,6 +3082,7 @@ async def _persist_external_conversation_item_unlocked(
             attributes=pending_inputs.delivery_attributes(uncertain),
             outcome="prior_fifo_match_uncertain",
             matched_item_id=persisted.id,
+            matched_response_id=persisted.response_id,
             matched_pending_id=cleared_pending_id,
             match_method=match_method,
         )

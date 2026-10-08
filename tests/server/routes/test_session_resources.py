@@ -7012,6 +7012,7 @@ async def test_relay_fences_cancelled_turn_and_resumes_on_next_turn(
 @pytest.mark.asyncio
 async def test_relay_settles_queued_native_message_on_failed_turn(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A failed native turn commits the queued web message ahead of its error item.
 
@@ -7035,6 +7036,8 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
         created_by="alice@example.com",
         stable_id="7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d",
     )
+    original = pending_inputs.delivery_attributes_for(sid, pending_id)
+    caplog.set_level(logging.INFO)
     # A second message the runner is still holding for the next turn.
     queued_next = pending_inputs.record(
         sid,
@@ -7115,6 +7118,20 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
         assert len(consumed) == 1
         assert consumed[0]["data"]["cleared_pending_id"] == pending_id
         assert consumed[0]["data"]["created_by"] == "alice@example.com"
+        [record] = [
+            record
+            for record in caplog.records
+            if getattr(record, "event_name", None) == "native_input_settled"
+        ]
+        attrs = record.attributes
+        assert attrs["outcome"] == "reported_undelivered"
+        assert attrs["pending_id"] == pending_id
+        assert attrs["input_stable_id"] == "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
+        assert attrs["delivery_attempt_id"] == original["delivery_attempt_id"]
+        assert attrs["input_enqueued_at_ms"] == original["input_enqueued_at_ms"]
+        assert attrs["item_id"] == consumed[0]["data"]["item_id"]
+        assert attrs["response_id"] == message.response_id == "resp_fail"
+        assert attrs["match_method"] == "input_stable_id"
     finally:
         pending_inputs.reset_for_tests()
 

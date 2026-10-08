@@ -46,13 +46,48 @@ async def test_concurrent_inputs_and_workers_keep_their_own_identity() -> None:
     assert current_input_attributes() == {}
 
 
-def test_logging_failure_cannot_interrupt_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("debug_fails", [False, True])
+def test_logging_failure_cannot_interrupt_delivery(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, debug_fails: bool
+) -> None:
     logger = logging.getLogger(__name__)
+    caplog.set_level(logging.DEBUG, logger=__name__)
 
     def fail(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("unavailable log sink")
+        raise RuntimeError("private sink details")
 
     monkeypatch.setattr(logger, "info", fail)
+    if debug_fails:
+        monkeypatch.setattr(logger, "debug", fail)
     with input_delivery_scope({"input_stable_id": "a" * 32}):
         log_input_event(logger, "native_input_execution_finished", outcome="executor_returned")
     assert current_input_attributes() == {}
+    assert "private sink details" not in caplog.text
+    if not debug_fails:
+        assert "Native input diagnostic could not be emitted (RuntimeError)" in caplog.text
+
+
+def test_diagnostic_emit_filters_extra_content_and_malformed_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=__name__)
+    log_input_event(
+        logging.getLogger(__name__),
+        "native_input_settled",
+        attributes={"input_stable_id": "a" * 32, "content": "private prompt"},
+        response_id="resp_saved",
+        outcome="rpc_accepted",
+        message="private prompt",
+        item_id="private prompt",
+        native_turn_id="x" * 257,
+        exception_type="x" * 65,
+        pending_age_ms=True,
+        rpc_error_code=-32600,
+    )
+    [record] = caplog.records
+    assert record.attributes == {
+        "input_stable_id": "a" * 32,
+        "response_id": "resp_saved",
+        "outcome": "rpc_accepted",
+        "rpc_error_code": -32600,
+    }
