@@ -4371,6 +4371,11 @@ def create_runner_app(
                 _sdk_compact_inprogress.add(session_id)
             _begin_turn_slot(session_id)
             _publish_turn_status(session_id, "running")
+            if _continuation_forward_ids:
+                # Mark the continuation running before its task starts: a repeat
+                # arriving in that gap is otherwise neither buffered nor running,
+                # and may already have aged out of the accepted-id ledger.
+                _running_forward_item_ids[session_id] = set(_continuation_forward_ids)
             _turn_task = asyncio.create_task(
                 _run_turn_bg(
                     next_body,
@@ -5737,6 +5742,12 @@ def create_runner_app(
             # Set once the harness has accepted the turn: failures before that
             # release the accept markers, failures after keep them.
             _delivered = False
+            # Own the running-forward markers for this streamed turn: the direct
+            # ``stream=true`` path has no ``_run_turn_bg`` to register them, so a
+            # repeat of a long turn whose id aged out of the ledger would re-run.
+            _own_stream_forward_ids = set(forward_item_ids)
+            if _own_stream_forward_ids:
+                _running_forward_item_ids[conv_id] = _own_stream_forward_ids
             try:
                 async with client.stream(
                     "POST",
@@ -6236,6 +6247,15 @@ def create_runner_app(
                 _publish_event(conv_id, _http_fail)
                 _on_proxy_stream_end(conv_id, error=_error, owner_response_id=_response_id)
                 yield _response_failed_event(_error, source="harness")
+
+            finally:
+                # Release this streamed turn's running markers on every exit, and
+                # drop its accept markers when it never delivered — covering the
+                # handlers above plus a mid-stream client disconnect or cancel.
+                if _running_forward_item_ids.get(conv_id) is _own_stream_forward_ids:
+                    _running_forward_item_ids.pop(conv_id, None)
+                if not _delivered:
+                    _forget_forwarded_items(conv_id, forward_item_ids)
 
         return StreamingResponse(
             proxy_stream(),

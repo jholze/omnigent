@@ -5320,10 +5320,9 @@ async def _post_across_runner_reconnect(
                 extra={"session_id": session_id},
             )
             raise
-        # ``httpx.ConnectError`` means the request never reached the runner, so
-        # repeating it cannot double-run and needs no dedup epoch. The epoch only
-        # matters for the in-flight bare ``ConnectionError`` shape, where the
-        # first request may have been delivered before the tunnel dropped.
+        # ``httpx.ConnectError`` means the request never reached the runner, so a
+        # repeat cannot double-run and needs no dedup epoch; the epoch guards only
+        # the in-flight ``ConnectionError`` shape, which may already have delivered.
         in_flight_drop = not isinstance(exc, httpx.ConnectError)
         if (
             repeat_requires_capability is not None
@@ -6990,7 +6989,6 @@ async def _forward_event_to_runner(
         # The forward could not be (re)delivered across the reconnect (runner
         # unreachable, timed out, or lacking dedup); the message is persisted and
         # ``create_session`` replays it as a recovery turn, so publish ``idle``.
-        # The send-racing-tunnel-close web E2E asserts on this message text.
         _logger.exception(
             "Forward to runner failed for session=%s",
             session_id,

@@ -180,6 +180,67 @@ async def test_live_forwards_beyond_the_completed_id_cache_still_dedupe_a_repeat
 
 
 @pytest.mark.asyncio
+async def test_streaming_turn_registers_its_running_id_so_an_aged_out_repeat_dedupes() -> None:
+    """A ``stream=true`` turn dedupes a repeat even after its id ages out of the ledger.
+
+    The direct-stream path has no background ``_run_turn_bg`` to mark the turn's
+    forward id running. Once a burst of later forwards ages that id out of the
+    bounded accepted ledger, a repeat of the still-running streamed message must
+    stay deduplicated rather than start a second run of it.
+    """
+    from omnigent.runner.app import _session_histories_ref
+
+    gate = asyncio.Event()
+    app, harness = _build_app(gate)
+    buffers = app.state.session_message_buffers
+    stream_task: asyncio.Task[None] | None = None
+    try:
+        async with _runner_client(app) as client:
+            drained = asyncio.Event()
+
+            async def _drive_stream() -> None:
+                async with client.stream(
+                    "POST", f"{EVENTS_PATH}?stream=true", json=_forward("msg_000", "first")
+                ) as resp:
+                    assert resp.status_code == 200
+                    async for _ in resp.aiter_bytes():
+                        pass
+                drained.set()
+
+            stream_task = asyncio.create_task(_drive_stream())
+            await asyncio.wait_for(harness.post_seen.wait(), timeout=5.0)
+
+            # Age the streamed message's id out of the bounded ledger with a burst
+            # of buffered forwards while its stream is still open.
+            queued_ids = [f"msg_{n:03d}" for n in range(1, _ACCEPTED_FORWARD_IDS_PER_SESSION + 2)]
+            for item_id in queued_ids:
+                queued = await client.post(EVENTS_PATH, json=_forward(item_id, item_id))
+                assert queued.json()["status"] == "buffered", queued.text
+
+            # The streamed turn registered its id as running, so its repeat is
+            # deduplicated even though it has left the accepted ledger.
+            repeat = await client.post(EVENTS_PATH, json=_forward("msg_000", "first"))
+            assert repeat.status_code == 202, repeat.text
+            assert repeat.json()["detail"] == DEDUPED
+            assert all(m["persisted_item_id"] != "msg_000" for m in buffers.get(SESSION_ID, []))
+            assert len(harness.posted_bodies) == 1
+
+            gate.set()
+            await asyncio.wait_for(drained.wait(), timeout=10.0)
+            # The buffered burst runs as one coalesced continuation, so the streamed
+            # message ran once and never a second time from its repeat.
+            await _wait_for(lambda: len(harness.posted_bodies) >= 2)
+            assert len(harness.posted_bodies) == 2
+    finally:
+        gate.set()
+        if stream_task is not None and not stream_task.done():
+            stream_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stream_task
+        _session_histories_ref.pop(SESSION_ID, None)
+
+
+@pytest.mark.asyncio
 async def test_deduplicated_native_forward_does_not_remark_the_turn_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
