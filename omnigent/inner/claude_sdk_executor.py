@@ -2608,13 +2608,20 @@ class ClaudeSDKExecutor(Executor):
         # for the canonical ids the CLI names itself (the refusal-fallback).
         # No-op off the gateway transport.
         model_overrides = await self._apply_gateway_model_vocabulary(env, api_key_helper)
-        # ``skills: none`` forwards ``setting_sources=[]``, so the CLI never
-        # reads a project's ``disableClaudeAiConnectors`` opt-out and would
-        # still auto-fetch the account's connectors; carry the opt-out here.
+        # Translate the spec's host-skill filter into the SDK
+        # options. Falls back to ``"all"`` semantics when the
+        # field is malformed (the parser already validates, so
+        # this is belt-and-suspenders).
+        resolved = _resolve_skills_option(self._skills_filter) or _ResolvedSkills(
+            skills="all", setting_sources=None
+        )
+        # With no setting sources the CLI never reads a project's
+        # ``disableClaudeAiConnectors`` opt-out and would still auto-fetch the
+        # account's connectors; carry the opt-out in the launch settings.
         settings_payload = _claude_settings_payload(
             api_key_helper,
             model_overrides,
-            disable_claude_ai_connectors=self._skills_filter == "none",
+            disable_claude_ai_connectors=resolved.setting_sources == [],
         )
 
         # Capture stderr from the CLI subprocess for diagnostics
@@ -2656,13 +2663,6 @@ class ClaudeSDKExecutor(Executor):
         # SDK's native Bash/Read/Edit/Write. Keep Skill and ToolSearch in
         # the base set so MCP definitions can be discovered on demand.
         base_tools: list[str] = ["Skill", "ToolSearch"]
-        # Translate the spec's host-skill filter into the SDK
-        # options. Falls back to ``"all"`` semantics when the
-        # field is malformed (the parser already validates, so
-        # this is belt-and-suspenders).
-        resolved = _resolve_skills_option(self._skills_filter) or _ResolvedSkills(
-            skills="all", setting_sources=None
-        )
         # Bundle skills are exposed via the SDK's plugin mechanism.
         # The bundle's ``<bundle>/skills/<dir>/SKILL.md`` files are
         # discovered as plugin skills (no ``.claude/`` prefix needed
