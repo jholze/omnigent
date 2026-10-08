@@ -1,4 +1,4 @@
-"""Recording rules distinguish CLI output from internal results."""
+"""Recording rules distinguish CLI output from internal results and keep captions honest."""
 
 from pathlib import Path
 
@@ -27,6 +27,30 @@ def test_lane_recording_blockers_are_explicit_and_do_not_block_delivery() -> Non
     assert "Text-only CLI output is not a reason to skip recording" in lanes
     assert "A missing recording from an earlier run is not a reason either" in lanes
     assert "Do not block the verdict, fix, or PR" in lanes
+
+
+def test_finishing_a_clip_requires_frame_inspection_or_a_disclosed_dom_only_caption() -> None:
+    lanes = _normalized(_DEV / "recording-lanes.md")
+
+    assert "Check the clip's last frame before captioning it" in lanes
+    assert "Look at the frame, not at a proxy for it" in lanes
+    assert "-sseof -0.5 -i <clip> -frames:v 1 -update 1 last-frame.png" in lanes
+    assert "Pixel-colour counts, file sizes, or the test's own intent" in lanes
+    assert "If the frames cannot be inspected" in lanes
+    assert "caption only the state the driver's DOM assertions established" in lanes
+    assert "frames not inspected; state verified by DOM assertions" in lanes
+    assert "Do not describe a screen nobody verified" in lanes
+
+
+def test_before_clip_of_an_absence_must_rule_out_a_different_failure() -> None:
+    lanes = _normalized(_DEV / "recording-lanes.md")
+
+    assert "must rule out a different failure" in lanes
+    assert "will also pass on a session that failed for an unrelated reason" in lanes
+    assert "assert that no generic error notice is on screen" in lanes
+    assert "page.locator('[data-testid=\"error-pill\"]')).to_have_count(0)" in lanes
+    assert "the stall context the caption describes is visible" in lanes
+    assert "demonstrates that error, not a silent stall" in lanes
 
 
 def test_repro_recording_rules_match_the_shared_guide() -> None:
