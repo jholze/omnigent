@@ -262,8 +262,13 @@ def _expire_antigravity_bridge_activity(bridge_dir: Path, agy_state_dir: Path) -
 
 
 @pytest.mark.skipif(
-    _AGY_BIN is None or shutil.which("tmux") is None,
-    reason="antigravity-native dir GC e2e needs the real `agy` CLI and `tmux` on PATH",
+    os.environ.get("OMNIGENT_E2E_ANTIGRAVITY_NATIVE") != "1"
+    or _AGY_BIN is None
+    or shutil.which("tmux") is None,
+    reason=(
+        "antigravity-native dir GC e2e needs the real `agy` CLI and `tmux` on PATH "
+        "and OMNIGENT_E2E_ANTIGRAVITY_NATIVE=1 to run"
+    ),
 )
 def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
     live_server: str,
@@ -392,11 +397,12 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
             f"{_SWEEP_GRACE_S:.0f}s of the host restarting: {remaining}"
         )
     finally:
+        # Best-effort during teardown so a cleanup race cannot mask the result.
         for proc in (daemon, daemon_b, daemon_c):
             if proc is not None and proc.poll() is None:
-                _kill_tree_uncleanly(proc)
+                with contextlib.suppress(subprocess.SubprocessError, psutil.Error):
+                    _kill_tree_uncleanly(proc)
         if session_id is not None:
-            # Best-effort during teardown so a tmux race cannot mask the result.
             with contextlib.suppress(OSError, subprocess.SubprocessError, AssertionError):
                 _kill_session_tmux_server(antigravity_bridge.bridge_dir_for_bridge_id(session_id))
             with contextlib.suppress(httpx.HTTPError):
