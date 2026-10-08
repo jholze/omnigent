@@ -1,9 +1,18 @@
-"""Exercise IME auto-pair correction in a mobile-sized browser and live PTY.
+"""E2E: an IME auto-pair on a phone must not corrupt the next composed candidate.
 
-A touch keyboard can append ``()`` with the caret inside. xterm tracks
-composition by value length, so without realignment it commits the trailing
-``)`` instead of 你. This test replays IME events in a phone-profile
-Chromium context; it does not emulate a physical phone keyboard.
+Journey (phone layout): open a shell from the header kebab → the touch keyboard
+auto-inserts ``()`` and leaves its caret between the pair → compose ``ni`` and
+select 你 → the terminal should receive ``()`` plus one cursor-left, then 你.
+
+CI has no physical IME, so the keyboard's event sequence is replayed at xterm's
+helper textarea as the report recorded it: ``keydown(229)`` → textarea ``()`` /
+caret 1 → ``input`` → ``keyup(229)`` → composition ``ni`` → textarea ``(你)`` /
+caret 2 → ``compositionend`` → ``input``. xterm's listeners do not check
+``isTrusted``, so its CompositionHelper runs exactly as with a real IME. The
+contract is read off the attach WebSocket: the bytes the PTY receives. That
+byte contract is program-independent — the shell program only decides whether
+it then echoes a clean line, so the PTY echo is captured for context, not
+asserted on.
 """
 
 from __future__ import annotations
@@ -11,174 +20,222 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Callable
 
-from playwright.sync_api import Browser, Page, ViewportSize, expect
+from playwright.sync_api import Browser, Locator, Page, expect
 
-# Below the mobile navigation breakpoint.
-_MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
+from tests.e2e_ui.shells.test_terminal_ime_composition import _capture_attach_frames
 
-_CANDIDATE = "你"
+# iPhone-class portrait viewport: below the ``md`` breakpoint, so the header
+# kebab (the phone user's shell entry point) renders.
+_VIEWPORT = {"width": 390, "height": 844}
 
-# Replay a keyCode-229 insert with the caret inside the pair.
-_AUTO_PAIR_REPLAY = """(ta) => {
+CANDIDATE = "你"
+# Normal and DECCKM (application cursor keys) encodings of one cursor-left.
+CURSOR_LEFT = (b"\x1b[D", b"\x1bOD")
+
+_ANSI = re.compile(
+    rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][0-~]|\x1b[=>78]|\x1b\].*?(?:\x07|\x1b\\)|\r|\x07"
+)
+
+# The touch keyboard's auto-pair: an IME "Process" keydown (keyCode 229), the
+# pair landing in the textarea with the caret between the parentheses, the
+# input event, then keyup.
+_AUTO_PAIR = """(ta) => {
   const key = (type) => {
     const ev = new KeyboardEvent(type, {
-      key: "Process", bubbles: true, cancelable: true,
+      key: "Process", keyCode: 229, bubbles: true, cancelable: true, composed: true,
     });
-    Object.defineProperty(ev, "keyCode", { value: 229 });
-    return ev;
+    if (ev.keyCode !== 229) Object.defineProperty(ev, "keyCode", { value: 229 });
+    ta.dispatchEvent(ev);
   };
-  ta.dispatchEvent(key("keydown"));
-  ta.value += "()";
-  ta.selectionStart = ta.selectionEnd = ta.value.length - 1;
+  key("keydown");
+  ta.value = "()";
+  ta.setSelectionRange(1, 1);
   ta.dispatchEvent(new InputEvent("input", {
-    data: "()", inputType: "insertText", bubbles: true, composed: true,
+    inputType: "insertText", data: "()", bubbles: true, composed: true,
   }));
-  ta.dispatchEvent(key("keyup"));
+  key("keyup");
+  return { value: ta.value, caret: ta.selectionStart };
 }"""
 
-# Replace the previous preedit at the caret.
-_COMPOSITION_STEP = """(ta, { prev, next }) => {
-  const start = ta.selectionStart - prev.length;
-  ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: next, bubbles: true }));
-  ta.value = ta.value.slice(0, start) + next + ta.value.slice(start + prev.length);
-  ta.selectionStart = ta.selectionEnd = start + next.length;
+# One IME composition step: optional compositionstart, the textarea's new
+# value/caret, compositionupdate, optional compositionend, then the input event.
+_COMPOSITION_STEP = """(ta, step) => {
+  const comp = (type, data) =>
+    ta.dispatchEvent(new CompositionEvent(type, { data, bubbles: true, composed: true }));
+  if (step.start) comp("compositionstart", "");
+  ta.value = step.value;
+  ta.setSelectionRange(step.caret, step.caret);
+  comp("compositionupdate", step.data);
+  if (step.end) comp("compositionend", step.data);
   ta.dispatchEvent(new InputEvent("input", {
-    data: next, inputType: "insertCompositionText", bubbles: true, composed: true,
+    inputType: "insertCompositionText", data: step.data, bubbles: true, composed: true,
   }));
+  return { value: ta.value, caret: ta.selectionStart };
 }"""
 
-_COMPOSITION_END = """(ta, data) => {
-  ta.dispatchEvent(new CompositionEvent("compositionend", { data, bubbles: true }));
-  ta.dispatchEvent(new InputEvent("input", {
-    data, inputType: "insertCompositionText", bubbles: true, composed: true,
-  }));
-}"""
+
+def _open_mobile_shell(page: Page) -> Locator:
+    """Header kebab → Shells → New shell; return the connected terminal view."""
+    kebab = page.get_by_test_id("header-conversation-actions").or_(
+        page.get_by_test_id("session-actions-menu")
+    )
+    expect(kebab).to_be_visible(timeout=60_000)
+    kebab.click()
+    page.get_by_role("menuitem", name="Shells").click()
+    drawer = page.get_by_test_id("shells-panel-drawer")
+    expect(drawer).to_be_visible(timeout=10_000)
+    drawer.get_by_role("button", name="New shell").click()
+    # The newest terminal-view is the shell just created; an earlier one may
+    # belong to the agent, so target .last like the sibling composition test.
+    connected = page.get_by_test_id("terminal-view").last
+    expect(connected).to_be_visible(timeout=60_000)
+    expect(connected).to_have_attribute("data-state", "connected", timeout=20_000)
+    return connected
 
 
-def _capture_attach_frames(page: Page) -> tuple[list[bytes], list[bytes]]:
-    """Capture attach frames before navigation, including later re-dials."""
-    sent: list[bytes] = []
-    received: list[bytes] = []
-
-    def _as_bytes(payload: str | bytes) -> bytes:
-        return payload if isinstance(payload, bytes) else payload.encode("utf-8")
-
-    def _on_ws(ws: object) -> None:
-        url = ws.url  # type: ignore[attr-defined]
-        if "/attach" not in url:
-            return
-        ws.on("framesent", lambda payload: sent.append(_as_bytes(payload)))  # type: ignore[attr-defined]
-        ws.on("framereceived", lambda payload: received.append(_as_bytes(payload)))  # type: ignore[attr-defined]
-
-    page.on("websocket", _on_ws)
-    return sent, received
-
-
-def _wait_for_sent_bytes(page: Page, sent: list[bytes], needle: bytes, timeout_s: float) -> bool:
-    """Poll until *needle* appears in the concatenated sent frames."""
+def _wait_for_frames(
+    page: Page,
+    frames: list[bytes],
+    baseline: int,
+    predicate: Callable[[bytes], bool],
+    timeout_s: float,
+) -> bytes:
+    """Poll the frames appended after *baseline* until *predicate* holds or time runs out."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if needle in b"".join(sent):
-            return True
+        joined = b"".join(frames[baseline:])
+        if predicate(joined):
+            return joined
         page.wait_for_timeout(100)
-    return needle in b"".join(sent)
+    return b"".join(frames[baseline:])
 
 
-def _open_new_shell_mobile(page: Page) -> None:
-    """Open a shell the way a phone user does: kebab → Shells → New shell."""
-    page.get_by_role("button", name="Conversation actions").click()
-    shells_entry = page.get_by_role("menuitem", name="Shells", exact=True)
-    expect(shells_entry).to_be_visible(timeout=10_000)
-    shells_entry.click()
-    drawer = page.get_by_test_id("shells-panel-drawer")
-    expect(drawer).to_have_attribute("data-state", "open")
-    drawer.get_by_role("button", name="New shell").click()
+def _echo_text(frames: list[bytes], baseline: int) -> bytes:
+    return _ANSI.sub(b"", b"".join(frames[baseline:]))
 
 
-def test_ime_autopair_then_candidate_reaches_pty(
+def _settle(page: Page, frames: list[bytes], quiet_s: float, timeout_s: float) -> None:
+    """Wait until no new frames have arrived for *quiet_s* (prompt painted)."""
+    deadline = time.monotonic() + timeout_s
+    last, stable_since = -1, time.monotonic()
+    while time.monotonic() < deadline:
+        cur = len(b"".join(frames))
+        if cur != last:
+            last, stable_since = cur, time.monotonic()
+        elif time.monotonic() - stable_since > quiet_s:
+            return
+        page.wait_for_timeout(150)
+
+
+def test_ime_autopair_then_composition_lands_inside_pair(
     browser: Browser, terminal_session: tuple[str, str]
 ) -> None:
-    """Commit the candidate between an auto-pair through the mobile shell UI."""
+    """Composing a candidate inside an auto-inserted pair must reach the PTY as ``(你)``.
+
+    Expected: the PTY receives ``()`` plus one cursor-left, then 你. The bug
+    this catches: the pair reaches the PTY with no cursor-left (the caret stays
+    after ``)``) and the composition commits ``)`` instead of 你, so the PTY
+    sees ``())``.
+    """
     base_url, session_id = terminal_session
 
-    context_kwargs: dict[str, object] = {
-        "viewport": _MOBILE_VIEWPORT,
-        "has_touch": True,
-        "is_mobile": True,
-    }
-    # Opt the sync browser context into recording when requested.
+    ctx_kwargs: dict = {"viewport": _VIEWPORT, "has_touch": True, "is_mobile": True}
     record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
     if record_dir:
-        context_kwargs["record_video_dir"] = record_dir
-    context = browser.new_context(**context_kwargs)
+        ctx_kwargs["record_video_dir"] = record_dir
+
+    context = browser.new_context(**ctx_kwargs)
     try:
         page = context.new_page()
-        sent, _received = _capture_attach_frames(page)
+        sent, received = _capture_attach_frames(page)
         page.goto(f"{base_url}/c/{session_id}")
+        terminal_view = _open_mobile_shell(page)
 
-        _open_new_shell_mobile(page)
-        terminal_view = page.locator('[data-testid="terminal-view"]:visible').first
-        expect(terminal_view).to_be_visible(timeout=60_000)
-        expect(terminal_view).to_have_attribute("data-state", "connected", timeout=30_000)
+        prompt = _wait_for_frames(page, received, 0, lambda b: len(b) > 0, timeout_s=30)
+        assert prompt, "no PTY output arrived after the terminal reported connected"
+        # Let the prompt finish painting so the recorded surface is settled.
+        _settle(page, received, quiet_s=1.5, timeout_s=10)
 
         textarea = terminal_view.locator("textarea.xterm-helper-textarea")
         textarea.focus()
 
-        # Prove the input path is live before checking candidate bytes.
-        page.keyboard.type("q")
-        assert _wait_for_sent_bytes(page, sent, b"q", timeout_s=10), (
-            "attach WebSocket frame capture saw no keystroke frame; "
-            f"sent so far: {b''.join(sent)!r}"
-        )
-        page.keyboard.press("Backspace")
+        # A first-run shell may open on a theme picker that consumes keystrokes
+        # as navigation; dismiss it so input lands on a prompt that echoes.
+        if b"Choose your theme" in b"".join(received):
+            textarea.press("Enter")
+            _settle(page, received, quiet_s=1.5, timeout_s=10)
 
-        textarea.evaluate(_AUTO_PAIR_REPLAY)
-        assert _wait_for_sent_bytes(page, sent, b"()", timeout_s=5), (
-            "the auto-pair itself never reached the PTY; the replay did not "
-            f"drive xterm's input path. Sent so far: {b''.join(sent)!r}"
-        )
+        echo_baseline = len(received)
 
-        # Compose "ni" at the in-pair caret.
+        pair_baseline = len(sent)
+        state = textarea.evaluate(_AUTO_PAIR)
+        assert state == {"value": "()", "caret": 1}, state
+        pair_frames = _wait_for_frames(
+            page, sent, pair_baseline, lambda b: b"()" in b, timeout_s=5
+        )
+        assert b"()" in pair_frames, f"the auto-pair never reached the PTY; sent: {pair_frames!r}"
+        pair_frames = _wait_for_frames(
+            page,
+            sent,
+            pair_baseline,
+            lambda b: any(cl in b for cl in CURSOR_LEFT),
+            timeout_s=2,
+        )
+        cursor_left_sent = any(cl in pair_frames for cl in CURSOR_LEFT)
+
         textarea.evaluate(
-            '(ta) => ta.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }))'
+            _COMPOSITION_STEP,
+            {"start": True, "value": "(ni)", "caret": 3, "data": "ni", "end": False},
         )
-        textarea.evaluate(_COMPOSITION_STEP, {"prev": "", "next": "n"})
+        # compositionupdate records the preedit end on a macrotask, as with a real IME.
         page.wait_for_timeout(100)
-        textarea.evaluate(_COMPOSITION_STEP, {"prev": "n", "next": "ni"})
-        page.wait_for_timeout(100)
-
         composition_view = terminal_view.locator(".composition-view")
         expect(composition_view).to_have_class(re.compile(r"\bactive\b"))
         expect(composition_view).to_have_text("ni")
 
-        textarea.evaluate(_COMPOSITION_STEP, {"prev": "ni", "next": _CANDIDATE})
-        textarea.evaluate(_COMPOSITION_END, _CANDIDATE)
+        commit_baseline = len(sent)
+        textarea.evaluate(
+            _COMPOSITION_STEP,
+            {
+                "start": False,
+                "value": f"({CANDIDATE})",
+                "caret": 2,
+                "data": CANDIDATE,
+                "end": True,
+            },
+        )
+        committed = _wait_for_frames(
+            page, sent, commit_baseline, lambda b: len(b) > 0, timeout_s=5
+        ).decode("utf-8", "replace")
 
-        committed = _wait_for_sent_bytes(page, sent, _CANDIDATE.encode("utf-8"), timeout_s=5)
-        # Let the PTY echo paint before judging.
-        page.wait_for_timeout(1_000)
-        all_sent = b"".join(sent)
-        assert committed, (
-            "the composed candidate never reached the PTY: the auto-pair's "
-            "caret position was dropped and the composition commit picked up "
-            f"the trailing ')'. Input sent after focus: {all_sent!r}"
+        outcomes = (b"())", f"({CANDIDATE})".encode())
+        _wait_for_frames(
+            page,
+            received,
+            echo_baseline,
+            lambda _b: any(o in _echo_text(received, echo_baseline) for o in outcomes),
+            timeout_s=10,
         )
-        assert b"())" not in all_sent, (
-            "the terminal sent the corrupted '())' byte stream to the PTY "
-            f"instead of keeping the candidate inside the pair: {all_sent!r}"
+        echoed = _echo_text(received, echo_baseline).decode("utf-8", "replace")
+        page.wait_for_timeout(2_000)
+        if record_dir:
+            page.screenshot(path=os.path.join(record_dir, "ime-autopair-final.png"))
+
+        # The two sent-frame facets below are the reported, program-independent
+        # contract. The PTY echo is recorded for context only; the shell program
+        # decides whether it renders a clean line.
+        summary = (
+            f"pair frames: {pair_frames!r}; cursor-left sent: {cursor_left_sent}; "
+            f"composition commit: {committed!r}; PTY echo: {echoed!r}"
         )
-        # Pair, cursor-left, candidate is the required PTY order.
-        pair_at = all_sent.find(b"()")
-        assert pair_at != -1, f"the pair was not sent intact: {all_sent!r}"
-        left_positions = [
-            pos
-            for pos in (all_sent.find(seq, pair_at) for seq in (b"\x1b[D", b"\x1bOD"))
-            if pos != -1
-        ]
-        assert left_positions, f"no realigning cursor-left followed the pair: {all_sent!r}"
-        assert all_sent.find(_CANDIDATE.encode("utf-8"), min(left_positions)) != -1, (
-            f"the candidate did not follow the cursor-left: {all_sent!r}"
+        assert cursor_left_sent, (
+            "no cursor-left followed the auto-inserted pair, so the PTY caret "
+            f"sits after ')' — {summary}"
+        )
+        assert committed == CANDIDATE, (
+            f"the composition committed {committed!r} instead of {CANDIDATE!r} — {summary}"
         )
     finally:
         context.close()

@@ -17,6 +17,7 @@ import {
   applyTerminalCopy,
   decodeTerminalClipboardBase64,
   hadRecentTerminalInput,
+  imeCommitBeforeCaret,
   imeInsertRealignment,
   isUnexpectedTerminalClose,
   loadWebglRenderer,
@@ -410,6 +411,27 @@ describe("imeInsertRealignment", () => {
 
   it("is a no-op without a caret position", () => {
     expect(imeInsertRealignment("", "()", null)).toBeNull();
+  });
+});
+
+describe("imeCommitBeforeCaret", () => {
+  it("drops the text after the caret from xterm's value-end commit", () => {
+    expect(imeCommitBeforeCaret("你)", "(你)", 2)).toBe("你");
+    expect(imeCommitBeforeCaret("好)", "(你好)", 3)).toBe("好");
+  });
+
+  it("leaves a commit alone when the caret sits at the end of the value", () => {
+    expect(imeCommitBeforeCaret("你", "(你", 2)).toBeNull();
+    expect(imeCommitBeforeCaret("你)", "(你)", null)).toBeNull();
+  });
+
+  it("yields nothing when only the trailing text was committed", () => {
+    expect(imeCommitBeforeCaret(")", "(你)", 2)).toBe("");
+  });
+
+  it("ignores data that is not xterm's slice of the value", () => {
+    expect(imeCommitBeforeCaret(CURSOR_LEFT_CSI, "()", 1)).toBeNull();
+    expect(imeCommitBeforeCaret("\r", "(ni)", 3)).toBeNull();
   });
 });
 
@@ -1424,6 +1446,89 @@ describe("TerminalSession", () => {
       .map((frame) => new TextDecoder().decode(frame as Uint8Array))
       .join("");
     expect(sentBytes).toBe(`()${CURSOR_LEFT_SS3}`);
+    session.dispose();
+  });
+
+  it("commits only the text before the caret when the keyboard keeps the closing mark", async () => {
+    // A keyboard that re-asserts its own view of the field puts ')' back
+    // after the caret; xterm's value-end slice must not carry it into the
+    // commit, and the next candidate must anchor at the caret again.
+    const settle = () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 25);
+      });
+    const { socket, session } = makeSession();
+    socket.open();
+    const term = (session as unknown as { term: Terminal }).term;
+    const textarea = term.textarea!;
+    textarea.focus();
+
+    const fire229 = (type: string) => {
+      const ev = new KeyboardEvent(type, { key: "Process", bubbles: true, cancelable: true });
+      Object.defineProperty(ev, "keyCode", { get: () => 229 });
+      textarea.dispatchEvent(ev);
+    };
+    const setField = (value: string, caret: number) => {
+      textarea.value = value;
+      textarea.selectionStart = caret;
+      textarea.selectionEnd = caret;
+    };
+    const composition = (type: string, data: string) =>
+      textarea.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
+    const compositionInput = (data: string) =>
+      textarea.dispatchEvent(
+        new InputEvent("input", {
+          data,
+          inputType: "insertCompositionText",
+          bubbles: true,
+          composed: true,
+        }),
+      );
+
+    fire229("keydown");
+    setField("()", 1);
+    textarea.dispatchEvent(
+      new InputEvent("input", {
+        data: "()",
+        inputType: "insertText",
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    fire229("keyup");
+    await settle();
+
+    composition("compositionstart", "");
+    setField("(ni)", 3);
+    composition("compositionupdate", "ni");
+    compositionInput("ni");
+    await settle();
+    setField("(你)", 2);
+    composition("compositionupdate", "你");
+    composition("compositionend", "你");
+    compositionInput("你");
+    await settle();
+
+    expect(textarea.value).toBe("(你");
+    expect(textarea.selectionStart).toBe(2);
+
+    composition("compositionstart", "");
+    setField("(你h)", 3);
+    composition("compositionupdate", "h");
+    compositionInput("h");
+    await settle();
+    setField("(你好)", 3);
+    composition("compositionupdate", "好");
+    composition("compositionend", "好");
+    compositionInput("好");
+    await settle();
+
+    const sentBytes = socket.sent
+      .filter((frame) => typeof frame !== "string")
+      .map((frame) => new TextDecoder().decode(frame as Uint8Array))
+      .join("");
+    expect(sentBytes).toBe(`()${CURSOR_LEFT_CSI}你好`);
+    expect(textarea.value).toBe("(你好");
     session.dispose();
   });
 });
