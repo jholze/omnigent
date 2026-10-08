@@ -290,19 +290,29 @@ async def test_clean_exit_schedules_no_interrupt(caplog: pytest.LogCaptureFixtur
 
 
 @pytest.mark.parametrize(
-    ("terminal_event", "outcome"),
+    ("terminal_event", "outcome", "already_cancelled"),
     [
-        (TurnCancelled(), "cancelled"),
-        (ExecutorError(message="private failure", undelivered=False), "error"),
-        (ExecutorError(message="private failure", undelivered=True), "reported_undelivered"),
+        (TurnCancelled(), "cancelled", False),
+        (ExecutorError(message="private failure", undelivered=False), "error", False),
+        (
+            ExecutorError(message="private failure", undelivered=True),
+            "reported_undelivered",
+            False,
+        ),
+        (TurnComplete(response="private response"), "cancelled", True),
     ],
 )
 async def test_terminal_event_records_one_correlated_input_outcome(
-    terminal_event: ExecutorEvent, outcome: str, caplog: pytest.LogCaptureFixture
+    terminal_event: ExecutorEvent,
+    outcome: str,
+    already_cancelled: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     executor = _FakeExecutor(events=[terminal_event])
     adapter = ExecutorAdapter(executor_factory=lambda: executor)
     ctx = _ctx("resp_terminal")
+    if already_cancelled:
+        ctx.cancelled.set()
     request = CreateResponseRequest(
         model="agent", input="private prompt", input_stable_id="a" * 32
     )
@@ -322,7 +332,11 @@ async def test_terminal_event_records_one_correlated_input_outcome(
         assert record.attributes["input_stable_id"] == "a" * 32
         assert record.attributes["response_id"] == "resp_terminal"
         assert "private" not in repr(record.attributes)
-        assert ctx.cancelled.is_set() == isinstance(terminal_event, TurnCancelled)
+        assert ctx.cancelled.is_set() == (
+            already_cancelled or isinstance(terminal_event, TurnCancelled)
+        )
+        if already_cancelled:
+            assert executor.interrupt_calls == [adapter._session_key]
         assert current_input_attributes() == {}
     finally:
         await adapter.on_shutdown()

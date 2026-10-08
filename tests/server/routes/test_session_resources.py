@@ -7151,9 +7151,11 @@ async def test_relay_fences_cancelled_turn_and_resumes_on_next_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fail_first_append", [False, True])
 async def test_relay_settles_queued_native_message_on_failed_turn(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    fail_first_append: bool,
 ) -> None:
     """A failed native turn commits the queued web message ahead of its error item.
 
@@ -7165,11 +7167,14 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
     nothing queued for a later mirrored message to drain by mistake.
     """
     from omnigent.runtime import pending_inputs
+    from omnigent.server.routes._sessions.orchestration import (
+        _settle_undelivered_native_input,
+    )
     from omnigent.server.routes.sessions import _relay_runner_stream
 
     pending_inputs.reset_for_tests()
     sid = "64a784c3aa907d1774f44313546947c6"
-    store = _ConversationStore()
+    store = _FailOnceStore() if fail_first_append else _ConversationStore()
     content = [{"type": "input_text", "text": "set up the worktree"}]
     pending_id = pending_inputs.record(
         sid,
@@ -7232,6 +7237,26 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
     )
 
     try:
+        if fail_first_append:
+            await _settle_undelivered_native_input(
+                store,  # type: ignore[arg-type]
+                sid,
+                "resp_fail",
+                "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d",
+            )
+            assert store.appended_items == []
+            assert [e["pending_id"] for e in pending_inputs.snapshot_for(sid)] == [
+                pending_id,
+                queued_next,
+            ]
+            restored = pending_inputs.delivery_attributes_for(sid, pending_id)
+            assert restored["delivery_attempt_id"] == original["delivery_attempt_id"]
+            assert restored["input_enqueued_at_ms"] == original["input_enqueued_at_ms"]
+            assert not any(
+                getattr(record, "event_name", None) == "native_input_settled"
+                for record in caplog.records
+            )
+            assert not any(e.get("type") == "session.input.consumed" for e in published)
         await _relay_runner_stream(sid, client, store)  # type: ignore[arg-type]
 
         types = [i.type for i in store.appended_items]
