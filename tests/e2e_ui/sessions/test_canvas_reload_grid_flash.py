@@ -17,14 +17,14 @@ from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.sessions.test_canvas_page import _serve_list, _session, _stub_server_info
 
-# Samples every React Flow tile's on-screen position (and the viewport
-# transform) on every animation frame, from document start. rAF callbacks run
-# right before paint, so each sample is what that frame shows the user. Tiles
-# hidden via CSS (a fix may keep the layer hidden until the view is restored)
-# are not recorded — the record holds only what is actually visible.
+# Samples each visible React Flow tile's screen position and the viewport
+# transform on every animation frame (rAF fires right before paint, so a
+# sample is what that frame shows); CSS-hidden tiles are skipped.
 _FRAME_SAMPLER = """
 (() => {
   window.__canvasFrames = [];
+  // Cap samples so the large-canvas run cannot grow __canvasFrames unbounded.
+  const MAX_FRAMES = 1200;
   const visible = (el) =>
     typeof el.checkVisibility === 'function'
       ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
@@ -46,7 +46,9 @@ _FRAME_SAMPLER = """
         }),
       });
     }
-    requestAnimationFrame(sample);
+    if (window.__canvasFrames.length < MAX_FRAMES) {
+      requestAnimationFrame(sample);
+    }
   };
   requestAnimationFrame(sample);
 })();
@@ -75,8 +77,15 @@ def _open_canvas_and_persist_a_move(
     # Filming aid (off by default): the flash lasts one or two display frames,
     # which slips between video-recorder samples. A CPU throttle stretches the
     # same race across enough frames to land on film without changing it.
-    throttle = float(os.environ.get("CANVAS_RELOAD_CPU_THROTTLE", "0") or 0)
+    raw_throttle = os.environ.get("CANVAS_RELOAD_CPU_THROTTLE", "0") or "0"
+    try:
+        throttle = float(raw_throttle)
+    except ValueError as err:
+        raise ValueError(
+            f"CANVAS_RELOAD_CPU_THROTTLE must be numeric, got {raw_throttle!r}"
+        ) from err
     if throttle > 1:
+        # Left attached so the throttle also covers the later reload we film.
         page.context.new_cdp_session(page).send(
             "Emulation.setCPUThrottlingRate", {"rate": throttle}
         )
@@ -130,10 +139,8 @@ def _reload_and_assert_first_frames_restored(
         f"reload did not restore the persisted layout: {steady[moved_id]}"
     )
 
-    # The bug: the first painted frames show the tile layer in the default-grid
-    # view (unfitted viewport, unmoved tiles at their reset grid slots on
-    # screen) before jumping to the restored view. Each tile's first visible
-    # frame must already paint it where the restored view puts it.
+    # The bug paints the default-grid view before jumping to the restored one;
+    # each tile's first visible frame must already be in the restored view.
     first_seen: dict[str, dict] = {}
     first_viewport: dict[str, str | None] = {}
     for frame in frames:

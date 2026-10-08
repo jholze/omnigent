@@ -338,10 +338,9 @@ function CanvasSurface() {
     if (!viewportDirtyRef.current) fitCanvas();
   }, [fitCanvas, loaded, nodes]);
 
-  // An empty canvas has no layout to restore: show it once the session and
-  // project lists have settled, confirmed or failed. A cached or partial list
-  // can look empty while cards are still on the way (and project scoping needs
-  // the project list); revealing early would paint the late cards unfitted.
+  // An empty canvas has no layout to restore: reveal once sessions and
+  // projects have settled (confirmed or failed). A cached or partial list can
+  // look empty while cards are still arriving; revealing early paints them unfitted.
   useEffect(() => {
     if (visibleSessions.length > 0) return;
     const sessionsSettled = networkConfirmed || error !== null;
@@ -350,10 +349,13 @@ function CanvasSurface() {
   }, [error, networkConfirmed, projectsQuery.data, projectsQuery.isError, visibleSessions]);
 
   // React 18's JSX has no `inert` prop; set the attribute directly so the
-  // invisible surface is not tabbable or read by assistive tech.
+  // invisible surface is not tabbable or read by assistive tech. Depend on
+  // `loaded` so the attribute lands when the container first mounts after the
+  // loading screen, not only when `viewRestored` later flips.
   useLayoutEffect(() => {
+    if (!loaded) return;
     flowContainerRef.current?.toggleAttribute("inert", !viewRestored);
-  }, [viewRestored]);
+  }, [loaded, viewRestored]);
 
   // Mirror the selected canvas into the URL; Main keeps the URL clean.
   const writeCanvasParam = useCallback(
@@ -607,10 +609,9 @@ function CanvasSurface() {
       )}
       <div
         ref={flowContainerRef}
-        // Hidden (with layout intact, so the flow can measure and fit) until
-        // the restored view is in place: the default grid never paints. Opacity
-        // rather than visibility — React Flow puts an inline `visibility:
-        // visible` on measured nodes, which would override an inherited hidden.
+        // Hidden (layout intact so the flow can measure and fit) until the
+        // restored view is in place. Opacity, not visibility: React Flow sets
+        // inline `visibility: visible` on nodes, overriding an inherited hidden.
         className={cn(
           "canvas-flow relative min-h-0 min-w-0 flex-1 border-t",
           !viewRestored && "pointer-events-none opacity-0",

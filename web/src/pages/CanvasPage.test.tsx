@@ -179,8 +179,10 @@ beforeEach(() => {
   window.localStorage.clear();
   viewerIdRef.current = null;
   flowProps.current = null;
-  flowFitView.mockClear();
-  flowSetViewport.mockClear();
+  flowFitView.mockReset();
+  flowSetViewport.mockReset();
+  flowFitView.mockImplementation(async () => true);
+  flowSetViewport.mockImplementation(async () => true);
   vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(sessionsStub([]));
   vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub([]));
 });
@@ -267,7 +269,37 @@ describe("CanvasPage", () => {
 
     // Cards are already built, but nothing may paint under the default
     // viewport: the surface stays hidden until the fitted view is in place.
+    expect(flowFitView).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("flow-node-conv_1")).toBeInTheDocument();
+    expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
+
+    await act(async () => applyFit(true));
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).not.toHaveAttribute("inert");
+  });
+
+  it("marks the surface mounted after the loading screen inert until it is fitted", async () => {
+    let applyFit = (_fitted: boolean) => {};
+    flowFitView.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          applyFit = resolve;
+        }),
+    );
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
+      sessionsStub([], { loaded: false, complete: false, networkConfirmed: false }),
+    );
+    const { rerender } = renderPage();
+
+    // Cold load: the surface is not mounted yet, so the hide effect has no
+    // container to mark. It must still apply once the first page arrives.
+    expect(screen.queryByTestId("canvas-flow")).toBeNull();
+
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
+      sessionsStub([conversation("conv_1", 2)]),
+    );
+    rerender(pageTree());
     expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
     expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
 
