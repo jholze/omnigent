@@ -225,6 +225,7 @@ async def _native_delivery_request(
         turn_id = turn.get("id") if turn is not None else None
     else:
         turn_id = result.get("turnId") if result is not None else None
+    native_turn_id = turn_id if isinstance(turn_id, str) and turn_id else None
     log_input_event(
         _logger,
         "codex_native_delivery_finished",
@@ -233,8 +234,8 @@ async def _native_delivery_request(
         stage=stage,
         thread_id=thread_id,
         requested_native_turn_id=requested_turn_id,
-        native_turn_id=turn_id if isinstance(turn_id, str) else None,
-        outcome="rpc_accepted",
+        native_turn_id=native_turn_id,
+        outcome="rpc_accepted" if native_turn_id else "rpc_accepted_missing_turn_id",
     )
     return response
 

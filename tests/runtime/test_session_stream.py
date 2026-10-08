@@ -865,6 +865,11 @@ def test_sse_retains_nested_delivery_ids_without_consumed_content() -> None:
         "item": {"id": "error_saved", "type": "error", "response_id": "resp_nested"},
     }
     assert session_stream._sse_safe_attributes(event)["response_id"] == "resp_nested"
+    event["item"]["response_id"] = "x" * 256
+    assert session_stream._sse_safe_attributes(event)["response_id"] == "x" * 256
+    event["item"]["response_id"] = "x" * 257
+    assert "response_id" not in session_stream._sse_safe_attributes(event)
+    event["item"]["response_id"] = "resp_nested"
     event["response_id"] = "resp_envelope"
     assert session_stream._sse_safe_attributes(event)["response_id"] == "resp_envelope"
     event["response"] = {"id": "resp_object"}

@@ -42,7 +42,7 @@ producer did not supply them; do not infer ownership from timestamps alone.
 | `native_input_execution_started` / `native_input_execution_finished` | The executor call and its bounded result, including cancellation or an explicitly reported undelivered input. `executor_returned` alone does not prove a transcript record exists. `executor_stream_ended` means the executor exited without reporting a final result. |
 | `native_input_steering_started` / `native_input_steering_finished` | A live injection, with its own input identity instead of the active turn's original input. |
 | `claude_native_delivery_finished` | Claude's existing stages, verification, retries, and local delivery ID, now joined to the original input. `draft_cleared` means the submitted draft disappeared; it does not prove native transcript persistence. Other delivery outcomes remain `unknown`. |
-| `codex_native_delivery_attempt` / `codex_native_delivery_finished` | One pair per RPC, with `turn_start` or `turn_steer` and an `rpc_accepted`, `rpc_error`, or `cancelled` outcome. A recovered stale steer generates separate pairs for the rejected and retried requests. No new delivery events are emitted without an input identity. |
+| `codex_native_delivery_attempt` / `codex_native_delivery_finished` | One pair per RPC, with `turn_start` or `turn_steer` and an `rpc_accepted`, `rpc_accepted_missing_turn_id`, `rpc_error`, or `cancelled` outcome. The missing-ID outcome means the RPC returned without a nonempty turn ID. A recovered stale steer generates separate pairs for the rejected and retried requests. No new delivery events are emitted without an input identity. |
 | `codex_turn_injection_failed` | The input identity, RPC error code when available, and native thread context for a failed injection. An RPC failure can be ambiguous about acceptance. |
 | `native_input_settled` | The server's decision after durable persistence. See outcomes below. |
 | `native_input_invalid_delivery_stage` | A caller supplied an unsupported server stage. The existing stage is preserved; the caller's invalid value is not logged. |
@@ -50,6 +50,9 @@ producer did not supply them; do not infer ownership from timestamps alone.
 The older top-level `turn_id` on `codex_turn_injection_failed` is the initial
 bridge snapshot, also named `initial_native_turn_id`. Use the individual RPC
 records to identify the turn that accepted or rejected a retry.
+
+Commands such as Codex `/side` that bypass the pending-input queue do not
+emit these input-delivery events.
 
 `native_input_settled.outcome` distinguishes:
 

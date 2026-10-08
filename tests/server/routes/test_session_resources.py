@@ -4827,6 +4827,61 @@ async def test_kiro_native_dispatch_forwards_without_persisting(
 
 
 @pytest.mark.asyncio
+async def test_codex_side_dispatch_forwards_without_pending_input_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A side-chat command bypasses the parent's pending-input queue."""
+    from omnigent.native.input_diagnostics import INPUT_FIELDS, input_delivery_scope
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _dispatch_session_event_to_runner
+
+    pending_inputs.reset_for_tests()
+    store = _ConversationStore()
+    conv = store.get_conversation("823dbd1aab969b5a813fac59bb977a77")
+    assert conv is not None
+    conv.labels["omnigent.wrapper"] = "codex-native-ui"
+    client = _FakeRunnerClient()
+    body = SessionEventInput(
+        type="message",
+        data={
+            "role": "user",
+            "content": [{"type": "input_text", "text": "/side explain this function"}],
+            "stable_id": "a" * 32,
+        },
+    )
+    caplog.set_level("INFO")
+
+    try:
+        with input_delivery_scope({"input_stable_id": "b" * 32}):
+            result = await _dispatch_session_event_to_runner(
+                conv.id,
+                conv,
+                body,
+                store,
+                client,  # type: ignore[arg-type]
+                agent_name="codex-native-ui",
+                file_store=None,
+                artifact_store=None,
+            )
+
+        assert result.item_id is None
+        assert result.pending_id is None
+        assert pending_inputs.snapshot_for(conv.id) == []
+        assert store.appended_items == []
+        [forwarded] = [
+            payload for path, payload in client.post_json_calls if path.endswith("/events")
+        ]
+        assert forwarded["content"] == body.data["content"]
+        assert not INPUT_FIELDS.intersection(forwarded)
+        assert not any(
+            str(getattr(record, "event_name", "")).startswith("native_input_")
+            for record in caplog.records
+        )
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_kiro_native_dispatch_clears_pending_when_injection_fails() -> None:
     """A failed Kiro tmux injection must not leave a ghost pending input."""
     from omnigent.runtime import pending_inputs

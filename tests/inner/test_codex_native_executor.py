@@ -157,8 +157,20 @@ def _collect_turn_events(executor: CodexNativeExecutor, text: str) -> list[Any]:
 
 
 @pytest.mark.parametrize("active_turn_id", [None, "turn_existing"])
+@pytest.mark.parametrize(
+    "rpc_reply",
+    [
+        None,
+        {},
+        {"result": {"turn": {"id": ""}, "turnId": ""}},
+        {"result": {"turn": {"id": 7}, "turnId": 7}},
+        {"result": []},
+    ],
+    ids=["turn-id", "missing-result", "empty-id", "invalid-id", "invalid-result"],
+)
 def test_codex_delivery_records_input_and_accepted_native_turn(
     active_turn_id: str | None,
+    rpc_reply: dict[str, Any] | None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -166,8 +178,16 @@ def test_codex_delivery_records_input_and_accepted_native_turn(
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
     _FakeCodexNativeClient.next_turn = 1
+
+    class _DeliveryReplyClient(_FakeCodexNativeClient):
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            reply = await super().request(method, params)
+            if method in {"turn/start", "turn/steer"} and rpc_reply is not None:
+                return rpc_reply
+            return reply
+
     monkeypatch.setattr(
-        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient", _FakeCodexNativeClient
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient", _DeliveryReplyClient
     )
     _seed_bridge(tmp_path, active_turn_id=active_turn_id)
     caplog.set_level(logging.INFO, logger=codex_native_executor.__name__)
@@ -188,9 +208,17 @@ def test_codex_delivery_records_input_and_accepted_native_turn(
     attrs = record.attributes
     assert {key: attrs[key] for key in identity} == identity
     assert attrs["response_id"] == "resp_delivery"
-    assert attrs["native_turn_id"] == ("turn_steered" if active_turn_id else "turn_1")
     assert attrs["stage"] == ("turn_steer" if active_turn_id else "turn_start")
-    assert attrs["outcome"] == "rpc_accepted"
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    if rpc_reply is None:
+        assert attrs["native_turn_id"] == ("turn_steered" if active_turn_id else "turn_1")
+        assert attrs["outcome"] == "rpc_accepted"
+        assert state.active_turn_id == attrs["native_turn_id"]
+    else:
+        assert attrs["native_turn_id"] is None
+        assert attrs["outcome"] == "rpc_accepted_missing_turn_id"
+        assert state.active_turn_id == active_turn_id
     assert "private prompt" not in json.dumps(attrs)
 
 

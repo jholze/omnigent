@@ -42,6 +42,7 @@ from omnigent.debug_logging import (
     sse_logging_enabled,
 )
 from omnigent.errors import ErrorImpact, ErrorPhase
+from omnigent.native.input_diagnostics import input_attributes
 from omnigent.runtime import inflight_text, pending_elicitations
 
 _logger = logging.getLogger(__name__)
@@ -189,8 +190,13 @@ def _sse_safe_attributes(event: dict[str, Any]) -> dict[str, object]:
         attrs["response_id"] = event["response_id"]
     item = event.get("item")
     if isinstance(item, dict):
-        if "response_id" not in attrs and isinstance(item.get("response_id"), str):
-            attrs["response_id"] = item["response_id"]
+        nested_response_id = item.get("response_id")
+        if (
+            "response_id" not in attrs
+            and isinstance(nested_response_id, str)
+            and len(nested_response_id) <= 256
+        ):
+            attrs["response_id"] = nested_response_id
         if isinstance(item.get("id"), str):
             attrs["item_id"] = item["id"]
         if isinstance(item.get("type"), str):
@@ -214,8 +220,6 @@ def _sse_safe_attributes(event: dict[str, Any]) -> dict[str, object]:
                 value = data.get(key)
                 if isinstance(value, str) and len(value) <= 256:
                     attrs[key] = value
-    from omnigent.native.input_diagnostics import input_attributes
-
     attrs.update(input_attributes(event))
     error = event.get("error")
     if not isinstance(error, dict) and isinstance(response, dict):

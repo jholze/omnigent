@@ -133,7 +133,7 @@ def log_input_event(
         from omnigent.debug_logging import debug_event
 
         correlation = current_input_attributes() if attributes is None else dict(attributes)
-        if attributes is None and not correlation:
+        if not correlation:
             return
         extra = debug_event(event_name, session_id=session_id)
         extra["attributes"] = _diagnostic_attributes({**correlation, **fields})
