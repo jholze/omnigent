@@ -780,9 +780,12 @@ class NativeInterruptRunner:
                     if not is_stale_active_turn_error(exc):
                         raise
                     # Codex already ended this turn, so the interrupt is a no-op.
-                    # Clear the turn only if it still matches (a newer one stays
-                    # active) and reconcile to idle so a dropped completion can't stick.
+                    # Clear the recorded turn only if it still matches, so a newer
+                    # turn that started mid-interrupt keeps running.
                     if clear_active_turn_id_if_matches(bridge_dir, state.active_turn_id):
+                        # The dropped completion means no idle edge is coming, so
+                        # publish one and realign the baseline or clients stay stuck.
+                        self._publish_event(conv_id, {"type": "session.status", "status": "idle"})
                         self._resource_registry.note_external_session_status(conv_id, "idle")
                     self._logger.info(
                         "Codex-native interrupt reconciled an already-ended turn "

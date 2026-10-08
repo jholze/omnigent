@@ -3189,9 +3189,9 @@ async def test_events_codex_native_stop_after_completed_turn_is_noop_not_503(
 
     Codex finished the recorded turn but its completion was delayed or dropped,
     so the session still has it recorded as active and ``turn/interrupt`` is
-    rejected with ``-32600 "no active turn to interrupt"``. That rejection must
-    reconcile to a 204 (drop the stale turn, mark idle), not the old 503 "Stop
-    failed" toast that left the session stuck on its spinner.
+    rejected with ``-32600 "no active turn to interrupt"``. The handler drops the
+    stale turn, publishes a ``session.status: idle`` edge so the spinner clears,
+    and returns 204 instead of a 503 that leaves the session stuck running.
     """
     from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
 
@@ -3232,7 +3232,17 @@ async def test_events_codex_native_stop_after_completed_turn_is_noop_not_503(
         flagged = conv_id in app.state.interrupted_sessions
         turn_is_active = app.state.session_resource_registry.session_turn_is_active(conv_id)
 
-    # 1) The reported bug: 204, not the 503 the stuck-spinner toast comes from.
+        from omnigent.runner.app import _session_event_queues_ref
+
+        queue = _session_event_queues_ref.get(conv_id)
+        assert queue is not None, "session create must initialize the event queue."
+        queued_events: list[dict[str, Any]] = []
+        while not queue.empty():
+            item = queue.get_nowait()
+            if isinstance(item, dict):
+                queued_events.append(item)
+
+    # 1) An already-ended turn reconciles to 204, never a 503.
     assert stop_resp.status_code == 204, (
         f"codex-native {event_type} on an already-ended turn must be a 204 "
         f"no-op; got {stop_resp.status_code}: {stop_resp.text}"
@@ -3250,6 +3260,15 @@ async def test_events_codex_native_stop_after_completed_turn_is_noop_not_503(
     )
     # 4) The session is reconciled to idle so it does not stay stuck running.
     assert not turn_is_active, "session must be reconciled to idle, not left active."
+    # A dropped completion leaves no idle edge, so the handler publishes one
+    # (exactly once); without it the spinner sticks for clients after refresh.
+    status_idle = [
+        e for e in queued_events if e.get("type") == "session.status" and e.get("status") == "idle"
+    ]
+    assert len(status_idle) == 1, (
+        f"stale-turn reconcile must publish exactly one session.status: idle; "
+        f"got {len(status_idle)} in {queued_events!r}."
+    )
     # 5) No interrupted marker is synthesized and the session is not flagged.
     assert not flagged
     marker_texts = [
@@ -3378,6 +3397,16 @@ async def test_events_codex_native_stop_preserves_newer_turn_without_false_idle(
 
         turn_is_active = app.state.session_resource_registry.session_turn_is_active(conv_id)
 
+        from omnigent.runner.app import _session_event_queues_ref
+
+        queue = _session_event_queues_ref.get(conv_id)
+        assert queue is not None, "session create must initialize the event queue."
+        queued_events: list[dict[str, Any]] = []
+        while not queue.empty():
+            item = queue.get_nowait()
+            if isinstance(item, dict):
+                queued_events.append(item)
+
     assert stop_resp.status_code == 204, (
         f"a superseded-turn rejection must be a 204 no-op; "
         f"got {stop_resp.status_code}: {stop_resp.text}"
@@ -3387,8 +3416,12 @@ async def test_events_codex_native_stop_preserves_newer_turn_without_false_idle(
     assert state is not None and state.active_turn_id == "turn_codex_newer", (
         f"a newer turn must be preserved, not cleared; got {state!r}."
     )
-    # And no false idle: the newer turn is still running.
+    # And no false idle: the newer turn is still running, so no idle edge is
+    # published and the local activity memo stays active.
     assert turn_is_active, "a newer running turn must not be reconciled to idle."
+    assert not [
+        e for e in queued_events if e.get("type") == "session.status" and e.get("status") == "idle"
+    ], "a preserved newer turn must not publish a false idle edge."
 
 
 @pytest.mark.asyncio
