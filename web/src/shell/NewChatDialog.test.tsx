@@ -10874,6 +10874,34 @@ describe("managed sandbox gateway preview", () => {
     expect(screen.getByTestId("new-chat-landing-agent-efforts")).toBeVisible();
   });
 
+  // The gateway catalog owns the model like a bound target does, so the
+  // per-turn router is offered only once the harness falls back to its own list.
+  it.each<[string, SandboxModelOptions, boolean]>([
+    ["owns the catalog", catalog, false],
+    [
+      "cannot serve the harness",
+      { ...catalog, status: "unconfigured", models: [], provider_label: null },
+      true,
+    ],
+  ])("offers Smart Routing only when the gateway %s", (_case, data, offered) => {
+    preview(data);
+    mockHosts([]);
+    renderLanding({
+      managed_sandboxes_enabled: true,
+      sandbox_provider: "arclet",
+      sandbox_provider_capabilities: { arclet: { gateway_models: true } },
+      smart_routing_enabled: true,
+      smart_routing_sources: { external: true, oss: true },
+    });
+    openAgentModels("a2");
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Smart Routing" }) !== null).toBe(
+      offered,
+    );
+    expect(screen.queryByTestId(`new-chat-landing-agent-model-${astra.id}`) !== null).toBe(
+      !offered,
+    );
+  });
+
   it("keeps a connected host's authoritative discovery when Arclet preview is offered", () => {
     localStorage.setItem("omnigent:last-host-choice", "host_1");
     preview();

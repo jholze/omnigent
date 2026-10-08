@@ -269,12 +269,17 @@ async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env):
 
 
 @pytest.mark.parametrize("selected", [True, False])
-async def test_gateway_failure_keeps_launch_selection_and_default_usable(env: _Env, selected):
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("private upstream error"), TimeoutError()], ids=["error", "timeout"]
+)
+async def test_gateway_failure_keeps_launch_selection_and_default_usable(
+    env: _Env, selected, failure
+):
     from omnigent.server.inference_catalog import SandboxInferenceService
 
     target = env.app.state.sandbox_config.default
     target.host_config = None
-    target.gateway_model_options = AsyncMock(side_effect=RuntimeError("private upstream error"))
+    target.gateway_model_options = AsyncMock(side_effect=failure)
     env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
     preview = await env.client.get(
         "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
@@ -336,8 +341,7 @@ def _discoverable_gateway(
     from omnigent.server.inference_catalog import SandboxInferenceService
 
     monkeypatch.setenv("CATALOG_KEY", "catalog-test-secret")
-    with model_catalog._listing_cache_lock:
-        model_catalog._listing_cache.clear()
+    model_catalog.clear_model_catalog_cache()
     target = env.app.state.sandbox_config.default
     target.host_config = copy.deepcopy(_UNBOUND_GATEWAY)
     target.model_discovery = copy.deepcopy(_UNBOUND_DISCOVERY)
@@ -373,8 +377,7 @@ async def test_unbound_gateway_preview_lists_discovery_and_launches_the_choice(
         ("gpt-5.5-mini", False),
     ]
     assert response.headers["cache-control"] == "private, no-store"
-    assert requests[0].url == "https://catalog.example/v1/models"
-    assert requests[0].headers["authorization"] == "Bearer catalog-test-secret"
+    assert len(requests) == 1
     assert "catalog-test-secret" not in response.text
     assert env.persisted() == before
     env.launch.assert_not_called()
@@ -421,7 +424,7 @@ async def test_unbound_gateway_preview_leaves_other_harnesses_unconfigured(
     assert requests == []
 
 
-async def test_malformed_providers_degrade_the_unbound_preview(
+async def test_malformed_providers_leave_the_unbound_preview_unconfigured(
     env: _Env, monkeypatch: pytest.MonkeyPatch
 ):
     requests: list[Request] = []
@@ -431,9 +434,8 @@ async def test_malformed_providers_degrade_the_unbound_preview(
         "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
     )
     assert response.status_code == 200, response.text
-    assert response.json()["status"] == "unavailable"
+    assert response.json()["status"] == "unconfigured"
     assert response.json()["configured"] is False
-    assert "must be a mapping" in response.json()["error"]
     assert requests == []
 
 

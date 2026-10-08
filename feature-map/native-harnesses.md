@@ -144,6 +144,13 @@ Cross-harness journeys:
   `tests/e2e_ui/start_session/test_native_picker_cli_parity.py::test_claude_picker_omits_aliases_the_cli_picker_does_not_offer`,
   `tests/e2e_ui/start_session/test_native_picker_cli_parity.py::test_codex_picker_offers_the_clis_catalog_and_default`;
   see also [composer](./composer.md) for effort.
+- **`model-and-effort`, managed sandbox before a host exists:**
+  `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py::test_sandbox_codex_picker_offers_gateway_models_before_a_host_exists`,
+  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`.
+  The picker offers the sandbox gateway's models for native and SDK agents with
+  a Harness default row; efforts come from the listing's reasoning metadata, and
+  an unavailable listing keeps Harness default launchable. Connected-host
+  discovery and bound (`inference_models`) targets are unchanged.
 - **`model-and-effort`, Codex runtime settings:**
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_preserves_supported_effort`,

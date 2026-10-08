@@ -232,19 +232,7 @@ def create_sandbox_inference_router(
         # An agent's own provider takes precedence over the sandbox's ambient gateway.
         if target is None or not target.managed_launch_supported or auth is not None or profile:
             return result
-        try:
-            ambient = await inference_service(request).ambient_catalog(provider, harness, user_id)
-        except (OmnigentError, ValueError) as exc:
-            _logger.warning(
-                "Gateway model preview failed for %s/%s", provider, harness, exc_info=True
-            )
-            result.update(
-                status="unavailable",
-                error=exc.message
-                if isinstance(exc, OmnigentError)
-                else "Invalid inference configuration",
-            )
-            return result
+        ambient = await inference_service(request).ambient_catalog(provider, harness, user_id)
         if ambient is not None:
             return ambient
         if target.gateway_model_options is not None:

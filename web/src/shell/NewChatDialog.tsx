@@ -3180,7 +3180,8 @@ export function NewChatLandingScreen() {
       : null;
   const sandboxGatewayCatalogError = sandboxGatewayPreviewEnabled
     ? (sandboxModels.error?.message ??
-      (sandboxModels.data?.status === "unavailable"
+      (sandboxModels.data !== undefined &&
+      ["unavailable", "empty"].includes(sandboxModels.data.status)
         ? (sandboxModels.data.error ?? "Could not load AI Gateway models.")
         : null))
     : null;
@@ -3267,7 +3268,7 @@ export function NewChatLandingScreen() {
   // family instead of losing the row — and loses it only when neither router
   // can answer.
   const smartRoutingEligible =
-    !sandboxInferenceConfigured &&
+    !sandboxHasModelCatalog &&
     smartRoutingEnabled &&
     selectedNativeHarness !== null &&
     SMART_ROUTING_ARMS.some((harness) => harness === selectedNativeHarness) &&
@@ -3678,11 +3679,15 @@ export function NewChatLandingScreen() {
       return;
     }
     const picked = model === MODEL_SELECT_DEFAULT ? "" : model;
+    // Gateway catalogs carry no default row, so Harness default keeps no effort.
+    const effortModel = sandboxGatewayPreviewEnabled
+      ? picked
+      : picked || codexModelOptions.find((option) => option.isDefault)?.id;
     const effort =
       (sandboxGatewayPreviewEnabled || selectedNativeHarness === "codex-native") &&
       !codexEffortLevelsForModel(
         sandboxGatewayPreviewEnabled ? pickerModelOptions : codexModelOptions,
-        picked || codexModelOptions.find((option) => option.isDefault)?.id,
+        effortModel,
       ).includes(pickedEffort)
         ? ""
         : pickedEffort;
@@ -3693,7 +3698,7 @@ export function NewChatLandingScreen() {
   };
   const selectPickerEffort = (effort: string) => {
     const selectionHarness =
-      selectedNativeHarness ?? (sandboxGatewayPreviewEnabled ? previewHarness : null);
+      selectedNativeHarness ?? (sandboxHasModelCatalog ? previewHarness : null);
     if (!selectionHarness) return;
     const picked = effort === EFFORT_SELECT_NONE ? "" : effort;
     setPickedEffort(picked);

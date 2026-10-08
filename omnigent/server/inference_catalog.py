@@ -154,9 +154,14 @@ def ambient_gateway_providers(
     discovery = model_discovery or {}
     if not discovery or parse_inference_config(raw):
         return {}
+    try:
+        providers = load_providers(raw)
+    except OmnigentError:
+        # Startup rejects malformed YAML providers; a programmatic target gets no preview.
+        return {}
     return {
         name: entry
-        for name, entry in load_providers(raw).items()
+        for name, entry in providers.items()
         if isinstance(discovery.get(name), dict) and entry.kind in {"gateway", "key", "local"}
     }
 

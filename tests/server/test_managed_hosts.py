@@ -2233,6 +2233,11 @@ def test_provider_ui_capabilities_advertise_gateway_models_for_unbound_discovery
             config("discovered", host_config=gateway, model_discovery=discovery),
             config("static", host_config=gateway),
             config("bound", host_config=bound, model_discovery=discovery),
+            config(
+                "malformed",
+                host_config={"providers": {"gateway": "nope"}},
+                model_discovery=discovery,
+            ),
         )
     )
     assert deployment.provider_ui_capabilities() == {
@@ -2240,6 +2245,7 @@ def test_provider_ui_capabilities_advertise_gateway_models_for_unbound_discovery
         "discovered": {"multi_repo": False, "gateway_models": True},
         "static": {"multi_repo": False},
         "bound": {"multi_repo": False, "inference_models": True},
+        "malformed": {"multi_repo": False},
     }
 
 

@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -44,6 +45,24 @@ def _wait(check, description: str, timeout: float = 90):
     raise AssertionError(f"Timed out waiting for {description}")
 
 
+def _bundled_codex_slugs(codex_home: Path, home: Path) -> set[str]:
+    """Models the installed Codex bundles; others fall open to its configured default."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in {"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+    }
+    listing = subprocess.run(
+        ["codex", "debug", "models", "--bundled"],
+        env={**env, "CODEX_HOME": str(codex_home), "HOME": str(home)},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    ).stdout
+    return {comparable_model_id(row["slug"]) for row in json.loads(listing)["models"]}
+
+
 def _check_response(response: httpx.Response) -> None:
     if response.is_error:
         response.read()
@@ -59,6 +78,8 @@ def test_gateway_choice_reaches_managed_codex_first_turn(
     config = tmp_path / "config"
     source = tmp_path / "codex-config"
     source.mkdir()
+    if comparable_model_id(MODEL) not in _bundled_codex_slugs(source, tmp_path):
+        pytest.skip(f"installed Codex does not advertise {MODEL}")
     # Deliberately different source default: the launch selection must override it.
     write_model_config(config, mock_url, "claude-test", "gpt-5.4")
     set_fallback_mock_llm(mock_url, key="_policy_llm_", text='{"action":"allow","reason":""}')
@@ -96,15 +117,14 @@ def test_gateway_choice_reaches_managed_codex_first_turn(
         ) as client,
     ):
         info = client.get("/v1/info")
-        info.raise_for_status()
         assert info.json()["sandbox_provider_capabilities"]["test-gateway"]["gateway_models"]
         assert client.get("/v1/hosts").json()["hosts"] == []
         preview = client.get(
             "/v1/sandbox-providers/test-gateway/harnesses/codex-native/model-options"
         )
-        preview.raise_for_status()
-        assert preview.json()["configured"] is False
-        assert preview.json()["models"][0]["id"] == MODEL
+        preview_body = preview.json()
+        assert preview_body["configured"] is False
+        assert preview_body["models"][0]["id"] == MODEL
         assert not (tmp_path / "provisioned").exists()
         # Install the real native wrapper, then use the same JSON create path
         # as the landing page. The seed session has no host or runner.
