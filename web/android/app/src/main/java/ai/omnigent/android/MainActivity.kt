@@ -10,6 +10,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -70,6 +72,7 @@ class MainActivity : AppCompatActivity() {
         AuthTabIntent.registerActivityResultLauncher(this, ::handleOidcAuthResult)
     private val oidcExecutor = Executors.newCachedThreadPool()
     private var oidcSession: OidcSessionController? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var databricksLoginManager: DatabricksLoginManager? = null
     private val callbackHandoff by lazy {
         OAuthCallbackHandoff(applicationContext)
@@ -337,6 +340,12 @@ class MainActivity : AppCompatActivity() {
             cookies = DefaultProfileCookieJar,
             io = oidcWorker ?: oidcExecutor,
             main = { task -> runOnUiThread(task) },
+            scheduler = { delayMillis, task ->
+                val runnable = Runnable(task)
+                mainHandler.postDelayed(runnable, delayMillis)
+                val cancel: () -> Unit = { mainHandler.removeCallbacks(runnable) }
+                cancel
+            },
             fetchManifest = manifestReader,
         ).also { oidcSession = it }
 
@@ -426,6 +435,8 @@ class MainActivity : AppCompatActivity() {
         ): Boolean =
             OidcSignInLauncher(OidcCredentials.shared(applicationContext), callbackHandoff)
                 .start(oidcAuthLauncher, serverUrl, cookieName)
+
+        override fun signedOut(message: String) = returnToSetup(message)
     }
 
     private fun handleDatabricksAuthResult(result: AuthTabIntent.AuthResult) {
@@ -778,7 +789,7 @@ class MainActivity : AppCompatActivity() {
                 .put(
                     "recentServers",
                     JSONArray(store.recentServers().filterNot(store.managed::includes)),
-                )
+                ).put("canSignOut", canSignOut())
         webView.evaluateJavascript(
             "window.__omnigentNativeEmitServerPicker && " +
                 "window.__omnigentNativeEmitServerPicker($payload);",
@@ -814,6 +825,23 @@ class MainActivity : AppCompatActivity() {
         } else {
             reloadWithNewServer(target, origin, interactive = true)
         }
+    }
+
+    /** Whether this connection's sign-in belongs to the shell, so the shell can sign it out. */
+    private fun canSignOut(): Boolean = workspaceSession != null || oidcSession?.canSignOut == true
+
+    /**
+     * The sidebar picker's "Sign out of <server>": the same sign-out as the native menu. The
+     * page hears whether the shell took it over before the shell navigates away.
+     */
+    private fun onSignOutOfServerRequested() {
+        val handled = canSignOut()
+        webView.evaluateJavascript(
+            "window.__omnigentNativeEmitSignOutResult && window.__omnigentNativeEmitSignOutResult($handled);",
+            null,
+        )
+        if (!handled) return
+        if (workspaceSession != null) requestWorkspaceSignOut() else oidcSession?.signOut()
     }
 
     /** "Connect to new server…" from the sidebar picker — manual URL entry. */
@@ -1015,6 +1043,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        oidcSession?.onForeground()
         val session = workspaceSession ?: return
         val profile = workspaceProfile ?: return
         val page = lastWorkspacePageUri ?: session.pageUri
@@ -1024,6 +1053,11 @@ class MainActivity : AppCompatActivity() {
                 if (rawError != null || present != true) handleWorkspaceSessionInvalid(null)
             }
         }
+    }
+
+    override fun onStop() {
+        oidcSession?.onBackground()
+        super.onStop()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -1059,6 +1093,7 @@ class MainActivity : AppCompatActivity() {
                     onSwitchServer = ::onSwitchServerRequested,
                     onOpenServerSetup = ::onOpenServerSetupRequested,
                     onSignOut = if (workspaceSession != null) ::requestWorkspaceSignOut else null,
+                    onSignOutOfServer = ::onSignOutOfServerRequested,
                 ),
             )
         } catch (_: IllegalArgumentException) {
@@ -1385,6 +1420,8 @@ class MainActivity : AppCompatActivity() {
             if (workspaceSession != null) {
                 add(2, 5, 0, getString(R.string.menu_sign_out_workspace))
                 DatabricksAuthDebugMenu.addItems(this)
+            } else if (oidcSession?.canSignOut == true) {
+                add(2, 6, 0, getString(R.string.menu_sign_out))
             }
         }
         popup.setOnMenuItemClickListener { item ->
@@ -1401,6 +1438,11 @@ class MainActivity : AppCompatActivity() {
 
                 5 -> {
                     requestWorkspaceSignOut()
+                    true
+                }
+
+                6 -> {
+                    oidcSession?.signOut()
                     true
                 }
 
