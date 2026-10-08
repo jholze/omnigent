@@ -10854,6 +10854,26 @@ describe("managed sandbox gateway preview", () => {
     expect(body.reasoning_effort).toBeUndefined();
   });
 
+  it("keeps a harness's ordinary picker when the gateway lists nothing for it", () => {
+    preview({ ...catalog, status: "unconfigured", models: [], provider_label: null });
+    renderGatewaySandbox();
+    openAgentModels("a1");
+    expect(useSandboxModelOptions).toHaveBeenLastCalledWith(
+      "arclet",
+      "claude-native",
+      "a1",
+      null,
+      true,
+    );
+    expect(screen.queryByTestId("sandbox-model-provider")).toBeNull();
+    const menu = screen
+      .getByTestId("new-chat-landing-agent-models")
+      .closest<HTMLElement>('[role="menu"]')!;
+    expect(within(menu).queryByText("Models unavailable")).toBeNull();
+    expect(within(menu).getByTestId("new-chat-landing-agent-model-opus")).toBeVisible();
+    expect(screen.getByTestId("new-chat-landing-agent-efforts")).toBeVisible();
+  });
+
   it("keeps a connected host's authoritative discovery when Arclet preview is offered", () => {
     localStorage.setItem("omnigent:last-host-choice", "host_1");
     preview();

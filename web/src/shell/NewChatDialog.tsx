@@ -3146,7 +3146,7 @@ export function NewChatLandingScreen() {
     info !== "loading" && previewSandboxProvider !== null
       ? info.sandbox_provider_capabilities?.[previewSandboxProvider]
       : undefined;
-  const sandboxGatewayPreviewEnabled =
+  const sandboxGatewayPreviewOffered =
     sandboxSelected &&
     sandboxModelCapabilities?.gateway_models === true &&
     sandboxModelCapabilities.inference_models !== true;
@@ -3155,7 +3155,7 @@ export function NewChatLandingScreen() {
     previewSandboxProvider !== null &&
     previewHarness !== null &&
     info !== "loading" &&
-    (sandboxModelCapabilities?.inference_models === true || sandboxGatewayPreviewEnabled);
+    (sandboxModelCapabilities?.inference_models === true || sandboxGatewayPreviewOffered);
   const sandboxModels = useSandboxModelOptions(
     previewSandboxProvider,
     previewHarness,
@@ -3163,6 +3163,9 @@ export function NewChatLandingScreen() {
     cacheUser,
     sandboxPreviewEnabled,
   );
+  // A harness the gateway cannot serve keeps its ordinary picker.
+  const sandboxGatewayPreviewEnabled =
+    sandboxGatewayPreviewOffered && sandboxModels.data?.status !== "unconfigured";
   const sandboxInferenceConfigured =
     sandboxPreviewEnabled && sandboxModels.data?.configured === true;
   const sandboxHasModelCatalog = sandboxInferenceConfigured || sandboxGatewayPreviewEnabled;

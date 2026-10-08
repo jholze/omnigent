@@ -227,13 +227,12 @@ def create_sandbox_inference_router(
         deployment = getattr(request.app.state, "sandbox_config", None)
         target = deployment.for_provider(provider) if deployment is not None else None
         # An agent's own provider takes precedence over the sandbox's ambient gateway.
-        if (
-            target is not None
-            and target.managed_launch_supported
-            and target.gateway_model_options is not None
-            and auth is None
-            and not profile
-        ):
+        if target is None or not target.managed_launch_supported or auth is not None or profile:
+            return result
+        ambient = await inference_service(request).ambient_catalog(provider, harness, user_id)
+        if ambient is not None:
+            return ambient
+        if target.gateway_model_options is not None:
             result["provider_label"] = "AI Gateway"
             try:
                 models = await asyncio.wait_for(

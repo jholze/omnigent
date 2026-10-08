@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Request, Response
 
 from omnigent.db.utils import generate_agent_id
+from omnigent.models import model_catalog
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.managed_hosts import ManagedSandboxConfig, ManagedSandboxDeployment
@@ -310,16 +311,125 @@ async def test_gateway_failure_keeps_launch_selection_and_default_usable(env: _E
     assert target.gateway_model_options.await_count == 1
 
 
+_UNBOUND_GATEWAY = {
+    "providers": {
+        "team_gateway": {
+            "kind": "gateway",
+            "display_name": "Team AI Gateway",
+            "openai": {
+                "base_url": "https://gateway.example/v1",
+                "api_key_ref": "env:POD_GATEWAY_KEY",
+                "wire_api": "responses",
+            },
+        }
+    }
+}
+_UNBOUND_DISCOVERY = {
+    "team_gateway": {"base_url": "https://catalog.example/v1", "api_key_ref": "env:CATALOG_KEY"}
+}
+
+
+def _discoverable_gateway(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, requests: list[Request]
+) -> ManagedSandboxConfig:
+    """Point the target at an unbound gateway the server can list via discovery."""
+    from omnigent.server.inference_catalog import SandboxInferenceService
+
+    monkeypatch.setenv("CATALOG_KEY", "catalog-test-secret")
+    with model_catalog._listing_cache_lock:
+        model_catalog._listing_cache.clear()
+    target = env.app.state.sandbox_config.default
+    target.host_config = copy.deepcopy(_UNBOUND_GATEWAY)
+    target.model_discovery = copy.deepcopy(_UNBOUND_DISCOVERY)
+
+    def respond(request: Request) -> Response:
+        requests.append(request)
+        return Response(200, json={"data": [{"id": "gpt-5.5"}, {"id": "gpt-5.5-mini"}]})
+
+    env.app.state.inference_catalog = SandboxInferenceService(
+        env.app.state, transport=MockTransport(respond)
+    )
+    return target
+
+
+async def test_unbound_gateway_preview_lists_discovery_and_launches_the_choice(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+):
+    requests: list[Request] = []
+    _discoverable_gateway(env, monkeypatch, requests)
+    before = env.persisted()
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["configured"] is False
+    assert body["status"] == "ready"
+    assert body["configuration_revision"] is None
+    assert body["default_model"] is None
+    assert body["provider_label"] == "Team AI Gateway"
+    assert [(row["id"], row["isDefault"]) for row in body["models"]] == [
+        ("gpt-5.5", False),
+        ("gpt-5.5-mini", False),
+    ]
+    assert response.headers["cache-control"] == "private, no-store"
+    assert requests[0].url == "https://catalog.example/v1/models"
+    assert requests[0].headers["authorization"] == "Bearer catalog-test-secret"
+    assert "catalog-test-secret" not in response.text
+    assert env.persisted() == before
+    env.launch.assert_not_called()
+    agent = await create_test_agent(
+        env.client,
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        include_llm=False,
+    )
+    created = await env.client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "host_type": "managed",
+            "sandbox_provider": "agent_sandbox",
+            "model_override": "gpt-5.5-mini",
+            "reasoning_effort": "high",
+        },
+    )
+    assert created.status_code == 201, created.text
+    saved = env.store.get_conversation(created.json()["id"])
+    assert saved is not None
+    assert (saved.model_override, saved.reasoning_effort) == ("gpt-5.5-mini", "high")
+    assert saved.inference_snapshot is None
+    env.launch.assert_awaited_once()
+
+
+async def test_unbound_gateway_preview_leaves_other_harnesses_unconfigured(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+):
+    requests: list[Request] = []
+    _discoverable_gateway(env, monkeypatch, requests)
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/claude-native/model-options"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "configured": False,
+        "models": [],
+        "configuration_revision": None,
+        "provider_label": None,
+        "default_model": None,
+        "status": "unconfigured",
+    }
+    assert requests == []
+
+
 @pytest.mark.parametrize(
     "connection", [{"auth": {"type": "provider", "name": "private"}}, {"profile": "private"}]
 )
-async def test_agent_provider_does_not_inherit_ambient_gateway_preview(env: _Env, connection):
-    from omnigent.server.inference_catalog import SandboxInferenceService
-
-    target = env.app.state.sandbox_config.default
-    target.host_config = None
+async def test_agent_provider_does_not_inherit_ambient_gateway_preview(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, connection
+):
+    requests: list[Request] = []
+    target = _discoverable_gateway(env, monkeypatch, requests)
     target.gateway_model_options = AsyncMock()
-    env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
     agent = await create_test_agent(
         env.client,
         executor={
@@ -336,6 +446,7 @@ async def test_agent_provider_does_not_inherit_ambient_gateway_preview(env: _Env
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "unconfigured"
     assert response.json()["models"] == []
+    assert requests == []
     target.gateway_model_options.assert_not_called()
 
 

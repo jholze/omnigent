@@ -807,10 +807,13 @@ class ManagedSandboxDeployment:
                 launcher = config.launcher_factory()
                 caps[config.provider] = {"multi_repo": launcher.capabilities.multi_repo}
                 from omnigent.inference_config import parse_inference_config
+                from omnigent.server.inference_catalog import ambient_gateway_providers
 
                 if parse_inference_config(config.host_config or {}):
                     caps[config.provider]["inference_models"] = True
-                elif config.gateway_model_options is not None:
+                elif config.gateway_model_options is not None or ambient_gateway_providers(
+                    config.host_config, config.model_discovery
+                ):
                     caps[config.provider]["gateway_models"] = True
         return caps
 
