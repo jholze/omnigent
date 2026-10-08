@@ -35,7 +35,8 @@ CANDIDATE = "你"
 CURSOR_LEFT = (b"\x1b[D", b"\x1bOD")
 
 _ANSI = re.compile(
-    rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][0-~]|\x1b[=>78]|\x1b\].*?(?:\x07|\x1b\\)|\r|\x07"
+    rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1bO[@-~]|\x1b[()][0-~]|\x1b[=>78]"
+    rb"|\x1b\].*?(?:\x07|\x1b\\)|\r|\x07"
 )
 
 # The touch keyboard's auto-pair: an IME "Process" keydown (keyCode 229), the
@@ -229,8 +230,10 @@ def test_ime_autopair_then_composition_lands_inside_pair(
             timeout_s=10,
         )
         echoed = _echo_text(received, echo_baseline).decode("utf-8", "replace")
-        page.wait_for_timeout(2_000)
         if record_dir:
+            # Hold the final frame so the committed candidate stays readable in
+            # the clip; the assertions below never need this pause.
+            page.wait_for_timeout(2_000)
             page.screenshot(path=os.path.join(record_dir, "ime-autopair-final.png"))
 
         # The two sent-frame facets below are the reported, program-independent

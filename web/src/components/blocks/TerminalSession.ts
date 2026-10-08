@@ -837,6 +837,9 @@ export class TerminalSession {
     // field moved on.
     let imeCorrection: { caret: number; value: string } | null = null;
     if (textarea) {
+      // xterm registered its own textarea listeners during term.open() above,
+      // so its zero-delay diff and commit timers are queued ahead of the
+      // realignment timers below; that ordering lets us correct after xterm.
       let imeGeneration = 0;
       // Snapshot at keydown; focus and input also resync IMEs without keydown.
       let valueBeforeInput = textarea.value;
@@ -985,13 +988,15 @@ export class TerminalSession {
       // Correct only the commit flushed after compositionend, never data
       // emitted mid-composition.
       if (imeCommitPending && !imeComposing && textarea) {
+        // Only the first flush after compositionend is the commit; disarm now
+        // so a genuine keystroke in the cleanup window is never trimmed, even
+        // when this flush needs no correction.
+        imeCommitPending = false;
         const corrected = imeCommitBeforeCaret(d, textarea.value, textarea.selectionStart);
         if (corrected !== null) {
           data = corrected;
-          // Record the tail to drop and stop correcting later payloads from
-          // this commit.
+          // Record the tail xterm re-sent so cleanup can unstage it.
           imeCorrection = { caret: textarea.selectionStart, value: textarea.value };
-          imeCommitPending = false;
         }
       }
       // xterm emitting nothing is not a user action; a commit trimmed to empty

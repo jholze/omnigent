@@ -9,6 +9,7 @@ it does not validate a physical phone keyboard.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 
@@ -223,5 +224,6 @@ def test_autopair_then_composition_commits_candidate(
     )
     assert b"())" not in all_sent, f"the corrupted '())' stream was sent: {all_sent!r}"
 
-    # Keep the result visible in recordings.
-    page.wait_for_timeout(1500)
+    # Keep the result visible in recordings; the assertions above never need it.
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        page.wait_for_timeout(1500)

@@ -1454,4 +1454,84 @@ describe("TerminalSession", () => {
     expect(textarea.value).toBe("(你好");
     session.dispose();
   });
+
+  it("skips the deferred realignment when the field moves before the timer", async () => {
+    // A later edit between the auto-pair insert and its zero-delay realignment
+    // invalidates the decision; no corrective arrow may reach the PTY and the
+    // field must not be unstaged behind the user's back.
+    const { socket, session } = makeSession();
+    socket.open();
+    const term = (session as unknown as { term: Terminal }).term;
+    const textarea = term.textarea!;
+    textarea.focus();
+    const { fire229, setField, insertText } = imeDriver(textarea);
+
+    fire229("keydown");
+    setField("()", 1);
+    insertText("()");
+    fire229("keyup");
+    // The user keeps typing before the realignment timer runs.
+    setField("()x", 3);
+    await settle();
+
+    expect(sentText(socket)).not.toContain(CURSOR_LEFT_CSI);
+    expect(textarea.value).toBe("()x");
+    session.dispose();
+  });
+
+  it("stamps input but sends no frame when a commit trims to empty", async () => {
+    // A commit can sit entirely past the caret, so bounding it at the caret
+    // yields an empty payload. That is still a user action for input trust,
+    // but there is nothing to forward.
+    const onInput = vi.fn();
+    const { socket, session } = makeSession(undefined, onInput);
+    socket.open();
+    const term = (session as unknown as { term: Terminal }).term;
+    const textarea = term.textarea!;
+    textarea.focus();
+    const { fire229, setField, composition } = imeDriver(textarea);
+    onInput.mockClear();
+    const sentBefore = sentText(socket);
+
+    // The field already holds the committed character with the caret before
+    // it, so xterm's own compositionend flush is a no-op and the only commit
+    // reaching onData is the one we drive, which bounds to empty at the caret.
+    setField("你", 0);
+    fire229("keydown");
+    composition("compositionstart", "");
+    composition("compositionend", "");
+    term.input("你", true);
+    await settle();
+
+    expect(onInput).toHaveBeenCalled();
+    expect(sentText(socket)).toBe(sentBefore);
+    session.dispose();
+  });
+
+  it("disarms the commit window even when the commit needs no trim", async () => {
+    // A commit landing with the caret at the end trims nothing, but the window
+    // must still close so a following genuine keystroke whose text equals the
+    // field suffix is forwarded, not swallowed as a stale commit tail.
+    const { socket, session } = makeSession();
+    socket.open();
+    const term = (session as unknown as { term: Terminal }).term;
+    const textarea = term.textarea!;
+    textarea.focus();
+    const { fire229, setField, composition } = imeDriver(textarea);
+    const sentBefore = sentText(socket);
+
+    // The value stays constant so xterm's own compositionend flush is a no-op;
+    // only the caret moves between the commit and the next keystroke.
+    setField("ab", 2);
+    fire229("keydown");
+    composition("compositionstart", "");
+    composition("compositionend", "");
+    term.input("ab", true);
+    setField("ab", 1);
+    term.input("b", true);
+    await settle();
+
+    expect(sentText(socket)).toBe(`${sentBefore}abb`);
+    session.dispose();
+  });
 });
