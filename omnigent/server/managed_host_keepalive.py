@@ -40,6 +40,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
+from functools import partial
 from typing import TYPE_CHECKING
 
 from omnigent.debug_logging import debug_event
@@ -104,11 +105,12 @@ _last_kept: dict[str, float] = {}
 # provider from stacking a second job for the same runner behind the first.
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by runner_id
 _inflight: set[str] = set()
-# Guards every shared scheduling map above plus _inflight.
+# Guards the per-runner maps (_runner_interval_s, _last_kept) and _inflight; the
+# store, config and executor globals are set once in configure() and read unlocked.
 _state_lock = threading.Lock()
 
-# Queue delay of the attempt a worker is running, read by _keep_alive_for_runner
-# for its outcome record. A direct call (tests) has no queue, so it stays None.
+# Queue delay of the attempt a worker is running, for its outcome record. Carried
+# as a ContextVar so _keep_alive_for_runner keeps its one-argument signature.
 _queue_delay_s: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "managed_keepalive_queue_delay_s", default=None
 )
@@ -247,7 +249,7 @@ def touch(runner_id: str) -> None:
         _prune_throttle(now)
     ctx = contextvars.copy_context()
     try:
-        executor.submit(ctx.run, _run_keepalive_job, runner_id)
+        executor.submit(ctx.run, partial(_run_keepalive_job, queued_at=now), runner_id)
     except Exception as exc:  # noqa: BLE001 - a rejecting pool must not wedge the runner
         # The stamp above stands as the attempt, so the retry is paced by the
         # interval instead of hammering a shut-down or broken pool.
@@ -269,13 +271,9 @@ def _prune_throttle(now: float) -> None:
             _runner_interval_s.pop(runner_id, None)
 
 
-def _run_keepalive_job(runner_id: str) -> None:
-    """Worker entry: record how long the attempt waited for a worker, then refresh."""
-    started_at = time.monotonic()
-    with _state_lock:
-        queued_at = _last_kept.get(runner_id)
-    queue_delay_s = max(0.0, started_at - queued_at) if queued_at is not None else None
-    token = _queue_delay_s.set(queue_delay_s)
+def _run_keepalive_job(runner_id: str, *, queued_at: float) -> None:
+    """Worker entry: refresh, recording how long the attempt waited for a worker."""
+    token = _queue_delay_s.set(max(0.0, time.monotonic() - queued_at))
     try:
         _keep_alive_for_runner(runner_id)
     finally:
@@ -426,12 +424,9 @@ def _keep_alive_for_runner(runner_id: str) -> None:
             provider_started = time.monotonic()
             try:
                 extended = config.launcher_factory().keep_alive(host.sandbox_id)
-                # INFO from the server layer so the keepalive is visible in the
-                # server log (onboarding-layer loggers do not surface there); the
-                # provider logs the new deadline at debug. A provider returns
-                # False when it attempted but could not confirm the extension (and
-                # logged its own warning); the structured outcome then names the
-                # soft failure instead of a success line.
+                # INFO so the keepalive is visible in the server log (onboarding
+                # loggers do not surface there). False means the provider attempted
+                # but could not confirm the extension, so record a soft failure.
                 outcome = (
                     _KeepAliveOutcome.SOFT_FAILED
                     if extended is False

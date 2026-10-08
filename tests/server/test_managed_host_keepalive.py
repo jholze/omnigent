@@ -62,6 +62,18 @@ def _wire(
     monkeypatch.setattr(managed_host_keepalive, "_sandbox_config", deployment)
 
 
+def _outcomes(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The managed_keepalive outcome of every captured record, in order."""
+    return [
+        record.attributes["outcome"]
+        for record in caplog.records
+        if getattr(record, "attributes", {}).get("outcome")
+    ]
+
+
+_KEEPALIVE_LOGGER = "omnigent.server.managed_host_keepalive"
+
+
 def test_extends_the_hosts_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     launcher = _Launcher()
     _wire(
@@ -73,7 +85,9 @@ def test_extends_the_hosts_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     assert launcher.calls == ["sbx1"]
 
 
-def test_provider_without_keep_alive_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provider_without_keep_alive_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     # kubernetes today: the base class raises, and that must not propagate.
     launcher = _Launcher(raises=SandboxCapabilityError("nope"))
     _wire(
@@ -81,11 +95,15 @@ def test_provider_without_keep_alive_is_skipped(monkeypatch: pytest.MonkeyPatch)
         launcher=launcher,
         host=SimpleNamespace(sandbox_id="sbx1", sandbox_provider="kubernetes"),
     )
-    managed_host_keepalive._keep_alive_for_runner("r1")
+    with caplog.at_level(logging.DEBUG, logger=_KEEPALIVE_LOGGER):
+        managed_host_keepalive._keep_alive_for_runner("r1")
     assert launcher.calls == ["sbx1"]  # attempted, error swallowed
+    assert _outcomes(caplog) == ["unsupported"]
 
 
-def test_store_failure_never_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_store_failure_never_propagates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     def _boom(_rid: str) -> list[object]:
         raise RuntimeError("db down")
 
@@ -100,18 +118,37 @@ def test_store_failure_never_propagates(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         managed_host_keepalive, "_sandbox_config", SimpleNamespace(for_provider=lambda _p: None)
     )
-    managed_host_keepalive._keep_alive_for_runner("r1")  # must not raise
+    with caplog.at_level(logging.WARNING, logger=_KEEPALIVE_LOGGER):
+        managed_host_keepalive._keep_alive_for_runner("r1")  # must not raise
+    assert _outcomes(caplog) == ["resolution_error"]
+    assert caplog.records[0].attributes["error_type"] == "RuntimeError"
+    assert "db down" not in caplog.text
 
 
-def test_cli_host_without_a_sandbox_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_host_without_a_sandbox_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     launcher = _Launcher()
     _wire(
         monkeypatch,
         launcher=launcher,
         host=SimpleNamespace(sandbox_id=None, sandbox_provider=None),
     )
-    managed_host_keepalive._keep_alive_for_runner("r1")
+    with caplog.at_level(logging.DEBUG, logger=_KEEPALIVE_LOGGER):
+        managed_host_keepalive._keep_alive_for_runner("r1")
     assert launcher.calls == []
+    assert _outcomes(caplog) == ["no_sandbox"]
+
+
+def test_a_missing_host_row_is_recorded_and_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    launcher = _Launcher()
+    _wire(monkeypatch, launcher=launcher, host=None)
+    with caplog.at_level(logging.DEBUG, logger=_KEEPALIVE_LOGGER):
+        managed_host_keepalive._keep_alive_for_runner("r1")
+    assert launcher.calls == []
+    assert _outcomes(caplog) == ["no_host"]
 
 
 def test_touch_is_rate_limited_per_runner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,7 +217,7 @@ def test_worker_runs_inside_the_callers_workspace_scope(
 
 
 def test_a_host_on_an_unoffered_provider_is_skipped(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
     Never extend through another provider's launcher. `recorded()` would fall
@@ -201,8 +238,10 @@ def test_a_host_on_an_unoffered_provider_is_skipped(
     monkeypatch.setattr(managed_host_keepalive, "_host_store", hosts)
     monkeypatch.setattr(managed_host_keepalive, "_sandbox_config", deployment)
 
-    managed_host_keepalive._keep_alive_for_runner("r1")
+    with caplog.at_level(logging.DEBUG, logger=_KEEPALIVE_LOGGER):
+        managed_host_keepalive._keep_alive_for_runner("r1")
     assert launcher.calls == []
+    assert _outcomes(caplog) == ["provider_unavailable"]
 
 
 def test_a_runner_already_in_flight_is_not_queued_twice(
@@ -352,8 +391,8 @@ def test_provider_error_is_recorded_without_the_exception_message(
     )
     monkeypatch.setattr(managed_host_keepalive, "_last_kept", {})
     monkeypatch.setattr(managed_host_keepalive, "_inflight", {"r1"})
-    with caplog.at_level(logging.WARNING, logger="omnigent.server.managed_host_keepalive"):
-        managed_host_keepalive._run_keepalive_job("r1")
+    with caplog.at_level(logging.WARNING, logger=_KEEPALIVE_LOGGER):
+        managed_host_keepalive._run_keepalive_job("r1", queued_at=time.monotonic())
     assert "r1" not in managed_host_keepalive._inflight
     error_events = [
         record
@@ -709,14 +748,17 @@ async def test_a_rejected_submission_is_retried_with_a_bounded_delay(
             await _stop_loop(task)
 
     sleeps = [delay for _, delay in stepper.sleeps]
+    # The scheduler's own records plus the tunnel loop's, which logs an ERROR if
+    # touch() raises; unrelated libraries must not count.
+    records = [record for record in caplog.records if record.name.startswith("omnigent.server")]
     observed = {
         "attempts": executor.attempts,
         "sleeps": sleeps,
         "inflight": sorted(managed_host_keepalive._inflight),
-        "logs": [record.getMessage() for record in caplog.records],
+        "logs": [record.getMessage() for record in records],
     }
     assert all(0 < delay <= interval for delay in sleeps), observed
-    assert len(caplog.records) <= len(executor.attempts), observed
+    assert len(records) <= len(executor.attempts), observed
     assert "runner-b" not in managed_host_keepalive._inflight, (
         f"rejected submission left the runner reserved, so it can never refresh again: {observed}"
     )
