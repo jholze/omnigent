@@ -336,9 +336,10 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
         history_origin = "agy-written" if history_dbs else "seeded stand-in"
         if not history_dbs:
             # Without a sign-in agy may mint nothing, so stand in for the database a
-            # real turn would have written, where agy keeps it.
+            # real turn would have written, where agy keeps it. agy, not bridge
+            # preparation, creates ``antigravity-cli/``, so build the parents too.
             conversations_dir = agy_state_dir / "conversations"
-            conversations_dir.mkdir(exist_ok=True)
+            conversations_dir.mkdir(parents=True, exist_ok=True)
             history_dbs = [conversations_dir / f"{uuid.uuid4()}.db"]
             history_dbs[0].write_bytes(b"conversation history")
 
@@ -371,8 +372,9 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
         assert owner_marker.is_file(), f"bridge dir {bridge_dir} lost its owner marker"
 
         # Once the whole bridge is inactive beyond retention, the next host
-        # restart must reclaim it. A relaunch may mint a fresh conversation in
-        # the same dir, so the old databases vanishing is the proof.
+        # restart reclaims it: the restart runs the sweep but does not resume the
+        # crashed session, so the aged dead-owner bridge still looks inactive and
+        # its old databases disappearing is the proof.
         _kill_tree_uncleanly(daemon_b)
         _kill_session_tmux_server(bridge_dir)
         assert all(db.is_file() for db in history_dbs)
