@@ -130,11 +130,27 @@ function sessionsStub(
 
 function projectsStub(
   projects: ProjectSummary[] | undefined,
-  overrides: Record<string, unknown> = {},
+  overrides: Partial<ReturnType<typeof conversationsHook.useProjects>> = {},
 ) {
   return { data: projects, ...overrides } as unknown as ReturnType<
     typeof conversationsHook.useProjects
   >;
+}
+
+// A deferred fitView: the surface stays hidden until the returned resolver runs.
+// Throws if the component never calls fitView, so a missing fit fails loudly
+// here instead of as a confusing downstream assertion.
+function deferFit() {
+  let applyFit = (_fitted: boolean): void => {
+    throw new Error("fitView was never invoked");
+  };
+  flowFitView.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        applyFit = resolve;
+      }),
+  );
+  return (fitted: boolean) => applyFit(fitted);
 }
 
 function LocationProbe() {
@@ -255,13 +271,7 @@ describe("CanvasPage", () => {
   });
 
   it("keeps the flow surface hidden until the restored view is fitted", async () => {
-    let applyFit = (_fitted: boolean) => {};
-    flowFitView.mockImplementationOnce(
-      () =>
-        new Promise<boolean>((resolve) => {
-          applyFit = resolve;
-        }),
-    );
+    const applyFit = deferFit();
     vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
       sessionsStub([conversation("conv_1", 2), conversation("conv_2", 1)]),
     );
@@ -280,13 +290,7 @@ describe("CanvasPage", () => {
   });
 
   it("keeps the surface inert until fitted when it mounts after the loading screen", async () => {
-    let applyFit = (_fitted: boolean) => {};
-    flowFitView.mockImplementationOnce(
-      () =>
-        new Promise<boolean>((resolve) => {
-          applyFit = resolve;
-        }),
-    );
+    const applyFit = deferFit();
     vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
       sessionsStub([], { loaded: false, complete: false, networkConfirmed: false }),
     );
@@ -309,13 +313,7 @@ describe("CanvasPage", () => {
   });
 
   it("re-hides a populated retry after an empty load failure until it is fitted", async () => {
-    let applyFit = (_fitted: boolean) => {};
-    flowFitView.mockImplementationOnce(
-      () =>
-        new Promise<boolean>((resolve) => {
-          applyFit = resolve;
-        }),
-    );
+    const applyFit = deferFit();
     // An empty load that failed reveals the surface so the user is not stuck
     // behind a blank page.
     vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
@@ -336,6 +334,66 @@ describe("CanvasPage", () => {
     await act(async () => applyFit(true));
     expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
     expect(screen.getByTestId("canvas-flow")).not.toHaveAttribute("inert");
+  });
+
+  it("re-fits a previously fitted card set that returns after an empty settle", async () => {
+    const rows = [conversation("conv_1", 2), conversation("conv_2", 1)];
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(sessionsStub(rows));
+    const { rerender } = renderPage();
+    await waitFor(() => expect(flowFitView).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+
+    // The cards leave the canvas; the settled empty state reveals it.
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(sessionsStub([]));
+    rerender(pageTree());
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+
+    // The same cards return without a remount. Their fit must run again, so
+    // the surface hides until it lands rather than painting them unfitted or
+    // staying hidden forever behind the stale fitted key.
+    const applyFit = deferFit();
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(sessionsStub(rows));
+    rerender(pageTree());
+    expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).toHaveAttribute("inert");
+
+    await act(async () => applyFit(true));
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).not.toHaveAttribute("inert");
+  });
+
+  it("ignores a superseded fit so a canvas switch cannot reveal an unfitted view", async () => {
+    const resolvers: ((fitted: boolean) => void)[] = [];
+    flowFitView.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub(PROJECTS));
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
+      sessionsStub([
+        conversation("conv_main", 2),
+        conversation("conv_alpha", 1, { project_id: "proj_a" }),
+      ]),
+    );
+    renderPage();
+
+    // The first canvas is fitting; the surface is still hidden.
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+    expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
+
+    // Switch canvas before that fit resolves: a second fit supersedes it.
+    fireEvent.click(screen.getByRole("tab", { name: "Alpha" }));
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+
+    // The stale first fit resolving must not reveal the newer, unfitted canvas.
+    await act(async () => resolvers[0](true));
+    expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
+
+    // The current canvas's own fit reveals it.
+    await act(async () => resolvers[1](true));
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
   });
 
   it("keeps a not-yet-confirmed empty canvas hidden: late cards must not flash", async () => {

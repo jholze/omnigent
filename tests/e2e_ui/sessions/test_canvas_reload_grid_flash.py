@@ -17,11 +17,10 @@ from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.sessions.test_canvas_page import _serve_list, _session, _stub_server_info
 
-# Samples each visible React Flow tile's screen position and the viewport
-# transform on every animation frame (rAF fires right before paint, so a
-# sample approximates that frame's geometry); CSS-hidden tiles are skipped.
-# ~20s at 60fps: bounds __canvasFrames so the large-canvas run stays small.
-_MAX_FRAMES = 1200
+# Sample each visible tile's screen position and the viewport transform per
+# animation frame (rAF fires just before paint); CSS-hidden tiles are skipped.
+# Cap ~40s at 60fps, above the 30s node-count wait, so a cap hit means a hang.
+_MAX_FRAMES = 2400
 
 _FRAME_SAMPLER = """
 (() => {

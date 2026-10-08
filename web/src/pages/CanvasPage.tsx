@@ -188,6 +188,8 @@ function CanvasSurface() {
   const fittedKeyRef = useRef<string | null>(null);
   // Revealed for an empty/failed load; re-hide if content later arrives unfit.
   const revealedEmptyRef = useRef(false);
+  // Bumped per fit so a superseded fit's resolution cannot reveal a newer view.
+  const fitGenerationRef = useRef(0);
   const pendingProjectNameRef = useRef<string | null>(null);
   const flowContainerRef = useRef<HTMLDivElement>(null);
   const aliveRef = useRef(true);
@@ -225,11 +227,16 @@ function CanvasSurface() {
   const fitCanvas = useCallback(
     (duration = 0) => {
       viewportDirtyRef.current = false;
-      // fitView resolves once the fitted viewport is applied, so the first
-      // frame the reveal below paints is already the restored view. Reveal on
-      // failure too: a lost fit must cost a flash, never an invisible canvas.
+      // A later fit supersedes this one; ignore the stale resolution so a
+      // canvas switch mid-fit cannot reveal the new view before it is fitted.
+      const generation = (fitGenerationRef.current += 1);
+      // fitView resolves once the fitted viewport is applied, so the revealed
+      // frame is already the restored view. Reveal on failure too: a lost fit
+      // must cost a flash, never an invisible canvas.
       const reveal = () => {
-        if (aliveRef.current) setViewRestored(true);
+        if (aliveRef.current && generation === fitGenerationRef.current) {
+          setViewRestored(true);
+        }
       };
       void fitView({ ...FIT_VIEW, duration }).then(reveal, reveal);
     },
@@ -347,6 +354,10 @@ function CanvasSurface() {
     if (visibleSessions.length > 0) {
       if (revealedEmptyRef.current && !viewportDirtyRef.current) {
         revealedEmptyRef.current = false;
+        // Clear the fitted key so a returning, already-fitted card set still
+        // refits; otherwise the fit effect early-outs and the re-hidden
+        // surface would stay hidden forever.
+        fittedKeyRef.current = null;
         setViewRestored(false);
       }
       return;
