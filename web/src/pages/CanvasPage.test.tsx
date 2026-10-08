@@ -128,8 +128,13 @@ function sessionsStub(
   };
 }
 
-function projectsStub(projects: ProjectSummary[] | undefined) {
-  return { data: projects } as unknown as ReturnType<typeof conversationsHook.useProjects>;
+function projectsStub(
+  projects: ProjectSummary[] | undefined,
+  overrides: Record<string, unknown> = {},
+) {
+  return { data: projects, ...overrides } as unknown as ReturnType<
+    typeof conversationsHook.useProjects
+  >;
 }
 
 function LocationProbe() {
@@ -293,6 +298,24 @@ describe("CanvasPage", () => {
     vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub(undefined));
     renderPage();
     expect(screen.getByTestId("canvas-flow")).toHaveClass("opacity-0");
+  });
+
+  it("reveals an empty canvas once the session list fails to load", () => {
+    vi.mocked(canvasSessions.useCanvasSessions).mockReturnValue(
+      sessionsStub([], { complete: false, networkConfirmed: false, error: "offline" }),
+    );
+    renderPage();
+    expect(screen.getByRole("alert")).toHaveTextContent("Refresh failed: offline");
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
+    expect(screen.getByTestId("canvas-flow")).not.toHaveAttribute("inert");
+  });
+
+  it("reveals an empty canvas once the project list fails to load", () => {
+    vi.mocked(conversationsHook.useProjects).mockReturnValue(
+      projectsStub(undefined, { isError: true }),
+    );
+    renderPage();
+    expect(screen.getByTestId("canvas-flow")).not.toHaveClass("opacity-0");
   });
 
   it("reveals the canvas when the fit fails: worst case is a flash, not a blank page", async () => {

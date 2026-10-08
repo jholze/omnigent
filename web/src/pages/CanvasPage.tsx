@@ -338,14 +338,16 @@ function CanvasSurface() {
     if (!viewportDirtyRef.current) fitCanvas();
   }, [fitCanvas, loaded, nodes]);
 
-  // An empty canvas has no layout to restore; show it once it is confirmed
-  // empty. A cached or partial list can look empty while cards are still on
-  // the way (and project scoping needs the project list), and revealing early
-  // would paint the late cards under the unfitted default viewport.
+  // An empty canvas has no layout to restore: show it once the session and
+  // project lists have settled, confirmed or failed. A cached or partial list
+  // can look empty while cards are still on the way (and project scoping needs
+  // the project list); revealing early would paint the late cards unfitted.
   useEffect(() => {
-    if (networkConfirmed && projectsQuery.data !== undefined && visibleSessions.length === 0)
-      setViewRestored(true);
-  }, [networkConfirmed, projectsQuery.data, visibleSessions]);
+    if (visibleSessions.length > 0) return;
+    const sessionsSettled = networkConfirmed || error !== null;
+    const projectsSettled = projectsQuery.data !== undefined || projectsQuery.isError;
+    if (sessionsSettled && projectsSettled) setViewRestored(true);
+  }, [error, networkConfirmed, projectsQuery.data, projectsQuery.isError, visibleSessions]);
 
   // React 18's JSX has no `inert` prop; set the attribute directly so the
   // invisible surface is not tabbable or read by assistive tech.

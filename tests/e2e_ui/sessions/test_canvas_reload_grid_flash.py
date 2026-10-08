@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import os
 
-from playwright.sync_api import Page, Route, expect
+from playwright.sync_api import Page, expect
+
+from tests.e2e_ui.sessions.test_canvas_page import _serve_list, _session, _stub_server_info
 
 # Samples every React Flow tile's on-screen position (and the viewport
 # transform) on every animation frame, from document start. rAF callbacks run
@@ -58,58 +60,6 @@ _READ_LAYOUT = (
 )
 
 
-def _stub_server_info(page: Page) -> None:
-    """Advertise the canvas release feature deterministically."""
-    body = json.dumps(
-        {
-            "accounts_enabled": False,
-            "single_user": True,
-            "login_url": None,
-            "needs_setup": False,
-            "features": {"canvas": True, "usage_page": False, "harness_install": False},
-            "harness_install_enabled": False,
-            "installable_harnesses": [],
-        }
-    )
-    page.route(
-        "**/v1/info",
-        lambda route: route.fulfill(status=200, content_type="application/json", body=body),
-    )
-
-
-def _session(session_id: str, title: str, updated_at: int) -> dict[str, object]:
-    return {
-        "id": session_id,
-        "object": "conversation",
-        "title": title,
-        "status": "idle",
-        "created_at": 1,
-        "updated_at": updated_at,
-        "labels": {},
-        "permission_level": None,
-        "workspace": "/workspace/canvas",
-        "git_branch": None,
-        "project_id": None,
-        "archived": False,
-        "parent_session_id": None,
-    }
-
-
-def _serve_list(sessions: list[dict[str, object]]):
-    def serve(route: Route) -> None:
-        route.fulfill(
-            json={
-                "object": "list",
-                "data": sessions,
-                "first_id": sessions[0]["id"] if sessions else None,
-                "last_id": None,
-                "has_more": False,
-            }
-        )
-
-    return serve
-
-
 def _open_canvas_and_persist_a_move(
     page: Page,
     live_server: str,
@@ -118,7 +68,7 @@ def _open_canvas_and_persist_a_move(
 ) -> str:
     """Open ``/canvas``, wait for every slot to persist, drag one card, and
     return its persisted transform."""
-    _stub_server_info(page)
+    _stub_server_info(page, canvas=True)
     page.route("**/v1/sessions?*", _serve_list(sessions))
     page.route("**/v1/sessions/projects", lambda route: route.fulfill(json=[]))
 
