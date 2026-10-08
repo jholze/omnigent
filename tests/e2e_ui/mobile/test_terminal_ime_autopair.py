@@ -206,8 +206,18 @@ def test_ime_autopair_then_composition_lands_inside_pair(
                 "end": True,
             },
         )
-        committed = _wait_for_frames(
-            page, sent, commit_baseline, lambda b: len(b) > 0, timeout_s=5
+        # Terminal replies (e.g. the OSC background-color report the theme
+        # picker queries) can share the commit's capture window; strip them and
+        # wait for the candidate so only the committed text is asserted.
+        committed = _ANSI.sub(
+            b"",
+            _wait_for_frames(
+                page,
+                sent,
+                commit_baseline,
+                lambda b: CANDIDATE.encode() in _ANSI.sub(b"", b),
+                timeout_s=5,
+            ),
         ).decode("utf-8", "replace")
 
         outcomes = (b"())", f"({CANDIDATE})".encode())

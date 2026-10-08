@@ -832,9 +832,10 @@ export class TerminalSession {
     const textarea = this.term.textarea;
     let imeCommitPending = false;
     let imeComposing = false;
-    // Caret of a commit whose trailing mark onData actually suppressed; the
-    // compositionend cleanup only trims that known tail, never live text.
-    let imeCorrectionCaret: number | null = null;
+    // Caret and expected value of a commit whose trailing mark onData
+    // suppressed; cleanup trims only that recorded tail and bails if the
+    // field moved on.
+    let imeCorrection: { caret: number; value: string } | null = null;
     if (textarea) {
       let imeGeneration = 0;
       // Snapshot at keydown; focus and input also resync IMEs without keydown.
@@ -859,7 +860,7 @@ export class TerminalSession {
           imeComposing = true;
           imeGeneration += 1;
           imeCommitPending = true;
-          imeCorrectionCaret = null;
+          imeCorrection = null;
         },
         { signal },
       );
@@ -873,15 +874,21 @@ export class TerminalSession {
           // after the caret.
           setTimeout(() => {
             if (generation !== imeGeneration || this.disposed) {
-              imeCorrectionCaret = null;
+              imeCorrection = null;
               return;
             }
             imeCommitPending = false;
-            // Trim only the tail a commit actually carried past the caret;
-            // with no suppressed mark there is nothing stray to drop.
-            const caret = imeCorrectionCaret;
-            imeCorrectionCaret = null;
-            if (caret !== null && caret < textarea.value.length) unstageTail(caret);
+            // Trim only the tail a commit carried past the caret, and only
+            // while the field still holds that recorded value.
+            const correction = imeCorrection;
+            imeCorrection = null;
+            if (
+              correction &&
+              textarea.value === correction.value &&
+              correction.caret < textarea.value.length
+            ) {
+              unstageTail(correction.caret);
+            }
           }, 0);
         },
         { signal },
@@ -981,7 +988,10 @@ export class TerminalSession {
         const corrected = imeCommitBeforeCaret(d, textarea.value, textarea.selectionStart);
         if (corrected !== null) {
           data = corrected;
-          imeCorrectionCaret = textarea.selectionStart;
+          // Record the tail to drop and stop correcting later payloads from
+          // this commit.
+          imeCorrection = { caret: textarea.selectionStart, value: textarea.value };
+          imeCommitPending = false;
         }
       }
       // xterm emitting nothing is not a user action; a commit trimmed to empty
