@@ -8,7 +8,10 @@ import androidx.activity.ComponentActivity
 import java.net.URI
 import java.util.concurrent.Executors
 
-/** HTTPS compatibility receiver for browsers that fall back from Auth Tab to Custom Tabs. */
+/**
+ * Callback receiver for browsers that fall back from Auth Tab to Custom Tabs: the Databricks
+ * return page and the native OIDC redirect.
+ */
 class OAuthCallbackActivity : ComponentActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private val callbackHandoff by lazy { OAuthCallbackHandoff(applicationContext) }
@@ -16,23 +19,30 @@ class OAuthCallbackActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         callbackHandoff.markInProgress()
+        val callback = intent?.data?.toString()?.let { runCatching { URI(it) }.getOrNull() }
+        val oidc = callback != null && OidcRedirect.matches(callback)
         setContentView(
             TextView(this).apply {
-                text = getString(R.string.oauth_completing)
+                text = getString(if (oidc) R.string.oidc_completing else R.string.oauth_completing)
                 gravity = Gravity.CENTER
             },
         )
-        val callback = intent?.data?.toString()?.let { runCatching { URI(it) }.getOrNull() }
         if (callback == null) {
             returnToApp(getString(R.string.oauth_invalid_callback))
             return
         }
         executor.execute {
-            val error =
-                runCatching { DatabricksLoginManager(applicationContext).complete(callback) }
-                    .exceptionOrNull()
-                    ?.message
+            val error = runCatching { complete(callback) }.exceptionOrNull()?.message
             runOnUiThread { returnToApp(error) }
+        }
+    }
+
+    private fun complete(callback: URI) {
+        if (OidcRedirect.matches(callback)) {
+            // The shell installs the session; only the minted token is held for it, in memory.
+            OidcCredentials.shared(applicationContext).completeHandedOffSignIn(callback)
+        } else {
+            DatabricksLoginManager(applicationContext).complete(callback)
         }
     }
 
