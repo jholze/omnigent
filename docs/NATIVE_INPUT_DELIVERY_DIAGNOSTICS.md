@@ -65,6 +65,8 @@ emit these input-delivery events.
   the later `matched_item_id` and `matched_pending_id`, and `match_method`.
 - `prior_fifo_match_uncertain`: an earlier FIFO attribution prevents treating
   this older input as definitely missing.
+- `user_interrupted`: the person pressed Stop while this input was queued.
+  A later transcript match clears it without saving a missing-message error.
 - `reported_undelivered`: the runner explicitly reported that this particular
   input had not reached the harness.
 

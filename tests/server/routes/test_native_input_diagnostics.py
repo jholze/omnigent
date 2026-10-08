@@ -118,8 +118,9 @@ async def test_skipped_message_logs_committed_ids_once_and_keeps_enqueue_identit
 
 
 @pytest.mark.asyncio
-async def test_fifo_attribution_is_not_logged_as_a_text_match(
-    db_uri: str, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_uncertain_or_interrupted_input_does_not_report_missing_message(
+    db_uri: str, caplog: pytest.LogCaptureFixture, interrupted: bool
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="Test", labels={"omnigent.wrapper": "claude-native-ui"})
@@ -142,6 +143,8 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
         background_titles_enabled=False,
     )
     original = pending_inputs.delivery_attributes_for(conv.id, uncertain)
+    if interrupted:
+        pending_inputs.mark_interrupted(conv.id, [uncertain])
     caplog.set_level(logging.INFO)
     await _persist_external_conversation_item(
         conv.id,
@@ -152,7 +155,12 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
                 "item_type": "message",
                 "item_data": {
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "reformatted"}],
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "original" if interrupted else "reformatted",
+                        }
+                    ],
                 },
                 "source_id": "native:reformatted:0",
             },
@@ -162,9 +170,13 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
     [record] = [
         r for r in caplog.records if getattr(r, "event_name", None) == "native_input_settled"
     ]
-    assert record.attributes["outcome"] == "native_transcript_fifo_attributed"
+    assert record.attributes["outcome"] == (
+        "native_transcript_matched" if interrupted else "native_transcript_fifo_attributed"
+    )
     assert record.attributes["pending_id"] == first
-    assert record.attributes["match_method"] == "fifo_fallback"
+    assert record.attributes["match_method"] == (
+        "normalized_text" if interrupted else "fifo_fallback"
+    )
     assert "error_item_id" not in record.attributes
     later_id = await _persist_external_conversation_item(
         conv.id,
@@ -180,11 +192,12 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
         ),
         store,
     )
+    expected_outcome = "user_interrupted" if interrupted else "prior_fifo_match_uncertain"
     [uncertain_record] = [
         r
         for r in caplog.records
         if getattr(r, "event_name", None) == "native_input_settled"
-        and r.attributes["outcome"] == "prior_fifo_match_uncertain"
+        and r.attributes["outcome"] == expected_outcome
     ]
     attrs = uncertain_record.attributes
     assert attrs["pending_id"] == uncertain
@@ -196,6 +209,7 @@ async def test_fifo_attribution_is_not_logged_as_a_text_match(
     assert attrs["matched_response_id"] == "resp_later"
     assert attrs["match_method"] == "normalized_text"
     saved = {item.id: item for item in store.list_items(conv.id).data}
+    assert len(saved) == 2
     assert saved[later_id].response_id == attrs["matched_response_id"]
     assert all(item.type != "error" for item in saved.values())
     assert "item_id" not in attrs and "error_item_id" not in attrs

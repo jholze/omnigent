@@ -3080,7 +3080,7 @@ async def _persist_external_conversation_item_unlocked(
             "native_input_settled",
             session_id=session_id,
             attributes=pending_inputs.delivery_attributes(uncertain),
-            outcome="prior_fifo_match_uncertain",
+            outcome="user_interrupted" if uncertain.interrupted else "prior_fifo_match_uncertain",
             matched_item_id=persisted.id,
             matched_response_id=persisted.response_id,
             matched_pending_id=cleared_pending_id,
