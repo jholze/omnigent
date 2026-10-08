@@ -2585,6 +2585,24 @@ def test_prune_orphaned_bridge_dirs_removes_expired_bridge(
     assert not dead_dir.exists()
 
 
+def test_prune_orphaned_bridge_dirs_removes_bridge_with_non_directory_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired bridge whose conversation path is not a directory is reclaimed."""
+    dead_dir = _dead_owner_bridge(
+        tmp_path / "antigravity-native",
+        monkeypatch,
+        owner_marker_age_s=_mod._ORPHAN_RETENTION_SECONDS,
+    )
+    conversations = _conversations_dir(dead_dir)
+    conversations.parent.mkdir(parents=True)
+    conversations.write_bytes(b"not a directory")
+
+    assert _mod.prune_orphaned_bridge_dirs() == 1
+    assert not dead_dir.exists()
+
+
 def test_prune_orphaned_bridge_dirs_uses_latest_conversation_activity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

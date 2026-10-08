@@ -15,7 +15,8 @@ check the old bridge is reclaimed.
 
 Run::
 
-    .venv/bin/python -m pytest tests/e2e/test_antigravity_native_dir_gc_e2e.py -v
+    OMNIGENT_E2E_ANTIGRAVITY_NATIVE=1 .venv/bin/python -m pytest \
+        tests/e2e/test_antigravity_native_dir_gc_e2e.py -v
 """
 
 from __future__ import annotations
@@ -72,8 +73,12 @@ def _spawn_host_daemon(
     env = os.environ.copy()
     env["HOME"] = str(home_dir)
     # The host only launches antigravity-native when agy looks signed in; a
-    # placeholder key passes that gate without any real sign-in.
-    env["GEMINI_API_KEY"] = "e2e-readiness-stand-in"
+    # placeholder key passes that gate, while an operator-supplied key is kept
+    # so a signed-in run can exercise real agy.
+    env.setdefault("GEMINI_API_KEY", "e2e-readiness-stand-in")
+    # The restart's sweep-completion marker logs at INFO; pin the level so an
+    # ambient OMNIGENT_LOG_LEVEL cannot suppress the line the test waits on.
+    env["OMNIGENT_LOG_LEVEL"] = "INFO"
     env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
     with open(log_path, "w") as log_fh:
         return subprocess.Popen(
@@ -371,10 +376,8 @@ def test_host_restart_retains_recent_antigravity_bridge_then_reclaims_it(
         )
         assert owner_marker.is_file(), f"bridge dir {bridge_dir} lost its owner marker"
 
-        # Once the whole bridge is inactive beyond retention, the next host
-        # restart reclaims it: the restart runs the sweep but does not resume the
-        # crashed session, so the aged dead-owner bridge still looks inactive and
-        # its old databases disappearing is the proof.
+        # The restart runs the sweep but does not resume the crashed session,
+        # so the aged dead-owner bridge still looks inactive and is reclaimed.
         _kill_tree_uncleanly(daemon_b)
         _kill_session_tmux_server(bridge_dir)
         assert all(db.is_file() for db in history_dbs)

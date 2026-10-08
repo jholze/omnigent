@@ -299,8 +299,10 @@ def _agy_orphan_retention_expired(bridge_dir: Path) -> bool:
         return True
     except OSError:
         return False
+    # A non-directory at the store path holds no conversation history, so treat
+    # it like a missing store rather than leaking the bridge forever.
     if not stat.S_ISDIR(conversations_mode):
-        return False
+        return True
 
     # Each conversation is ``<id>.db`` plus SQLite ``-wal``/``-shm`` sidecars; in
     # WAL mode the sidecar, not the main file, carries the latest write.
