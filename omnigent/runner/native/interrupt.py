@@ -698,11 +698,16 @@ class NativeInterruptRunner:
         return Response(status_code=204)
 
     async def _codex_interrupt(self, conv_id: str) -> Response:
-        from omnigent.harnesses.codex_native.app_server import client_for_transport
+        from omnigent.harnesses.codex_native.app_server import (
+            CodexAppServerResponseError,
+            client_for_transport,
+            is_stale_active_turn_error,
+        )
         from omnigent.harnesses.codex_native.bridge import (
             CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
             bridge_dir_for_bridge_id,
             cancel_pending_mcp_startup,
+            clear_active_turn_id_if_matches,
             read_mcp_startup,
         )
 
@@ -763,13 +768,32 @@ class NativeInterruptRunner:
                         exc_info=True,
                     )
             if state.active_turn_id is not None:
-                await codex_client.request(
-                    "turn/interrupt",
-                    {
-                        "threadId": state.thread_id,
-                        "turnId": state.active_turn_id,
-                    },
-                )
+                try:
+                    await codex_client.request(
+                        "turn/interrupt",
+                        {
+                            "threadId": state.thread_id,
+                            "turnId": state.active_turn_id,
+                        },
+                    )
+                except CodexAppServerResponseError as exc:
+                    if not is_stale_active_turn_error(exc):
+                        raise
+                    # Codex already ended this turn, so the interrupt is a no-op.
+                    # Clear the turn only if it still matches (a newer one stays
+                    # active) and reconcile to idle so a dropped completion can't stick.
+                    if clear_active_turn_id_if_matches(bridge_dir, state.active_turn_id):
+                        self._resource_registry.note_external_session_status(conv_id, "idle")
+                    self._logger.info(
+                        "Codex-native interrupt reconciled an already-ended turn "
+                        "for session=%s thread=%s turn=%s: %s",
+                        conv_id,
+                        state.thread_id,
+                        state.active_turn_id,
+                        exc.message,
+                    )
+                    # The turn already ended; skip the deferred parent-wake cancel.
+                    return Response(status_code=204)
         except Exception as exc:  # noqa: BLE001 - surface active-turn interrupt failures.
             self._logger.warning(
                 "Codex-native turn/interrupt failed for session=%s thread=%s turn=%s",
