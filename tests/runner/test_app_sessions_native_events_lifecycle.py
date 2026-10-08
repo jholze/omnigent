@@ -3429,12 +3429,8 @@ async def test_events_codex_native_repeated_stop_after_completed_turn_stays_204(
         )
         assert create_resp.status_code == 201, create_resp.text
 
-        first = await client.post(
-            f"/v1/sessions/{conv_id}/events", json={"type": "stop_session"}
-        )
-        second = await client.post(
-            f"/v1/sessions/{conv_id}/events", json={"type": "stop_session"}
-        )
+        first = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "stop_session"})
+        second = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "stop_session"})
 
     assert first.status_code == 204, first.text
     assert second.status_code == 204, second.text
