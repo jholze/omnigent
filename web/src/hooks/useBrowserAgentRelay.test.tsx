@@ -293,6 +293,7 @@ describe("useBrowserAgentRelay — action dispatch", () => {
   it.each([{ databricksInternalFeatures: false }, null, {}])(
     "skips source metadata when desktop internal features are disabled (%j)",
     async (features) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const bridge = installBridge();
       getDesktopFeatures.mockResolvedValue(features);
       getSessionSlim.mockResolvedValue({ id: CONV, hostId: "arca-host", parentSessionId: null });
@@ -306,13 +307,35 @@ describe("useBrowserAgentRelay — action dispatch", () => {
         undefined,
         { force: true, agent: true },
       );
+      expect(warn).not.toHaveBeenCalled();
     },
   );
+
+  it("clears the lookup deadline timer after successful source-host resolution", async () => {
+    vi.useFakeTimers();
+    const bridge = installBridge();
+    const client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
+    getSessionSlim.mockResolvedValue({ id: CONV, hostId: "arca-host", parentSessionId: null });
+    renderRelay(CONV, client);
+    emitBrowserActionRequest(actionEvent("navigate", { url: "https://example.com" }), CONV);
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(postedResult().result).toHaveProperty("ok", true);
+    expect(bridge.browserOpenOrNavigate).toHaveBeenCalledExactlyOnceWith(
+      CONV,
+      "https://example.com",
+      undefined,
+      { force: true, agent: true, sourceHostId: "arca-host" },
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it("dispatches without provenance when the desktop feature check rejects", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const bridge = installBridge();
-    getDesktopFeatures.mockRejectedValue(new Error("feature IPC failed"));
+    const error = new Error("feature IPC failed");
+    getDesktopFeatures.mockRejectedValue(error);
 
     await runAction(actionEvent("navigate", { url: "https://example.com" }));
 
@@ -323,7 +346,10 @@ describe("useBrowserAgentRelay — action dispatch", () => {
       undefined,
       { force: true, agent: true },
     );
-    expect(warn).toHaveBeenCalledExactlyOnceWith("[browserRelay] source host lookup failed");
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "[browser-relay] source host lookup failed",
+      error,
+    );
   });
 
   it.each(["feature check", "session fetch", "joined session fetch"])(
@@ -363,7 +389,7 @@ describe("useBrowserAgentRelay — action dispatch", () => {
         claim_token: "tok_1",
         result: { ok: true, data: { final_url: "https://example.com" } },
       });
-      expect(warn).toHaveBeenCalledExactlyOnceWith("[browserRelay] source host lookup timed out");
+      expect(warn).toHaveBeenCalledExactlyOnceWith("[browser-relay] source host lookup timed out");
       expect(getSessionSlim).toHaveBeenCalledTimes(stall === "feature check" ? 0 : 1);
     },
   );
@@ -405,7 +431,7 @@ describe("useBrowserAgentRelay — action dispatch", () => {
       { force: true, agent: true },
     );
     expect(authenticatedFetch).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenCalledExactlyOnceWith("[browserRelay] source host lookup timed out");
+    expect(warn).toHaveBeenCalledExactlyOnceWith("[browser-relay] source host lookup timed out");
   });
 
   it("derives inherited provenance from the source session, never model args or visible host", async () => {

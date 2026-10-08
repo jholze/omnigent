@@ -18,6 +18,7 @@ import { setSessionHost, setSessionParent } from "@/lib/sessionHost";
 import { getSessionSlim } from "@/lib/sessionsApi";
 import type { Session } from "@/lib/types";
 
+// Keep the post-claim lookup budget well below the server's 30s browser-action wait.
 const SOURCE_HOST_LOOKUP_TIMEOUT_MS = 2000;
 
 async function resolveSourceHostId(
@@ -63,11 +64,11 @@ async function lookupSourceHostId(
       }),
     ]);
   } catch (error) {
-    console.warn(
-      error === timeoutError
-        ? "[browserRelay] source host lookup timed out"
-        : "[browserRelay] source host lookup failed",
-    );
+    if (error === timeoutError) {
+      console.warn("[browser-relay] source host lookup timed out");
+    } else {
+      console.warn("[browser-relay] source host lookup failed", error);
+    }
     return null;
   } finally {
     clearTimeout(timer);
