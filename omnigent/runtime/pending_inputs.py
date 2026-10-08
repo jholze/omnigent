@@ -107,7 +107,7 @@ from typing import Any, Literal
 
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
-from omnigent.native.input_diagnostics import log_input_event
+from omnigent.native.input_diagnostics import input_attributes, log_input_event
 
 # A pending entry is evicted this many seconds after it was recorded
 # if it was never drained by a matching persisted message. Covers the
@@ -380,8 +380,6 @@ def pending_id_for_stable_id(conversation_id: str, stable_id: str) -> str | None
 
 def delivery_attributes(entry: DrainedInput | _Entry) -> dict[str, object]:
     """Return correlation and age without exposing the queued content or author."""
-    from omnigent.native.input_diagnostics import input_attributes
-
     attrs: dict[str, object] = dict(
         input_attributes(
             {

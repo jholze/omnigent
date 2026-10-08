@@ -188,14 +188,17 @@ async def _native_delivery_request(
     """Pair each RPC attempt with its result, including a rejected stale steer."""
     attempt_id = uuid.uuid4().hex
     stage = "turn_start" if method == "turn/start" else "turn_steer"
-    requested_turn_id = state.active_turn_id if method == "turn/steer" else None
+    expected = params.get("expectedTurnId") if method == "turn/steer" else None
+    requested_turn_id = expected if isinstance(expected, str) else None
+    requested_thread = params.get("threadId")
+    thread_id = requested_thread if isinstance(requested_thread, str) else None
     log_input_event(
         _logger,
         "codex_native_delivery_attempt",
         session_id=state.session_id,
         native_rpc_attempt_id=attempt_id,
         stage=stage,
-        thread_id=state.thread_id,
+        thread_id=thread_id,
         native_turn_id=requested_turn_id,
         requested_native_turn_id=requested_turn_id,
     )
@@ -208,7 +211,7 @@ async def _native_delivery_request(
             session_id=state.session_id,
             native_rpc_attempt_id=attempt_id,
             stage=stage,
-            thread_id=state.thread_id,
+            thread_id=thread_id,
             native_turn_id=requested_turn_id,
             requested_native_turn_id=requested_turn_id,
             outcome="cancelled" if isinstance(exc, asyncio.CancelledError) else "rpc_error",
@@ -228,7 +231,7 @@ async def _native_delivery_request(
         session_id=state.session_id,
         native_rpc_attempt_id=attempt_id,
         stage=stage,
-        thread_id=state.thread_id,
+        thread_id=thread_id,
         requested_native_turn_id=requested_turn_id,
         native_turn_id=turn_id if isinstance(turn_id, str) else None,
         outcome="rpc_accepted",
@@ -468,20 +471,24 @@ class CodexNativeExecutor(Executor):
                     settings_overrides={},
                 )
             except Exception as exc:  # noqa: BLE001 - steering is best-effort from the runner facade.
-                log_input_event(
-                    _logger,
-                    "codex_turn_injection_failed",
-                    session_id=state.session_id,
-                    stage="native_rpc",
-                    outcome="error",
-                    thread_id=state.thread_id,
-                    initial_native_turn_id=state.active_turn_id,
-                    exception_type=type(exc).__name__,
-                    rpc_error_code=exc.code
-                    if isinstance(exc, CodexAppServerResponseError)
-                    else None,
+                _logger.warning(
+                    "Codex native turn/steer failed",
+                    exc_info=True,
+                    extra=with_input_attributes(
+                        debug_event(
+                            "codex_turn_injection_failed",
+                            session_id=state.session_id,
+                            turn_id=state.active_turn_id,
+                            initial_native_turn_id=state.active_turn_id,
+                            thread_id=state.thread_id,
+                            rpc_error_code=exc.code
+                            if isinstance(exc, CodexAppServerResponseError)
+                            else None,
+                            stage="native_rpc",
+                            outcome="error",
+                        )
+                    ),
                 )
-                _logger.warning("Codex native turn/steer failed", exc_info=True)
                 return False
             finally:
                 await client.close()

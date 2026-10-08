@@ -391,9 +391,7 @@ class ExecutorAdapter(HarnessApp):
                             "native_input_execution_finished",
                             session_id=turn_session_id,
                             outcome="reported_undelivered" if event.undelivered else "error",
-                            error_code=event.code
-                            if event.code and len(event.code) <= 64
-                            else None,
+                            error_code=event.code,
                         )
                         input_outcome_logged = True
                         clean_exit = event.preserve_session
@@ -468,6 +466,7 @@ class ExecutorAdapter(HarnessApp):
                     outcome="cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
                     exception_type=type(exc).__name__,
                 )
+                input_outcome_logged = True
             # Close the span so it doesn't leak on the OTel provider.
             if tctx is not None and agent_span is not None:
                 tctx.end_agent_span(agent_span, response=None, error="unhandled exception")

@@ -1009,11 +1009,13 @@ def test_stale_completed_turn_steer_retries_once_as_new_turn(
         ),
     ],
 )
+@pytest.mark.parametrize("live_injection", [False, True])
 def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     error: Exception,
     caplog: pytest.LogCaptureFixture,
+    live_injection: bool,
 ) -> None:
     """Only Codex's explicit idle semantic is safe to retry."""
 
@@ -1037,9 +1039,14 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
     with input_delivery_scope({"input_stable_id": "a" * 32}, response_id="resp_delivery"):
-        events = _collect_turn_events(executor, "do not duplicate")
+        if live_injection:
+            assert (
+                asyncio.run(executor.enqueue_session_message("main", "do not duplicate")) is False
+            )
+        else:
+            events = _collect_turn_events(executor, "do not duplicate")
+            assert [type(event) for event in events] == [ExecutorError]
 
-    assert [type(event) for event in events] == [ExecutorError]
     assert [method for method, _params in _FailingSteerClient.requests] == ["turn/steer"]
     state = read_bridge_state(tmp_path)
     assert state is not None
@@ -1047,17 +1054,19 @@ def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
 
     from omnigent.debug_logging import record_to_row
 
-    record = next(
+    [record] = [
         record
         for record in caplog.records
-        if record.getMessage() == "Codex native turn injection failed"
-    )
+        if getattr(record, "event_name", None) == "codex_turn_injection_failed"
+    ]
     row = record_to_row(record, source="runner")
     assert row["session_id"] == state.session_id
     assert row["event_name"] == "codex_turn_injection_failed"
     attrs = row["attributes"]
     assert row["turn_id"] == "turn_maybe_active"
+    assert attrs["initial_native_turn_id"] == "turn_maybe_active"
     assert attrs["thread_id"] == state.thread_id
+    assert attrs["exception_type"] == type(error).__name__
     assert attrs["input_stable_id"] == "a" * 32
     assert attrs["response_id"] == "resp_delivery"
     assert attrs["outcome"] == "error"
