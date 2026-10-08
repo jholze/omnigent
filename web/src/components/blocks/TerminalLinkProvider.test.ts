@@ -1,0 +1,138 @@
+// Link detection over the xterm buffer: which rows join into one URL and
+// where the link lands. The buffer is driven headlessly with the same bytes
+// the pane would receive.
+
+import { type ILink, Terminal } from "@xterm/xterm";
+import { describe, expect, it, vi } from "vitest";
+import { TerminalLinkProvider } from "./TerminalLinkProvider";
+
+const COLS = 40;
+// Longer than the pane, so it needs a second row.
+const URL = "https://wrapped.example.com/explore/connections/pagerduty-mcp";
+// Needs three rows.
+const LONG_URL = `${URL}?o=${"1234567890".repeat(3)}#end`;
+
+/** Split ``text`` into rows of ``COLS`` characters joined by hard line breaks. */
+function brokenAtPaneWidth(text: string): string {
+  const rows: string[] = [];
+  for (let i = 0; i < text.length; i += COLS) rows.push(text.slice(i, i + COLS));
+  return `${rows.join("\r\n")}\r\n`;
+}
+
+async function terminalShowing(output: string): Promise<Terminal> {
+  const term = new Terminal({ cols: COLS, rows: 10 });
+  await new Promise<void>((resolve) => {
+    term.write(output, resolve);
+  });
+  return term;
+}
+
+/** Links the provider reports for the 1-based buffer row. */
+function linksOnRow(term: Terminal, row: number): ILink[] {
+  let result: ILink[] | undefined;
+  new TerminalLinkProvider(term, vi.fn()).provideLinks(row, (links) => {
+    result = links;
+  });
+  return result ?? [];
+}
+
+function texts(links: ILink[]): string[] {
+  return links.map((link) => link.text);
+}
+
+describe("TerminalLinkProvider", () => {
+  it("joins the rows of a URL the terminal soft-wrapped", async () => {
+    const term = await terminalShowing(`${URL}\r\n`);
+
+    for (const row of [1, 2]) {
+      const [link, ...rest] = linksOnRow(term, row);
+      expect(rest).toEqual([]);
+      expect(link.text).toBe(URL);
+      expect(link.range).toEqual({ start: { x: 1, y: 1 }, end: { x: 21, y: 2 } });
+    }
+  });
+
+  it("joins the rows of a URL the program broke at the pane width", async () => {
+    // A width-aware CLI ends the first row with its own line break after
+    // exactly COLS characters, so xterm stores two unwrapped rows.
+    const term = await terminalShowing(brokenAtPaneWidth(URL));
+    expect(term.buffer.active.getLine(1)?.isWrapped).toBe(false);
+
+    for (const row of [1, 2]) {
+      const [link, ...rest] = linksOnRow(term, row);
+      expect(rest).toEqual([]);
+      expect(link.text).toBe(URL);
+      expect(link.range).toEqual({ start: { x: 1, y: 1 }, end: { x: 21, y: 2 } });
+    }
+  });
+
+  it("follows a program-broken URL across more than two rows", async () => {
+    const term = await terminalShowing(brokenAtPaneWidth(LONG_URL));
+
+    for (const row of [1, 2, 3]) {
+      const [link, ...rest] = linksOnRow(term, row);
+      expect(rest).toEqual([]);
+      expect(link.text).toBe(LONG_URL);
+      expect(link.range).toEqual({ start: { x: 1, y: 1 }, end: { x: 18, y: 3 } });
+    }
+  });
+
+  it("joins a URL that starts after other text on its first row", async () => {
+    const prefix = "Open ";
+    const term = await terminalShowing(brokenAtPaneWidth(`${prefix}${URL}`));
+
+    const [link] = linksOnRow(term, 1);
+    expect(link.text).toBe(URL);
+    expect(link.range.start).toEqual({ x: prefix.length + 1, y: 1 });
+    expect(link.range.end).toEqual({ x: 26, y: 2 });
+  });
+
+  it("keeps a URL that merely ends at the pane edge apart from the next word", async () => {
+    // Word-wrapped prose whose line happens to fill the pane exactly; the
+    // short URL fitted on one row, so the next row is a new word.
+    const line = "See the console at https://ab.example.io";
+    expect(line).toHaveLength(COLS);
+    const term = await terminalShowing(`${line}\r\nfor details.\r\n`);
+
+    expect(texts(linksOnRow(term, 1))).toEqual(["https://ab.example.io"]);
+    expect(linksOnRow(term, 2)).toEqual([]);
+  });
+
+  it("leaves an indented row out of the URL above it", async () => {
+    const term = await terminalShowing(`${URL.slice(0, COLS)}\r\n  ${URL.slice(COLS)}\r\n`);
+
+    expect(texts(linksOnRow(term, 1))).toEqual([URL.slice(0, COLS)]);
+    expect(linksOnRow(term, 2)).toEqual([]);
+  });
+
+  it("excludes trailing punctuation and enclosing quotes", async () => {
+    const term = await terminalShowing(
+      `Docs: https://ab.example.io/docs. Config in "https://ab.example.io/cfg".\r\n`,
+    );
+
+    expect(texts(linksOnRow(term, 1))).toEqual([
+      "https://ab.example.io/docs",
+      "https://ab.example.io/cfg",
+    ]);
+  });
+
+  it("reports nothing for rows without a URL", async () => {
+    const term = await terminalShowing("plain text, no links here\r\n");
+
+    expect(linksOnRow(term, 1)).toEqual([]);
+  });
+
+  it("activates with the detected URL", async () => {
+    const activate = vi.fn();
+    const term = await terminalShowing(brokenAtPaneWidth(URL));
+    let links: ILink[] | undefined;
+    new TerminalLinkProvider(term, activate).provideLinks(1, (result) => {
+      links = result;
+    });
+    const event = new MouseEvent("click");
+
+    links?.[0].activate(event, links[0].text);
+
+    expect(activate).toHaveBeenCalledWith(event, URL);
+  });
+});

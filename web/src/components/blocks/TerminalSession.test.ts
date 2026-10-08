@@ -2,9 +2,9 @@
 //
 // The full TerminalSession constructor needs a real xterm + WebSocket
 // + DOM container, so it's exercised via manual REPL verification (see
-// TerminalView.test.ts). `openTerminalLink` is the one piece of our own
-// logic the WebLinksAddon delegates to — the click handler that makes
-// terminal URLs clickable — so we pin it here.
+// TerminalView.test.ts). `openTerminalLink` is the click handler the
+// terminal link provider delegates to — the piece that makes terminal URLs
+// open the right way — so we pin it here.
 
 import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +29,7 @@ import {
   type WheelMouseState,
   type WheelScreenMetrics,
 } from "./TerminalSession";
+import { TerminalLinkProvider } from "./TerminalLinkProvider";
 
 describe("openTerminalLink", () => {
   afterEach(() => {
@@ -750,6 +751,15 @@ describe("TerminalSession", () => {
 
     expect(term.options.linkHandler?.allowNonHttpProtocols).toBe(true);
     expect(term.options.linkHandler?.activate).toBeTypeOf("function");
+    session.dispose();
+  });
+
+  it("registers the URL link provider on the terminal", () => {
+    const registerSpy = vi.spyOn(Terminal.prototype, "registerLinkProvider");
+
+    const { session } = makeSession();
+
+    expect(registerSpy).toHaveBeenCalledWith(expect.any(TerminalLinkProvider));
     session.dispose();
   });
 
