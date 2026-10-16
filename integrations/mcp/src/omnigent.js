@@ -29,7 +29,8 @@ const TOOLS = [
   },
   {
     name: "list_agents",
-    description: "List agents. GET /v1/agents. scope=user lists the caller's own agents.",
+    description:
+      "List agents. GET /v1/agents. Each item has id and name. scope=user lists the caller's own agents. create_session accepts either field.",
     inputSchema: {
       type: "object",
       properties: {
@@ -102,11 +103,23 @@ const TOOLS = [
     name: "create_session",
     description:
       "Create a session bound to an agent. POST /v1/sessions. Dry-run unless confirm is true: returns method, path, and body and does not call the server. " +
+      "Pass agent_id (list_agents data[].id) or agent_name (list_agents data[].name, for example debby). A name is resolved with GET /v1/agents before the preview or the POST. " +
       "Optional message is stored as initial_items. To wait for the reply, create without a message, then call send_message with wait.",
     inputSchema: {
       type: "object",
       properties: {
-        agent_id: { type: "string", description: "Durable agent id, for example ag_abc123." },
+        agent_id: {
+          type: "string",
+          description: "Durable agent id from list_agents data[].id. Used as-is when set.",
+        },
+        agent_name: {
+          type: "string",
+          description: "Agent name from list_agents data[].name, for example debby. Resolved to agent_id when agent_id is omitted.",
+        },
+        name: {
+          type: "string",
+          description: "Alias of agent_name. The name field list_agents returns.",
+        },
         host_id: { type: "string", description: "External host to launch on. Required with workspace when the server should start the runner." },
         workspace: {
           type: "string",
@@ -117,7 +130,6 @@ const TOOLS = [
         message: { type: "string", description: "Optional first user message." },
         confirm: { type: "boolean", description: "Perform the POST. Default false returns the request and sends nothing." },
       },
-      required: ["agent_id"],
     },
   },
   {
@@ -185,7 +197,33 @@ export function loadConfig(env = process.env) {
   if (env.OMNIGENT_EMAIL) {
     headers[env.OMNIGENT_AUTH_HEADER || "X-Forwarded-Email"] = env.OMNIGENT_EMAIL;
   }
+  applyAccountsAuth(headers, env, url);
   return { base, headers };
+}
+
+function headerSecret(value, name) {
+  if (typeof value !== "string") throw new Error(`${name} must be a string`);
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${name} is empty`);
+  if (/[\r\n\0]/.test(trimmed)) throw new Error(`${name} contains a newline`);
+  return trimmed;
+}
+
+function applyAccountsAuth(headers, env, url) {
+  if (env.OMNIGENT_ACCESS_TOKEN != null && env.OMNIGENT_ACCESS_TOKEN !== "") {
+    headers.authorization = `Bearer ${headerSecret(env.OMNIGENT_ACCESS_TOKEN, "OMNIGENT_ACCESS_TOKEN")}`;
+  }
+  if (env.OMNIGENT_SESSION_COOKIE != null && env.OMNIGENT_SESSION_COOKIE !== "") {
+    headers.cookie = sessionCookie(headerSecret(env.OMNIGENT_SESSION_COOKIE, "OMNIGENT_SESSION_COOKIE"), url);
+  }
+}
+
+function sessionCookie(value, url) {
+  if (value.startsWith("ap_session=") || value.startsWith("__Host-ap_session=") || value.includes(";")) {
+    return value;
+  }
+  const name = url.protocol === "https:" ? "__Host-ap_session" : "ap_session";
+  return `${name}=${value}`;
 }
 
 function snippet(body) {
@@ -626,8 +664,86 @@ async function watchTurn(config, sessionId, body, budgetMs) {
   return state.toResult(accepted, timedOut && !state.done);
 }
 
-function buildCreateBody(args) {
-  const agentId = requireId(args.agent_id, "agent_id");
+const AGENT_FIELD_HINT =
+  "agent_id is data[].id from list_agents; agent_name is data[].name from list_agents";
+
+function namedAgent(args) {
+  const agentName = blankToUndefined(optionalString(args.agent_name, "agent_name"));
+  const name = blankToUndefined(optionalString(args.name, "name"));
+  if (agentName && name && agentName !== name) {
+    throw new Error(`agent_name and name disagree. ${AGENT_FIELD_HINT}.`);
+  }
+  return agentName || name;
+}
+
+function blankToUndefined(value) {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function sameName(agent, wanted, loose) {
+  if (typeof agent?.name !== "string") return false;
+  return loose ? agent.name.toLowerCase() === wanted.toLowerCase() : agent.name === wanted;
+}
+
+async function listAllAgents(config, scope) {
+  const agents = [];
+  let after;
+  for (let page = 0; page < 20; page += 1) {
+    const body = await callOmnigent(config, "GET", withQuery("/v1/agents", { limit: 1000, after, scope }));
+    const data = Array.isArray(body?.data) ? body.data : [];
+    agents.push(...data);
+    const lastId = typeof body?.last_id === "string" ? body.last_id : "";
+    if (!body?.has_more || !lastId || lastId === after) break;
+    after = lastId;
+  }
+  return agents;
+}
+
+async function collectAgents(config) {
+  const serverAgents = await listAllAgents(config, undefined);
+  let userAgents = [];
+  try {
+    userAgents = await listAllAgents(config, "user");
+  } catch {
+    userAgents = [];
+  }
+  const seen = new Set();
+  const agents = [];
+  for (const agent of serverAgents.concat(userAgents)) {
+    if (typeof agent?.id === "string" && seen.has(agent.id)) continue;
+    if (typeof agent?.id === "string") seen.add(agent.id);
+    agents.push(agent);
+  }
+  return agents;
+}
+
+async function resolveAgentId(config, args) {
+  const explicit = optionalString(args.agent_id, "agent_id");
+  if (explicit) return requireId(explicit, "agent_id");
+  const wanted = namedAgent(args);
+  if (!wanted) throw new Error(`create_session needs agent_id or agent_name. ${AGENT_FIELD_HINT}.`);
+  const agents = await collectAgents(config);
+  const exact = agents.filter((agent) => sameName(agent, wanted, false));
+  const matches = exact.length > 0 ? exact : agents.filter((agent) => sameName(agent, wanted, true));
+  if (matches.length === 0) {
+    throw new Error(`No agent named ${JSON.stringify(wanted)}. ${AGENT_FIELD_HINT}.`);
+  }
+  if (matches.length > 1) {
+    const listed = matches.map((agent) => `${agent.id}${agent.harness ? ` (${agent.harness})` : ""}`).join(", ");
+    throw new Error(
+      `Several agents are named ${JSON.stringify(wanted)}. Pass agent_id. ${AGENT_FIELD_HINT}. Matches: ${listed}`,
+    );
+  }
+  if (typeof matches[0].id !== "string" || !matches[0].id) {
+    throw new Error(`Agent ${JSON.stringify(wanted)} has no id. ${AGENT_FIELD_HINT}.`);
+  }
+  return requireId(matches[0].id, "agent_id");
+}
+
+async function buildCreateBody(config, args) {
+  const agentId = await resolveAgentId(config, args);
   const hostType = oneOf(args.host_type, "host_type", ["external", "managed"]);
   const hostId = optionalString(args.host_id, "host_id");
   const workspace = optionalString(args.workspace, "workspace");
@@ -753,7 +869,7 @@ export async function callTool(name, args, config) {
       return presentItems(page, maxChars);
     }
     case "create_session": {
-      const body = buildCreateBody(args);
+      const body = await buildCreateBody(config, args);
       if (args.confirm !== true) return preview("POST", "/v1/sessions", body);
       return { session: presentSession(await callOmnigent(config, "POST", "/v1/sessions", body)) };
     }

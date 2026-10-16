@@ -24,7 +24,7 @@ Claude Code (`.mcp.json`) and Cursor (`.cursor/mcp.json`) use the same shape:
 }
 ```
 
-A local `omnigent server` has no API key. Identity falls back to the reserved `local` user. Behind a proxy that injects an email, set `OMNIGENT_EMAIL` (sent as `X-Forwarded-Email`). If the proxy uses a different header name, set `OMNIGENT_AUTH_HEADER` as well.
+A local `omnigent server` in header mode has no API key. Identity falls back to the reserved `local` user. Behind a proxy that injects an email, set `OMNIGENT_EMAIL` (sent as `X-Forwarded-Email`). If the proxy uses a different header name, set `OMNIGENT_AUTH_HEADER` as well. That header does not authenticate an accounts server.
 
 ```json
 "env": {
@@ -32,6 +32,33 @@ A local `omnigent server` has no API key. Identity falls back to the reserved `l
   "OMNIGENT_EMAIL": "you@example.com"
 }
 ```
+
+### Accounts login (username and password)
+
+When `GET /v1/info` reports `accounts_enabled: true` and `login_url: "/login"`, the server ignores `X-Forwarded-Email`. Browser sessions use the cookie `ap_session` on plain HTTP and `__Host-ap_session` on HTTPS (including an ngrok URL). `omnigent login`, `omnigent host`, and `omnigent attach` use the same session JWT as `Authorization: Bearer`. That bearer is the credential this MCP server sends. There is no separate personal access token.
+
+On the Mac that runs the server, log in with the CLI against the same base URL you will put in `OMNIGENT_URL`. Accounts login is a username and password prompt. It does not open a browser.
+
+```bash
+omnigent login "https://YOUR-NGROK-HOST"
+```
+
+Use `http://127.0.0.1:6767` when the MCP server will call the server on localhost. The username defaults to `admin`. If the first account was created as your macOS user, enter that name instead. The password is the one you set for that account.
+
+The CLI writes `~/.omnigent/auth_tokens.json` (mode `0600`). The object is keyed by the server URL you passed to `omnigent login`. Copy the `token` string for that URL. Leave `refresh_token` in the file. `omnigent host` refreshes on its own. This MCP server does not, so it needs the current `token`.
+
+Put it in the MCP env. Do not commit it, and do not paste it into a chat or a log.
+
+```json
+"env": {
+  "OMNIGENT_URL": "https://YOUR-NGROK-HOST",
+  "OMNIGENT_ACCESS_TOKEN": "<token field from ~/.omnigent/auth_tokens.json>"
+}
+```
+
+The access token is the session JWT. The default lifetime is 8 hours (`expires_at` in the same file, `expires_in` from `POST /auth/login`). When authenticated reads start returning HTTP 401, run `omnigent login` again and replace `OMNIGENT_ACCESS_TOKEN`. A token minted against localhost is valid for the ngrok URL of that same server. Log in against the URL you configure so the file entry you copy matches `OMNIGENT_URL`.
+
+To use the browser cookie instead, copy its value (the JWT, not the cookie name) into `OMNIGENT_SESSION_COOKIE`. On `http://` the client sends `ap_session`. On `https://` it sends `__Host-ap_session`. A value that already starts with `ap_session=` or `__Host-ap_session=` is sent unchanged. Either env var is enough. If both are set, both headers are sent. The values are request headers only. They are not written to stdout or stderr.
 
 Requires Node.js 18 or newer. There are no npm dependencies.
 
@@ -57,7 +84,7 @@ Read tools run immediately.
 | `list_sessions` | `GET /v1/sessions` | Filters: `agent_id`, `agent_name`, `search_query`, `project`, `kind`, `order`, `sort_by`, `include_archived`, cursors. `visibility` is always sent (`all` by default, or `mine` / `shared` / `archived`). |
 | `get_session` | `GET /v1/sessions/{id}` | Drops the embedded `items` array. |
 | `get_session_items` | `GET /v1/sessions/{id}/items` | Newest 30 items by default (`order: "desc"`). Text blocks are truncated (`max_chars`, default 2000). |
-| `create_session` | `POST /v1/sessions` | `agent_id`, optional `host_id` + absolute `workspace`, optional `host_type`, `title`, and first `message`. |
+| `create_session` | `POST /v1/sessions` | `agent_id` (`list_agents` `data[].id`) or `agent_name` / `name` (`data[].name`, for example `debby`). A name is looked up before the dry-run preview. Optional `host_id` + absolute `workspace`, `host_type`, `title`, and first `message`. |
 | `send_message` | `POST /v1/sessions/{id}/events` | Posts a user message. Optional `wait`. |
 | `interrupt_turn` | `POST /v1/sessions/{id}/events` | Body `{ "type": "interrupt" }`. Cancels the current turn. |
 | `stop_session` | `POST /v1/sessions/{id}/events` | Body `{ "type": "stop_session" }`. Stops the live process. Owner-only. The conversation is kept. |

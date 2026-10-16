@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "../src/omnigent.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverPath = path.join(root, "src", "server.js");
@@ -57,6 +58,8 @@ class Mcp {
     const env = { ...process.env };
     delete env.OMNIGENT_EMAIL;
     delete env.OMNIGENT_AUTH_HEADER;
+    delete env.OMNIGENT_ACCESS_TOKEN;
+    delete env.OMNIGENT_SESSION_COOKIE;
     env.OMNIGENT_URL = url;
     Object.assign(env, extraEnv);
     this.child = spawn(process.execPath, [serverPath], { env, stdio: ["pipe", "pipe", "pipe"] });
@@ -264,7 +267,13 @@ test("read tools hit the documented paths", { timeout: 15000 }, async () => {
   const seen = [];
   await withMock(
     async (req, res) => {
-      seen.push({ method: req.method, url: req.url, email: req.headers["x-forwarded-email"] });
+      seen.push({
+        method: req.method,
+        url: req.url,
+        email: req.headers["x-forwarded-email"],
+        authorization: req.headers.authorization,
+        cookie: req.headers.cookie,
+      });
       if (req.url === "/health") return json(res, 200, { status: "ok" });
       if (req.url === "/v1/info") return json(res, 200, { server_version: "0.18.0", single_user: true });
       if (req.url === "/v1/agents?limit=2&scope=user") {
@@ -299,6 +308,8 @@ test("read tools hit the documented paths", { timeout: 15000 }, async () => {
       });
       assert.equal(sessions.data[0].id, "conv_1");
       assert.equal(seen[0].email, undefined);
+      assert.equal(seen[0].authorization, undefined);
+      assert.equal(seen[0].cookie, undefined);
     },
     { env: {} },
   );
@@ -744,6 +755,142 @@ test("tool and HTTP failures are tool errors", { timeout: 15000 }, async () => {
       const http = await callToolError(mcp, "health");
       assert.match(http, /HTTP 422/);
       assert.match(http, /workspace is relative/);
+    },
+  );
+});
+
+const ACCESS_TOKEN = "mcp-test-token-do-not-log";
+const SESSION_COOKIE = "mcp-test-cookie-do-not-log";
+
+test("accounts auth sends the bearer token or session cookie and does not log them", { timeout: 15000 }, async () => {
+  const http = loadConfig({ OMNIGENT_URL: "http://127.0.0.1:6767", OMNIGENT_SESSION_COOKIE: SESSION_COOKIE });
+  assert.equal(http.headers.cookie, `ap_session=${SESSION_COOKIE}`);
+  const https = loadConfig({
+    OMNIGENT_URL: "https://example.ngrok.io",
+    OMNIGENT_SESSION_COOKIE: SESSION_COOKIE,
+    OMNIGENT_ACCESS_TOKEN: `  ${ACCESS_TOKEN}  `,
+  });
+  assert.equal(https.headers.cookie, `__Host-ap_session=${SESSION_COOKIE}`);
+  assert.equal(https.headers.authorization, `Bearer ${ACCESS_TOKEN}`);
+  const pair = loadConfig({
+    OMNIGENT_URL: "https://example.ngrok.io",
+    OMNIGENT_SESSION_COOKIE: `ap_session=${SESSION_COOKIE}`,
+  });
+  assert.equal(pair.headers.cookie, `ap_session=${SESSION_COOKIE}`);
+  assert.equal(pair.headers.authorization, undefined);
+  assert.throws(() => loadConfig({ OMNIGENT_ACCESS_TOKEN: "bad\ntoken" }), /OMNIGENT_ACCESS_TOKEN contains a newline/);
+
+  const seen = [];
+  await withMock(
+    (req, res) => {
+      seen.push({ url: req.url, authorization: req.headers.authorization, cookie: req.headers.cookie });
+      if (req.url === "/health") return json(res, 401, { error: "unauthorized", message: "Authentication required" });
+      return json(res, 200, { object: "list", data: [], has_more: false });
+    },
+    async (mcp) => {
+      await handshake(mcp);
+      const failure = await callToolError(mcp, "health");
+      assert.match(failure, /HTTP 401/);
+      assert.match(failure, /Authentication required/);
+      assert.equal(failure.includes(ACCESS_TOKEN), false);
+      assert.equal(failure.includes(SESSION_COOKIE), false);
+      const sessions = await callTool(mcp, "list_sessions");
+      assert.deepEqual(sessions.data, []);
+      assert.equal(seen[0].authorization, `Bearer ${ACCESS_TOKEN}`);
+      assert.equal(seen[0].cookie, `ap_session=${SESSION_COOKIE}`);
+      assert.equal(mcp.stderr.includes(ACCESS_TOKEN), false);
+      assert.equal(mcp.stderr.includes(SESSION_COOKIE), false);
+    },
+    { env: { OMNIGENT_ACCESS_TOKEN: ACCESS_TOKEN, OMNIGENT_SESSION_COOKIE: SESSION_COOKIE } },
+  );
+});
+
+function agentPages(req, res, pages) {
+  const query = new URL(req.url, "http://127.0.0.1").searchParams;
+  if (query.get("scope") === "user") {
+    return json(res, 200, { object: "list", data: pages.user ?? [], has_more: false });
+  }
+  const after = query.get("after");
+  const page = after ? pages.next : pages.first;
+  return json(res, 200, page);
+}
+
+test("create_session accepts the agent name list_agents reports", { timeout: 15000 }, async () => {
+  const debby = "eac9e787e68ae6774d77e618031c287a";
+  const seen = [];
+  await withMock(
+    (req, res) => {
+      seen.push({ method: req.method, url: req.url });
+      if (req.url.startsWith("/v1/agents")) {
+        return agentPages(req, res, {
+          first: {
+            object: "list",
+            data: [{ id: "ag_other", name: "other" }],
+            has_more: true,
+            last_id: "ag_other",
+          },
+          next: {
+            object: "list",
+            data: [{ id: debby, name: "debby", harness: "claude-sdk" }],
+            has_more: false,
+            last_id: debby,
+          },
+          user: [{ id: "ag_user", name: "notes", harness: "codex" }],
+        });
+      }
+      if (req.method === "POST" && req.url === "/v1/sessions") {
+        return json(res, 201, { id: "conv_named", agent_id: debby, status: "idle", items: [] });
+      }
+      return json(res, 404, {});
+    },
+    async (mcp) => {
+      await handshake(mcp);
+      const preview = await callTool(mcp, "create_session", { agent_name: "debby", title: "named" });
+      assert.equal(preview.dry_run, true);
+      assert.equal(preview.body.agent_id, debby);
+      assert.equal(preview.method, "POST");
+      const created = await callTool(mcp, "create_session", { name: "Debby", confirm: true });
+      assert.equal(created.session.id, "conv_named");
+      assert.equal(created.session.agent_id, debby);
+      const urls = seen.map((hit) => hit.url);
+      assert.ok(urls.includes("/v1/agents?limit=1000"));
+      assert.ok(urls.includes("/v1/agents?limit=1000&after=ag_other"));
+      assert.ok(urls.includes("/v1/agents?limit=1000&scope=user"));
+      assert.equal(seen.filter((hit) => hit.method === "POST").length, 1);
+      const missing = await callToolError(mcp, "create_session", { title: "none" });
+      assert.match(missing, /agent_id or agent_name/);
+      assert.match(missing, /data\[\]\.id from list_agents/);
+      assert.match(missing, /data\[\]\.name from list_agents/);
+      const unknown = await callToolError(mcp, "create_session", { agent_name: "missing" });
+      assert.match(unknown, /No agent named "missing"/);
+      assert.match(unknown, /data\[\]\.name/);
+    },
+  );
+});
+
+test("create_session names the field when several agents share a name", { timeout: 15000 }, async () => {
+  await withMock(
+    (req, res) => {
+      if (!req.url.startsWith("/v1/agents")) return json(res, 404, {});
+      return agentPages(req, res, {
+        first: {
+          object: "list",
+          data: [
+            { id: "ag_a", name: "debby", harness: "claude-sdk" },
+            { id: "ag_b", name: "debby", harness: "codex" },
+          ],
+          has_more: false,
+          last_id: "ag_b",
+        },
+      });
+    },
+    async (mcp) => {
+      await handshake(mcp);
+      const error = await callToolError(mcp, "create_session", { agent_name: "debby" });
+      assert.match(error, /Several agents are named "debby"/);
+      assert.match(error, /Pass agent_id/);
+      assert.match(error, /ag_a \(claude-sdk\)/);
+      assert.match(error, /ag_b \(codex\)/);
     },
   );
 });
