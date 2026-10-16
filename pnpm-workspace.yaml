@@ -9,6 +9,10 @@ packages:
 
 # 7-day dependency cooldown, mirroring the Python-side exclude-newer = "P7D" in uv.toml.
 minimumReleaseAge: 10080
+# 19.3.1 published 2026-10-14; exempt only these versions until 2026-10-21.
+minimumReleaseAgeExclude:
+  - react@19.3.1
+  - react-dom@19.3.1
 
 settings:
   autoInstallPeers: false
@@ -25,8 +29,8 @@ packageExtensions:
       vitest: '*'
 
 catalog:
-  react: ^18.2.0
-  react-dom: ^18.2.0
+  react: ^19.3.1
+  react-dom: ^19.3.1
   shiki: 4.2.0
 
 overrides:

@@ -14,9 +14,11 @@
 //
 // Only React/ReactDOM, react/jsx-runtime, and react-router(-dom) are left as
 // BARE externals (not bundled, not shimmed). rspack resolves these bare
-// specifiers to the host monolith's own copies (React 18 / react-router 6.4.1,
-// matching web), so there is a single React instance and a single
-// react-router instance shared with the host — no `__OMNIGENT_SHARED__`, no MF.
+// specifiers to the host monolith's own copies (React 18 / react-router 6.4.1).
+// The standalone app is React 19; the embed still shares the host's React, so
+// this source must not call React 19-only runtime APIs. That keeps a single
+// React instance and a single react-router instance with the host — no
+// `__OMNIGENT_SHARED__`, no MF.
 // @tanstack/react-query is BUNDLED (the embed owns its own QueryClient now; see
 // `embed.tsx`). Standalone (`main.tsx` / `vite.config.ts`) is unaffected.
 //

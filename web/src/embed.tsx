@@ -21,7 +21,8 @@ import { IdentityAwareSidebarDataProvider } from "./hooks/useSidebarData";
 // Only React/ReactDOM, react/jsx-runtime, and react-router(-dom) are left as
 // BARE externals in the intermediate build (`vite.embed.config.ts`); the host
 // monolith's rspack resolves them to its own copies (React 18, react-router
-// 6.4.1), so the island shares the host's single React + react-router instance.
+// 6.4.1). The standalone app is React 19; this island still shares the host's
+// React, so it must not call React 19-only runtime APIs.
 // Everything else (react-query, monaco, shiki, xterm, …) is bundled by Vite;
 // rspack then ingests the single intermediate module and emits the final chunks.
 
