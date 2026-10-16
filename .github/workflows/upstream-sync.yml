@@ -1,0 +1,193 @@
+name: Upstream sync + Mac update
+
+# Mergt täglich upstream main in den Fork-main und installiert bei
+# Änderungen omnigent[dictation] auf dem MacBook. Schedule läuft nur
+# auf dem Default-Branch (in Forks erst nach dem Aktivieren der Actions).
+
+on:
+  schedule:
+    # 03:00 UTC = 05:00 Berlin (Sommerzeit) / 04:00 (Winterzeit)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      install:
+        description: "Nach dem Merge auf dem MacBook installieren"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: omnigent-ai/omnigent
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      sha: ${{ steps.merge.outputs.sha }}
+      conflict: ${{ steps.merge.outputs.conflict }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          # GITHUB_TOKEN darf Commits, die .github/workflows ändern, nicht
+          # pushen. FORK_SYNC_TOKEN braucht deshalb den workflow-Scope.
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
+
+      - name: Merge upstream
+        id: merge
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "$UPSTREAM_BRANCH"
+          before="$(git rev-parse HEAD)"
+          if ! git merge --no-edit "upstream/${UPSTREAM_BRANCH}"; then
+            git diff --name-only --diff-filter=U > conflicts.txt || true
+            git merge --abort || true
+            if [ -s conflicts.txt ]; then
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+            fi
+            echo "::error::Merge-Konflikt mit ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+            exit 1
+          fi
+          sha="$(git rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          if [ "$sha" = "$before" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Bereits auf dem Stand von upstream/${UPSTREAM_BRANCH}."
+          else
+            git push origin "HEAD:${TARGET_BRANCH}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Issue bei Konflikt
+        if: failure() && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Upstream-Sync: Merge-Konflikt auf ${TARGET_BRANCH}"
+          tick="$(printf '\140')"
+          fence="${tick}${tick}${tick}"
+          {
+            printf 'Der automatische Merge von %s in %s ist fehlgeschlagen.\n\n' \
+              "${tick}${UPSTREAM_REPO}@${UPSTREAM_BRANCH}${tick}" \
+              "${tick}${TARGET_BRANCH}${tick}"
+            printf 'Konflikt-Dateien:\n%s\n' "$fence"
+            cat conflicts.txt
+            printf '%s\n\nLokal lösen:\n%s\n' "$fence" "$fence"
+            printf 'cd ~/Documents/scripts/omnigent-src\n'
+            printf 'git fetch upstream && git checkout %s\n' "$TARGET_BRANCH"
+            printf 'git merge upstream/%s\n' "$UPSTREAM_BRANCH"
+            printf '# Konflikte lösen, committen, pushen\n'
+            printf '%s\n' "$fence"
+            printf 'Lauf: %s\n' \
+              "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > issue.md
+          number="$(
+            gh issue list --state open --limit 30 --json number,title \
+              --search "in:title \"${title}\"" \
+              | jq -r --arg title "$title" \
+                '[.[] | select(.title == $title) | .number][0] // empty'
+          )"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file issue.md
+          else
+            gh issue create --title "$title" --body-file issue.md
+          fi
+
+  install-on-mac:
+    needs: sync
+    if: >-
+      needs.sync.result == 'success'
+      && needs.sync.outputs.changed == 'true'
+      && (github.event_name == 'schedule' || inputs.install)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: SSH-Key einrichten
+        env:
+          MAC_SSH_KEY: ${{ secrets.MAC_SSH_KEY }}
+          MAC_SSH_KNOWN_HOSTS: ${{ secrets.MAC_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$MAC_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$MAC_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: uv tool install aus dem Fork + Server neu starten
+        env:
+          HOST: ${{ secrets.MAC_SSH_HOST }}
+          PORT: ${{ secrets.MAC_SSH_PORT }}
+          SHA: ${{ needs.sync.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unerwarteter Commit-SHA: ${SHA}"
+            exit 1
+          fi
+          port="${PORT:-22}"
+          # bash -s, nicht die Login-Shell: PATH setzt das Skript selbst
+          # (Homebrew, ~/.local/bin, optional nvm).
+          ssh -i "${HOME}/.ssh/id_ed25519" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            -p "$port" \
+            "jholze@${HOST}" \
+            "REPO='${GITHUB_REPOSITORY}' SHA='${SHA}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          REPO="${REPO:?REPO fehlt}"
+          SHA="${SHA:?SHA fehlt}"
+          export PATH="${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+          if [ -s "${HOME}/.nvm/nvm.sh" ]; then
+            # shellcheck disable=SC1091
+            . "${HOME}/.nvm/nvm.sh"
+          fi
+          if ! command -v node >/dev/null 2>&1; then
+            echo "Node.js >= 22.13 fehlt. setup.py baut die Web-UI beim Wheel-Build." >&2
+            exit 1
+          fi
+          if ! command -v pnpm >/dev/null 2>&1 && ! command -v corepack >/dev/null 2>&1; then
+            echo "pnpm oder corepack fehlt. Die Web-UI ist ein pnpm-Workspace." >&2
+            exit 1
+          fi
+          node -e 'const p=process.versions.node.split(".").map(Number); if (p[0]<22 || (p[0]===22 && p[1]<13)) { console.error("Node.js "+process.versions.node+" ist älter als 22.13"); process.exit(1); }'
+          # --no-sources: path-sources sind editable und 0.18.0.dev0 ist nicht
+          # auf PyPI. --reinstall statt --force, damit ein fehlgeschlagener
+          # Web-UI-Build die bestehende Installation nicht vorher löscht.
+          base="git+https://github.com/${REPO}.git@${SHA}"
+          "${HOME}/.local/bin/uv" tool install --reinstall --python 3.12 --no-sources \
+            --with "omnigent-client @ ${base}#subdirectory=sdks/python-client" \
+            --with "omnigent-ui-sdk @ ${base}#subdirectory=sdks/ui" \
+            "omnigent[dictation] @ ${base}"
+          "${HOME}/.local/bin/omnigent" --version || true
+          launchctl kickstart -k "gui/$(id -u)/ai.omnigent.host"
+          i=0
+          until curl -fsS http://127.0.0.1:6767/health; do
+            i=$((i + 1))
+            if [ "$i" -ge 12 ]; then
+              echo "Health-Check http://127.0.0.1:6767/health fehlgeschlagen" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          REMOTE
