@@ -40,11 +40,14 @@ Limitations:
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any
 
 from omnigent.db.workspace_cache import WorkspaceScopedCache
+
+_logger = logging.getLogger(__name__)
 
 # Per-conversation mapping of outstanding elicitation_id → original
 # event payload. Storing the full event (not just the id) lets
@@ -60,7 +63,10 @@ _lock = threading.Lock()
 
 # Optional observer (``subagent_block_notifier``) run synchronously on every
 # tracked event — must be cheap + non-blocking. ``None`` (runner, tests) skips it.
+# This is a single slot. Additional consumers (the manager-webhook outbox)
+# register through :func:`add_elicitation_lifecycle_listener` instead.
 _observer: Callable[[str, dict[str, Any]], None] | None = None
+_lifecycle_listeners: list[Callable[[str, dict[str, Any]], None]] = []
 
 
 def set_elicitation_observer(
@@ -78,6 +84,31 @@ def set_elicitation_observer(
     """
     global _observer
     _observer = observer
+
+
+def add_elicitation_lifecycle_listener(
+    listener: Callable[[str, dict[str, Any]], None],
+) -> None:
+    """Register an additional elicitation listener without replacing the observer.
+
+    The listener is invoked as ``listener(conversation_id, event)`` after the
+    in-memory index updates, for the same request and resolved events the
+    observer sees. A listener exception is logged and does not unwind publish.
+
+    :param listener: Callback. Registering the same callable twice is a no-op.
+    """
+    if listener not in _lifecycle_listeners:
+        _lifecycle_listeners.append(listener)
+
+
+def remove_elicitation_lifecycle_listener(
+    listener: Callable[[str, dict[str, Any]], None],
+) -> None:
+    """Remove a listener registered with :func:`add_elicitation_lifecycle_listener`."""
+    try:
+        _lifecycle_listeners.remove(listener)
+    except ValueError:
+        return
 
 
 # Optional per-session count sink, fired with the new count whenever the
@@ -153,6 +184,7 @@ def record_publish(conversation_id: str, event: dict[str, Any]) -> None:
             count = len(ids)
         _notify_count_hook(conversation_id, count)
         _notify_observer(conversation_id, event)
+        _notify_lifecycle_listeners(conversation_id, event)
         return
     if event_type == "response.elicitation_resolved":
         elicitation_id = event.get("elicitation_id")
@@ -160,6 +192,7 @@ def record_publish(conversation_id: str, event: dict[str, Any]) -> None:
             return
         resolve(conversation_id, elicitation_id)
         _notify_observer(conversation_id, event)
+        _notify_lifecycle_listeners(conversation_id, event)
 
 
 def _notify_observer(conversation_id: str, event: dict[str, Any]) -> None:
@@ -178,6 +211,15 @@ def _notify_observer(conversation_id: str, event: dict[str, Any]) -> None:
     observer = _observer
     if observer is not None:
         observer(conversation_id, event)
+
+
+def _notify_lifecycle_listeners(conversation_id: str, event: dict[str, Any]) -> None:
+    """Invoke lifecycle listeners. One failure does not skip the rest."""
+    for listener in list(_lifecycle_listeners):
+        try:
+            listener(conversation_id, event)
+        except Exception:
+            _logger.exception("elicitation lifecycle listener failed")
 
 
 def resolve(conversation_id: str, elicitation_id: str) -> None:

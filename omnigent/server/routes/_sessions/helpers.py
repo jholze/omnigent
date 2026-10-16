@@ -3238,7 +3238,7 @@ async def _forward_approval_to_runner(
     session_id: str,
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
-) -> None:
+) -> httpx.Response | None:
     """
     Forward an approval verdict to the session's bound runner.
 
@@ -3261,9 +3261,9 @@ async def _forward_approval_to_runner(
     """
     runner_client = await _get_runner_client(session_id, runner_router)
     if runner_client is None:
-        return
+        return None
     try:
-        await runner_client.post(
+        return await runner_client.post(
             f"/v1/sessions/{session_id}/events",
             json={"type": _APPROVAL_TYPE, "data": data},
             timeout=10.0,
@@ -3274,6 +3274,7 @@ async def _forward_approval_to_runner(
             session_id,
             extra={"session_id": session_id},
         )
+        return None
 
 
 def _parse_external_assistant_message(
@@ -4862,6 +4863,50 @@ def _failure_log_detail(error: ErrorDetail | None) -> str:
     return f"{message[:_FAILURE_LOG_DETAIL_MAX_CHARS]}… (+{dropped} chars)"
 
 
+def _record_manager_webhook_status(
+    session_id: str,
+    status: str,
+    *,
+    response_id: str | None,
+    error: ErrorDetail | None,
+    background_task_count: int | None,
+) -> None:
+    """Write a completed/failed outbox row. Failures are logged, not raised.
+
+    The session status cache and the live-status persist are not one SQL
+    transaction with this outbox insert. A store error is logged at ERROR
+    and the status edge still publishes; that delivery is not retried from
+    the status row. A failure with no response id is its own event, so a
+    later failure of the same session is not collapsed.
+    """
+    if status not in ("idle", "failed"):
+        return
+    try:
+        from omnigent.server import session_outbox
+
+        if status == "idle":
+            if response_id is None:
+                return
+            session_outbox.record_session_completed(
+                session_id=session_id,
+                response_id=response_id,
+                background_task_count=background_task_count,
+            )
+            return
+        session_outbox.record_session_failed(
+            session_id=session_id,
+            response_id=response_id,
+            error_code=error.code if error is not None else "unknown",
+            error_message=error.message if error is not None else "",
+        )
+    except Exception:  # noqa: BLE001 — webhook failure must not swallow the status edge
+        _logger.exception(
+            "manager webhook status write failed for %s; the session status "
+            "was already published and this outbox row is not in that transaction",
+            session_id,
+        )
+
+
 def _publish_status(
     session_id: str,
     status: str,
@@ -4927,6 +4972,10 @@ def _publish_status(
         # snapshot to reopen a streaming bubble.
         _session_active_response_cache.pop(session_id, None)
         return
+    # Captured before the terminal edge clears the in-flight id. A turn id
+    # dedupes the manager-webhook completed/failed row. With no id, each
+    # failure is recorded on its own so later failures are not dropped.
+    tracked_response_id = response_id or _session_active_response_cache.get(session_id)
     previous_status = _session_status_cache.get(session_id)
     _session_status_cache[session_id] = status
     if previous_status != status:
@@ -5025,6 +5074,13 @@ def _publish_status(
     elif status == "failed":
         _session_background_task_count_cache.pop(session_id, None)
         _session_background_tasks_cache.pop(session_id, None)
+    _record_manager_webhook_status(
+        session_id,
+        status,
+        response_id=tracked_response_id,
+        error=error,
+        background_task_count=background_task_count,
+    )
     event = SessionStatusEvent(
         type="session.status",
         conversation_id=session_id,
