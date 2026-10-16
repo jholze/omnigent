@@ -4059,6 +4059,27 @@ class SessionPresenceEvent(_SSEEventBase):
     viewers: list[PresenceViewer]
 
 
+class SessionHumanChatEvent(_SSEEventBase):
+    """A person in this session sent a line to the other people.
+
+    The event does not carry the text. A client that may read the chat
+    loads it with ``GET /v1/sessions/{id}/chat``. The stream route only
+    requires read access, which a public-link visitor has, so the
+    generator drops this event for a caller who fails the chat rule.
+
+    :param type: Always ``"session.human_chat"``.
+    :param conversation_id: The stream that received this event, the root
+        or a sub-agent, e.g. ``"conv_abc123"``.
+    :param id: Stored line id, bare uuid hex.
+    :param created_at: Unix epoch microseconds of the stored line.
+    """
+
+    type: Literal["session.human_chat"]
+    conversation_id: str
+    id: str
+    created_at: int
+
+
 class ElicitationRequestParams(BaseModel):
     """
     Inner ``params`` block of a :class:`ElicitationRequestEvent`.
@@ -4758,6 +4779,7 @@ ServerStreamEvent = Annotated[
     | SessionSupersededEvent
     | SessionBtwSidechatEvent
     | SessionPresenceEvent
+    | SessionHumanChatEvent
     # ── Transient (SSE-only) — session resource lifecycle ─────
     | SessionResourceCreatedEvent
     | SessionResourceDeletedEvent

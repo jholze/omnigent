@@ -39,6 +39,7 @@ import { HeaderProjectTag } from "./HeaderProjectTag";
 import { HeaderTitle } from "./HeaderTitle";
 import { UNTITLED_CONVERSATION_LABEL } from "./sidebarNav";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
+import { SessionChatColumn } from "./SessionChatColumn";
 import type { Agent } from "@/hooks/useAgents";
 import type { Conversation } from "@/hooks/useConversations";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -608,7 +609,12 @@ export function ChatHeader({
         {/* Other users currently viewing this session (presence).
             Self-contained — reads the chat store directly, renders
             nothing when the user is alone. */}
-        {conversationId && !isMobile && <PresenceAvatars />}
+        {conversationId && !isMobile && (
+          <>
+            <PresenceAvatars />
+            <SessionChatColumn conversationId={conversationId} />
+          </>
+        )}
         {/* Desktop (md+) action buttons. On mobile these collapse into
             the three-dot "Session actions" menu below. Fork is also
             available from the session menus and assistant messages. */}

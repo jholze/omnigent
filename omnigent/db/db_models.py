@@ -1199,6 +1199,47 @@ class SqlComment(OmnigentBase):
     __table_args__ = (CheckConstraint("status IN (1, 2)", name="ck_comments_status"),)
 
 
+class SqlSessionChatMessage(OmnigentBase):
+    """One human-to-human line on a shared session.
+
+    Stored on the root conversation. A sub-agent view reads the same rows.
+    The text is not a conversation item and is not sent to the agent.
+
+    :param id: UUID primary key, bare 32-char hex.
+    :param root_conversation_id: Root of the session tree.
+    :param created_by: Email of the author. ``NULL`` in single-user mode.
+    :param created_at: Unix epoch microseconds. ``BigInteger`` so the value
+        stays exact on PostgreSQL and in JavaScript.
+    :param body: Trimmed text, at most 2000 characters. The cap is enforced
+        by the route, not by a database constraint.
+    """
+
+    __tablename__ = "session_chat_messages"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    root_conversation_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_session_chat_messages_root_created",
+            "workspace_id",
+            "root_conversation_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
 def policy_name_cksum(name: str) -> bytes:
     """Return the sha256 digest of a policy name.
 
