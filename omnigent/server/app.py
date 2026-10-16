@@ -1477,7 +1477,9 @@ def create_app(
         authoritative. Never grants past ``sharing_mode``/``public_sharing``.
     :param server_config: Resolved non-secret server settings. The optional
         ``session_title_instructions`` string augments the isolated automatic
-        title prompt. ``None`` loads the standard server config.
+        title prompt. ``mcp_enabled`` (default true; overridable with
+        ``OMNIGENT_MCP_ENABLED``) turns the ``POST /mcp`` endpoint on or off.
+        ``None`` loads the standard server config.
     :param base_path: Public URL prefix the server is served under by a
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal
@@ -4246,6 +4248,14 @@ def create_app(
     all_extra_routers.extend(_load_debug_routers(debug_router_modules))
     for router, prefix, tags in all_extra_routers:
         app.include_router(router, prefix=prefix, tags=[*tags])
+
+    # Before the SPA catch-all: a disabled flag still owns ``/mcp`` so the
+    # path returns JSON 404 instead of ``index.html``. Auth matches ``/v1``.
+    from omnigent.server.mcp_endpoint import create_mcp_router, mcp_endpoint_enabled
+
+    app.state.mcp_enabled = mcp_endpoint_enabled(resolved_server_config)
+    app.include_router(create_mcp_router(auth_provider))
+    _logger.info("mcp: POST /mcp %s", "enabled" if app.state.mcp_enabled else "disabled")
 
     web_ui_dist = _WEB_UI_DIST
     web_ui_present = web_ui_dist.is_dir() and (web_ui_dist / "index.html").is_file()
