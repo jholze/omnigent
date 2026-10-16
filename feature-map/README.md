@@ -134,6 +134,7 @@ map an area, remove it here in the same change.
 - Files and the workspace browser: `tests/e2e_ui/files/`, `tests/browser_ui/files/`
 - Comments: `tests/e2e_ui/comments/`
 - Sharing and session permissions: `tests/e2e_ui/collaboration/`
+- Team chat (behind the `team_chat` flag): `tests/e2e_ui/team_chat/`
 - GitHub integration: `tests/e2e_ui/github/`
 - Scheduled tasks: `tests/e2e_ui/scheduled/`
 - In-app browser: `tests/e2e_ui/browser/` (session cookie sharing is covered in
