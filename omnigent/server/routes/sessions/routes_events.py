@@ -262,6 +262,7 @@ from omnigent.server.schemas import (
     McpServerStartup,
     SessionEventInput,
 )
+from omnigent.server.session_chat import may_read_human_chat
 from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.subagent_activity import (
@@ -3114,6 +3115,12 @@ def register_events_routes(
             events.append(presence.snapshot(conv.root_conversation_id, session_id))
             return events
 
+        include_human_chat = await asyncio.to_thread(
+            may_read_human_chat,
+            user_id,
+            conv.root_conversation_id,
+            permission_store,
+        )
         return StreamingResponse(
             _stream_live_events(
                 request,
@@ -3128,6 +3135,7 @@ def register_events_routes(
                 # the CHILD conversation's stream, and per-conversation
                 # scoping would hide co-viewers on other agents.
                 presence_root_id=conv.root_conversation_id,
+                include_human_chat=include_human_chat,
             ),
             media_type="text/event-stream",
             headers={

@@ -1286,9 +1286,12 @@ def _permission_level_from_grants(
         return None
     if is_admin:
         return LEVEL_OWNER
-    user_grant = next((g for g in grants if g.user_id == user_id), None)
-    if user_grant is not None:
-        return user_grant.level
+    from omnigent.server.principals import principals
+
+    allowed = principals(user_id)
+    best = max((g.level for g in grants if g.user_id in allowed), default=None)
+    if best is not None:
+        return best
     public_grant = next((g for g in grants if g.user_id == RESERVED_USER_PUBLIC), None)
     if public_grant is not None:
         return public_grant.level
@@ -9360,6 +9363,7 @@ async def _stream_live_events(
     viewer_user_id: str | None = None,
     viewer_idle: bool = False,
     presence_root_id: str | None = None,
+    include_human_chat: bool = False,
 ) -> AsyncIterator[str]:
     """
     Yield SSE-formatted events from the conversation's live stream.
@@ -9423,6 +9427,10 @@ async def _stream_live_events(
         viewers of different agents/sub-agents in one session see
         each other. Required when *viewer_user_id* is set; ignored
         otherwise.
+    :param include_human_chat: When ``False`` (the default), drop
+        ``session.human_chat``. The stream route only requires read
+        access, which a public-link visitor has, so the caller passes
+        ``True`` only for a viewer who may read the human chat.
     :returns: An async iterator of SSE message strings.
     :raises ValueError: If *viewer_user_id* is set without
         *presence_root_id* — a per-conversation presence scope would
@@ -9464,6 +9472,10 @@ async def _stream_live_events(
                     raise ValueError(
                         f"session stream event missing string ``type`` field: {event!r}",
                     )
+                # Public-link viewers satisfy LEVEL_READ. The event has no
+                # body, and they still must not learn that a line was sent.
+                if event_type == "session.human_chat" and not include_human_chat:
+                    continue
                 validated = _SERVER_STREAM_EVENT_ADAPTER.validate_python(event)
                 yield _format_sse(event_type, validated.model_dump())
     except session_stream.SubscriberOverflowError:
@@ -10660,7 +10672,9 @@ async def _authorize_bundled_parent_and_inherit_runner(
     inherited_runner_id = parent_conv.runner_id
     if inherited_runner_id is not None and user_id is not None and runner_router is not None:
         runner_owner = runner_router.runner_owner(inherited_runner_id)
-        if runner_owner is not None and runner_owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if runner_owner is not None and not same_account(user_id, runner_owner):
             return parent_conv, None
     return parent_conv, inherited_runner_id
 
@@ -10755,7 +10769,9 @@ def _registered_runner_id(
     # they are trying to bind to a session.
     if user_id is not None:
         runner_owner = runner_router.runner_owner(runner_id)
-        if runner_owner is not None and runner_owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if runner_owner is not None and not same_account(user_id, runner_owner):
             raise OmnigentError(
                 f"runner {runner_id!r} is not owned by the requesting user",
                 code=ErrorCode.FORBIDDEN,

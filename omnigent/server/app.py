@@ -114,6 +114,7 @@ from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
+from omnigent.server.routes.session_chat import create_session_chat_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
@@ -151,6 +152,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.stores.session_chat_store import SessionChatStore
 
 _logger = logging.getLogger(__name__)
 _RECONNECT_BINDING_BATCH_SIZE = 128
@@ -1389,6 +1391,7 @@ def create_app(
     feature_flags: FeatureFlags | None = None,
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
+    chat_store: SessionChatStore | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -1525,6 +1528,8 @@ def create_app(
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal
         root deployment.
+    :param chat_store: Store for human lines beside a shared session.
+        ``None`` leaves ``/v1/sessions/{id}/chat`` unmounted.
     :returns: A fully configured :class:`FastAPI` application.
     :raises ValueError: If ``permission_store`` is provided
         without an ``auth_provider``.
@@ -1567,6 +1572,8 @@ def create_app(
     # an AccountStore, defeating the whole "accounts is opt-in"
     # framing.
     _bootstrap_result = None  # populated below for the lifespan hook
+    from omnigent.server.principals import set_principal_resolver
+
     if auth_provider is not None and account_store is not None:
         from omnigent.server.auth import UnifiedAuthProvider
 
@@ -1583,6 +1590,13 @@ def create_app(
                 session_ttl_hours=_accounts_cfg.session_ttl_hours,
                 cookie_secret=_accounts_cfg.cookie_secret,
             )
+            set_principal_resolver(account_store.extra_principals)
+        else:
+            # A header or OIDC app in this process must not keep the previous
+            # accounts store. Lifespan shutdown clears it again on the way out.
+            set_principal_resolver(None)
+    else:
+        set_principal_resolver(None)
 
     from omnigent.runner.routing import RunnerRouter
     from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
@@ -1857,6 +1871,9 @@ def create_app(
         try:
             yield
         finally:
+            from omnigent.server.principals import set_principal_resolver
+
+            set_principal_resolver(None)
             if managed_sandbox_reaper is not None:
                 await managed_sandbox_reaper.shutdown()
             # Run completion is event-driven (the _publish_status hook) plus a
@@ -3399,6 +3416,17 @@ def create_app(
             prefix="/v1",
             tags=["comments"],
         )
+    if chat_store is not None:
+        app.include_router(
+            create_session_chat_router(
+                chat_store,
+                conversation_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
+            prefix="/v1",
+            tags=["session_chat"],
+        )
     if policy_store is not None:
         app.include_router(
             create_session_policies_router(
@@ -4332,6 +4360,28 @@ def create_app(
             """Serve the API-only landing page (no web UI bundle present)."""
             return FileResponse(_API_ONLY_LANDING_HTML, media_type="text/html")
 
+        from omnigent.server.auth import UnifiedAuthProvider as _AccountsAuthProvider
+
+        if (
+            isinstance(auth_provider, _AccountsAuthProvider)
+            and getattr(auth_provider, "_source", None) == "accounts"
+        ):
+
+            @app.get("/login", include_in_schema=False)
+            async def accounts_login_page(request: Request) -> Response:
+                """Password form for API-only installs. The SPA shell owns /login when built."""
+                from omnigent.server.google_accounts import (
+                    bind_email_for_display,
+                    login_page_html,
+                )
+
+                cookie_secret = b""
+                accounts_cfg = getattr(auth_provider, "_accounts_config", None)
+                if accounts_cfg is not None:
+                    cookie_secret = accounts_cfg.cookie_secret
+                email = bind_email_for_display(request, cookie_secret)
+                return Response(login_page_html(bind_email=email), media_type="text/html")
+
     app.add_middleware(AccountAuthorityMiddleware, auth_provider=auth_provider)
     app.add_middleware(PublicSharingPolicyMiddleware, max_level=app.state.public_sharing_max_level)
     if resolved_base_path:
@@ -4407,6 +4457,10 @@ class _SPAStaticFiles(StaticFiles):
         # asset refs and the injected base-path global reflect `base_path`.
         if self._index_html is not None and path in ("", ".", "index.html"):
             return _apply_web_ui_cache_headers(self._shell_response(scope), "index.html")
+        if path == "login" and self._index_html is not None:
+            from omnigent.server.google_accounts import inject_login_shell
+
+            return inject_login_shell(self._shell_response(scope), scope)
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
