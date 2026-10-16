@@ -1965,3 +1965,370 @@ class SqlSessionElicitation(OmnigentBase):
             "session_id",
         ),
     )
+
+
+class SqlChatChannel(OmnigentBase):
+    """A team-chat channel, direct message, or session-chat container.
+
+    ``kind`` is one of ``channel``/``dm``/``session``. ``name`` is only set
+    for ``channel`` rows (NULL otherwise), which is why the per-workspace
+    unique index on ``name`` is a plain index rather than a partial one: a
+    plain unique index treats NULL as distinct, so dm/session rows never
+    collide (and the index stays MySQL-buildable). No foreign keys
+    (Rule R032); ``session_root_id`` is application-owned. Times are epoch
+    microseconds.
+    """
+
+    __tablename__ = "chat_channels"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    topic: Mapped[str | None] = mapped_column(Text, nullable=True)
+    project_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    visibility: Mapped[str] = mapped_column(String(16), nullable=False, server_default="public")
+    dm_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    session_root_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    archived_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_chat_channels_workspace_name",
+            "workspace_id",
+            "name",
+            unique=True,
+        ),
+        Index(
+            "uq_chat_channels_workspace_dm_key",
+            "workspace_id",
+            "dm_key",
+            unique=True,
+        ),
+        Index(
+            "uq_chat_channels_workspace_session_root_id",
+            "workspace_id",
+            "session_root_id",
+            unique=True,
+        ),
+    )
+
+
+class SqlChatMember(OmnigentBase):
+    """Membership of one principal in one team-chat channel.
+
+    For ``kind=session`` channels membership is not stored here (it is
+    derived from session grants). ``principal_id`` is a user identity
+    (``user@…``) or an agent-account principal (``agent:<uuid>``).
+    """
+
+    __tablename__ = "chat_members"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    channel_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="member")
+    joined_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_chat_members_workspace_principal",
+            "workspace_id",
+            "principal_id",
+        ),
+    )
+
+
+class SqlChatMessage(OmnigentBase):
+    """One message in a team-chat channel (top-level or thread reply).
+
+    ``thread_root_id`` is NULL for top-level messages and names the root
+    message id for replies. ``client_id`` is the per-(channel, author)
+    idempotency key; it is nullable, so the unique index is plain (NULLs are
+    distinct and never collide). ``body`` is plain text (never HTML/Markdown
+    for human authors). Times are epoch microseconds.
+    """
+
+    __tablename__ = "chat_messages"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    thread_root_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    author_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    author_kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default="user")
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    forward_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    session_ref: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    response_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    system_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    edited_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    deleted_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_chat_messages_workspace_channel_thread_created",
+            "workspace_id",
+            "channel_id",
+            "thread_root_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "uq_chat_messages_workspace_channel_author_client",
+            "workspace_id",
+            "channel_id",
+            "author_id",
+            "client_id",
+            unique=True,
+        ),
+        Index(
+            "ix_chat_messages_workspace_created",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
+class SqlChatThread(OmnigentBase):
+    """Thread state for a top-level message.
+
+    ``participants`` is a JSON array of up to 5 principal ids (the latest
+    repliers). ``agent_state`` is one of ``none``/``starting``/``active``/
+    ``dismissed``/``start_failed``/``closed``. ``start_requested_at`` drives
+    the agent start timeout (FR-087). Times are epoch microseconds.
+    """
+
+    __tablename__ = "chat_threads"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    root_message_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    reply_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_reply_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    participants: Mapped[str] = mapped_column(String(1024), nullable=False, server_default="[]")
+    bot_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    brake_notice_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    agent_handle: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    agent_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="none")
+    caller_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    start_requested_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_chat_threads_workspace_session",
+            "workspace_id",
+            "session_id",
+            unique=True,
+        ),
+        Index(
+            "ix_chat_threads_workspace_channel_updated",
+            "workspace_id",
+            "channel_id",
+            "updated_at",
+        ),
+    )
+
+
+class SqlChatMention(OmnigentBase):
+    """One validated mention token resolved from a stored message body.
+
+    ``target_kind`` is ``user``/``agent_account``/``omnigent_agent``.
+    ``target_id`` holds the principal id or agent handle the token names.
+    Invalid tokens are left as literal text and produce no row.
+    """
+
+    __tablename__ = "chat_mentions"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    message_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_chat_mentions_workspace_target_created",
+            "workspace_id",
+            "target_id",
+            "created_at",
+        ),
+    )
+
+
+class SqlChatRead(OmnigentBase):
+    """Forward-only read cursor for one principal in a channel or thread.
+
+    ``thread_root_id`` is ``""`` for channel-level reads and the root message
+    id for thread-level reads. ``last_read_at``/``last_read_id`` name the
+    newest read message and are NULL until the first read.
+    """
+
+    __tablename__ = "chat_reads"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    channel_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    thread_root_id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, nullable=False, server_default=""
+    )
+    last_read_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_read_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class SqlChatAgentAccount(OmnigentBase):
+    """An agent account (webhook bot) owned by a human principal.
+
+    ``token_hash`` is the HMAC-SHA256 hex of the bearer token and is unique
+    globally (the auth lookup happens before workspace resolution).
+    ``token_prefix`` is an 8-character display hint. Times are epoch
+    microseconds.
+    """
+
+    __tablename__ = "chat_agent_accounts"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    handle: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(8), nullable=False)
+    secret_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    webhook_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_seen_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    revoked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_chat_agent_accounts_workspace_handle",
+            "workspace_id",
+            "handle",
+            unique=True,
+        ),
+        Index(
+            "uq_chat_agent_accounts_token_hash",
+            "token_hash",
+            unique=True,
+        ),
+    )
+
+
+class SqlChatAgentOutbox(OmnigentBase):
+    """Transactional outbox of agent-account webhook events.
+
+    Payload is JSON without any message body (NFR-014), stored compressed.
+    ``sequence`` is monotonically increasing per account. Times are epoch
+    microseconds.
+    """
+
+    __tablename__ = "chat_agent_outbox"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    event_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    account_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_until: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_chat_agent_outbox_status_next_attempt",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_chat_agent_outbox_workspace_account_sequence",
+            "workspace_id",
+            "account_id",
+            "sequence",
+        ),
+    )
+
+
+class SqlChatUserPref(OmnigentBase):
+    """Per-principal team-chat preferences.
+
+    ``default_project_id`` is the fallback project used to resolve agent
+    starts (A-8). Times are epoch microseconds.
+    """
+
+    __tablename__ = "chat_user_prefs"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    principal_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    default_project_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
