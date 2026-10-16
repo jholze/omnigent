@@ -463,34 +463,50 @@ def record_elicitation_raised(
     elicitation_id: str,
     request: dict[str, Any],
 ) -> None:
-    """Record the ledger row and ``session.awaiting_decision`` together."""
+    """Record the ledger row, and ``session.awaiting_decision`` when subscribed.
+
+    The ledger is written when any of ``session.awaiting_decision``,
+    ``session.decision_resolved``, or ``session.resumed`` is subscribed so
+    the later verdict and resume events still have a row to anchor on. The
+    outbox row is inserted only for ``session.awaiting_decision``.
+    """
     config = _active_config()
     store = _store
-    if config is None or store is None or not config.wants("session.awaiting_decision"):
+    if config is None or store is None:
+        return
+    wants_awaiting = config.wants("session.awaiting_decision")
+    wants_decision = config.wants("session.decision_resolved")
+    wants_resumed = config.wants("session.resumed")
+    if not (wants_awaiting or wants_decision or wants_resumed):
         return
     now = now_epoch()
-    context = _lookup_context(session_id)
     allowlisted = _redact_request_fields(_allowlist(request, _ELICITATION_REQUEST_ALLOWLIST))
-    data = build_awaiting_decision_data(
-        session_id=session_id,
-        elicitation_id=elicitation_id,
-        request=request,
-        created_at=now,
-        context=context,
-        public_base_url=config.public_base_url,
-    )
     workspace_id = current_workspace_id()
     transition_key = f"elicitation:{elicitation_id}:awaiting_decision"
+    outbox_event_id: str | None = None
+    outbox_payload: str | None = None
+    if wants_awaiting:
+        context = _lookup_context(session_id)
+        data = build_awaiting_decision_data(
+            session_id=session_id,
+            elicitation_id=elicitation_id,
+            request=request,
+            created_at=now,
+            context=context,
+            public_base_url=config.public_base_url,
+        )
+        outbox_event_id = _event_id(workspace_id, session_id, transition_key)
+        outbox_payload = json.dumps(data, separators=(",", ":"), default=str)
     _elicitation, _event, inserted = store.record_elicitation_raised(
         elicitation_id=elicitation_id,
         session_id=session_id,
         request_payload=json.dumps(allowlisted, separators=(",", ":"), default=str),
-        outbox_event_id=_event_id(workspace_id, session_id, transition_key),
-        transition_key=transition_key,
-        outbox_payload=json.dumps(data, separators=(",", ":"), default=str),
+        outbox_event_id=outbox_event_id,
+        transition_key=transition_key if wants_awaiting else None,
+        outbox_payload=outbox_payload,
         now=now,
     )
-    if inserted:
+    if inserted and wants_awaiting:
         _notify()
 
 

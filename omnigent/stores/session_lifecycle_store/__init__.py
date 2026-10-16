@@ -41,13 +41,14 @@ class SessionLifecycleStore(ABC):
         elicitation_id: str,
         session_id: str,
         request_payload: str,
-        outbox_event_id: str,
-        transition_key: str,
-        outbox_payload: str,
+        outbox_event_id: str | None = None,
+        transition_key: str | None = None,
+        outbox_payload: str | None = None,
         now: int,
         outbox_event_type: str = "session.awaiting_decision",
     ) -> tuple[SessionElicitation, LifecycleOutboxEvent | None, bool]:
-        """Insert the ledger row and its awaiting-decision outbox row together."""
+        """Insert the ledger row and, when outbox fields are set, its
+        awaiting-decision outbox row, in one transaction."""
         ...
 
     @abstractmethod
