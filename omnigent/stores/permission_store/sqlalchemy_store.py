@@ -515,9 +515,12 @@ class SqlAlchemyPermissionStore(PermissionStore):
         if user_id is None:
             return False
 
-        grant = self.get(user_id, conversation_id)
-        if grant is not None and grant.level >= required_level:
-            return True
+        from omnigent.server.principals import principals
+
+        for principal in principals(user_id):
+            grant = self.get(principal, conversation_id)
+            if grant is not None and grant.level >= required_level:
+                return True
 
         public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
         public_level = effective_public_level(public_grant.level if public_grant else None)
@@ -536,22 +539,42 @@ class SqlAlchemyPermissionStore(PermissionStore):
             return None
         if self.is_admin(user_id):
             return LEVEL_OWNER
-        grant = self.get(user_id, conversation_id)
+        from omnigent.server.principals import principals
+
+        best: int | None = None
+        for principal in principals(user_id):
+            grant = self.get(principal, conversation_id)
+            if grant is not None and (best is None or grant.level > best):
+                best = grant.level
         public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
         levels = [
             level
             for level in (
-                grant.level if grant is not None else None,
+                best,
                 effective_public_level(public_grant.level if public_grant else None),
             )
             if level is not None
         ]
         return max(levels) if levels else None
 
+    def _resolve_cache_key(self, conversation_id: str, user_id: str) -> tuple[object, ...]:
+        """Cache identity includes the linked email so a new link is a miss.
+
+        ``conversation_id`` stays first: invalidation scans ``key[0]``.
+        """
+        from omnigent.server.principals import principals
+
+        return (
+            conversation_id,
+            user_id,
+            account_generation(user_id),
+            tuple(sorted(principals(user_id))),
+        )
+
     def _resolve_cache_lookup(self, conversation_id: str, user_id: str) -> ResolvedAccess | None:
         """Return a live cached resolve_access result, or ``None`` on miss/expiry."""
         now = self._resolve_cache_clock()
-        key = (conversation_id, user_id, account_generation(user_id))
+        key = self._resolve_cache_key(conversation_id, user_id)
         with self._resolve_cache_lock:
             entry = self._resolve_cache.get(key)
             if entry is None:
@@ -582,7 +605,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
         be stored on top of the eviction it already performed. Enforces the LRU
         entry cap so the cache cannot grow without bound on a long-lived replica.
         """
-        key = (conversation_id, user_id, account_generation(user_id))
+        key = self._resolve_cache_key(conversation_id, user_id)
         expiry = self._resolve_cache_clock() + self._resolve_cache_ttl_s
         with self._resolve_cache_lock:
             if generation != self._resolve_cache_generation:
@@ -638,10 +661,18 @@ class SqlAlchemyPermissionStore(PermissionStore):
         # calling is_admin + check_access + get_permission_level separately
         # did — see the GET /v1/sessions/{id} snapshot path).
         with self._session("resolve_access") as session:
+            from omnigent.server.principals import principals
+
             user_row = session.get(SqlUser, (workspace_id, user_id))
-            user_grant = session.get(
-                SqlSessionPermission, (workspace_id, user_id, conversation_id)
-            )
+            principal_ids = tuple(sorted(principals(user_id)))
+            grant_levels = session.execute(
+                select(SqlSessionPermission.level).where(
+                    SqlSessionPermission.workspace_id == workspace_id,
+                    SqlSessionPermission.conversation_id == conversation_id,
+                    SqlSessionPermission.user_id.in_(principal_ids),
+                )
+            ).scalars()
+            levels = list(grant_levels)
             public_grant = session.get(
                 SqlSessionPermission,
                 (workspace_id, RESERVED_USER_PUBLIC, conversation_id),
@@ -650,7 +681,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
                 is_admin=user_row is not None
                 and user_row.deleted_at is None
                 and user_row.is_admin,
-                user_grant_level=user_grant.level if user_grant is not None else None,
+                user_grant_level=max(levels) if levels else None,
                 public_grant_level=public_grant.level if public_grant is not None else None,
             )
         # Cache only a positive standing: a no-access result is left uncached so
