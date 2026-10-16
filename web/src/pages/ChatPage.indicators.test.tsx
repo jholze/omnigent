@@ -266,6 +266,7 @@ describe("BubbleView dispatch", () => {
 
     const bubble = screen.getByTestId("message-bubble");
     expect(screen.getByTestId("error-pill")).toBeInTheDocument();
+    expect(bubble).toHaveAttribute("data-role", "error");
     expect(bubble).toHaveClass("max-w-full");
     expect(bubble.firstElementChild).toHaveClass("w-full");
     expect(screen.queryByTestId("message-timestamp")).not.toBeInTheDocument();
