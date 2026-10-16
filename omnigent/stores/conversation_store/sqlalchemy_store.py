@@ -822,6 +822,20 @@ def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
     )
 
 
+def _matches_principals(column: Any, user_id: str) -> Any:
+    """Match a grant on the signed-in user or their linked email.
+
+    A single id keeps the old equality comparison. ``owned_by`` does not
+    use this helper, so "mine" stays the username.
+    """
+    from omnigent.server.principals import principals
+
+    ids = tuple(sorted(principals(user_id)))
+    if len(ids) == 1:
+        return column == ids[0]
+    return column.in_(ids)
+
+
 class SqlAlchemyConversationStore(ConversationStore):
     """
     SQLAlchemy-backed implementation of :class:`ConversationStore`.
@@ -2634,7 +2648,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                         meta_sess.execute(
                             select(SqlSessionPermission.conversation_id).where(
                                 SqlSessionPermission.workspace_id == current_workspace_id(),
-                                SqlSessionPermission.user_id == accessible_by,
+                                _matches_principals(SqlSessionPermission.user_id, accessible_by),
                             )
                         ).scalars()
                     )
@@ -2680,7 +2694,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                             SqlSessionPermission.workspace_id == SqlConversationLabel.workspace_id,
                             SqlSessionPermission.conversation_id
                             == SqlConversationLabel.conversation_id,
-                            SqlSessionPermission.user_id == accessible_by,
+                            _matches_principals(SqlSessionPermission.user_id, accessible_by),
                         )
                         .exists()
                     )
@@ -2859,13 +2873,12 @@ class SqlAlchemyConversationStore(ConversationStore):
             with self._session("list_conversations") as meta_sess:
                 accessible_set: set[str] | None = None
                 owned_set: set[str] | None = None
-                if accessible_by is not None or shared_only:
-                    acl_user = accessible_by
+                if accessible_by is not None:
                     accessible_set = set(
                         meta_sess.execute(
                             select(SqlSessionPermission.conversation_id).where(
                                 SqlSessionPermission.workspace_id == current_workspace_id(),
-                                SqlSessionPermission.user_id == acl_user,
+                                _matches_principals(SqlSessionPermission.user_id, accessible_by),
                             )
                         ).scalars()
                     )
@@ -2929,7 +2942,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                         .where(
                             SqlSessionPermission.workspace_id == SqlConversation.workspace_id,
                             SqlSessionPermission.conversation_id == SqlConversation.id,
-                            SqlSessionPermission.user_id == accessible_by,
+                            _matches_principals(SqlSessionPermission.user_id, accessible_by),
                         )
                         .exists()
                     )

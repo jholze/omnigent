@@ -129,6 +129,13 @@ your project before completing these steps.
 > can log in when the OAuth consent screen is "External." Always restrict to
 > your domain.
 
+Accounts mode can add **Continue with Google** beside the password form
+without switching the server to OIDC. Leave `OMNIGENT_AUTH_PROVIDER` as
+`accounts` and do not set `OMNIGENT_OIDC_ISSUER`. Set the client id, client
+secret, a non-empty `OMNIGENT_OIDC_ALLOWED_DOMAINS`, and
+`OMNIGENT_OIDC_REDIRECT_URI` to `{base}/auth/google/callback`. The session
+cookie stays the accounts cookie.
+
 ### Generic OIDC (Okta, Auth0, Keycloak, Entra ID)
 
 Set `OMNIGENT_OIDC_ISSUER` to your IdP's base URL (the one that publishes

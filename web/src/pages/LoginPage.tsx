@@ -33,7 +33,13 @@ import { useLoginV2 } from "@/lib/useLoginV2";
 import { AuthCardShell } from "@/pages/onboarding/AuthCardShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { getMe, login as loginRequest } from "@/lib/accountsApi";
+import {
+  bindGoogle,
+  createGoogleAccount,
+  getGoogleStatus,
+  getMe,
+  login as loginRequest,
+} from "@/lib/accountsApi";
 
 const DEFAULT_RETURN_TO = "/";
 const LAST_USERNAME_KEY = "omnigent.lastLoginUsername";
@@ -76,6 +82,8 @@ export function LoginPage() {
   const [username, setUsername] = useState(readLastUsername);
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [googleConfigured, setGoogleConfigured] = useState(false);
+  const [bindEmail, setBindEmail] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(
     magicError === "expired"
       ? "That sign-in link has expired. Enter your password to sign in."
@@ -105,6 +113,21 @@ export function LoginPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The password form renders immediately. This probe only reveals the
+  // Google button or the bind panel; it must not gate the form.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const status = await getGoogleStatus();
+      if (cancelled) return;
+      setGoogleConfigured(status.configured);
+      setBindEmail(status.bindEmail);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Focus the empty field on mount: username when no remembered value,
   // password when the username is pre-filled from localStorage.
   useEffect(() => {
@@ -124,7 +147,10 @@ export function LoginPage() {
     setSubmitting(true);
     setError(null);
 
-    const result = await loginRequest({ username, password });
+    const result =
+      bindEmail !== null
+        ? await bindGoogle({ username, password })
+        : await loginRequest({ username, password });
     if (result.ok) {
       rememberUsername(username);
       // Hard-navigate so identity.ts re-runs and every cached
@@ -143,9 +169,35 @@ export function LoginPage() {
     </div>
   );
 
+  async function onCreateAccount() {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    const result = await createGoogleAccount();
+    if (result.ok) {
+      window.location.href = returnTo;
+      return;
+    }
+    setSubmitting(false);
+    setError(result.error);
+  }
+
   const body: ReactNode = (
     <>
       {heading}
+
+      {googleConfigured && (
+        <a href={withBasePath("/auth/google/start")} className="text-ui font-medium underline">
+          Continue with Google
+        </a>
+      )}
+
+      {bindEmail !== null && (
+        <div className="space-y-2 text-ui">
+          <p>Google confirmed {bindEmail}.</p>
+          <p>Sessions owned by another username will not appear.</p>
+        </div>
+      )}
 
       <form onSubmit={onSubmit} className="space-y-4">
         <div className="space-y-1.5">
@@ -200,6 +252,19 @@ export function LoginPage() {
           {submitting ? "Signing in…" : "Sign in"}
         </Button>
       </form>
+
+      {bindEmail !== null && (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          disabled={submitting}
+          onClick={() => void onCreateAccount()}
+          componentId="login.google_create"
+        >
+          Create account. Sessions owned by another username will not appear.
+        </Button>
+      )}
 
       <p className="text-center text-sm text-muted-foreground">
         On a fresh install you set the first admin's password yourself — no credential is

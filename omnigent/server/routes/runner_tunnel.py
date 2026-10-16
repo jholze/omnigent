@@ -271,7 +271,13 @@ def create_runner_tunnel_router(
             if session is None:
                 continue
             # Scope listing to the caller's own runners.
-            if user_id is not None and session.owner is not None and session.owner != user_id:
+            from omnigent.server.principals import same_account
+
+            if (
+                user_id is not None
+                and session.owner is not None
+                and not same_account(user_id, session.owner)
+            ):
                 continue
             data.append(
                 {
@@ -298,11 +304,13 @@ def create_runner_tunnel_router(
         session = registry.get(runner_id)
         online = session is not None
         # Hide runners owned by other users.
+        from omnigent.server.principals import same_account
+
         if (
             session is not None
             and user_id is not None
             and session.owner is not None
-            and session.owner != user_id
+            and not same_account(user_id, session.owner)
         ):
             online = False
         result: dict[str, str | bool] = {"runner_id": runner_id, "online": online}
