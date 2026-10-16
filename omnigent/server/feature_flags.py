@@ -27,6 +27,7 @@ class Feature(StrEnum):
     HARNESS_SETTINGS_UI = "harness_settings_ui"
     IMPORT_REVIEW = "import_review"
     CUSTOM_AGENTS_SETTINGS_UI = "custom_agents_settings_ui"
+    TEAM_CHAT = "team_chat"
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,13 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         description="Manage reusable custom agents from Settings",
         owner="web",
         review_by_release="0.18.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.TEAM_CHAT,
+        description="Team chat: channels, DMs, threads, mentions, and agent participants",
+        owner="web",
+        review_by_release="0.20.0",
+        frontend_visible=True,
     ),
 )
 
