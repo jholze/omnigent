@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from omnigent.server.mcp_endpoint import (
     _CONFIRM_HELP,
@@ -479,10 +479,47 @@ def _session(session_id: str, *parts: str) -> str:
     return path
 
 
+def _check_fs_path(relative: str, name: str = "path") -> str:
+    """Reject a filesystem path httpx would send somewhere else.
+
+    ``.`` and ``..`` segments, including percent-encoded ones, are rejected.
+    httpx collapses dot segments, so ``DELETE .../filesystem/../../../..``
+    would be sent as ``DELETE /v1/sessions/{id}`` while the preview still
+    showed the original path. A single leading slash is kept so a host
+    absolute path such as ``/tmp/oa-mcp-dir`` can stay in a JSON body.
+
+    :param relative: Caller-supplied path, relative or absolute.
+    :param name: Argument name used in the tool error.
+    :returns: ``relative`` unchanged when every segment is safe.
+    :raises ToolFailure: The path is empty or contains an unsafe segment.
+    """
+    if not relative or "\\" in relative or "\x00" in relative or relative.startswith("//"):
+        raise ToolFailure(f"{name} contains invalid characters")
+    body = relative[1:] if relative.startswith("/") else relative
+    if not body or body.endswith("/"):
+        raise ToolFailure(f"{name} contains invalid characters")
+    for segment in body.split("/"):
+        if segment in {"", ".", ".."} or unquote(segment) in {".", ".."}:
+            raise ToolFailure(f"{name} contains invalid characters")
+    return relative
+
+
+def _encode_url_path(relative: str) -> str:
+    """Percent-encode each segment of a path that survived :func:`_check_fs_path`.
+
+    ``safe=''`` encodes everything except unreserved characters, so the
+    string appended to the preview is the path httpx will request.
+    """
+    checked = _check_fs_path(relative)
+    body = checked[1:] if checked.startswith("/") else checked
+    return "/".join(quote(part, safe="") for part in body.split("/"))
+
+
 def _joined(base: str, relative: str | None) -> str:
+    """Append ``relative`` to ``base`` as the exact URL that will be requested."""
     if not relative:
         return base
-    return f"{base}/{quote(relative.lstrip('/'), safe='/')}"
+    return f"{base}/{_encode_url_path(relative)}"
 
 
 async def _get_elicitation(api: _Api, args: dict[str, Any]) -> Any:
@@ -528,7 +565,7 @@ async def _answer_elicitation(api: _Api, args: dict[str, Any]) -> Any:
 
     if not wait or budget is None:
         return await post()
-    watched = await _watch_posted(session_id, post, budget)
+    watched = await _watch_posted(api, session_id, post, budget)
     watched["resolved"] = watched.pop("accepted")
     return watched
 
@@ -882,10 +919,11 @@ async def _host_fs(api: _Api, args: dict[str, Any]) -> Any:
     host_id = _part(args, "host_id")
     root = f"/v1/hosts/{quote(host_id, safe='')}"
     if action == "worktrees":
-        return await _read(
-            api, "GET", _with_query(f"{root}/worktrees", {"path": _nonempty(args, "path")})
-        )
+        host_path = _check_fs_path(_nonempty(args, "path"))
+        return await _read(api, "GET", _with_query(f"{root}/worktrees", {"path": host_path}))
     relative = _optional_str(args.get("path"), "path")
+    if relative is not None:
+        relative = _check_fs_path(relative)
     if action == "list":
         return await _read(api, "GET", _joined(f"{root}/filesystem", relative))
     if not relative:
@@ -1074,7 +1112,7 @@ async def _session_mcp(api: _Api, args: dict[str, Any]) -> Any:
             body,
             extra={"effect": f"Adds MCP server {body['name']} to this session's agent bundle."},
         )
-    name = _nonempty(args, "name")
+    name = _require_id(_nonempty(args, "name"), "name")
     path = _session(session_id, "agent", "mcp-servers", name)
     if action == "delete":
         return await _write(
@@ -1120,9 +1158,8 @@ async def _list_extensions(api: _Api, args: dict[str, Any]) -> Any:
 
 
 async def _get_extension(api: _Api, args: dict[str, Any]) -> Any:
-    return await _read(
-        api, "GET", f"/v1/extensions/{quote(_nonempty(args, 'extension_id'), safe='')}"
-    )
+    extension_id = _require_id(_nonempty(args, "extension_id"), "extension_id")
+    return await _read(api, "GET", f"/v1/extensions/{quote(extension_id, safe='')}")
 
 
 async def _session_access(api: _Api, args: dict[str, Any]) -> Any:
@@ -1132,7 +1169,7 @@ async def _session_access(api: _Api, args: dict[str, Any]) -> Any:
         return await _read(api, "GET", _session(session_id, "permissions"))
     if action == "owner":
         return await _read(api, "GET", _session(session_id, "owner"))
-    user_id = _nonempty(args, "user_id")
+    user_id = _require_id(_nonempty(args, "user_id"), "user_id")
     if action == "revoke":
         return await _write(
             api,

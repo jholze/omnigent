@@ -11,13 +11,36 @@ they would make and change nothing.
 call is `401`. Send the session JWT from `omnigent login` as
 `Authorization: Bearer`, or send the browser cookie (`ap_session` on HTTP,
 `__Host-ap_session` on HTTPS, including ngrok). The acting user is that
-account, and session permissions apply. A local single-user server accepts
-`/mcp` the same way it accepts `/v1` (no token when
-`OMNIGENT_LOCAL_SINGLE_USER` is set).
+account, and session permissions apply. A delegated scope token (a device
+grant or a client-credentials token) is rejected: `/mcp` is not on the
+delegated path allowlist. A local single-user server accepts `/mcp` the same
+way it accepts `/v1` (no token when `OMNIGENT_LOCAL_SINGLE_USER` is set).
 
-The endpoint is on by default. Set `mcp_enabled: false` in the server config
-file, or `OMNIGENT_MCP_ENABLED=0`, to turn it off. A disabled server answers
-`/mcp` with `404`.
+`POST /mcp` requires `Content-Type: application/json` (or
+`application/*+json`). Any other type, including `text/plain`, is `415`.
+A present `Origin` has to pass the same trusted-origin check as `/v1`. In
+local single-user mode that means a loopback origin (`http://127.0.0.1`,
+`http://localhost`, or `http://[::1]`); any other origin is `403`. A missing
+`Origin` is allowed, which is how non-browser clients call the endpoint.
+The in-process `/v1` call forwards that `Origin` when the client sent one
+and omits it otherwise. It does not substitute an internal origin.
+
+Session ids and other URL segments are one path segment: `.`, `..`, and
+characters such as `/` are rejected before a request is built. Filesystem
+paths reject `.` and `..` segments (including percent-encoded ones). The
+dry-run preview shows the percent-encoded path the confirmed call sends.
+
+`send_message` and `answer_elicitation` with `wait: true` read the session
+(`GET /v1/sessions/{id}?include_items=false`) before subscribing to the live
+stream, so a caller without read access never joins it. The wait stops when
+the MCP client disconnects. `timeout_seconds` is checked only when `wait`
+is true.
+
+The endpoint is on by default. Turn it off with `mcp_enabled: false` in the
+server config, or set `OMNIGENT_MCP_ENABLED` to `0`, `false`, `no`, or
+`off`. The env var and the config key both also accept `1`, `true`, `yes`,
+and `on`. Any other string turns the endpoint off. A disabled server answers
+`/mcp` with `404` before the content-type and origin checks.
 
 ## Get a token
 
@@ -104,7 +127,7 @@ includes `will_lose`, a sentence naming what that call removes.
 | `sharing` | `get` or `set` on `/v1/sharing`. `set` needs confirm. A deployment-managed setting is refused by the route |
 
 `confirm` must be the boolean `true`. Any other value, including the string
-`"true"`, is a dry-run.
+`"true"` and the number `1`, is a dry-run.
 
 ### What the API does not do
 

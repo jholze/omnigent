@@ -117,6 +117,42 @@ def _error(response: httpx.Response) -> str:
     return str(result["content"][0]["text"])
 
 
+def _record_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, Any]]:
+    """Record every in-process route call ``/mcp`` makes, then perform it."""
+    from omnigent.server.mcp_endpoint import _UNSET, _Api
+
+    seen: list[tuple[str, str, Any]] = []
+    original = _Api.call
+
+    async def recording(
+        self: _Api,
+        method: str,
+        path: str,
+        body: Any = _UNSET,
+        *,
+        timeout: float = 30.0,
+    ) -> Any:
+        seen.append((method, path, None if body is _UNSET else body))
+        return await original(self, method, path, body, timeout=timeout)
+
+    monkeypatch.setattr(_Api, "call", recording)
+    return seen
+
+
+def _assert_upstream(
+    response: httpx.Response, method: str, path: str, body: Any, seen: list[tuple[str, str, Any]]
+) -> None:
+    """The tool both called this exact request and reported that request."""
+    assert (method, path, body) in seen
+    result = response.json()["result"]
+    text = str(result["content"][0]["text"])
+    if result.get("isError") is True:
+        assert f"Omnigent {method} {path} returned HTTP" in text
+        return
+    parsed = json.loads(text)
+    assert isinstance(parsed, dict | list | str)
+
+
 async def _session(client: httpx.AsyncClient, name: str) -> str:
     agent = await create_test_agent(client, name=name)
     return str(agent["_session_id"])
@@ -152,6 +188,11 @@ async def test_every_write_tool_dry_run_ignores_string_confirm(
         quoted["confirm"] = "true"
         still_dry = await _call(mcp_client, name, quoted)
         assert _tool_text(still_dry)["dry_run"] is True, name
+
+        numbered = dict(payload)
+        numbered["confirm"] = 1
+        still_number = await _call(mcp_client, name, numbered)
+        assert _tool_text(still_number)["dry_run"] is True, name
 
     after = {
         row["id"] for row in (await mcp_client.get("/v1/sessions?visibility=all")).json()["data"]
@@ -277,7 +318,9 @@ async def test_elicitation_answer_and_wait(mcp_client: httpx.AsyncClient) -> Non
     assert answered["timed_out"] is False
 
 
-async def test_session_files_and_workspace(mcp_client: httpx.AsyncClient) -> None:
+async def test_session_files_and_workspace(
+    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """List and read a real uploaded file. Environment writes hit the runner-less route."""
     session_id = await _session(mcp_client, "files-ext")
     empty = _tool_text(
@@ -343,43 +386,57 @@ async def test_session_files_and_workspace(mcp_client: httpx.AsyncClient) -> Non
     )
     assert workspace_dry["dry_run"] is True
     assert "approval gate" in workspace_dry["effect"]
-    for action, arguments in (
-        ("list", {}),
-        ("read", {"path": "src/app.py"}),
-        ("search", {"q": "app"}),
-        ("changes", {}),
-        ("diff", {"path": "src/app.py"}),
-        ("write", {"path": "notes.txt", "content": "hello", "confirm": True}),
-        ("shell", {"command": "pwd", "confirm": True}),
-    ):
+    seen = _record_calls(monkeypatch)
+    root = f"/v1/sessions/{session_id}/resources/environments/default"
+    expected = (
+        ("list", {}, "GET", f"{root}/filesystem", None),
+        ("read", {"path": "src/app.py"}, "GET", f"{root}/filesystem/src/app.py", None),
+        ("search", {"q": "app"}, "GET", f"{root}/search?q=app", None),
+        ("changes", {}, "GET", f"{root}/changes", None),
+        ("diff", {"path": "src/app.py"}, "GET", f"{root}/diff/src/app.py", None),
+        (
+            "write",
+            {"path": "notes.txt", "content": "hello", "confirm": True},
+            "PUT",
+            f"{root}/filesystem/notes.txt",
+            {"content": "hello"},
+        ),
+        (
+            "shell",
+            {"command": "pwd", "confirm": True},
+            "POST",
+            f"{root}/shell",
+            {"command": "pwd"},
+        ),
+    )
+    for action, arguments, method, path, body in expected:
         response = await _call(
             mcp_client,
             "session_workspace",
             {"session_id": session_id, "action": action, **arguments},
         )
-        text = response.json()["result"]["content"][0]["text"]
-        assert session_id in text
+        _assert_upstream(response, method, path, body, seen)
 
 
-async def test_session_github_state(mcp_client: httpx.AsyncClient) -> None:
+async def test_session_github_state(
+    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """GitHub reads and a confirmed attach hit the route and surface its runner error."""
     session_id = await _session(mcp_client, "github-ext")
-    for action, arguments in (
-        ("info", {}),
-        ("changes", {}),
-        ("diff", {}),
-        ("diff", {"path": "src/app.py"}),
+    seen = _record_calls(monkeypatch)
+    root = f"/v1/sessions/{session_id}/resources/github"
+    for action, arguments, path in (
+        ("info", {}, root),
+        ("changes", {}, f"{root}/changes"),
+        ("diff", {}, f"{root}/diff"),
+        ("diff", {"path": "src/app.py"}, f"{root}/diff/src/app.py"),
     ):
         response = await _call(
             mcp_client,
             "session_github",
             {"session_id": session_id, "action": action, **arguments},
         )
-        text = response.json()["result"]["content"][0]["text"]
-        if response.json()["result"].get("isError") is True:
-            assert session_id in text
-        else:
-            assert json.loads(text)
+        _assert_upstream(response, "GET", path, None, seen)
 
     dry = _tool_text(
         await _call(
@@ -404,7 +461,13 @@ async def test_session_github_state(mcp_client: httpx.AsyncClient) -> None:
             "confirm": True,
         },
     )
-    assert session_id in _error(refused)
+    _assert_upstream(
+        refused,
+        "POST",
+        f"{root}/prs",
+        {"url": "https://github.com/example/repo/pull/2", "action": "attach"},
+        seen,
+    )
 
 
 async def test_manage_session(mcp_client: httpx.AsyncClient) -> None:
@@ -633,10 +696,11 @@ async def test_comments_round_trip(mcp_client: httpx.AsyncClient) -> None:
 
 
 async def test_host_filesystem_and_worktrees_report_a_missing_host(
-    mcp_client: httpx.AsyncClient,
+    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No live host in this app. Dry-run skips the POST; confirm returns the route 404."""
     host_id = "ab" * 16
+    seen = _record_calls(monkeypatch)
     dry = _tool_text(
         await _call(
             mcp_client,
@@ -646,24 +710,26 @@ async def test_host_filesystem_and_worktrees_report_a_missing_host(
     )
     assert dry["dry_run"] is True
     assert dry["method"] == "POST"
+    root = f"/v1/hosts/{host_id}"
     refused = await _call(
         mcp_client,
         "host_fs",
         {"action": "mkdir", "host_id": host_id, "path": "/tmp/oa-mcp-dir", "confirm": True},
     )
+    _assert_upstream(refused, "POST", f"{root}/directories", {"path": "/tmp/oa-mcp-dir"}, seen)
     assert "host not found" in _error(refused)
     listing = await _call(mcp_client, "host_fs", {"action": "list", "host_id": host_id})
-    assert "host not found" in _error(listing)
+    _assert_upstream(listing, "GET", f"{root}/filesystem", None, seen)
     nested = await _call(
         mcp_client, "host_fs", {"action": "list", "host_id": host_id, "path": "src"}
     )
-    assert "host not found" in _error(nested)
+    _assert_upstream(nested, "GET", f"{root}/filesystem/src", None, seen)
     worktrees = await _call(
         mcp_client,
         "host_fs",
         {"action": "worktrees", "host_id": host_id, "path": "/tmp/oa-mcp-repo"},
     )
-    assert "host not found" in _error(worktrees)
+    _assert_upstream(worktrees, "GET", f"{root}/worktrees?path=%2Ftmp%2Foa-mcp-repo", None, seen)
 
 
 async def test_projects_usage_and_order(mcp_client: httpx.AsyncClient) -> None:
@@ -960,7 +1026,9 @@ async def test_session_mcp_server_round_trip(mcp_client: httpx.AsyncClient) -> N
     assert removed == {"ok": True}
 
 
-async def test_harnesses_skills_and_extensions(mcp_client: httpx.AsyncClient) -> None:
+async def test_harnesses_skills_and_extensions(
+    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Harnesses and extensions list. Skills on a session with no host return the route 409."""
     session_id = await _session(mcp_client, "skills-ext")
     harnesses = _tool_text(await _call(mcp_client, "list_harnesses"))
@@ -975,7 +1043,9 @@ async def test_harnesses_skills_and_extensions(mcp_client: httpx.AsyncClient) ->
         missing = await _call(mcp_client, "get_extension", {"extension_id": "not-installed"})
         assert missing.json()["result"]["isError"] is True
 
+    seen = _record_calls(monkeypatch)
     skills = await _call(mcp_client, "list_skills", {"session_id": session_id})
+    _assert_upstream(skills, "GET", f"/v1/skills?session_id={session_id}", None, seen)
     assert "session host is not ready" in _error(skills)
 
 
@@ -1098,3 +1168,73 @@ async def test_permissions_grant_and_revoke(
             await _call(client, "session_access", {"session_id": session_id, "action": "list"})
         )
         assert all(row["user_id"] != "alice@example.com" for row in after["permissions"])
+
+
+async def test_path_traversal_is_rejected_before_the_request(
+    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``..`` is a tool error. confirm true does not send the collapsed URL."""
+    session_id = await _session(mcp_client, "traversal-ext")
+    before = {
+        row["id"] for row in (await mcp_client.get("/v1/sessions?visibility=all")).json()["data"]
+    }
+    seen = _record_calls(monkeypatch)
+    attacks = (
+        (
+            "session_workspace",
+            {"session_id": session_id, "action": "delete", "path": "../../../..", "confirm": True},
+        ),
+        (
+            "session_workspace",
+            {
+                "session_id": session_id,
+                "action": "delete",
+                "path": "foo/../../etc/passwd",
+                "confirm": True,
+            },
+        ),
+        (
+            "session_workspace",
+            {
+                "session_id": session_id,
+                "action": "delete",
+                "path": "%2e%2e/%2e%2e",
+                "confirm": True,
+            },
+        ),
+        (
+            "session_workspace",
+            {"session_id": "..", "action": "delete", "path": "notes.txt", "confirm": True},
+        ),
+        (
+            "manage_session",
+            {"session_id": "..", "action": "delete", "confirm": True},
+        ),
+        (
+            "session_files",
+            {"session_id": session_id, "action": "delete", "file_id": "..", "confirm": True},
+        ),
+        (
+            "host_fs",
+            {"action": "list", "host_id": "ab" * 16, "path": "../.."},
+        ),
+    )
+    for name, arguments in attacks:
+        assert "invalid" in _error(await _call(mcp_client, name, arguments))
+    assert seen == []
+    preview = _tool_text(
+        await _call(
+            mcp_client,
+            "session_workspace",
+            {"session_id": session_id, "action": "delete", "path": "my notes.txt"},
+        )
+    )
+    encoded = f"/v1/sessions/{session_id}/resources/environments/default/filesystem/my%20notes.txt"
+    assert preview["dry_run"] is True
+    assert preview["path"] == encoded
+    assert preview["method"] == "DELETE"
+    after = {
+        row["id"] for row in (await mcp_client.get("/v1/sessions?visibility=all")).json()["data"]
+    }
+    assert after == before
+    assert (await mcp_client.get(f"/v1/sessions/{session_id}")).status_code == 200

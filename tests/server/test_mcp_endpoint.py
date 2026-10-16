@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from omnigent.db.utils import get_or_create_engine
 from omnigent.runtime import init as init_runtime
@@ -29,7 +31,10 @@ from omnigent.server.accounts_store import SqlAlchemyAccountStore
 from omnigent.server.app import create_app
 from omnigent.server.auth import UnifiedAuthProvider, create_auth_provider
 from omnigent.server.mcp_endpoint import (
+    ToolFailure,
+    _forwarded_headers,
     _TurnState,
+    _watch_posted,
     mcp_endpoint_enabled,
     working_directory_from_labels,
 )
@@ -93,6 +98,16 @@ def test_mcp_enabled_env_overrides_config(monkeypatch: pytest.MonkeyPatch) -> No
     assert mcp_endpoint_enabled({"mcp_enabled": True}) is False
     monkeypatch.setenv("OMNIGENT_MCP_ENABLED", "yes")
     assert mcp_endpoint_enabled({"mcp_enabled": False}) is True
+    monkeypatch.setenv("OMNIGENT_MCP_ENABLED", "on")
+    assert mcp_endpoint_enabled({"mcp_enabled": False}) is True
+    monkeypatch.setenv("OMNIGENT_MCP_ENABLED", "off")
+    assert mcp_endpoint_enabled({"mcp_enabled": True}) is False
+    monkeypatch.setenv("OMNIGENT_MCP_ENABLED", "maybe")
+    assert mcp_endpoint_enabled({"mcp_enabled": True}) is False
+    monkeypatch.delenv("OMNIGENT_MCP_ENABLED", raising=False)
+    assert mcp_endpoint_enabled({"mcp_enabled": "on"}) is True
+    assert mcp_endpoint_enabled({"mcp_enabled": "OFF"}) is False
+    assert mcp_endpoint_enabled({"mcp_enabled": "maybe"}) is False
 
 
 def test_working_directory_joins_composer_label_chunks() -> None:
@@ -1071,3 +1086,291 @@ def test_disabled_flag_returns_404(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         response = client.post("/mcp", json=_rpc_body("initialize"))
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "not_found"
+        plain = client.post("/mcp", content=b"{}", headers={"content-type": "text/plain"})
+        assert plain.status_code == 404
+
+
+def test_plain_text_body_is_unsupported(mcp_app: FastAPI) -> None:
+    """A cross-site simple request cannot drive ``/mcp``. JSON is required first."""
+    with TestClient(mcp_app) as client:
+        response = client.post(
+            "/mcp",
+            content=json.dumps(
+                _rpc_body(
+                    "tools/call",
+                    {
+                        "name": "create_session",
+                        "arguments": {"agent_name": "x", "confirm": True},
+                    },
+                )
+            ),
+            headers={"content-type": "text/plain", "origin": "https://evil.example"},
+        )
+    assert response.status_code == 415
+
+
+def test_untrusted_origin_is_forbidden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local single-user mode rejects a non-loopback Origin and still allows a missing one."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    provider = UnifiedAuthProvider(
+        source="header", local_single_user=True, header_name="X-Forwarded-Email"
+    )
+    app = _sync_app(tmp_path, monkeypatch, auth_provider=provider, server_config={})
+    init = _rpc_body("initialize")
+    with TestClient(app) as client:
+        evil = client.post("/mcp", json=init, headers={"Origin": "https://evil.example"})
+        assert evil.status_code == 403
+        loopback = client.post("/mcp", json=init, headers={"Origin": "http://127.0.0.1:6767"})
+        assert loopback.status_code == 200, loopback.text
+        absent = client.post("/mcp", json=init)
+        assert absent.status_code == 200, absent.text
+        before = client.get("/v1/sessions").json()["data"]
+        write = client.post(
+            "/mcp",
+            json=_rpc_body(
+                "tools/call",
+                {
+                    "name": "create_session",
+                    "arguments": {"agent_name": "crossed", "confirm": True},
+                },
+            ),
+            headers={"Origin": "https://evil.example"},
+        )
+        assert write.status_code == 403
+        after = client.get("/v1/sessions").json()["data"]
+    assert before == after
+
+
+def test_forwarded_headers_do_not_replace_origin() -> None:
+    """The inner ``/v1`` call keeps the caller's Origin and invents none."""
+
+    def _request(headers: list[tuple[bytes, bytes]]) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/mcp",
+                "raw_path": b"/mcp",
+                "query_string": b"",
+                "headers": headers,
+                "client": ("127.0.0.1", 1234),
+                "server": ("test", 80),
+            }
+        )
+
+    forwarded = _forwarded_headers(
+        _request([(b"origin", b"http://127.0.0.1:6767"), (b"authorization", b"Bearer t")]),
+        None,
+    )
+    assert forwarded["origin"] == "http://127.0.0.1:6767"
+    assert "omnigent://internal" not in forwarded.values()
+    assert "origin" not in _forwarded_headers(_request([]), None)
+
+
+def test_protocol_version_is_negotiated(mcp_app: FastAPI) -> None:
+    """An unknown protocol version becomes the latest. A supported one is echoed."""
+    with TestClient(mcp_app) as client:
+        unknown = client.post(
+            "/mcp", json=_rpc_body("initialize", {"protocolVersion": "1999-01-01"})
+        )
+        assert unknown.status_code == 200, unknown.text
+        assert unknown.json()["result"]["protocolVersion"] == "2025-03-26"
+        assert unknown.headers["mcp-protocol-version"] == "2025-03-26"
+        older = client.post(
+            "/mcp", json=_rpc_body("initialize", {"protocolVersion": "2024-11-05"})
+        )
+        assert older.json()["result"]["protocolVersion"] == "2024-11-05"
+        assert older.headers["mcp-protocol-version"] == "2024-11-05"
+        missing = client.post("/mcp", json=_rpc_body("initialize", {}))
+        assert missing.json()["result"]["protocolVersion"] == "2025-03-26"
+
+
+def test_delegated_scope_token_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scope-bearing token is confined to the delegated allowlist, which excludes ``/mcp``."""
+    from omnigent.server.routes.device_auth import mint_delegated_token
+
+    _accounts_env(monkeypatch, tmp_path)
+    app = _sync_app(
+        tmp_path,
+        monkeypatch,
+        auth_provider=create_auth_provider(),
+        server_config={},
+        accounts=True,
+    )
+    token = mint_delegated_token(
+        "mcp-machine",
+        bytes.fromhex("ab" * 32),
+        3600,
+        "accounts",
+        grant_id=None,
+        client_id="mcp-test",
+        jti="jti-mcp-scope",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    with TestClient(app) as client:
+        allowed = client.get("/v1/sessions", headers=headers)
+        assert allowed.status_code == 200, allowed.text
+        response = client.post("/mcp", json=_rpc_body("initialize"), headers=headers)
+    assert response.status_code == 401
+
+
+async def test_timeout_seconds_is_checked_only_when_waiting(mcp_client: httpx.AsyncClient) -> None:
+    """An invalid timeout is a dry-run when wait is off, and an error when wait is on."""
+    agent = await create_test_agent(mcp_client, name="timeout-guard")
+    session_id = agent["_session_id"]
+    dry = await mcp_client.post(
+        "/mcp",
+        json=_rpc_body(
+            "tools/call",
+            {
+                "name": "send_message",
+                "arguments": {
+                    "session_id": session_id,
+                    "text": "stay dry",
+                    "wait": False,
+                    "timeout_seconds": "nope",
+                },
+            },
+        ),
+    )
+    planned = _tool_text(dry)
+    assert planned["dry_run"] is True
+    assert "timeout_seconds" not in planned
+    waited = await mcp_client.post(
+        "/mcp",
+        json=_rpc_body(
+            "tools/call",
+            {
+                "name": "send_message",
+                "arguments": {
+                    "session_id": session_id,
+                    "text": "stay dry",
+                    "wait": True,
+                    "timeout_seconds": "nope",
+                },
+            },
+        ),
+    )
+    result = waited.json()["result"]
+    assert result["isError"] is True
+    assert "timeout_seconds" in result["content"][0]["text"]
+
+
+async def test_send_message_wait_requires_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``wait`` reads the session before subscribe. A stranger never joins the stream."""
+    from omnigent.runtime import session_stream
+
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    provider = UnifiedAuthProvider(
+        source="header", local_single_user=True, header_name="X-Forwarded-Email"
+    )
+    app = _sync_app(tmp_path, monkeypatch, auth_provider=provider, server_config={})
+    subscribed: list[str] = []
+    original = session_stream.subscribe
+
+    def _spy(conversation_id: str, **kwargs: Any) -> Any:
+        subscribed.append(conversation_id)
+        return original(conversation_id, **kwargs)
+
+    monkeypatch.setattr(session_stream, "subscribe", _spy)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        agent = await create_test_agent(client, name="wait-acl")
+        session_id = str(agent["_session_id"])
+        denied = await client.post(
+            "/mcp",
+            json=_rpc_body(
+                "tools/call",
+                {
+                    "name": "send_message",
+                    "arguments": {
+                        "session_id": session_id,
+                        "text": "should not run",
+                        "confirm": True,
+                        "wait": True,
+                    },
+                },
+            ),
+            headers={"X-Forwarded-Email": "bob@example.com"},
+        )
+    assert denied.status_code == 200, denied.text
+    result = denied.json()["result"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert f"GET /v1/sessions/{session_id}?include_items=false returned HTTP" in text
+    assert subscribed == []
+
+
+class _DroppingRequest:
+    """Flips to disconnected once the watched POST has been issued."""
+
+    def __init__(self) -> None:
+        self.drop = False
+        self.checks = 0
+
+    async def is_disconnected(self) -> bool:
+        self.checks += 1
+        return self.drop
+
+
+class _WatchApi:
+    def __init__(self, request: _DroppingRequest, *, fail_read: bool = False) -> None:
+        self._request = request
+        self.fail_read = fail_read
+        self.calls: list[tuple[str, str]] = []
+
+    async def call(
+        self, method: str, path: str, body: Any = None, *, timeout: float = 30.0
+    ) -> Any:
+        del body, timeout
+        self.calls.append((method, path))
+        if method == "GET" and self.fail_read:
+            raise ToolFailure(f"Omnigent {method} {path} returned HTTP 403: forbidden")
+        if method == "POST":
+            self._request.drop = True
+        return {"id": "sess"}
+
+
+async def _do_not_post() -> None:
+    raise AssertionError("post must not run")
+
+
+async def test_wait_refuses_subscribe_without_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 403 on the session read happens before the live stream is joined."""
+    subscribed: list[str] = []
+
+    def _forbid(conversation_id: str, **kwargs: Any) -> Any:
+        del kwargs
+        subscribed.append(conversation_id)
+        raise AssertionError("subscribe must not run")
+
+    monkeypatch.setattr("omnigent.runtime.session_stream.subscribe", _forbid)
+    api = _WatchApi(_DroppingRequest(), fail_read=True)
+    with pytest.raises(ToolFailure, match="403"):
+        await _watch_posted(api, "sess", _do_not_post, 30)
+    assert api.calls == [("GET", "/v1/sessions/sess?include_items=false")]
+    assert subscribed == []
+
+
+async def test_wait_stops_when_the_client_disconnects() -> None:
+    """A disconnect during the turn wait returns without sitting out the budget."""
+    request = _DroppingRequest()
+
+    async def post() -> dict[str, bool]:
+        request.drop = True
+        return {"ok": True}
+
+    api = _WatchApi(request)
+    started = time.monotonic()
+    with pytest.raises(ToolFailure, match="client disconnected"):
+        await _watch_posted(api, "sess-disconnect", post, 30)
+    assert time.monotonic() - started < 2
+    assert api.calls == [("GET", "/v1/sessions/sess-disconnect?include_items=false")]
+    assert request.drop is True

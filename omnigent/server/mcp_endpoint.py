@@ -6,11 +6,14 @@ Every write returns the request it would make unless ``confirm`` is boolean
 true. Deletes and revokes also name what that request would destroy.
 
 Tool calls go through the existing HTTP routes on this process
-(:class:`httpx.ASGITransport`), forwarding the caller's credentials, so
-session permissions, validation, and event dispatch stay in the routes that
-already own them. Waiting for a reply subscribes to the in-process live
-stream that ``GET /v1/sessions/{id}/stream`` serves, and the subscription is
-opened before the message POST so the turn's ``session.status`` is not missed.
+(:class:`httpx.ASGITransport`), forwarding the caller's credentials and
+``Origin`` unchanged, so session permissions, validation, and event dispatch
+stay in the routes that already own them. ``POST /mcp`` itself requires a
+JSON content type and the same trusted-origin check as ``/v1``. Waiting for
+a reply reads the session (the live stream's read check) before subscribing
+to the in-process stream that ``GET /v1/sessions/{id}/stream`` serves, and
+the subscription is opened before the message POST so the turn's
+``session.status`` is not missed.
 """
 
 from __future__ import annotations
@@ -30,9 +33,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
-from omnigent.server.auth import AuthProvider, env_var_is_truthy
+from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes._content_type import require_json_content_type
+from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.version import VERSION
 
 _logger = logging.getLogger(__name__)
@@ -49,6 +53,8 @@ _HARD_TERMINAL = frozenset(
     {"response.failed", "response.cancelled", "turn.failed", "turn.cancelled"}
 )
 _UNSET = object()
+# How often a waiting tool notices the MCP client has gone away.
+_DISCONNECT_SLICE_S = 0.25
 
 
 class ToolFailure(Exception):
@@ -63,26 +69,47 @@ class _RpcFailure(Exception):
         self.rpc_code = code
 
 
+_MCP_ON = frozenset({"1", "true", "yes", "on"})
+_MCP_OFF = frozenset({"0", "false", "no", "off"})
+# Versions this server can speak. An unknown client version gets the latest,
+# not an echo of the request (MCP lifecycle negotiation).
+_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26")
+_LATEST_PROTOCOL = _PROTOCOL_VERSIONS[-1]
+
+
+def _mcp_bool(raw: str) -> bool | None:
+    """Parse ``on``/``off`` the same way for the env var and the config key."""
+    value = raw.strip().lower()
+    if value in _MCP_ON:
+        return True
+    if value in _MCP_OFF:
+        return False
+    return None
+
+
 def mcp_endpoint_enabled(config: Mapping[str, Any]) -> bool:
     """Whether ``POST /mcp`` serves MCP calls.
 
-    Default on. The route uses the same authentication as ``/v1``, so an
-    anonymous caller receives 401 and enabling it does not add an anonymous
-    surface. ``OMNIGENT_MCP_ENABLED`` overrides the ``mcp_enabled`` key in the
-    server config (``true`` / ``false``).
+    Default on. ``POST /mcp`` requires ``Content-Type: application/json`` and
+    the same trusted-Origin rule as ``/v1``, then the same authentication, so
+    a cross-site ``text/plain`` request cannot drive it. ``OMNIGENT_MCP_ENABLED``
+    overrides the ``mcp_enabled`` config key. Both accept ``1``/``true``/``yes``/``on``
+    and ``0``/``false``/``no``/``off``.
 
     :param config: Resolved server config. An absent ``mcp_enabled`` key stays on.
     :returns: ``True`` when the endpoint should accept MCP calls.
     """
     raw = os.environ.get(_MCP_ENV)
     if raw is not None and raw.strip():
-        return env_var_is_truthy(_MCP_ENV, default=True)
+        parsed = _mcp_bool(raw)
+        return False if parsed is None else parsed
     value = config.get("mcp_enabled", True)
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    if isinstance(value, int):
+        parsed = _mcp_bool(value)
+        return False if parsed is None else parsed
+    if isinstance(value, int) and not isinstance(value, bool):
         return value != 0
     return True
 
@@ -134,7 +161,7 @@ def tool_definitions() -> list[dict[str, Any]]:
     """Return the MCP tool list advertised by ``tools/list``."""
     from omnigent.server.mcp_extensions import extension_tool_definitions
 
-    core = [
+    core: list[dict[str, Any]] = [
         {
             "name": "health",
             "description": (
@@ -384,6 +411,8 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
     ]
+    for tool in core:
+        tool["inputSchema"]["additionalProperties"] = False
     return core + extension_tool_definitions()
 
 
@@ -405,6 +434,11 @@ def create_mcp_router(auth_provider: AuthProvider | None) -> APIRouter:
         """Serve one Streamable HTTP MCP message, or 401/404/405."""
         if not getattr(request.app.state, "mcp_enabled", False):
             raise OmnigentError("MCP endpoint is disabled", code=ErrorCode.NOT_FOUND)
+        # Same CSRF boundary as /v1, checked here so the inner call cannot
+        # re-label a text/plain body as JSON or swap in a first-party Origin.
+        if request.method == "POST":
+            require_json_content_type(request)
+            require_trusted_origin(request)
         require_user(request, auth_provider)
         if request.method != "POST":
             return Response(status_code=405, headers={"Allow": "POST"})
@@ -488,7 +522,10 @@ async def _dispatch(
 
 def _initialize_result(params: Mapping[str, Any]) -> dict[str, Any]:
     requested = params.get("protocolVersion")
-    version = requested if isinstance(requested, str) and requested else "2025-03-26"
+    if isinstance(requested, str) and requested in _PROTOCOL_VERSIONS:
+        version = requested
+    else:
+        version = _LATEST_PROTOCOL
     return {
         "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": False}},
@@ -545,6 +582,7 @@ class _Api:
 
     def __init__(self, request: Request, auth_provider: AuthProvider | None) -> None:
         self._app = request.app
+        self._request = request
         self._headers = _forwarded_headers(request, auth_provider)
 
     async def call(
@@ -584,10 +622,14 @@ def _forwarded_headers(request: Request, auth_provider: AuthProvider | None) -> 
     """Copy the caller's credentials onto the in-process route call.
 
     The inner route runs ``require_user`` again, so the acting user is the
-    MCP caller. ``Origin`` is the server's own sentinel: these calls are not
-    a browser form post.
+    MCP caller. ``Origin`` is forwarded unchanged when the caller sent one,
+    and omitted when they did not. It is not replaced with the first-party
+    sentinel; ``/mcp`` already applied :func:`require_trusted_origin`.
     """
-    headers = {"accept": "application/json", "origin": OMNIGENT_INTERNAL_WS_ORIGIN}
+    headers = {"accept": "application/json"}
+    origin = request.headers.get("origin")
+    if origin:
+        headers["origin"] = origin
     for name in ("authorization", "cookie"):
         value = request.headers.get(name)
         if value:
@@ -642,9 +684,15 @@ def _blank_to_none(value: str | None) -> str | None:
 
 
 def _require_id(value: str, name: str) -> str:
+    """Reject a value that is not one safe URL path segment.
+
+    ``.`` and ``..`` are rejected as well as ``/``. httpx collapses dot
+    segments, so ``/v1/sessions/..`` would be sent as ``DELETE /v1`` even
+    though the preview showed the original path.
+    """
     if not value:
         raise ToolFailure(f"{name} is required")
-    if any(char in value for char in " \t\r\n/?#"):
+    if value in {".", ".."} or any(char in value for char in " \t\r\n/?#\\"):
         raise ToolFailure(f"{name} contains invalid characters")
     return value
 
@@ -1077,20 +1125,21 @@ async def _send_message(api: _Api, args: Mapping[str, Any]) -> Any:
     body = _user_message_event(text)
     path = f"{_session_path(session_id)}/events"
     wait = args.get("wait") is True
-    budget = _timeout_seconds(args.get("timeout_seconds"))
     if args.get("confirm") is not True:
         extra = None
         if wait:
             extra = {
                 "wait": {
                     "stream": f"GET {_session_path(session_id)}/stream?idle=false",
-                    "timeout_seconds": budget,
+                    "timeout_seconds": _timeout_seconds(args.get("timeout_seconds")),
                 }
             }
         return _preview("POST", path, body, extra)
     if not wait:
         return await api.call("POST", path, body)
-    result = await _watch_turn(api, session_id, body, budget)
+    result = await _watch_turn(
+        api, session_id, body, _timeout_seconds(args.get("timeout_seconds"))
+    )
     if not result["reply"] and not result["needs_input"]:
         try:
             page = await api.call(
@@ -1106,10 +1155,48 @@ async def _send_message(api: _Api, args: Mapping[str, Any]) -> Any:
     return result
 
 
+async def _wait_for_client(request: Request, waiter: asyncio.Future[Any], timeout: float) -> Any:
+    """Return ``waiter``'s result, or raise when the MCP client disconnects.
+
+    A finished waiter returns immediately. Disconnect is polled about four
+    times a second so a hung turn does not keep the handler open after the
+    client has gone. This does not cancel ``waiter``.
+
+    :param request: The ``/mcp`` request. ``is_disconnected`` is the ASGI signal.
+    :param waiter: The stream-open task or the live-event pump.
+    :param timeout: Seconds to wait before :class:`TimeoutError`.
+    :returns: Whatever ``waiter`` completed with.
+    :raises ToolFailure: The client disconnected before ``waiter`` finished.
+    :raises TimeoutError: ``timeout`` elapsed first.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        if waiter.done():
+            return waiter.result()
+        if await request.is_disconnected():
+            raise ToolFailure("client disconnected")
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        await asyncio.wait({waiter}, timeout=min(_DISCONNECT_SLICE_S, remaining))
+
+
 async def _watch_posted(
-    session_id: str, post: Callable[[], Awaitable[Any]], budget_s: float
+    api: _Api, session_id: str, post: Callable[[], Awaitable[Any]], budget_s: float
 ) -> dict[str, Any]:
-    """Subscribe to the live stream, run ``post``, then read until the turn ends."""
+    """Read-check the session, subscribe, run ``post``, then read until the turn ends.
+
+    The read is ``GET /v1/sessions/{id}?include_items=false``. That route
+    applies the same read permission as ``GET .../stream``, and it runs
+    before subscribe so a refused caller never joins the live stream.
+    """
+    request = api._request
+    if await request.is_disconnected():
+        raise ToolFailure("client disconnected")
+    await api.call("GET", _with_query(_session_path(session_id), {"include_items": False}))
+    if await request.is_disconnected():
+        raise ToolFailure("client disconnected")
     state = _TurnState()
     ready = asyncio.Event()
     task = asyncio.create_task(_pump_live_events(session_id, state, ready))
@@ -1117,22 +1204,31 @@ async def _watch_posted(
     timed_out = False
     post_error: ToolFailure | None = None
     try:
+        ready_wait = asyncio.create_task(ready.wait())
         try:
-            await asyncio.wait_for(ready.wait(), timeout=5)
-        except TimeoutError as exc:
-            raise ToolFailure("timed out opening the session live stream") from exc
+            try:
+                await _wait_for_client(request, ready_wait, 5)
+            except TimeoutError as exc:
+                raise ToolFailure("timed out opening the session live stream") from exc
+        finally:
+            if not ready_wait.done():
+                ready_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ready_wait
         try:
             accepted = await post()
         except ToolFailure as exc:
             post_error = exc
         else:
             try:
-                await asyncio.wait_for(task, timeout=budget_s)
+                await _wait_for_client(request, task, budget_s)
             except TimeoutError:
                 timed_out = not state.done
                 if not state.done:
                     state.finish("timeout")
             except asyncio.CancelledError:
+                raise
+            except ToolFailure:
                 raise
             except Exception as exc:  # noqa: BLE001 — a dropped live tail still returns what was observed
                 _logger.debug("mcp live stream ended for %s: %s", session_id, exc)
@@ -1153,12 +1249,12 @@ async def _watch_posted(
 async def _watch_turn(
     api: _Api, session_id: str, body: dict[str, Any], budget_s: float
 ) -> dict[str, Any]:
-    """Subscribe to the live stream, then post the message, then read until the turn ends."""
+    """Read-check the session, subscribe, post the message, then read until the turn ends."""
 
     async def post() -> Any:
         return await api.call("POST", f"{_session_path(session_id)}/events", body)
 
-    return await _watch_posted(session_id, post, budget_s)
+    return await _watch_posted(api, session_id, post, budget_s)
 
 
 async def _pump_live_events(session_id: str, state: _TurnState, ready: asyncio.Event) -> None:
