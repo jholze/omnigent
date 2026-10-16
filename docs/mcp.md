@@ -71,6 +71,11 @@ Add this to `~/.cursor/mcp.json` (or the project `.cursor/mcp.json`):
 
 ## Tools
 
+Core session drive stays one tool per action. The rest of `/v1` is grouped
+behind an `action` argument so the catalog stays short. A write action does
+nothing unless `confirm` is boolean `true`. A delete or revoke preview
+includes `will_lose`, a sentence naming what that call removes.
+
 | Tool | Effect |
 | --- | --- |
 | `health`, `info` | `GET /health`, `GET /v1/info` |
@@ -82,20 +87,34 @@ Add this to `~/.cursor/mcp.json` (or the project `.cursor/mcp.json`):
 | `create_session` | `POST /v1/sessions`. `agent_id` or `agent_name`, plus optional `host_id`, `workspace`, and `message`. Dry-run unless `confirm` is true |
 | `send_message` | `POST /v1/sessions/{id}/events` with `type: "message"` and an `input_text` block. `wait: true` reads the live stream until `session.status` is `idle` or `failed`, an elicitation arrives (`needs_input`), or `timeout_seconds` (default 120) |
 | `interrupt_turn`, `stop_session` | `{type: "interrupt"}` / `{type: "stop_session"}` on the events route. Dry-run unless `confirm` is true |
-| `resolve_elicitation` | `POST /v1/sessions/{id}/elicitations/{elicitation_id}/resolve` |
-| `update_session`, `delete_session` | Patch title, project, or archived; delete the session. `delete_branch` asks the host to remove a server-created worktree branch |
-| `add_comment`, `update_comment`, `delete_comment`, `list_comments` | Review comments on a session |
-| `list_session_files` | Files stored on the session. Upload stays on the multipart route |
-| `get_session_github`, `list_session_github_changes`, `attach_session_pull_request` | GitHub state, the PR file list, and attaching a pull request |
-| `list_environment_changes`, `get_environment_diff` | Environment change list and one file diff |
-| `list_host_filesystem`, `list_host_worktrees`, `create_host_directory` | Host directory listing, git worktrees, and creating a directory. These need a live host |
-| `get_project`, `create_project`, `update_project`, `delete_project`, `get_usage` | Project CRUD and the caller's usage report |
-| `list_session_policies`, `create_session_policy`, `delete_session_policy`, `list_policy_registry` | Per-session policies and the built-in handler registry |
-| `list_session_mcp_servers`, `add_session_mcp_server`, `delete_session_mcp_server` | MCP servers declared on the session's agent |
-| `list_skills`, `list_extensions`, `get_extension` | Skills for a session or host, and installed extensions |
-| `list_session_permissions`, `get_session_owner`, `grant_session_access`, `revoke_session_access` | Session grants. Needs the permissions store |
-| `get_sharing`, `set_sharing` | Server sharing settings. A deployment-managed setting is refused by the route |
+| `get_elicitation` | `GET .../elicitations/{elicitation_id}` |
+| `answer_elicitation` | `POST .../elicitations/{id}/resolve`. `approve`/`deny` map to `accept`/`decline`. `text` is sent as `content.text`. `wait: true` subscribes to the live stream before the verdict and reads until the turn ends |
+| `session_files` | `list`, `get`, `content`, `delete` on `.../resources/files`. `delete` needs confirm |
+| `session_workspace` | `list`, `read`, `search`, `changes`, `diff`, `write`, `edit`, `delete`, `shell` on `.../resources/environments/{environment_id}`. `environment_id` defaults to `default`. `write`, `edit`, `delete`, and `shell` need confirm. `shell` is owner-only and has no approval gate |
+| `session_github` | `info`, `changes`, `diff`, `attach_pr`, `preferences` on `.../resources/github`. `attach_pr` and `preferences` need confirm |
+| `manage_session` | `update` (title, archived, project, labels, model_override), `fork`, `delete`, `children`, `agent`, `labels`, `reset_model`. `update`, `fork`, `delete`, and `reset_model` need confirm. `delete_branch` also removes a server-created worktree branch |
+| `session_comments` | `list`, `add`, `update`, `delete`, `send`. `send` is `POST .../comments/send`: it marks comments addressed and returns `formatted_message`. It does not post a turn |
+| `host_fs` | `list` (`GET /v1/hosts/{id}/filesystem` and `.../filesystem/{path}`), `worktrees`, `mkdir`. `mkdir` needs confirm. These need a live host |
+| `project` | `get`, `create`, `update`, `delete`, `order`, `usage`. `order` with no `ordered_project_ids` reads `GET /v1/projects/order`; a list or `null` is `PUT`. `usage` is `GET /v1/usage`. `delete` leaves member sessions unfiled |
+| `policy` | `list`, `get`, `create`, `update`, `delete`, `evaluate`, `registry`, with `scope` `session` (default) or `global`. `evaluate` is per session (`POST .../policies/evaluate`) and can rewrite content. `registry` is `GET /v1/policy-registry`. Writes need confirm |
+| `session_mcp` | `list`, `create`, `update`, `delete` on `.../agent/mcp-servers`. Writes change the agent bundle and need confirm |
+| `list_skills` | `GET /v1/skills`. Pass `session_id`, or `host_id` plus `harness` and `path` |
+| `list_extensions`, `get_extension` | `GET /v1/extensions` and `GET /v1/extensions/{id}` |
+| `session_access` | `list`, `owner`, `grant`, `revoke` on `.../permissions`. `grant` and `revoke` need confirm. Level is 1–3 |
+| `sharing` | `get` or `set` on `/v1/sharing`. `set` needs confirm. A deployment-managed setting is refused by the route |
 
 `confirm` must be the boolean `true`. Any other value, including the string
-`"true"`, is a dry-run. That applies to every write tool, not only
-`create_session` and `send_message`.
+`"true"`, is a dry-run.
+
+### What the API does not do
+
+These were dropped or renamed after checking the routes and `openapi.json`:
+
+* There is no JSON session-file upload. `POST .../resources/files` is multipart.
+* Replacing a session agent is `PUT .../agent` with a `.tar.gz` bundle, not a JSON body. `manage_session` `agent` is the read. MCP servers on that agent are `session_mcp`.
+* `comments/send` does not deliver text to the agent. It marks the comments addressed and returns `formatted_message`. Post that text with `send_message`.
+* Labels are read with `manage_session` `labels` (`GET .../labels`). Writing them is `manage_session` `update`, which merges `labels` through `PATCH /v1/sessions/{id}`. There is no labels write route.
+* `reset_model` is `POST .../model-override/reset`. It clears `expected_model_override` only while that selection is still current. To clear unconditionally, `update` with `model_override` set to `default`, `off`, or `reset`.
+* There is no global policy evaluate route. `policy` `evaluate` is per session. Global `create` accepts `type=python` and a handler from `policy` `registry`; a URL handler is rejected by the route.
+* `session_workspace` `diff` and `session_github` `diff` call routes that are mounted with `include_in_schema=false`. They are real, and they are absent from `openapi.json`.
+* `files:copy` is a lineage copy into a child session, not a general file write, so it is not a tool.

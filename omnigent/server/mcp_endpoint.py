@@ -2,8 +2,8 @@
 
 External agents (Claude Code, Cursor, remote cloud agents) call ``POST /mcp``
 with JSON-RPC and the same credentials as ``/v1``. Reads run immediately.
-``create_session``, ``send_message``, ``interrupt_turn``, and ``stop_session``
-return the request they would make unless ``confirm`` is boolean true.
+Every write returns the request it would make unless ``confirm`` is boolean
+true. Deletes and revokes also name what that request would destroy.
 
 Tool calls go through the existing HTTP routes on this process
 (:class:`httpx.ASGITransport`), forwarding the caller's credentials, so
@@ -21,7 +21,7 @@ import json
 import logging
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -497,6 +497,7 @@ def _initialize_result(params: Mapping[str, Any]) -> dict[str, Any]:
             "Drives this Omnigent server as the authenticated user. "
             "Every write tool does nothing unless confirm is boolean true; "
             "it returns the method, path, and body it would send. "
+            "Deletes and revokes include will_lose, naming what would be destroyed. "
             "A user message is POST /v1/sessions/{id}/events with type message. "
             "send_message wait:true reads the session live stream until the turn ends. "
             "list_projects returns project id, name, workspace, and default agent; "
@@ -1105,10 +1106,10 @@ async def _send_message(api: _Api, args: Mapping[str, Any]) -> Any:
     return result
 
 
-async def _watch_turn(
-    api: _Api, session_id: str, body: dict[str, Any], budget_s: float
+async def _watch_posted(
+    session_id: str, post: Callable[[], Awaitable[Any]], budget_s: float
 ) -> dict[str, Any]:
-    """Subscribe to the live stream, then post the message, then read until the turn ends."""
+    """Subscribe to the live stream, run ``post``, then read until the turn ends."""
     state = _TurnState()
     ready = asyncio.Event()
     task = asyncio.create_task(_pump_live_events(session_id, state, ready))
@@ -1121,7 +1122,7 @@ async def _watch_turn(
         except TimeoutError as exc:
             raise ToolFailure("timed out opening the session live stream") from exc
         try:
-            accepted = await api.call("POST", f"{_session_path(session_id)}/events", body)
+            accepted = await post()
         except ToolFailure as exc:
             post_error = exc
         else:
@@ -1147,6 +1148,17 @@ async def _watch_turn(
     if post_error is not None:
         raise post_error
     return state.to_result(accepted, timed_out)
+
+
+async def _watch_turn(
+    api: _Api, session_id: str, body: dict[str, Any], budget_s: float
+) -> dict[str, Any]:
+    """Subscribe to the live stream, then post the message, then read until the turn ends."""
+
+    async def post() -> Any:
+        return await api.call("POST", f"{_session_path(session_id)}/events", body)
+
+    return await _watch_posted(session_id, post, budget_s)
 
 
 async def _pump_live_events(session_id: str, state: _TurnState, ready: asyncio.Event) -> None:
