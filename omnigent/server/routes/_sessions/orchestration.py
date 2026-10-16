@@ -2257,7 +2257,30 @@ async def _resolve_elicitation(
     # matches, no resolved event published) rather than 500-ing the
     # client — the runner forward still fires so the runner can reject.
     elicitation_id = data.get("elicitation_id", "")
+    if isinstance(elicitation_id, str) and elicitation_id:
+        try:
+            from omnigent.errors import ErrorCode, OmnigentError
+            from omnigent.server import session_outbox
+
+            decision_write = session_outbox.record_decision(
+                elicitation_id=elicitation_id,
+                session_id=session_id,
+                decision={
+                    key: value
+                    for key, value in data.items()
+                    if key in {"action", "content"} and value is not None
+                },
+            )
+        except Exception:  # noqa: BLE001 — webhook failure must not block the verdict
+            _logger.exception("manager webhook decision write failed for %s", elicitation_id)
+        else:
+            if decision_write.ownership_mismatch:
+                raise OmnigentError(
+                    "Elicitation not found",
+                    code=ErrorCode.NOT_FOUND,
+                )
     harness_future = _harness_elicitation_registry.get(elicitation_id)
+    harness_consumed = False
     if harness_future is not None and not harness_future.done():
         # Only the session that owns this elicitation
         # may resolve its server-side Future. A mismatch skips
@@ -2274,6 +2297,7 @@ async def _resolve_elicitation(
                 )
             else:
                 harness_future.set_result(verdict_result)
+                harness_consumed = True
                 # The waiter may be a zombie: a proxy can sever the
                 # long-poll client-side while holding the backend
                 # connection open, so the verdict set above is written to
@@ -2356,7 +2380,22 @@ async def _resolve_elicitation(
             )
     # Runner-side elicitations (policy approvals, scaffold dispatch)
     # resolve when the canonical approval event reaches the runner.
-    await _forward_approval_to_runner(session_id, data, runner_router)
+    runner_response = await _forward_approval_to_runner(session_id, data, runner_router)
+    runner_consumed = False
+    if runner_response is not None:
+        header = runner_response.headers.get("X-Omnigent-Pending-Approval-Resolved", "")
+        runner_consumed = header == "1" or 200 <= runner_response.status_code < 300
+    if (
+        (harness_consumed or runner_consumed)
+        and isinstance(elicitation_id, str)
+        and elicitation_id
+    ):
+        try:
+            from omnigent.server import session_outbox
+
+            session_outbox.record_elicitation_resumed(elicitation_id=elicitation_id)
+        except Exception:  # noqa: BLE001 — webhook failure must not block resolution
+            _logger.exception("manager webhook resumed write failed for %s", elicitation_id)
 
 
 def _spawn_native_approval_popup_forward(

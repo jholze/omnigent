@@ -1313,6 +1313,44 @@ def _ensure_default_polly_agent(
     )
 
 
+def _wire_manager_webhook(
+    *,
+    conversation_store: ConversationStore,
+    agent_store: AgentStore,
+    project_store: ProjectStore | None,
+) -> Any:
+    """Attach the lifecycle outbox to this process, or disable it.
+
+    Validates ``manager_webhook`` before the app serves traffic. An enabled
+    block with a bad endpoint raises and the process does not start. The
+    default (block absent) leaves the feature off and still constructs the
+    store so a later config edit can be picked up by the dispatcher without
+    a code change — writes themselves stay gated on ``enabled``.
+
+    :returns: The store, or ``None`` when this process has no database URI.
+    """
+    from omnigent.server.manager_webhook_context import build_lookups
+    from omnigent.server.server_config import manager_webhook_config
+    from omnigent.server.session_outbox import configure
+    from omnigent.stores.session_lifecycle_store.sqlalchemy_store import (
+        SqlAlchemySessionLifecycleStore,
+    )
+
+    manager_webhook_config()
+    location = getattr(conversation_store, "storage_location", None)
+    if not isinstance(location, str) or "://" not in location:
+        configure(None)
+        return None
+    store = SqlAlchemySessionLifecycleStore(location)
+    context_lookup, summary_lookup = build_lookups(
+        conversation_store=conversation_store,
+        agent_store=agent_store,
+        project_store=project_store,
+    )
+    configure(store, context_lookup=context_lookup, summary_lookup=summary_lookup)
+    return store
+
+
 def create_app(
     agent_store: AgentStore,
     file_store: FileStore,
@@ -1584,6 +1622,11 @@ def create_app(
     _mcp_pool = ServerMcpPool()
     server_metrics = ServerPerformanceMetrics()
     server_metrics_otel = ServerMetricsOtelPublisher()
+    lifecycle_store = _wire_manager_webhook(
+        conversation_store=conversation_store,
+        agent_store=agent_store,
+        project_store=project_store,
+    )
 
     @asynccontextmanager
     async def _lifespan(
@@ -1720,6 +1763,11 @@ def create_app(
                 otel_publisher=server_metrics_otel,
             )
         )
+        webhook_dispatcher_task: asyncio.Task[None] | None = None
+        if lifecycle_store is not None:
+            from omnigent.server.manager_webhook_dispatcher import start_dispatcher
+
+            webhook_dispatcher_task = start_dispatcher(lifecycle_store)
         # Runner ``runner_last_seen`` is refreshed per-tunnel from each
         # runner tunnel's ping loop (``runner_tunnel._ping_loop``), inside
         # that handler's ``workspace_scope`` — not from a lifespan sweep,
@@ -1813,6 +1861,13 @@ def create_app(
             metrics_publish_task.cancel()
             with suppress(asyncio.CancelledError):
                 await metrics_publish_task
+            if webhook_dispatcher_task is not None:
+                from omnigent.server.manager_webhook_dispatcher import cancel_dispatcher
+
+                await cancel_dispatcher(webhook_dispatcher_task)
+            from omnigent.server import session_outbox as _session_outbox
+
+            _session_outbox.configure(None)
             # Stop in-flight background managed-sandbox launches so a
             # slow provision doesn't outlive the ASGI shutdown (the
             # sandbox itself, if already provisioned, is reaped by the
@@ -1862,6 +1917,7 @@ def create_app(
             host_store.admit_launch, require_account_owner=runner_account_store is not None
         )
     app.state.agent_store = agent_store
+    app.state.session_lifecycle_store = lifecycle_store
     app.state.sandbox_config = sandbox_config
     app.state.branding_snapshot = branding_snapshot
     app.state.feature_flags = resolved_feature_flags

@@ -603,7 +603,9 @@ async def test_branding_snapshot_performs_no_request_time_io_or_decode(
 
     app = _build_branding_app(db_uri, tmp_path, "no-request-io")
     startup_counts = (config_loads, logo_reads, validations, pillow_opens)
-    assert startup_counts == (1, 1, 1, 2)
+    # Boot reads the file once for branding and once for manager_webhook.
+    # Requests must not add another read, decode, or image open.
+    assert startup_counts == (2, 1, 1, 2)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

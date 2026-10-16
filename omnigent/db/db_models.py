@@ -1730,3 +1730,134 @@ class SqlScheduledTaskRun(OmnigentBase):
             "conversation_id",
         ),
     )
+
+
+class SqlSessionLifecycleCursor(OmnigentBase):
+    """Per-session monotonic sequence allocator for the lifecycle outbox."""
+
+    __tablename__ = "session_lifecycle_cursors"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    session_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    next_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+
+
+class SqlSessionLifecycleOutbox(OmnigentBase):
+    """Transactional outbox of manager-webhook lifecycle events.
+
+    ``id`` is the externally stable event id (UUIDv5). Payload JSON is
+    stored compressed. No foreign keys (Rule R032): ``session_id`` is
+    application-owned.
+    """
+
+    __tablename__ = "session_lifecycle_outbox"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    session_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    event_type: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    transition_key: Mapped[str] = mapped_column(String(192), nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    payload: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    status: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_attempt_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    delivered_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_http_status: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN (1, 2, 3, 4, 5)",
+            name="ck_session_lifecycle_outbox_event_type",
+        ),
+        CheckConstraint(
+            "status IN (1, 2, 3, 4, 5)",
+            name="ck_session_lifecycle_outbox_status",
+        ),
+        Index(
+            "uq_session_lifecycle_outbox_session_sequence",
+            "workspace_id",
+            "session_id",
+            "sequence",
+            unique=True,
+        ),
+        Index(
+            "uq_session_lifecycle_outbox_transition",
+            "workspace_id",
+            "session_id",
+            "event_type",
+            "transition_key",
+            unique=True,
+        ),
+        Index(
+            "ix_session_lifecycle_outbox_claim",
+            "status",
+            "next_attempt_at",
+            "workspace_id",
+        ),
+        Index(
+            "ix_session_lifecycle_outbox_session_order",
+            "workspace_id",
+            "session_id",
+            "sequence",
+            "status",
+        ),
+    )
+
+
+class SqlSessionElicitation(OmnigentBase):
+    """Durable human-decision ledger.
+
+    ``id`` is the elicitation token (``elicit_…``), not a bare UUID, so it
+    is a string column. ``session_id`` is a Uuid16 with no foreign key.
+    """
+
+    __tablename__ = "session_elicitations"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    status: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    request_payload: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    decision_payload: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    decided_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resolved_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (1, 2, 3, 4)",
+            name="ck_session_elicitations_status",
+        ),
+        Index(
+            "ix_session_elicitations_session_id",
+            "workspace_id",
+            "session_id",
+        ),
+    )

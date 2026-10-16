@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from types import MappingProxyType
@@ -713,3 +714,280 @@ def branding_logo_asset(variant: str = "main") -> BrandingAsset | None:
 def branding_config() -> dict[str, Any]:
     """Branding block surfaced by ``GET /v1/info`` for the web UI."""
     return load_branding_snapshot().config()
+
+
+# Event names the manager webhook can emit. The first four match the
+# upstream lifecycle push. ``session.decision_resolved`` is a fork extension
+# emitted when a human verdict is durably recorded.
+MANAGER_WEBHOOK_EVENT_TYPES: tuple[str, ...] = (
+    "session.completed",
+    "session.failed",
+    "session.awaiting_decision",
+    "session.resumed",
+    "session.decision_resolved",
+)
+
+_RESERVED_WEBHOOK_HEADERS = frozenset(
+    {
+        "content-type",
+        "x-omnigent-event-id",
+        "x-omnigent-event-type",
+        "x-omnigent-delivery-attempt",
+        "x-omnigent-timestamp",
+        "x-omnigent-signature",
+        "x-omnigent-key-id",
+    }
+)
+
+_LOCAL_WEBHOOK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class ManagerWebhookConfigError(RuntimeError):
+    """``manager_webhook`` is enabled with a config that cannot deliver."""
+
+
+@dataclass(frozen=True)
+class ManagerWebhookConfig:
+    """Resolved ``manager_webhook`` block.
+
+    The signing key is not here. It lives in
+    ``OMNIGENT_MANAGER_WEBHOOK_SECRET`` (and ``_PREVIOUS`` during rotation).
+
+    :param enabled: When false, nothing is recorded or delivered.
+    :param endpoint: HTTPS URL, or HTTP only for localhost when
+        ``allow_insecure_localhost`` is set.
+    :param events: Event types to record. Defaults to every known type.
+    :param timeout_seconds: Per-attempt HTTP timeout.
+    :param max_attempts: Attempts before a row is marked dead-letter. The
+        row keeps retrying at the capped backoff after that.
+    :param extra_headers: Static headers merged under the signature headers.
+    :param public_base_url: Optional origin used to build a web deep link.
+    :param summary_max_chars: Cap for completed/failed summary text.
+    :param allow_insecure_localhost: Permit ``http://127.0.0.1``,
+        ``http://localhost``, or ``http://[::1]`` endpoints.
+    :param key_id: Optional id sent as ``X-Omnigent-Key-Id``.
+    """
+
+    enabled: bool = False
+    endpoint: str | None = None
+    events: tuple[str, ...] = MANAGER_WEBHOOK_EVENT_TYPES
+    timeout_seconds: float = 10.0
+    max_attempts: int = 10
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
+    public_base_url: str | None = None
+    summary_max_chars: int = 500
+    allow_insecure_localhost: bool = False
+    key_id: str | None = None
+
+    def wants(self, event_type: str) -> bool:
+        """Return whether *event_type* is in the subscription list."""
+        return event_type in self.events
+
+
+_webhook_config_cache: tuple[float, float | None, ManagerWebhookConfig] | None = None
+_WEBHOOK_CONFIG_TTL_SECONDS = 1.0
+
+
+def reset_manager_webhook_config_cache() -> None:
+    """Drop the short-lived config cache. Tests call this after editing the file."""
+    global _webhook_config_cache
+    _webhook_config_cache = None
+
+
+def _as_bool(value: Any, *, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off", ""}:
+            return False
+    raise ManagerWebhookConfigError(f"manager_webhook.{key} must be a boolean")
+
+
+def _validate_webhook_url(url: str, *, key: str, allow_insecure_localhost: bool) -> str:
+    from urllib.parse import urlsplit
+
+    stripped = url.strip()
+    parsed = urlsplit(stripped)
+    if parsed.username or parsed.password:
+        raise ManagerWebhookConfigError(f"manager_webhook.{key} must not embed credentials")
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and host:
+        return stripped
+    local = host in _LOCAL_WEBHOOK_HOSTS
+    if parsed.scheme == "http" and local and allow_insecure_localhost:
+        return stripped
+    raise ManagerWebhookConfigError(
+        f"manager_webhook.{key} {stripped!r} must be HTTPS "
+        "(http is allowed only for localhost when allow_insecure_localhost is true)"
+    )
+
+
+def _bounded_int(value: Any, *, key: str, default: int, low: int, high: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ManagerWebhookConfigError(f"manager_webhook.{key} must be an integer") from exc
+    if parsed < low or parsed > high:
+        raise ManagerWebhookConfigError(f"manager_webhook.{key} must be between {low} and {high}")
+    return parsed
+
+
+def _bounded_float(value: Any, *, key: str, default: float, low: float, high: float) -> float:
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ManagerWebhookConfigError(f"manager_webhook.{key} must be a number") from exc
+    if parsed < low or parsed > high:
+        raise ManagerWebhookConfigError(f"manager_webhook.{key} must be between {low} and {high}")
+    return parsed
+
+
+def _parse_events(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return MANAGER_WEBHOOK_EVENT_TYPES
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ManagerWebhookConfigError("manager_webhook.events must be a list of event names")
+    unknown = [item for item in items if item not in MANAGER_WEBHOOK_EVENT_TYPES]
+    if unknown:
+        known = ", ".join(MANAGER_WEBHOOK_EVENT_TYPES)
+        raise ManagerWebhookConfigError(
+            f"manager_webhook.events has unknown entries {unknown}; known types: {known}"
+        )
+    # Preserve order, drop duplicates.
+    seen: dict[str, None] = {}
+    for item in items:
+        seen.setdefault(item, None)
+    return tuple(seen)
+
+
+def _parse_extra_headers(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ManagerWebhookConfigError("manager_webhook.extra_headers must be a mapping")
+    headers: dict[str, str] = {}
+    for key, raw in value.items():
+        name = str(key).strip()
+        if not name or any(ch in name for ch in "\r\n:"):
+            raise ManagerWebhookConfigError(
+                f"manager_webhook.extra_headers has an invalid name {key!r}"
+            )
+        if name.lower() in _RESERVED_WEBHOOK_HEADERS:
+            raise ManagerWebhookConfigError(
+                f"manager_webhook.extra_headers cannot override {name}"
+            )
+        if not isinstance(raw, str):
+            raise ManagerWebhookConfigError(
+                f"manager_webhook.extra_headers[{name}] must be a string"
+            )
+        if "\r" in raw or "\n" in raw:
+            raise ManagerWebhookConfigError(
+                f"manager_webhook.extra_headers[{name}] must be a single line"
+            )
+        headers[name] = raw
+    return headers
+
+
+def manager_webhook_config(*, refresh: bool = False) -> ManagerWebhookConfig:
+    """Resolve the ``manager_webhook`` block.
+
+    Disabled (the default) when the block is absent. An enabled block with
+    a missing or non-HTTPS endpoint fails closed. The result is cached for
+    about a second so the status path does not re-read the file on every edge.
+
+    :raises ManagerWebhookConfigError: When the block is present and invalid,
+        including ``enabled: true`` without a usable endpoint.
+    """
+    global _webhook_config_cache
+    path = resolve_config_path()
+    mtime = path.stat().st_mtime if path is not None and path.is_file() else None
+    now = time.monotonic()
+    cached = _webhook_config_cache
+    if (
+        not refresh
+        and cached is not None
+        and now - cached[0] < _WEBHOOK_CONFIG_TTL_SECONDS
+        and cached[1] == mtime
+    ):
+        return cached[2]
+    config = _parse_manager_webhook(load_server_config())
+    _webhook_config_cache = (now, mtime, config)
+    return config
+
+
+def _parse_manager_webhook(root: Mapping[str, Any]) -> ManagerWebhookConfig:
+    raw = root.get("manager_webhook")
+    if raw is None:
+        return ManagerWebhookConfig()
+    if not isinstance(raw, Mapping):
+        raise ManagerWebhookConfigError("server config manager_webhook must be a mapping")
+    enabled = _as_bool(raw.get("enabled", False), key="enabled")
+    allow_insecure = _as_bool(
+        raw.get("allow_insecure_localhost", False), key="allow_insecure_localhost"
+    )
+    endpoint_raw = raw.get("endpoint")
+    endpoint: str | None = None
+    if isinstance(endpoint_raw, str) and endpoint_raw.strip():
+        if enabled:
+            endpoint = _validate_webhook_url(
+                endpoint_raw,
+                key="endpoint",
+                allow_insecure_localhost=allow_insecure,
+            )
+        else:
+            endpoint = endpoint_raw.strip()
+    elif enabled:
+        raise ManagerWebhookConfigError(
+            "manager_webhook.enabled is true but manager_webhook.endpoint is not set"
+        )
+    public_raw = raw.get("public_base_url")
+    public_base_url: str | None = None
+    if isinstance(public_raw, str) and public_raw.strip():
+        public_base_url = _validate_webhook_url(
+            public_raw,
+            key="public_base_url",
+            allow_insecure_localhost=allow_insecure,
+        ).rstrip("/")
+    elif public_raw not in (None, ""):
+        raise ManagerWebhookConfigError("manager_webhook.public_base_url must be a string")
+    key_id_raw = raw.get("key_id")
+    key_id = (
+        str(key_id_raw).strip() if isinstance(key_id_raw, str) and key_id_raw.strip() else None
+    )
+    return ManagerWebhookConfig(
+        enabled=enabled,
+        endpoint=endpoint,
+        events=_parse_events(raw.get("events")),
+        timeout_seconds=_bounded_float(
+            raw.get("timeout_seconds"),
+            key="timeout_seconds",
+            default=10.0,
+            low=0.2,
+            high=120.0,
+        ),
+        max_attempts=_bounded_int(
+            raw.get("max_attempts"), key="max_attempts", default=10, low=1, high=100
+        ),
+        extra_headers=_parse_extra_headers(raw.get("extra_headers")),
+        public_base_url=public_base_url,
+        summary_max_chars=_bounded_int(
+            raw.get("summary_max_chars"),
+            key="summary_max_chars",
+            default=500,
+            low=32,
+            high=8000,
+        ),
+        allow_insecure_localhost=allow_insecure,
+        key_id=key_id,
+    )

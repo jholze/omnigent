@@ -2121,6 +2121,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "kiro",
         "lakebox",
         "login",
+        "manager-webhook",
         "opencode",
         "pane-picker",
         "pane-split",
@@ -13816,6 +13817,12 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
 # omnigent.cli_native; register them on the group here, at module bottom, so the
 # shared launch helpers their bodies close over are already defined.
 _register_native_commands(cli)
+
+from omnigent.cli_manager_webhook import (  # noqa: E402
+    register_manager_webhook_commands as _register_manager_webhook_commands,
+)
+
+_register_manager_webhook_commands(cli)
 
 
 if __name__ == "__main__":

@@ -295,6 +295,31 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(autouse=True)
+def _reset_manager_webhook_state() -> Generator[None, None, None]:
+    """Drop process-global manager-webhook state between tests.
+
+    ``create_app`` points the outbox producer at the test database. Without
+    this reset, a later test can write into a database the previous test
+    already closed, or deliver with a config that test left behind.
+    """
+
+    def _reset() -> None:
+        outbox = sys.modules.get("omnigent.server.session_outbox")
+        if outbox is not None:
+            outbox.reset_for_tests()
+        dispatcher = sys.modules.get("omnigent.server.manager_webhook_dispatcher")
+        if dispatcher is not None:
+            dispatcher.reset_dispatcher_for_tests()
+        config = sys.modules.get("omnigent.server.server_config")
+        if config is not None:
+            config.reset_manager_webhook_config_cache()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_runner_catalog_cache() -> Generator[None, None, None]:
     """
     Clear smart routing's per-session runner-catalog cache after every test.
