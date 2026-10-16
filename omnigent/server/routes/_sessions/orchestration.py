@@ -2205,6 +2205,7 @@ async def _resolve_elicitation(
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
     conversation_store: ConversationStore | None = None,
+    decided_by: str | None = None,
 ) -> None:
     """
     Resolve one outstanding elicitation from an approval payload.
@@ -2249,6 +2250,8 @@ async def _resolve_elicitation(
     :param conversation_store: Optional store used to mirror the
         resolved signal into ancestor streams when ``session_id`` is
         a child session. ``None`` keeps the signal scoped locally.
+    :param decided_by: Authenticated user id stored on the elicitation
+        ledger, or ``None`` when the caller has no user.
     """
     # Empty-string default is intentional, NOT a fail-loud miss: the
     # resolve-URL caller always supplies the id (it comes from the URL
@@ -2257,7 +2260,32 @@ async def _resolve_elicitation(
     # matches, no resolved event published) rather than 500-ing the
     # client — the runner forward still fires so the runner can reject.
     elicitation_id = data.get("elicitation_id", "")
+    if isinstance(elicitation_id, str) and elicitation_id:
+        try:
+            from omnigent.errors import ErrorCode, OmnigentError
+            from omnigent.server import session_outbox
+
+            decision_write = await asyncio.to_thread(
+                session_outbox.record_decision,
+                elicitation_id=elicitation_id,
+                session_id=session_id,
+                decision={
+                    key: value
+                    for key, value in data.items()
+                    if key in {"action", "content"} and value is not None
+                },
+                decided_by=decided_by,
+            )
+        except Exception:  # noqa: BLE001 — webhook failure must not block the verdict
+            _logger.exception("manager webhook decision write failed for %s", elicitation_id)
+        else:
+            if decision_write.ownership_mismatch:
+                raise OmnigentError(
+                    "Elicitation not found",
+                    code=ErrorCode.NOT_FOUND,
+                )
     harness_future = _harness_elicitation_registry.get(elicitation_id)
+    harness_consumed = False
     if harness_future is not None and not harness_future.done():
         # Only the session that owns this elicitation
         # may resolve its server-side Future. A mismatch skips
@@ -2274,6 +2302,7 @@ async def _resolve_elicitation(
                 )
             else:
                 harness_future.set_result(verdict_result)
+                harness_consumed = True
                 # The waiter may be a zombie: a proxy can sever the
                 # long-poll client-side while holding the backend
                 # connection open, so the verdict set above is written to
@@ -2356,7 +2385,28 @@ async def _resolve_elicitation(
             )
     # Runner-side elicitations (policy approvals, scaffold dispatch)
     # resolve when the canonical approval event reaches the runner.
-    await _forward_approval_to_runner(session_id, data, runner_router)
+    runner_response = await _forward_approval_to_runner(session_id, data, runner_router)
+    runner_consumed = False
+    if runner_response is not None:
+        # A bare 2xx is a forward that reached the runner. Only the header
+        # the runner sets after pending_approvals.resolve() means the
+        # verdict was consumed.
+        header = runner_response.headers.get("X-Omnigent-Pending-Approval-Resolved", "")
+        runner_consumed = header == "1"
+    if (
+        (harness_consumed or runner_consumed)
+        and isinstance(elicitation_id, str)
+        and elicitation_id
+    ):
+        try:
+            from omnigent.server import session_outbox
+
+            await asyncio.to_thread(
+                session_outbox.record_elicitation_resumed,
+                elicitation_id=elicitation_id,
+            )
+        except Exception:  # noqa: BLE001 — webhook failure must not block resolution
+            _logger.exception("manager webhook resumed write failed for %s", elicitation_id)
 
 
 def _spawn_native_approval_popup_forward(
@@ -10748,7 +10798,9 @@ async def _create_session_from_existing_agent(
                 and runner_router is not None
             ):
                 runner_owner = runner_router.runner_owner(inherited_runner_id)
-                if runner_owner is not None and runner_owner != user_id:
+                from omnigent.server.principals import same_account
+
+                if runner_owner is not None and not same_account(user_id, runner_owner):
                     inherited_runner_id = None
 
     # Workspace validation: if the caller is binding to a host,

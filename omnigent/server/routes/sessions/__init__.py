@@ -955,6 +955,17 @@ def create_sessions_router(
         permission_store=permission_store,
     )
 
+    from omnigent.server.routes.sessions.routes_manager_webhook import (
+        register_manager_webhook_routes,
+    )
+
+    register_manager_webhook_routes(
+        router,
+        conversation_store=conversation_store,
+        auth_provider=auth_provider,
+        permission_store=permission_store,
+    )
+
     register_events_routes(
         router,
         conversation_store=conversation_store,

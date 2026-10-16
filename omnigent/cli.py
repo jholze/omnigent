@@ -2121,6 +2121,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "kiro",
         "lakebox",
         "login",
+        "manager-webhook",
         "opencode",
         "pane-picker",
         "pane-split",
@@ -4450,6 +4451,9 @@ def server(
     )
     from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
     from omnigent.stores.policy_store.sqlalchemy_store import SqlAlchemyPolicyStore
+    from omnigent.stores.session_chat_store.sqlalchemy_store import (
+        SqlAlchemySessionChatStore,
+    )
     from omnigent.util.tunnel_limits import uvicorn_tunnel_kwargs
 
     cfg = _load_config(config_path)
@@ -4493,6 +4497,7 @@ def server(
     file_store = SqlAlchemyFileStore(db_uri)
     conversation_store = SqlAlchemyConversationStore(db_uri, conv_db_uri)
     comment_store = SqlAlchemyCommentStore(db_uri)
+    chat_store = SqlAlchemySessionChatStore(db_uri)
     policy_store = SqlAlchemyPolicyStore(db_uri)
     permission_store = SqlAlchemyPermissionStore(db_uri)
     scheduled_task_store = SqlAlchemyScheduledTaskStore(db_uri)
@@ -4676,6 +4681,7 @@ def server(
         file_store=file_store,
         conversation_store=conversation_store,
         comment_store=comment_store,
+        chat_store=chat_store,
         policy_store=policy_store,
         artifact_store=artifact_store,
         agent_cache=agent_cache,
@@ -13816,6 +13822,12 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
 # omnigent.cli_native; register them on the group here, at module bottom, so the
 # shared launch helpers their bodies close over are already defined.
 _register_native_commands(cli)
+
+from omnigent.cli_manager_webhook import (  # noqa: E402
+    register_manager_webhook_commands as _register_manager_webhook_commands,
+)
+
+_register_manager_webhook_commands(cli)
 
 
 if __name__ == "__main__":
