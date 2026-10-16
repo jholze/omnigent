@@ -1145,6 +1145,37 @@ def test_read_transcript_items_since_unwraps_pasted_content_in_list_blocks(
     }
 
 
+def test_read_transcript_items_since_strips_resume_system_reminder(tmp_path: Path) -> None:
+    """A resumed prompt mirrors as the typed text, not Claude's reminder chrome."""
+    transcript_path = tmp_path / "session.jsonl"
+    wrapped = (
+        "<system-reminder>\nThe session was resumed from a previous conversation.\n"
+        "</system-reminder>\n\n"
+        "This is turn 3. Context marker usr-3-abcd1234."
+    )
+    transcript_path.write_text(
+        json.dumps(
+            {"type": "user", "uuid": "user-1", "message": {"role": "user", "content": wrapped}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _cursor, _current_response_id, items = read_transcript_items_since(
+        transcript_path,
+        0,
+        agent_name="claude-native-ui",
+    )
+
+    assert [item.item_type for item in items] == ["message"]
+    assert items[0].data == {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "This is turn 3. Context marker usr-3-abcd1234."}
+        ],
+    }
+
+
 def test_read_transcript_items_since_strips_inline_image_data(tmp_path: Path) -> None:
     """
     Reading an image file must not replay its base64 data as prompt text.
@@ -2092,6 +2123,121 @@ def test_scheduled_wake_skips_tool_results_and_real_prompts(tmp_path: Path) -> N
     assert result.items[0].response_id == "resp_prev_turn"
     assert result.items[2].data["role"] == "assistant"
     assert result.items[2].response_id not in {"resp_prev_turn", None}
+
+
+def test_api_request_blob_is_not_mirrored_as_a_user_bubble(tmp_path: Path) -> None:
+    """SessionStart hook context in an ``api-request-blob`` is not a user turn.
+
+    Claude Code 2.x nests ``message.role=user`` on those records. Treating
+    them as prompts would FIFO-drain a lost queued message onto hook chrome.
+    """
+    transcript_path = tmp_path / "session.jsonl"
+    blob_text = (
+        "<system-reminder>\nSessionStart hook additional context: <hindsight_knowledge>\n"
+        "tools below are registered\n</system-reminder>"
+    )
+    transcript_path.write_text(
+        _transcript_line(
+            {
+                "type": "api-request-blob",
+                "uuid": "blob-1",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": blob_text}],
+                },
+            }
+        )
+        + _transcript_line(
+            {
+                "type": "user",
+                "uuid": "real-prompt",
+                "message": {
+                    "role": "user",
+                    "content": "This is turn 3. Context marker usr-3-abcd1234.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = read_transcript_items_from_offset(
+        transcript_path,
+        0,
+        start_line=0,
+        agent_name="claude-native-ui",
+    )
+    assert [item.item_type for item in result.items] == ["message"]
+    assert result.items[0].data["role"] == "user"
+    assert result.items[0].data["content"] == [
+        {"type": "input_text", "text": "This is turn 3. Context marker usr-3-abcd1234."}
+    ]
+
+
+def test_resume_reminder_does_not_mark_following_assistant_as_scheduled_wake(
+    tmp_path: Path,
+) -> None:
+    """Dropped ``--resume`` chrome must not mint scheduled-wake bubbles.
+
+    After ``Stop``, Claude Code prepends a reminder-only user record (and
+    sometimes ``isMeta`` caveat rows) before the next real prompt. Those
+    records are not persisted. Leaving the settled id armed made every
+    following assistant look like a cron firing, so the reconnect grew
+    extra ``[System: scheduled prompt fired]`` user boundaries and the
+    chat showed several assistant bubbles for one turn.
+    """
+    transcript_path = tmp_path / "session.jsonl"
+    reminder = (
+        "<system-reminder>\nThe session was resumed from a previous conversation.\n"
+        "</system-reminder>"
+    )
+    transcript_path.write_text(
+        _transcript_line(
+            {
+                "type": "user",
+                "uuid": "resume-reminder",
+                "isMeta": True,
+                "message": {"role": "user", "content": reminder},
+            }
+        )
+        + _transcript_line(_assistant_text_entry("resume-chrome", "picking up where we left off"))
+        + _transcript_line(
+            {
+                "type": "user",
+                "uuid": "real-prompt",
+                "message": {
+                    "role": "user",
+                    "content": reminder + "\n\nThis is turn 3. Context marker usr-3-abcd1234.",
+                },
+            }
+        )
+        + _transcript_line(_assistant_text_entry("turn-3", "echo ast-3")),
+        encoding="utf-8",
+    )
+
+    result = read_transcript_items_from_offset(
+        transcript_path,
+        0,
+        start_line=0,
+        agent_name="claude-native-ui",
+        current_response_id="resp_prev_turn",
+        settled_response_id="resp_prev_turn",
+    )
+
+    texts = [
+        block.get("text")
+        for item in result.items
+        if item.item_type == "message"
+        for block in item.data["content"]
+        if isinstance(block, dict)
+    ]
+    assert claude_native_bridge._SCHEDULED_WAKE_MARKER_TEXT not in texts
+    roles = [item.data.get("role") for item in result.items if item.item_type == "message"]
+    assert roles == ["assistant", "user", "assistant"]
+    assert texts == [
+        "picking up where we left off",
+        "This is turn 3. Context marker usr-3-abcd1234.",
+        "echo ast-3",
+    ]
 
 
 def test_read_transcript_line_cursor_migration_preserves_legacy_source_ids(

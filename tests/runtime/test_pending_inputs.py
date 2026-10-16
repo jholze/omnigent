@@ -281,6 +281,51 @@ def test_resolve_matching_text_does_not_match_on_unanchored_suffix() -> None:
     ]
 
 
+def test_resolve_matching_text_skips_a_lost_head_when_the_mirror_is_wrapped() -> None:
+    """A resume wrapper around the next prompt must not FIFO-drain a stale head.
+
+    Claude Code prepends ``<system-reminder>`` (or a continuation blurb) to the
+    first prompt after ``--resume``. Equality against the queued text fails,
+    and draining by position would name the lost message in the receipt.
+    """
+    lost = pending_inputs.record("conv_wrap", [_text_block("lost in the reconnect")])
+    nxt = pending_inputs.record(
+        "conv_wrap",
+        [_text_block("This is turn 3. Context marker usr-3-abcd1234. Reply with exactly this.")],
+    )
+    wrapped = (
+        "<system-reminder>\nThe session was resumed from a previous conversation.\n"
+        "</system-reminder>\n\n"
+        "This is turn 3. Context marker usr-3-abcd1234. Reply with exactly this."
+    )
+
+    drained = pending_inputs.resolve_matching_text("conv_wrap", wrapped)
+
+    assert drained.matched is not None and drained.matched.pending_id == nxt
+    assert [entry.pending_id for entry in drained.skipped] == [lost]
+    assert pending_inputs.snapshot_for("conv_wrap") == []
+
+
+def test_resolve_matching_text_does_not_unique_substring_two_contained_entries() -> None:
+    """Two long queued texts inside one mirror are ambiguous; neither drains."""
+    first = pending_inputs.record(
+        "conv_amb", [_text_block("please continue with the original investigation")]
+    )
+    second = pending_inputs.record(
+        "conv_amb", [_text_block("and then summarize the findings for me now")]
+    )
+    drained = pending_inputs.resolve_matching_text(
+        "conv_amb",
+        "please continue with the original investigation "
+        "and then summarize the findings for me now",
+    )
+    assert drained.matched is None
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_amb")] == [
+        first,
+        second,
+    ]
+
+
 def test_resolve_removes_entry_idempotently() -> None:
     """
     :func:`resolve` drops an entry by id (forward-failed rollback).

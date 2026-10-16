@@ -7880,12 +7880,23 @@ def _transcript_items_from_entry(
     """
     if not include_sidechains and entry.get("isSidechain") is True:
         return current_response_id, []
+    # Claude 2.x writes nested ``message.role=user`` on metadata records
+    # (``api-request-blob``, prompt snapshots). Those are not chat turns;
+    # parsing them as user bubbles FIFO-drains a stale pending input.
+    entry_type = entry.get("type")
+    if (
+        entry_type is not None
+        and entry_type not in {"user", "assistant", "attachment"}
+        and entry.get("subtype") != "local_command"
+    ):
+        return current_response_id, []
     if entry.get("type") == "attachment":
         return _attachment_transcript_items_from_entry(
             entry,
             line_number=line_number,
             record_offset=record_offset,
             current_response_id=current_response_id,
+            settled_response_id=settled_response_id,
         )
     if entry.get("subtype") == "local_command":
         return _local_command_transcript_items_from_entry(
@@ -7906,6 +7917,7 @@ def _transcript_items_from_entry(
             record_offset=record_offset,
             agent_name=agent_name,
             current_response_id=current_response_id,
+            settled_response_id=settled_response_id,
         )
     if role == "assistant":
         return _assistant_transcript_items_from_entry(
@@ -7925,6 +7937,7 @@ def _attachment_transcript_items_from_entry(
     line_number: int,
     record_offset: int | None,
     current_response_id: str | None,
+    settled_response_id: str | None = None,
 ) -> tuple[str | None, list[ClaudeTranscriptItem]]:
     """
     Parse user-visible Claude attachment transcript entries.
@@ -7941,8 +7954,13 @@ def _attachment_transcript_items_from_entry(
         starts, or ``None`` for legacy line-cursor reads.
     :param current_response_id: Response id for the active assistant
         turn. Ignored attachment metadata preserves this value.
+    :param settled_response_id: Response id of a turn whose ``Stop``
+        has already been forwarded. Dropped resume chrome must not
+        leave this armed, or the next assistant record is marked as a
+        scheduled wake.
     :returns: Updated active response id and parsed items.
     """
+    dropped_id = _response_id_after_dropped_user(current_response_id, settled_response_id)
     attachment = entry.get("attachment")
     if not isinstance(attachment, dict):
         return current_response_id, []
@@ -7970,21 +7988,22 @@ def _attachment_transcript_items_from_entry(
     if attachment.get("commandMode") != "prompt":
         return current_response_id, []
     if attachment.get("isMeta") is True:
-        return current_response_id, []
+        return dropped_id, []
     if _is_trusted_agent_notification_text(prompt, origin=attachment.get("origin")):
-        return current_response_id, []
+        return dropped_id, []
     source_key = _transcript_source_key(entry, line_number, record_offset)
+    prompt_text = _normalize_mirrored_user_text(prompt)
+    if not prompt_text:
+        return dropped_id, []
     item = ClaudeTranscriptItem(
         source_id=_source_id(source_key, 0, "message"),
         item_type="message",
         data={
             "role": "user",
-            "content": [{"type": "input_text", "text": _unwrap_pasted_content_markers(prompt)}],
+            "content": [{"type": "input_text", "text": prompt_text}],
         },
         response_id=_response_id_from_source(source_key),
-        agent_message_candidate=_is_agent_notification_text(
-            _unwrap_pasted_content_markers(prompt)
-        ),
+        agent_message_candidate=_is_agent_notification_text(prompt_text),
     )
     return None, [item]
 
@@ -8045,6 +8064,60 @@ def _unwrap_pasted_content_markers(text: str) -> str:
     if unwrapped == text:
         return text
     return unwrapped.strip("\n")
+
+
+# Claude Code prepends these to a resumed or injected prompt. They are not
+# user-typed; leaving them on the mirrored bubble breaks pending-input
+# matching (FIFO then drains a stale head) and shows CLI chrome in chat.
+_VENDOR_INJECTED_XML_RE = re.compile(
+    r"<(system-reminder|local-command-caveat)(?:\s[^>]*)?>.*?</\1(?:\s[^>]*)?>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _normalize_mirrored_user_text(text: str) -> str:
+    """
+    Strip Claude-injected wrappers from a mirrored user prompt.
+
+    Paste markers are removed first, then ``<system-reminder>`` /
+    ``<local-command-caveat>`` blocks. The remainder is the text the person
+    sent. Empty when the record was only CLI chrome.
+
+    :param text: Raw user text from a Claude transcript record.
+    :returns: The typed prompt, or ``""`` when nothing user-authored remains.
+    """
+    unwrapped = _unwrap_pasted_content_markers(text)
+    lowered = unwrapped.lower()
+    if "<system-reminder" not in lowered and "<local-command-caveat" not in lowered:
+        return unwrapped
+    return _VENDOR_INJECTED_XML_RE.sub("", unwrapped).strip()
+
+
+def _response_id_after_dropped_user(
+    current_response_id: str | None,
+    settled_response_id: str | None,
+) -> str | None:
+    """
+    Response id to keep after dropping a user record that produced no items.
+
+    Mid-turn CLI chrome (``isMeta`` skill text, a caveat, a reminder) must
+    not split the live assistant turn. After ``Stop``, the same drop would
+    leave ``current_response_id == settled_response_id``, so the next
+    assistant record is parsed as a scheduled wake and the web grows a
+    ``[System: scheduled prompt fired]`` bubble — ``--resume`` writes that
+    chrome, then real output, and one reconnect becomes several assistant
+    bubbles. Clearing the settled id treats resume chrome as continuation,
+    not a cron firing. Cron still wakes: those re-invocations write no
+    user record at all.
+
+    :param current_response_id: Active assistant turn id, if any.
+    :param settled_response_id: Turn id already closed by a ``Stop`` hook.
+    :returns: ``None`` when the latch would fire on the next assistant
+        record; otherwise *current_response_id*.
+    """
+    if current_response_id is not None and current_response_id == settled_response_id:
+        return None
+    return current_response_id
 
 
 _TASK_NOTIFICATION_REQUIRED_MARKERS: tuple[str, ...] = (
@@ -8538,6 +8611,7 @@ def _user_transcript_items_from_entry(
     record_offset: int | None,
     agent_name: str,
     current_response_id: str | None,
+    settled_response_id: str | None = None,
 ) -> tuple[str | None, list[ClaudeTranscriptItem]]:
     """
     Parse a Claude ``role=user`` transcript entry.
@@ -8550,6 +8624,9 @@ def _user_transcript_items_from_entry(
         items so the web UI can attribute the invocation.
     :param current_response_id: Response id for the active assistant
         turn; tool results keep this id.
+    :param settled_response_id: Response id of a turn whose ``Stop``
+        has already been forwarded. Dropped resume chrome must not
+        leave this armed (see :func:`_response_id_after_dropped_user`).
     :returns: Updated active response id and parsed user/tool-result
         items.
     """
@@ -8568,12 +8645,13 @@ def _user_transcript_items_from_entry(
         else []
     )
     # Keep hidden completion provenance so the parent can link the returned child.
+    dropped_id = _response_id_after_dropped_user(current_response_id, settled_response_id)
     if (
         entry.get("isMeta") is True
         and return_id is None
         and not any(_is_task_completion_text(text) for text in notification_texts)
     ):
-        return current_response_id, []
+        return dropped_id, []
     source_key = _transcript_source_key(entry, line_number, record_offset)
     fallback_response_id = _response_id_from_source(source_key)
 
@@ -8643,7 +8721,7 @@ def _user_transcript_items_from_entry(
             # to the user-bubble path — that rendered the markup verbatim
             # in the original bug.
             if payload is None or payload.name in _CLAUDE_CLI_DROPPED_COMMANDS:
-                return current_response_id, []
+                return dropped_id, []
             kind = "command" if payload.name in _CLAUDE_CLI_SURFACED_COMMANDS else "skill"
             data: _JsonObject = {
                 "agent": agent_name,
@@ -8686,21 +8764,20 @@ def _user_transcript_items_from_entry(
         # arrive as standalone ``role=user`` records and must drop instead
         # of leaking as user bubbles.
         if any(stripped.startswith(m) for m in _CLI_SCAFFOLDING_MARKERS):
-            return current_response_id, []
+            return dropped_id, []
+        prompt_text = _normalize_mirrored_user_text(content)
+        if not prompt_text:
+            return dropped_id, []
         items.append(
             ClaudeTranscriptItem(
                 source_id=_source_id(source_key, 0, "message"),
                 item_type="message",
                 data={
                     "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": _unwrap_pasted_content_markers(content)}
-                    ],
+                    "content": [{"type": "input_text", "text": prompt_text}],
                 },
                 response_id=fallback_response_id,
-                agent_message_candidate=_is_agent_notification_text(
-                    _unwrap_pasted_content_markers(content)
-                ),
+                agent_message_candidate=_is_agent_notification_text(prompt_text),
             )
         )
         return None, items
@@ -8745,9 +8822,10 @@ def _user_transcript_items_from_entry(
                 stripped.startswith(m) for m in _CLI_SCAFFOLDING_MARKERS
             ):
                 continue
-            user_blocks.append(
-                {"type": "input_text", "text": _unwrap_pasted_content_markers(text)}
-            )
+            prompt_text = _normalize_mirrored_user_text(text)
+            if not prompt_text:
+                continue
+            user_blocks.append({"type": "input_text", "text": prompt_text})
             saw_user_text = True
             continue
         if block_type != "tool_result":
@@ -8790,7 +8868,11 @@ def _user_transcript_items_from_entry(
                 ),
             ),
         )
-    return (None if saw_user_text else current_response_id), items
+    if saw_user_text:
+        return None, items
+    if items:
+        return current_response_id, items
+    return dropped_id, []
 
 
 def _assistant_transcript_items_from_entry(

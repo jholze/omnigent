@@ -8005,6 +8005,56 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(after.blocks).toBe(existingBlocks);
     });
 
+    it("does not promote a named stale head when the payload is a later pending message", () => {
+      // Server FIFO drained the lost reconnect head onto the next prompt.
+      // The receipt names the lost id; the payload is the next text. Promote
+      // the next bubble so it does not render twice beside a rewritten lost one.
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [
+          { tempId: "pending_lost", content: [{ type: "input_text", text: "lost in the reconnect" }] },
+          {
+            tempId: "pending_next",
+            content: [
+              {
+                type: "input_text",
+                text: "This is turn 3. Context marker usr-3-abcd1234. Reply with exactly this.",
+              },
+            ],
+          },
+        ],
+      });
+
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: "msg_next",
+        itemType: "message",
+        clearedPendingId: "pending_lost",
+        data: {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "This is turn 3. Context marker usr-3-abcd1234. Reply with exactly this.",
+            },
+          ],
+        },
+      });
+
+      const state = useChatStore.getState();
+      expect(state.pendingUserMessages).toEqual([
+        { tempId: "pending_lost", content: [{ type: "input_text", text: "lost in the reconnect" }] },
+      ]);
+      const promoted = state.blocks[0] as UserMessageBlock;
+      expect(promoted.ctx.itemId).toBe("msg_next");
+      expect(promoted.content).toEqual([
+        {
+          type: "input_text",
+          text: "This is turn 3. Context marker usr-3-abcd1234. Reply with exactly this.",
+        },
+      ]);
+    });
+
     it("drops the entry named by clearedPendingId, not the FIFO head", () => {
       // After a rebind the optimistic bubbles are keyed by the SERVER
       // pending id (from the snapshot / adopted on POST). The server

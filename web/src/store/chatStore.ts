@@ -7596,10 +7596,34 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         // 1. Drop by id when the server names the drained entry.
         const cleared = event.clearedPendingId;
         if (cleared) {
-          const idx = s.pendingUserMessages.findIndex(
+          let idx = s.pendingUserMessages.findIndex(
             (p) => p.tempId === cleared || p.pendingId === cleared,
           );
           if (idx >= 0) {
+            const named = s.pendingUserMessages[idx]!;
+            const eventText = eventContent ? messageContentText(eventContent) : "";
+            const namedText = messageContentText(named.content);
+            // A FIFO receipt names a stale lost head while the payload is
+            // the next prompt. Prefer the pending bubble that actually
+            // carries this text so the next message is not committed onto
+            // the lost one (duplicate next, lost vanished). A single
+            // reformatted pending still promotes by id (no other match).
+            if (
+              eventText &&
+              namedText &&
+              eventText !== namedText &&
+              !eventText.endsWith(namedText) &&
+              !namedText.endsWith(eventText)
+            ) {
+              const better = s.pendingUserMessages.findIndex((p) => {
+                const text = messageContentText(p.content);
+                return (
+                  text !== "" &&
+                  (text === eventText || eventText.endsWith(text) || text.endsWith(eventText))
+                );
+              });
+              if (better >= 0) idx = better;
+            }
             const matched = s.pendingUserMessages[idx]!;
             const content = committedContentFor(event, matched.content);
             if (content === null) return {};

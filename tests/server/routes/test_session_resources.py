@@ -5237,6 +5237,90 @@ async def test_claude_native_mirror_matches_pending_text_and_reports_lost_input(
 
 
 @pytest.mark.asyncio
+async def test_claude_native_wrapped_mirror_does_not_drain_a_lost_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume-wrapped next prompt still names its own queued entry in the receipt.
+
+    FIFO would attach the lost message's pending id to the next committed
+    bubble, so the live tab would show that next message twice and drop the
+    lost one. Wrapper-stripped matching persists the lost pair as undelivered.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    published: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        session_stream,
+        "publish",
+        lambda conversation_id, event: published.append((conversation_id, event)),
+    )
+    pending_inputs.reset_for_tests()
+    store = _ConversationStore()
+    sid = "64a784c3aa907d1774f44313546947c6"
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    lost = pending_inputs.record(
+        sid, [{"type": "input_text", "text": "lost in the reconnect"}], created_by="a@example.com"
+    )
+    nxt = pending_inputs.record(
+        sid,
+        [
+            {
+                "type": "input_text",
+                "text": "This is turn 3. Context marker usr-3-abcd1234. Reply with exactly this.",
+            }
+        ],
+        created_by="a@example.com",
+    )
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "<system-reminder>\nThe session was resumed.\n"
+                            "</system-reminder>\n\n"
+                            "This is turn 3. Context marker usr-3-abcd1234. "
+                            "Reply with exactly this."
+                        ),
+                    }
+                ],
+            },
+            "response_id": "resp_still_here",
+            "source_id": "claude:still-here:0",
+        },
+    )
+
+    try:
+        item_id = await _persist_external_conversation_item(
+            sid,
+            conv,
+            body,
+            store,  # type: ignore[arg-type]
+        )
+
+        assert [item.type for item in store.appended_items] == ["message", "error", "message"]
+        lost_user, lost_error, matched_user = store.appended_items
+        assert lost_user.data.content == [{"type": "input_text", "text": "lost in the reconnect"}]
+        assert lost_error.data.code == "native_prompt_not_recorded"
+        assert item_id == matched_user.id
+        assert pending_inputs.snapshot_for(sid) == []
+        receipts = [
+            event["data"]["cleared_pending_id"]
+            for _conversation_id, event in published
+            if event.get("type") == "session.input.consumed"
+        ]
+        assert receipts == [lost, nxt]
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_claude_native_mirror_without_text_match_drains_the_oldest_entry() -> None:
     """A mirror whose text the transcript reformatted still drains by position.
 

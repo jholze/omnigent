@@ -1064,6 +1064,9 @@ function AssistantBubble({
   const hasError = bubble.items.some((it) => it.kind === "error");
   // A bubble carrying an error but no prose stands alone as a thread-level
   // element — the hover footer belongs to assistant text, not to the error.
+  // `data-role="error"` so chat journeys that settle on assistant bubble
+  // count (a reconnect's undelivered banner, a rate-limit pill) do not
+  // treat the banner as a model reply.
   const errorOnly = hasError && !markdownText;
   const spansFullColumn = isWide || hasError;
 
@@ -1072,7 +1075,7 @@ function AssistantBubble({
       <Message
         from="assistant"
         data-testid="message-bubble"
-        data-role="assistant"
+        data-role={errorOnly ? "error" : "assistant"}
         data-response-stable-id={bubble.stableId}
         data-message-id={bubble.responseId}
         className={spansFullColumn ? "max-w-full" : "max-w-[var(--chat-prose-width)]"}

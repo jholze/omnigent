@@ -54,7 +54,11 @@ normalized here — the oldest entry is drained, as before, and every entry
 still queued is marked uncertain (:func:`mark_uncertain`): the drained
 receipt may really have belonged to one of them, so a later match that
 jumps over them drains them quietly instead of recording them as
-undelivered.
+undelivered. Claude-injected ``<system-reminder>`` / paste wrappers are
+stripped first; a unique queued text of at least
+:data:`_MIN_UNIQUE_SUBSTRING_CHARS` characters that is contained in the
+mirror still selects its own entry, so a resume wrapper cannot FIFO-drain
+a stale head.
 
 A message the person cancelled with Stop before the agent recorded it would
 otherwise be recorded as undelivered at the next match. The interrupt route
@@ -140,6 +144,22 @@ _MAX_ENTRIES_PER_CONVERSATION = 64
 # the person typed is never mistaken for a generated one.
 _ONE_LEADING_ATTACHMENT_MARKER_RE = re.compile(rf"^\s*(?:{ATTACHMENT_MARKER_STRIP_PATTERN})\s*")
 _ATTACHMENT_BLOCK_TYPES = frozenset({"input_image", "input_file"})
+# Claude Code injects these around a pasted/resumed prompt. They must not
+# keep the mirror from matching the queued web message — otherwise FIFO
+# drain names the stale head in the receipt and the next message renders
+# twice. Tags only; a phrase the person typed is left alone.
+_VENDOR_INJECTED_XML_RE = re.compile(
+    r"<(system-reminder|local-command-caveat)(?:\s[^>]*)?>.*?</\1(?:\s[^>]*)?>",
+    re.DOTALL | re.IGNORECASE,
+)
+_PASTED_CONTENT_RE = re.compile(
+    r'<pasted_content id="[^"]*">(?P<inner>.*?)</pasted_content(?: id="[^"]*")?>',
+    re.DOTALL,
+)
+# Below this length a queued entry may be an unanchored suffix of an
+# unrelated prompt (``"ok"`` in ``"Let's continue - ok"``). Unique
+# containment is only consulted for longer, identifying texts.
+_MIN_UNIQUE_SUBSTRING_CHARS = 16
 
 
 def _now() -> float:
@@ -693,15 +713,22 @@ def resolve_matching_text(
             else _collapse_whitespace(_content_text(entry.content))
             for _pid, entry in ordered
         ]
-        # Two passes. An exact (whitespace-collapsed) match first, so two
-        # messages that differ only in a marker-like phrase the person typed
-        # at the front stay distinct. Then, for entries carrying attachments:
-        # the executor pastes one generated marker line per file block ahead
-        # of the text, so drop exactly that many from the mirror and compare
-        # with the entry's own text — typed marker-like text still counts.
+        # Exact (whitespace-collapsed) match first, so two messages that
+        # differ only in a marker-like phrase the person typed at the front
+        # stay distinct. Then, for entries carrying attachments: the executor
+        # pastes one generated marker line per file block ahead of the text,
+        # so drop exactly that many from the mirror and compare with the
+        # entry's own text — typed marker-like text still counts. A resume
+        # or paste wrapper Claude prepends is stripped, and a unique long
+        # queued text contained in the mirror still identifies its entry
+        # (FIFO would otherwise hand a stale head to the next message).
         interrupted = [entry.interrupted for _pid, entry in ordered]
-        match_index = _first_match(texts, exact_needle, interrupted)
+        match_index = None
         match_method = "normalized_text"
+        for needle in _match_needles(text):
+            match_index = _first_match(texts, needle, interrupted)
+            if match_index is not None:
+                break
         if match_index is None:
             match_method = "attachment_normalized_text"
             marker_matches: list[int] = []
@@ -715,6 +742,9 @@ def resolve_matching_text(
                 ):
                     marker_matches.append(index)
             match_index = _prefer_live(marker_matches, interrupted)
+        if match_index is None:
+            match_method = "unique_contained_text"
+            match_index = _unique_contained_match(texts, _match_needles(text), interrupted)
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
         # Bound one drain's work: report at most a cap's worth of skipped
@@ -837,6 +867,77 @@ def _content_text(content: list[dict[str, Any]]) -> str:
             if isinstance(text, str):
                 parts.append(text)
     return "\n".join(parts)
+
+
+def _strip_pasted_content(text: str) -> str:
+    """Drop Claude's ``<pasted_content id=…>`` wrappers, keeping the inner text."""
+    if "<pasted_content" not in text:
+        return text
+
+    def _inner(match: re.Match[str]) -> str:
+        return match.group("inner").removeprefix("\n").removesuffix("\n")
+
+    unwrapped = _PASTED_CONTENT_RE.sub(_inner, text)
+    return unwrapped.strip("\n") if unwrapped != text else text
+
+
+def _strip_vendor_injected_xml(text: str) -> str:
+    """Drop Claude-injected reminder/caveat tags, leaving the person's text."""
+    lowered = text.lower()
+    if "<system-reminder" not in lowered and "<local-command-caveat" not in lowered:
+        return text
+    stripped = _VENDOR_INJECTED_XML_RE.sub("", text).strip()
+    return stripped if stripped else text
+
+
+def _match_needles(text: str) -> list[str]:
+    """Collapsed mirror texts to try, original first then wrapper-stripped paragraphs."""
+    cleaned = _strip_vendor_injected_xml(_strip_pasted_content(text)).strip()
+    needles: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        collapsed = _collapse_whitespace(value)
+        if collapsed and collapsed not in seen:
+            seen.add(collapsed)
+            needles.append(collapsed)
+
+    add(text)
+    add(cleaned)
+    for paragraph in re.split(r"\n\s*\n", cleaned):
+        add(paragraph)
+    return needles
+
+
+def _unique_contained_match(
+    texts: list[str], needles: list[str], interrupted: list[bool]
+) -> int | None:
+    """
+    Index of the one long queued text contained in a needle, if it is unique.
+
+    A stale lost message at the head of the queue is not a substring of the
+    next prompt, so a resume wrapper around that next prompt still identifies
+    it. Two contained entries are ambiguous and return ``None``. Short texts
+    are ignored so ``"ok"`` cannot match ``"Let's continue - ok"``.
+
+    :param texts: Whitespace-collapsed queued entry texts in queue order.
+    :param needles: Whitespace-collapsed mirror candidates, longest first.
+    :param interrupted: Per entry, whether the person cancelled it by interrupting.
+    :returns: The matching index (see :func:`_prefer_live`), or ``None``.
+    """
+    contained: list[int] = []
+    for needle in needles:
+        hits = [
+            index
+            for index, queued in enumerate(texts)
+            if queued and len(queued) >= _MIN_UNIQUE_SUBSTRING_CHARS and queued in needle
+        ]
+        if len(hits) == 1:
+            contained = hits
+            break
+        if len(hits) > 1:
+            return None
+    return _prefer_live(contained, interrupted)
 
 
 def _first_match(texts: list[str], needle: str, interrupted: list[bool]) -> int | None:
