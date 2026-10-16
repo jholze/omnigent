@@ -2205,6 +2205,7 @@ async def _resolve_elicitation(
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
     conversation_store: ConversationStore | None = None,
+    decided_by: str | None = None,
 ) -> None:
     """
     Resolve one outstanding elicitation from an approval payload.
@@ -2249,6 +2250,8 @@ async def _resolve_elicitation(
     :param conversation_store: Optional store used to mirror the
         resolved signal into ancestor streams when ``session_id`` is
         a child session. ``None`` keeps the signal scoped locally.
+    :param decided_by: Authenticated user id stored on the elicitation
+        ledger, or ``None`` when the caller has no user.
     """
     # Empty-string default is intentional, NOT a fail-loud miss: the
     # resolve-URL caller always supplies the id (it comes from the URL
@@ -2262,7 +2265,8 @@ async def _resolve_elicitation(
             from omnigent.errors import ErrorCode, OmnigentError
             from omnigent.server import session_outbox
 
-            decision_write = session_outbox.record_decision(
+            decision_write = await asyncio.to_thread(
+                session_outbox.record_decision,
                 elicitation_id=elicitation_id,
                 session_id=session_id,
                 decision={
@@ -2270,6 +2274,7 @@ async def _resolve_elicitation(
                     for key, value in data.items()
                     if key in {"action", "content"} and value is not None
                 },
+                decided_by=decided_by,
             )
         except Exception:  # noqa: BLE001 — webhook failure must not block the verdict
             _logger.exception("manager webhook decision write failed for %s", elicitation_id)
@@ -2383,8 +2388,11 @@ async def _resolve_elicitation(
     runner_response = await _forward_approval_to_runner(session_id, data, runner_router)
     runner_consumed = False
     if runner_response is not None:
+        # A bare 2xx is a forward that reached the runner. Only the header
+        # the runner sets after pending_approvals.resolve() means the
+        # verdict was consumed.
         header = runner_response.headers.get("X-Omnigent-Pending-Approval-Resolved", "")
-        runner_consumed = header == "1" or 200 <= runner_response.status_code < 300
+        runner_consumed = header == "1"
     if (
         (harness_consumed or runner_consumed)
         and isinstance(elicitation_id, str)
@@ -2393,7 +2401,10 @@ async def _resolve_elicitation(
         try:
             from omnigent.server import session_outbox
 
-            session_outbox.record_elicitation_resumed(elicitation_id=elicitation_id)
+            await asyncio.to_thread(
+                session_outbox.record_elicitation_resumed,
+                elicitation_id=elicitation_id,
+            )
         except Exception:  # noqa: BLE001 — webhook failure must not block resolution
             _logger.exception("manager webhook resumed write failed for %s", elicitation_id)
 

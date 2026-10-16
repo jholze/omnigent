@@ -114,8 +114,13 @@ class SessionLifecycleStore(ABC):
         workspace_id: int,
         delivered_at: int,
         http_status: int,
+        lease_owner: str | None = None,
     ) -> None:
-        """Mark a leased row delivered."""
+        """Mark a leased row delivered.
+
+        When *lease_owner* is set, a row leased by someone else is left
+        unchanged so a stale worker cannot clobber a newer claim.
+        """
         ...
 
     @abstractmethod
@@ -129,8 +134,13 @@ class SessionLifecycleStore(ABC):
         http_status: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        lease_owner: str | None = None,
     ) -> None:
-        """Release a lease after a failed attempt. Dead-letter keeps retrying."""
+        """Release a lease after a failed attempt. Dead-letter keeps retrying.
+
+        When *lease_owner* is set, a row leased by someone else is left
+        unchanged.
+        """
         ...
 
     @abstractmethod

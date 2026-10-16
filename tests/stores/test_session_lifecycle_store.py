@@ -90,6 +90,40 @@ def test_claim_preserves_order_and_dead_letter_blocks_later_rows(db_uri: str) ->
     assert nxt[0].sequence == 2
 
 
+def test_stale_lease_owner_cannot_mark_delivered_or_failed(db_uri: str) -> None:
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_id = _sid()
+    row, _ = _record(store, session_id, key="turn:1:completed", now=1)
+    claimed = store.claim_batch(limit=1, now=1, lease_owner="host:1", lease_seconds=30)
+    assert claimed[0].lease_owner == "host:1"
+    store.mark_delivered(
+        row.id,  # type: ignore[attr-defined]
+        workspace_id=row.workspace_id,  # type: ignore[attr-defined]
+        delivered_at=2,
+        http_status=200,
+        lease_owner="host:stale",
+    )
+    assert store.latest_delivery(session_id).status == "leased"  # type: ignore[union-attr]
+    store.mark_delivery_failed(
+        row.id,  # type: ignore[attr-defined]
+        workspace_id=row.workspace_id,  # type: ignore[attr-defined]
+        next_attempt_at=9,
+        dead_letter_after_attempts=1,
+        error_code="http_error",
+        error_message="stale",
+        lease_owner="host:stale",
+    )
+    assert store.latest_delivery(session_id).status == "leased"  # type: ignore[union-attr]
+    store.mark_delivered(
+        row.id,  # type: ignore[attr-defined]
+        workspace_id=row.workspace_id,  # type: ignore[attr-defined]
+        delivered_at=3,
+        http_status=200,
+        lease_owner="host:1",
+    )
+    assert store.latest_delivery(session_id).status == "delivered"  # type: ignore[union-attr]
+
+
 def test_lease_reclaim_and_requeue(db_uri: str) -> None:
     store = SqlAlchemySessionLifecycleStore(db_uri)
     session_id = _sid()

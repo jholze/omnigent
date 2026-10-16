@@ -4870,8 +4870,11 @@ def _record_manager_webhook_status(
 ) -> None:
     """Write a completed/failed outbox row. Failures are logged, not raised.
 
-    The webhook is optional. A store error must not swallow the status edge
-    the session UI is about to publish.
+    The session status cache and the live-status persist are not one SQL
+    transaction with this outbox insert. A store error is logged at ERROR
+    and the status edge still publishes; that delivery is not retried from
+    the status row. A failure with no response id is its own event, so a
+    later failure of the same session is not collapsed.
     """
     if status not in ("idle", "failed"):
         return
@@ -4889,12 +4892,16 @@ def _record_manager_webhook_status(
             return
         session_outbox.record_session_failed(
             session_id=session_id,
-            response_id=response_id or "none",
+            response_id=response_id,
             error_code=error.code if error is not None else "unknown",
             error_message=error.message if error is not None else "",
         )
     except Exception:  # noqa: BLE001 — webhook failure must not swallow the status edge
-        _logger.exception("manager webhook status write failed for %s", session_id)
+        _logger.exception(
+            "manager webhook status write failed for %s; the session status "
+            "was already published and this outbox row is not in that transaction",
+            session_id,
+        )
 
 
 def _publish_status(
@@ -4962,8 +4969,9 @@ def _publish_status(
         # snapshot to reopen a streaming bubble.
         _session_active_response_cache.pop(session_id, None)
         return
-    # Captured before the terminal edge clears the in-flight id. The manager
-    # webhook uses it as the idempotency key for completed/failed.
+    # Captured before the terminal edge clears the in-flight id. A turn id
+    # dedupes the manager-webhook completed/failed row. With no id, each
+    # failure is recorded on its own so later failures are not dropped.
     tracked_response_id = response_id or _session_active_response_cache.get(session_id)
     previous_status = _session_status_cache.get(session_id)
     _session_status_cache[session_id] = status

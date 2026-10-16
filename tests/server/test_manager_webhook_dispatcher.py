@@ -5,13 +5,17 @@ from __future__ import annotations
 import logging
 import uuid
 
+import pytest
+
 from omnigent.entities import LifecycleOutboxEvent
 from omnigent.server.manager_webhook_dispatcher import (
     _BACKOFF_BASE_SECONDS,
     _BACKOFF_CAP_SECONDS,
     _log_attempt,
+    _run_once,
     backoff_seconds,
 )
+from omnigent.server.server_config import reset_manager_webhook_config_cache
 
 
 def test_backoff_is_full_jitter_and_capped() -> None:
@@ -64,3 +68,20 @@ def test_delivery_log_has_no_body_or_signature(caplog: object) -> None:
     assert records[0].endpoint_host == "bot.example.com"
     assert records[0].event_id == event.id
     assert records[1].error_code == "[redacted]"
+
+
+async def test_disabled_dispatcher_does_not_touch_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Store:
+        def reclaim_expired_leases(self, *, now: int) -> int:
+            del now
+            raise AssertionError("disabled dispatcher touched the store")
+
+        def claim_batch(self, **_kwargs: object) -> list[object]:
+            raise AssertionError("disabled dispatcher touched the store")
+
+    monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
+    reset_manager_webhook_config_cache()
+    claimed = await _run_once(None, _Store(), lease_owner="host:1")  # type: ignore[arg-type]
+    assert claimed == -1

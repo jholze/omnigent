@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from omnigent.entities import LifecycleOutboxEvent
-from omnigent.server.auth import LEVEL_READ, AuthProvider
+from omnigent.server.auth import LEVEL_MANAGE, AuthProvider
 from omnigent.server.routes._auth_helpers import get_user_id as _get_user_id
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
@@ -61,12 +61,15 @@ def register_manager_webhook_routes(
     ) -> dict[str, Any]:
         """List a session's manager-webhook outbox rows, newest first.
 
+        Requires manage (or owner) access. ``last_error_message`` can
+        describe the receiver, so a public-link viewer is not enough.
+
         :param after: Opaque cursor (an event id). Returns older rows.
         :returns: ``{"deliveries": [...], "next_cursor": ...}``.
         """
         user_id = _get_user_id(request, auth_provider)
         access = await _require_access_and_level(
-            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+            user_id, session_id, LEVEL_MANAGE, permission_store, conversation_store
         )
         conv = access.conversation
         if conv is None:

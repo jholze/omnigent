@@ -107,6 +107,34 @@ def test_test_command_posts_a_signed_probe(
     assert headers["X-Omnigent-Key-Id"] == "grok-bot"
 
 
+def test_test_command_refuses_non_local_http_even_with_the_localhost_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.cli import cli
+
+    posted: list[str] = []
+
+    def _post(*_args: object, **_kwargs: object) -> None:
+        posted.append("sent")
+        raise AssertionError("test command posted to a foreign http endpoint")
+
+    monkeypatch.setattr("omnigent.cli_manager_webhook.httpx.post", _post)
+    monkeypatch.setenv("OMNIGENT_MANAGER_WEBHOOK_SECRET", "cli-test-secret")
+    for endpoint in ("HTTP://example.com/hook", "http://example.com/hook"):
+        _config(
+            tmp_path,
+            monkeypatch,
+            "manager_webhook:\n"
+            "  enabled: false\n"
+            f"  endpoint: {endpoint}\n"
+            "  allow_insecure_localhost: true\n",
+        )
+        refused = CliRunner().invoke(cli, ["manager-webhook", "test"])
+        assert refused.exit_code != 0, refused.output
+        assert "HTTPS" in refused.output
+    assert posted == []
+
+
 def test_test_command_refuses_plaintext_and_missing_secret(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

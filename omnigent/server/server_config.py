@@ -30,6 +30,7 @@ Resolution order for the config path:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -740,6 +741,12 @@ _RESERVED_WEBHOOK_HEADERS = frozenset(
 )
 
 _LOCAL_WEBHOOK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_METADATA_WEBHOOK_HOSTS = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata.google.com",
+    }
+)
 
 
 class ManagerWebhookConfigError(RuntimeError):
@@ -753,9 +760,11 @@ class ManagerWebhookConfig:
     The signing key is not here. It lives in
     ``OMNIGENT_MANAGER_WEBHOOK_SECRET`` (and ``_PREVIOUS`` during rotation).
 
-    :param enabled: When false, nothing is recorded or delivered.
+    :param enabled: When false, nothing is recorded or delivered. A
+        present endpoint is still validated.
     :param endpoint: HTTPS URL, or HTTP only for localhost when
-        ``allow_insecure_localhost`` is set.
+        ``allow_insecure_localhost`` is set. Private, link-local, and
+        metadata addresses are rejected.
     :param events: Event types to record. Defaults to every known type.
     :param timeout_seconds: Per-attempt HTTP timeout.
     :param max_attempts: Attempts before a row is marked dead-letter. The
@@ -794,6 +803,18 @@ def reset_manager_webhook_config_cache() -> None:
     _webhook_config_cache = None
 
 
+def prime_manager_webhook_config(config: ManagerWebhookConfig) -> None:
+    """Seed the cache from a config mapping already loaded at boot.
+
+    Boot parses the dict ``create_app`` already read. Priming avoids a
+    second read of the same file during startup.
+    """
+    global _webhook_config_cache
+    path = resolve_config_path()
+    mtime = path.stat().st_mtime if path is not None and path.is_file() else None
+    _webhook_config_cache = (time.monotonic(), mtime, config)
+
+
 def _as_bool(value: Any, *, key: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -806,6 +827,31 @@ def _as_bool(value: Any, *, key: str) -> bool:
     raise ManagerWebhookConfigError(f"manager_webhook.{key} must be a boolean")
 
 
+def _blocked_webhook_host(host: str) -> bool:
+    """True for private, link-local, reserved, and cloud-metadata hosts.
+
+    Loopback stays allowed. Hostnames are matched literally, not resolved.
+    """
+    if host in _METADATA_WEBHOOK_HOSTS:
+        return True
+    try:
+        parsed: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = parsed.ipv4_mapped if isinstance(parsed, ipaddress.IPv6Address) else None
+    if mapped is not None:
+        parsed = mapped
+    if parsed.is_loopback:
+        return False
+    return bool(
+        parsed.is_private
+        or parsed.is_link_local
+        or parsed.is_reserved
+        or parsed.is_multicast
+        or parsed.is_unspecified
+    )
+
+
 def _validate_webhook_url(url: str, *, key: str, allow_insecure_localhost: bool) -> str:
     from urllib.parse import urlsplit
 
@@ -814,6 +860,11 @@ def _validate_webhook_url(url: str, *, key: str, allow_insecure_localhost: bool)
     if parsed.username or parsed.password:
         raise ManagerWebhookConfigError(f"manager_webhook.{key} must not embed credentials")
     host = (parsed.hostname or "").lower()
+    if host and _blocked_webhook_host(host):
+        raise ManagerWebhookConfigError(
+            f"manager_webhook.{key} {stripped!r} must not target a private, "
+            "link-local, or metadata address"
+        )
     if parsed.scheme == "https" and host:
         return stripped
     local = host in _LOCAL_WEBHOOK_HOSTS
@@ -902,9 +953,11 @@ def _parse_extra_headers(value: Any) -> dict[str, str]:
 def manager_webhook_config(*, refresh: bool = False) -> ManagerWebhookConfig:
     """Resolve the ``manager_webhook`` block.
 
-    Disabled (the default) when the block is absent. An enabled block with
-    a missing or non-HTTPS endpoint fails closed. The result is cached for
-    about a second so the status path does not re-read the file on every edge.
+    Disabled (the default) when the block is absent. A missing endpoint
+    fails closed only when the block is enabled. An endpoint that is
+    present is validated whether or not the block is enabled. The result
+    is cached for about a second so the status path does not re-read the
+    file on every edge.
 
     :raises ManagerWebhookConfigError: When the block is present and invalid,
         including ``enabled: true`` without a usable endpoint.
@@ -939,14 +992,11 @@ def _parse_manager_webhook(root: Mapping[str, Any]) -> ManagerWebhookConfig:
     endpoint_raw = raw.get("endpoint")
     endpoint: str | None = None
     if isinstance(endpoint_raw, str) and endpoint_raw.strip():
-        if enabled:
-            endpoint = _validate_webhook_url(
-                endpoint_raw,
-                key="endpoint",
-                allow_insecure_localhost=allow_insecure,
-            )
-        else:
-            endpoint = endpoint_raw.strip()
+        endpoint = _validate_webhook_url(
+            endpoint_raw,
+            key="endpoint",
+            allow_insecure_localhost=allow_insecure,
+        )
     elif enabled:
         raise ManagerWebhookConfigError(
             "manager_webhook.enabled is true but manager_webhook.endpoint is not set"

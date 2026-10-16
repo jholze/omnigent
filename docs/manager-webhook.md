@@ -55,14 +55,26 @@ export OMNIGENT_MANAGER_WEBHOOK_SECRET="$(openssl rand -hex 32)"
 export OMNIGENT_MANAGER_WEBHOOK_SECRET_PREVIOUS=""
 ```
 
-Restart is not required to pick up a config edit: the dispatcher re-reads
-the file about once a second. Events that happened while the feature was
-disabled are not backfilled. An enabled block with a missing endpoint, a
-non-HTTPS URL, or an unknown event name refuses to boot.
+Restart is not required to pick up a config edit. While the feature is
+enabled, the dispatcher re-reads the file about once a second and polls
+the outbox every couple of seconds for retries. While it is disabled, the
+dispatcher does not read the outbox; it re-checks the config about every
+30 seconds, so turning the feature on does not need a restart. Events that
+happened while the feature was disabled are not backfilled.
 
-`allow_insecure_localhost` permits an `http://` endpoint only when the host
-is `localhost`, `127.0.0.1`, or `::1`. Any other host stays HTTPS-only.
+An endpoint is validated whether or not the block is enabled. A disabled
+block may omit the endpoint. A present endpoint that is not HTTPS, that
+uses `http://` for a non-local host (including `HTTP://example.com`), or
+that targets a private, link-local, or metadata address refuses to boot.
+`http://` is allowed only for `localhost`, `127.0.0.1`, or `::1`, and only
+when `allow_insecure_localhost` is true. Loopback HTTPS stays allowed.
+`metadata.google.internal` and `metadata.google.com` are rejected by name.
+An enabled block with a missing endpoint, or an unknown event name, also
+refuses to boot.
+
 `extra_headers` cannot replace `Content-Type` or any `X-Omnigent-*` header.
+`omnigent manager-webhook test` applies the same URL check before it
+sends, so a plaintext probe of a foreign host is refused.
 
 On an existing install the next server start adds three tables
 (`session_lifecycle_outbox`, `session_lifecycle_cursors`,
@@ -128,6 +140,11 @@ you verify are the exact body bytes.
 
 A 2xx response acknowledges the delivery. Anything else, including a
 redirect (redirects are not followed), is a failure and will be retried.
+
+`omnigent.server.manager_webhook_signing.verify` and `previous_secret`
+are the receiver-side helpers. The server signs with the current key
+only. During rotation, a receiver checks the current secret and
+`OMNIGENT_MANAGER_WEBHOOK_SECRET_PREVIOUS`.
 
 ## Signature
 
@@ -200,6 +217,10 @@ sends the same id and the same `sequence`. The attempt header increases.
 
 Events for one session are delivered in `sequence` order. A later event
 waits while an earlier one is still pending, leased, or dead-lettered.
+That wait is intentional and lasts until the earlier row is delivered or
+requeued with `retry`. A dead letter does not get skipped, so it can hold
+later events for that session until you requeue it or the receiver starts
+accepting it again.
 
 Backoff is exponential with full jitter: about 5 seconds times 2^attempt,
 capped at 15 minutes, then multiplied by a random factor between 0.5 and
@@ -227,7 +248,9 @@ second time.
 `data.request` is the upstream allowlist (`mode`, `message`,
 `requestedSchema`, `url`, `phase`, `policy_name`, `target_session_id`,
 `tool_name`). The fields beside it are this fork's richer context. Missing
-values are omitted, not sent as null.
+values are omitted, not sent as null. `message`, `requestedSchema` string
+values, and `url` are scanned for credentials before they are stored.
+Schema property names are kept so the receiver can still render the form.
 
 ```json
 {
@@ -295,7 +318,10 @@ the same way any other `/v1` client does for that server.
 
 Emitted when the human verdict is first stored, which can be before the
 runner has consumed it. Use it to retract a stale prompt. Upstream builds
-do not emit this event.
+do not emit this event. `decision.content` is redacted the same way as a
+summary: secret-shaped keys and credential-shaped strings become
+`[redacted]`. `decided_by` on the ledger is the authenticated user when
+the verdict arrived through the resolve route or an approval event.
 
 ```json
 {
@@ -318,9 +344,11 @@ do not emit this event.
 
 ### `session.resumed`
 
-Emitted once the in-process harness or the runner has consumed the verdict.
-A runner that sets `X-Omnigent-Pending-Approval-Resolved: 1`, or that
-returns HTTP 2xx to the forwarded approval, counts as consumed.
+Emitted once the in-process harness consumed the verdict, or the runner
+set `X-Omnigent-Pending-Approval-Resolved: 1` after
+`pending_approvals.resolve()` succeeded. A 2xx from the forwarded
+approval without that header is not consumption and does not emit this
+event.
 
 ```json
 {
@@ -343,6 +371,12 @@ returns HTTP 2xx to the forwarded approval, counts as consumed.
 Emitted when a turn goes idle. `summary` is a short assistant-message
 excerpt, truncated to `summary_max_chars` (default 500). Credential-shaped
 text is replaced with `[redacted]` before it is stored.
+
+The completed and failed rows are written after the session status is
+published. They are not in the same database transaction as the live
+status row. If the outbox write fails, the server logs that at ERROR and
+the status edge still goes out; that webhook event is not reconstructed
+from the status row later.
 
 ```json
 {
@@ -368,6 +402,11 @@ text is replaced with `[redacted]` before it is stored.
 `reason.message` is a fixed sentence chosen from `reason.code`. It is not
 the raw error. `summary` is the truncated, redacted error text when one
 was recorded.
+
+A turn with a `response_id` uses one idempotent event
+(`turn:{response_id}:failed`). A failure with no response id gets its own
+event id, so a second failure of the same session is delivered too. `data`
+omits `response_id` when the turn id is unknown.
 
 ```json
 {
@@ -429,8 +468,11 @@ Sent only by `omnigent manager-webhook test`. `sequence` is 0 and
 GET /v1/sessions/{session_id}/manager-webhook-deliveries?limit=100&after={event_id}
 ```
 
-The caller needs read access to the session. The response is newest
-sequence first and does not include the payload body:
+The caller needs manage or owner access. A public-link viewer (read) is
+rejected, and a user with no grant gets the same not-found response as
+any other hidden session. The response is newest sequence first, includes
+`last_error_message` for callers who passed the manage check, and does
+not include the payload body:
 
 ```json
 {

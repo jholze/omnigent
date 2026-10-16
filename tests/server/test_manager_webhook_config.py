@@ -106,7 +106,7 @@ manager_webhook:
         manager_webhook_config(refresh=True)
 
 
-def test_disabled_garbage_endpoint_does_not_fail_closed(
+def test_disabled_endpoint_is_still_validated(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _write(
@@ -114,13 +114,69 @@ def test_disabled_garbage_endpoint_does_not_fail_closed(
         """
 manager_webhook:
   enabled: false
-  endpoint: not a url
+  endpoint: https://bot.example.com/hook
 """,
         monkeypatch,
     )
     config = manager_webhook_config(refresh=True)
     assert config.enabled is False
-    assert config.endpoint == "not a url"
+    assert config.endpoint == "https://bot.example.com/hook"
+
+    for endpoint in (
+        "not a url",
+        "HTTP://example.com/hook",
+        "http://example.com/hook",
+    ):
+        _write(
+            tmp_path,
+            f"""
+manager_webhook:
+  enabled: false
+  endpoint: "{endpoint}"
+  allow_insecure_localhost: true
+""",
+            monkeypatch,
+        )
+        with pytest.raises(ManagerWebhookConfigError, match="HTTPS"):
+            manager_webhook_config(refresh=True)
+
+
+def test_https_rejects_private_link_local_and_metadata_hosts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blocked = (
+        "https://10.1.2.3/hook",
+        "https://192.168.1.9/hook",
+        "https://169.254.169.254/latest",
+        "https://metadata.google.internal/computeMetadata/v1/",
+        "https://metadata.google.com/",
+        "https://[fc00::1]/hook",
+        "https://[fe80::1]/hook",
+        "https://[::ffff:10.0.0.1]/hook",
+    )
+    for endpoint in blocked:
+        _write(
+            tmp_path,
+            f"""
+manager_webhook:
+  enabled: true
+  endpoint: "{endpoint}"
+""",
+            monkeypatch,
+        )
+        with pytest.raises(ManagerWebhookConfigError, match="private, link-local, or metadata"):
+            manager_webhook_config(refresh=True)
+
+    _write(
+        tmp_path,
+        """
+manager_webhook:
+  enabled: true
+  endpoint: https://127.0.0.1/hook
+""",
+        monkeypatch,
+    )
+    assert manager_webhook_config(refresh=True).endpoint == "https://127.0.0.1/hook"
 
 
 def test_rejects_bad_events_headers_bounds_and_credentials(

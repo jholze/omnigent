@@ -3,7 +3,8 @@
 One task per server process. Inserts wake it through an ``asyncio.Event``
 so ``session.awaiting_decision`` leaves the process well under a second.
 The idle poll remains as the fallback for retries and for rows that were
-pending when the process started.
+pending when the process started. While the feature is disabled the loop
+does not touch the store; it only re-checks the config on a slow timer.
 
 HTTP delivery never runs on the request or agent path. A slow receiver
 only occupies this task.
@@ -31,6 +32,7 @@ from omnigent.stores.session_lifecycle_store import SessionLifecycleStore
 _logger = logging.getLogger(__name__)
 
 _IDLE_POLL_SECONDS = 2.0
+_DISABLED_POLL_SECONDS = 30.0
 _CLAIM_BATCH_SIZE = 25
 _LEASE_SECONDS = 60
 _BACKOFF_BASE_SECONDS = 5.0
@@ -132,7 +134,7 @@ def _log_attempt(
     )
 
 
-def _fail(
+async def _fail(
     store: SessionLifecycleStore,
     event: LifecycleOutboxEvent,
     *,
@@ -141,7 +143,8 @@ def _fail(
     error_message: str,
     http_status: int | None = None,
 ) -> None:
-    store.mark_delivery_failed(
+    await asyncio.to_thread(
+        store.mark_delivery_failed,
         event.id,
         workspace_id=event.workspace_id,
         next_attempt_at=int(time.time()) + int(backoff_seconds(event.attempt_count)),
@@ -149,6 +152,7 @@ def _fail(
         http_status=http_status,
         error_code=error_code,
         error_message=error_message[:256],
+        lease_owner=event.lease_owner,
     )
 
 
@@ -168,7 +172,7 @@ async def _deliver_one(
     started = time.monotonic()
     host = _endpoint_host(endpoint)
     if secret is None:
-        _fail(
+        await _fail(
             store,
             event,
             max_attempts=max_attempts,
@@ -210,7 +214,7 @@ async def _deliver_one(
         )
     except httpx.HTTPError as exc:
         latency_ms = (time.monotonic() - started) * 1000
-        _fail(
+        await _fail(
             store,
             event,
             max_attempts=max_attempts,
@@ -228,11 +232,13 @@ async def _deliver_one(
         return
     latency_ms = (time.monotonic() - started) * 1000
     if 200 <= response.status_code < 300:
-        store.mark_delivered(
+        await asyncio.to_thread(
+            store.mark_delivered,
             event.id,
             workspace_id=event.workspace_id,
             delivered_at=int(time.time()),
             http_status=response.status_code,
+            lease_owner=event.lease_owner,
         )
         _log_attempt(
             event,
@@ -243,7 +249,7 @@ async def _deliver_one(
             endpoint_host=host,
         )
         return
-    _fail(
+    await _fail(
         store,
         event,
         max_attempts=max_attempts,
@@ -267,19 +273,24 @@ async def _run_once(
     *,
     lease_owner: str,
 ) -> int:
-    """Claim and deliver. Returns 0 when disabled or idle."""
+    """Claim and deliver.
+
+    Returns the number of rows claimed, or ``-1`` when the feature is
+    disabled or the config is invalid. That path does not touch the store.
+    """
     try:
         config = manager_webhook_config()
     except ManagerWebhookConfigError:
         _logger.warning("manager_webhook config invalid; dispatcher idling", exc_info=True)
-        return 0
+        return -1
     if not config.enabled or config.endpoint is None:
-        return 0
+        return -1
     now = int(time.time())
-    reclaimed = store.reclaim_expired_leases(now=now)
+    reclaimed = await asyncio.to_thread(store.reclaim_expired_leases, now=now)
     if reclaimed:
         _logger.info("manager_webhook reclaimed %d expired lease(s)", reclaimed)
-    claimed = store.claim_batch(
+    claimed = await asyncio.to_thread(
+        store.claim_batch,
         limit=_CLAIM_BATCH_SIZE,
         now=now,
         lease_owner=lease_owner,
@@ -314,11 +325,14 @@ async def run_dispatcher(store: SessionLifecycleStore, *, lease_owner: str) -> N
                 except Exception:  # one bad cycle must not kill the dispatcher
                     _logger.exception("manager_webhook dispatcher cycle failed")
                     claimed_count = 0
-                if claimed_count:
+                if claimed_count > 0:
                     continue
                 event = _wake_event
+                # Disabled (or invalid) config must not poll SQLite. A slow
+                # wait still notices a later enable without a process restart.
+                timeout = _DISABLED_POLL_SECONDS if claimed_count < 0 else _IDLE_POLL_SECONDS
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=_IDLE_POLL_SECONDS)
+                    await asyncio.wait_for(event.wait(), timeout=timeout)
                 except TimeoutError:
                     pass
                 else:

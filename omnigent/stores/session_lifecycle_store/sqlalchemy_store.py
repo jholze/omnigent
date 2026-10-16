@@ -421,11 +421,14 @@ class SqlAlchemySessionLifecycleStore(SessionLifecycleStore):
         workspace_id: int,
         delivered_at: int,
         http_status: int,
+        lease_owner: str | None = None,
     ) -> None:
         leased_code = encode_session_lifecycle_outbox_status("leased")
         with self._session("mark_lifecycle_delivered") as session:
             row = session.get(SqlSessionLifecycleOutbox, (workspace_id, event_id))
             if row is None or row.status != leased_code:
+                return
+            if lease_owner is not None and row.lease_owner != lease_owner:
                 return
             row.status = encode_session_lifecycle_outbox_status("delivered")
             row.delivered_at = delivered_at
@@ -443,11 +446,14 @@ class SqlAlchemySessionLifecycleStore(SessionLifecycleStore):
         http_status: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        lease_owner: str | None = None,
     ) -> None:
         leased_code = encode_session_lifecycle_outbox_status("leased")
         with self._session("mark_lifecycle_delivery_failed") as session:
             row = session.get(SqlSessionLifecycleOutbox, (workspace_id, event_id))
             if row is None or row.status != leased_code:
+                return
+            if lease_owner is not None and row.lease_owner != lease_owner:
                 return
             dead = row.attempt_count >= dead_letter_after_attempts
             row.status = encode_session_lifecycle_outbox_status(

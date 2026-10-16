@@ -15,6 +15,7 @@ from omnigent.server import manager_webhook_signing as signing
 from omnigent.server.manager_webhook_dispatcher import render_delivery_body
 from omnigent.server.server_config import (
     ManagerWebhookConfigError,
+    _validate_webhook_url,
     manager_webhook_config,
     reset_manager_webhook_config_cache,
 )
@@ -50,11 +51,14 @@ def register_manager_webhook_commands(cli: click.Group) -> None:
             raise click.ClickException(
                 f"{signing.SECRET_ENV_VAR} is not set. Export it and retry."
             )
-        if config.endpoint.startswith("http://") and not config.allow_insecure_localhost:
-            raise click.ClickException(
-                "Refusing to send a test event to an http:// endpoint. "
-                "Set manager_webhook.allow_insecure_localhost for localhost only."
+        try:
+            _validate_webhook_url(
+                config.endpoint,
+                key="endpoint",
+                allow_insecure_localhost=config.allow_insecure_localhost,
             )
+        except ManagerWebhookConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
         event = LifecycleOutboxEvent(
             id=uuid.uuid4().hex,
             session_id="0" * 32,

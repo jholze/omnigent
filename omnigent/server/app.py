@@ -10,7 +10,7 @@ import re
 import tarfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from importlib import import_module
@@ -1318,10 +1318,12 @@ def _wire_manager_webhook(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
     project_store: ProjectStore | None,
+    server_config: Mapping[str, Any] | None = None,
 ) -> Any:
     """Attach the lifecycle outbox to this process, or disable it.
 
-    Validates ``manager_webhook`` before the app serves traffic. An enabled
+    Validates ``manager_webhook`` from the mapping ``create_app`` already
+    loaded, so boot does not read the config file a second time. An enabled
     block with a bad endpoint raises and the process does not start. The
     default (block absent) leaves the feature off and still constructs the
     store so a later config edit can be picked up by the dispatcher without
@@ -1330,13 +1332,16 @@ def _wire_manager_webhook(
     :returns: The store, or ``None`` when this process has no database URI.
     """
     from omnigent.server.manager_webhook_context import build_lookups
-    from omnigent.server.server_config import manager_webhook_config
+    from omnigent.server.server_config import (
+        _parse_manager_webhook,
+        prime_manager_webhook_config,
+    )
     from omnigent.server.session_outbox import configure
     from omnigent.stores.session_lifecycle_store.sqlalchemy_store import (
         SqlAlchemySessionLifecycleStore,
     )
 
-    manager_webhook_config()
+    prime_manager_webhook_config(_parse_manager_webhook(server_config or {}))
     location = getattr(conversation_store, "storage_location", None)
     if not isinstance(location, str) or "://" not in location:
         configure(None)
@@ -1626,6 +1631,7 @@ def create_app(
         conversation_store=conversation_store,
         agent_store=agent_store,
         project_store=project_store,
+        server_config=resolved_server_config,
     )
 
     @asynccontextmanager

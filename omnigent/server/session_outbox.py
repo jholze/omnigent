@@ -65,17 +65,22 @@ _SAFE_FAILURE_MESSAGES: dict[str, str] = {
 }
 _DEFAULT_SAFE_FAILURE_MESSAGE = "The session turn failed."
 
+# A short word after "bearer" is prose. Quoted JSON keys and an
+# Authorization header without the word Bearer are still credentials.
 _SECRET_VALUE_RE = re.compile(
     r"(?i)"
-    r"(?:bearer\s+)[^\s]+"
-    r"|sk-[a-z0-9_\-]{8,}"
-    r"|ghp_[a-z0-9]+"
-    r"|github_pat_[a-z0-9_]+"
-    r"|xox[baprs]-[a-z0-9\-]+"
+    r"authorization\s*[:=]\s*(?:bearer\s+)?\S+"
+    r"|(?:bearer\s+)[A-Za-z0-9._\-]{16,}"
+    r"|sk-[A-Za-z0-9_\-]{8,}"
+    r"|ghp_[A-Za-z0-9]+"
+    r"|github_pat_[A-Za-z0-9_]+"
+    r"|xox[baprs]-[A-Za-z0-9\-]+"
     r"|AKIA[0-9A-Z]{8,}"
     r"|(?:postgres|postgresql|mysql|mongodb|redis|amqp)://\S+"
-    r"|(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+"
+    r"|[\"']?(?:api[_-]?key|token|secret|password)[\"']?\s*[=:]\s*[\"']?[^\s\"']+"
 )
+
+_FREE_TEXT_REQUEST_FIELDS = ("message", "requestedSchema", "url")
 
 _RESOLVE_ACTIONS = ("accept", "decline", "cancel")
 
@@ -171,9 +176,49 @@ def _redact_denylist(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _redact_text(text: str) -> str:
+    return _SECRET_VALUE_RE.sub("[redacted]", text)
+
+
+def _redact_strings(value: Any) -> Any:
+    """Replace credential-shaped substrings. Mapping keys are kept."""
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [_redact_strings(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_strings(item) for key, item in value.items()}
+    return value
+
+
+def _redact_content(value: Any) -> Any:
+    """Redact a verdict's content: secret-shaped keys and secret-shaped strings."""
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [_redact_content(item) for item in value]
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if any(token in str(key).lower() for token in _REDACT_KEY_SUBSTRINGS):
+                redacted[key] = "[redacted]"
+            else:
+                redacted[key] = _redact_content(item)
+        return redacted
+    return value
+
+
+def _redact_request_fields(allowlisted: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(allowlisted)
+    for key in _FREE_TEXT_REQUEST_FIELDS:
+        if key in redacted:
+            redacted[key] = _redact_strings(redacted[key])
+    return redacted
+
+
 def redact_summary(text: str, *, max_chars: int) -> str:
     """Truncate *text* and replace credential-shaped substrings."""
-    cleaned = _SECRET_VALUE_RE.sub("[redacted]", text).strip()
+    cleaned = _redact_text(text).strip()
     if len(cleaned) <= max_chars:
         return cleaned
     if max_chars <= 1:
@@ -240,7 +285,7 @@ def build_awaiting_decision_data(
     finds ``data.request.message``. The surrounding fields are the fork's
     richer context: title, project, agent, schema, and the resolve route.
     """
-    allowlisted = _allowlist(request, _ELICITATION_REQUEST_ALLOWLIST)
+    allowlisted = _redact_request_fields(_allowlist(request, _ELICITATION_REQUEST_ALLOWLIST))
     target = allowlisted.get("target_session_id")
     resolve_session = target if isinstance(target, str) and target else session_id
     data: dict[str, Any] = {
@@ -283,7 +328,7 @@ def build_completed_data(
 
 def build_failed_data(
     *,
-    response_id: str,
+    response_id: str | None,
     error_code: str,
     error_message: str,
     summary_max_chars: int,
@@ -296,7 +341,9 @@ def build_failed_data(
     """
     safe_message = _SAFE_FAILURE_MESSAGES.get(error_code, _DEFAULT_SAFE_FAILURE_MESSAGE)
     reason = _redact_denylist({"code": str(error_code)[:64], "message": safe_message})
-    payload: dict[str, Any] = {"response_id": response_id, "reason": reason}
+    payload: dict[str, Any] = {"reason": reason}
+    if response_id:
+        payload["response_id"] = response_id
     if error_message:
         payload["summary"] = redact_summary(error_message, max_chars=summary_max_chars)
     return payload
@@ -363,11 +410,16 @@ def record_session_completed(
 def record_session_failed(
     *,
     session_id: str,
-    response_id: str,
+    response_id: str | None,
     error_code: str,
     error_message: str,
 ) -> None:
-    """Record ``session.failed``. The raw error is redacted before it is stored."""
+    """Record ``session.failed``. The raw error is redacted before it is stored.
+
+    A turn id keeps the idempotent key ``turn:{response_id}:failed``. With
+    no turn id, each failure gets its own key. A shared ``turn:none:failed``
+    key would drop every later failure of the same session.
+    """
     config = _active_config()
     if config is None:
         return
@@ -377,11 +429,15 @@ def record_session_failed(
             session_id,
             error_code,
         )
+    if response_id:
+        transition_key = f"turn:{response_id}:failed"
+    else:
+        transition_key = f"failure:{uuid.uuid4().hex}"
     _record(
         config=config,
         session_id=session_id,
         event_type="session.failed",
-        transition_key=f"turn:{response_id}:failed",
+        transition_key=transition_key,
         payload=build_failed_data(
             response_id=response_id,
             error_code=error_code,
@@ -414,7 +470,7 @@ def record_elicitation_raised(
         return
     now = now_epoch()
     context = _lookup_context(session_id)
-    allowlisted = _allowlist(request, _ELICITATION_REQUEST_ALLOWLIST)
+    allowlisted = _redact_request_fields(_allowlist(request, _ELICITATION_REQUEST_ALLOWLIST))
     data = build_awaiting_decision_data(
         session_id=session_id,
         elicitation_id=elicitation_id,
@@ -458,6 +514,8 @@ def record_decision(
     if existing is not None and existing.session_id != session_id:
         return DecisionWrite(elicitation=existing, ownership_mismatch=True)
     allowlisted = _allowlist(decision, _ELICITATION_DECISION_ALLOWLIST)
+    if "content" in allowlisted:
+        allowlisted["content"] = _redact_content(allowlisted["content"])
     now = now_epoch()
     transition_key = f"elicitation:{elicitation_id}:decision_resolved"
     workspace_id = current_workspace_id()

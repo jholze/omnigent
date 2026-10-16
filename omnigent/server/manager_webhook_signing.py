@@ -2,8 +2,12 @@
 
 Stripe-style scheme: sign ``{timestamp}.{event_id}.{raw_json_body}`` and
 send the digest as ``X-Omnigent-Signature: v1=<hex>``. The signing key is
-read from the environment, never from the config file. During a rotation,
-sign with the current key and verify against the current and previous keys.
+read from the environment, never from the config file.
+
+The server signs with :func:`current_signing_key` and :func:`sign` only.
+:func:`previous_secret` and :func:`verify` are receiver-side helpers: a
+receiver, and the tests, use them to accept the current key and, during
+rotation, the previous key. Delivery never signs with the previous key.
 
 The signed-content format matches the upstream durable session-lifecycle
 push so a receiver can later switch to that implementation unchanged.
