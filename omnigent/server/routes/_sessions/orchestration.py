@@ -10748,7 +10748,9 @@ async def _create_session_from_existing_agent(
                 and runner_router is not None
             ):
                 runner_owner = runner_router.runner_owner(inherited_runner_id)
-                if runner_owner is not None and runner_owner != user_id:
+                from omnigent.server.principals import same_account
+
+                if runner_owner is not None and not same_account(user_id, runner_owner):
                     inherited_runner_id = None
 
     # Workspace validation: if the caller is binding to a host,

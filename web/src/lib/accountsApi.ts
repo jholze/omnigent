@@ -140,6 +140,110 @@ export async function getMe(): Promise<CurrentAccount | null> {
   return null;
 }
 
+/** ``GET /auth/google/status``. Unauthenticated. */
+export interface GoogleStatus {
+  configured: boolean;
+  bindEmail: string | null;
+}
+
+/**
+ * GET /auth/google/status — whether Continue with Google is configured,
+ * and the verified address waiting on the bind panel.
+ *
+ * A failed fetch leaves the password form usable: the button stays hidden
+ * and no bind panel is shown.
+ */
+export async function getGoogleStatus(): Promise<GoogleStatus> {
+  let res: Response;
+  try {
+    res = await fetch(withBasePath("/auth/google/status"), { cache: "no-store" });
+  } catch {
+    return { configured: false, bindEmail: null };
+  }
+  if (!res.ok) return { configured: false, bindEmail: null };
+  const data = (await res.json()) as { configured?: boolean; bind_email?: string | null };
+  const email = data.bind_email;
+  return {
+    configured: data.configured === true,
+    bindEmail: typeof email === "string" && email.length > 0 ? email : null,
+  };
+}
+
+/**
+ * POST a JSON body to an accounts auth route and map it like :func:`login`.
+ *
+ * The Google bind and create routes set the same session cookie and return
+ * ``user`` plus ``expires_in``. They do not echo a bearer token.
+ */
+async function postSession(path: string, body: unknown): Promise<LoginResult> {
+  let res: Response;
+  try {
+    res = await fetch(withBasePath(path), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return {
+      ok: false,
+      error: "Could not reach the server. Check your connection.",
+      status: 0,
+    };
+  }
+  if (res.ok) {
+    const data = (await res.json()) as {
+      user: { id: string; is_admin: boolean };
+      expires_in: number;
+      token?: string;
+    };
+    return {
+      ok: true,
+      user: data.user,
+      token: typeof data.token === "string" ? data.token : "",
+      expires_in: data.expires_in,
+    };
+  }
+  let message = "Login failed.";
+  if (res.status >= 500) {
+    message = "Server error. Try again in a moment.";
+  } else {
+    try {
+      const data = (await res.json()) as { error?: string };
+      if (data.error) message = data.error;
+    } catch {
+      // Body wasn't JSON; keep the generic message.
+    }
+  }
+  return { ok: false, error: message, status: res.status };
+}
+
+/**
+ * POST /auth/google/bind — attach the pending Google address to a
+ * username after the password check.
+ */
+export async function bindGoogle(body: LoginRequest): Promise<LoginResult> {
+  return postSession("/auth/google/bind", body);
+}
+
+/**
+ * POST /auth/google/create — create a passwordless member whose id is
+ * the verified Google email. Sessions owned by another username stay there.
+ */
+export async function createGoogleAccount(): Promise<LoginResult> {
+  return postSession("/auth/google/create", {});
+}
+
+/**
+ * POST /auth/google/cancel — drop the pending bind without creating a user.
+ */
+export async function cancelGoogleBind(): Promise<void> {
+  try {
+    await fetch(withBasePath("/auth/google/cancel"), { method: "POST" });
+  } catch {
+    // The bind cookie expires on its own. The next visit can cancel again.
+  }
+}
+
 /** Body of POST /auth/register. */
 export interface RegisterRequest {
   invite: string;

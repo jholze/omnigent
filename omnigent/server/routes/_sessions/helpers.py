@@ -1286,9 +1286,12 @@ def _permission_level_from_grants(
         return None
     if is_admin:
         return LEVEL_OWNER
-    user_grant = next((g for g in grants if g.user_id == user_id), None)
-    if user_grant is not None:
-        return user_grant.level
+    from omnigent.server.principals import principals
+
+    allowed = principals(user_id)
+    best = max((g.level for g in grants if g.user_id in allowed), default=None)
+    if best is not None:
+        return best
     public_grant = next((g for g in grants if g.user_id == RESERVED_USER_PUBLIC), None)
     if public_grant is not None:
         return public_grant.level
@@ -10604,7 +10607,9 @@ async def _authorize_bundled_parent_and_inherit_runner(
     inherited_runner_id = parent_conv.runner_id
     if inherited_runner_id is not None and user_id is not None and runner_router is not None:
         runner_owner = runner_router.runner_owner(inherited_runner_id)
-        if runner_owner is not None and runner_owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if runner_owner is not None and not same_account(user_id, runner_owner):
             return parent_conv, None
     return parent_conv, inherited_runner_id
 
@@ -10699,7 +10704,9 @@ def _registered_runner_id(
     # they are trying to bind to a session.
     if user_id is not None:
         runner_owner = runner_router.runner_owner(runner_id)
-        if runner_owner is not None and runner_owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if runner_owner is not None and not same_account(user_id, runner_owner):
             raise OmnigentError(
                 f"runner {runner_id!r} is not owned by the requesting user",
                 code=ErrorCode.FORBIDDEN,

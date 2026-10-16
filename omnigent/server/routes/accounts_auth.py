@@ -39,6 +39,7 @@ from omnigent.db.account_authority import bind_account_authority, target_account
 from omnigent.server.accounts_store import SqlAlchemyAccountStore
 from omnigent.server.admin_list import AdminList, promote_if_listed
 from omnigent.server.auth import _RESERVED_USERS, RESERVED_USER_LOCAL, UnifiedAuthProvider
+from omnigent.server.login_lockout import record_failure
 from omnigent.server.oidc import mint_session_cookie
 from omnigent.server.passwords import (
     InvalidPasswordError,
@@ -292,12 +293,14 @@ def create_accounts_auth_router(
         if password_hash is None:
             with contextlib.suppress(InvalidPasswordError):
                 verify_password(body.password, _DUMMY_HASH)
+            record_failure(username)
             _logger.info("auth/login: unknown user %s", _redact_for_log(username))
             return JSONResponse(status_code=401, content={"error": "invalid username or password"})
 
         try:
             verify_password(body.password, password_hash)
         except InvalidPasswordError:
+            record_failure(username)
             _logger.info("auth/login: bad password for %s", _redact_for_log(username))
             return JSONResponse(status_code=401, content={"error": "invalid username or password"})
 
@@ -394,6 +397,7 @@ def create_accounts_auth_router(
                 "is_admin": user.is_admin,
                 "created_at": user.created_at,
                 "last_login_at": user.last_login_at,
+                "linked_email": account_store.linked_email(user.id),
             },
         )
 
@@ -459,9 +463,12 @@ def create_accounts_auth_router(
             return JSONResponse(status_code=400, content={"error": err})
 
         username = body.username.strip().lower()
-        if account_store.get_user(username) is not None:
+        if account_store.get_user(username) is not None or (
+            account_store.username_collides_with_linked_email(username)
+        ):
             # Don't burn the invite — the user can retry with a
-            # different name on the same URL.
+            # different name on the same URL. A linked email is the
+            # same refusal and does not name the account that owns it.
             return JSONResponse(status_code=409, content={"error": "username already taken"})
 
         now = int(time.time())
@@ -829,6 +836,9 @@ def create_accounts_auth_router(
         _logger.info("auth/users/me/password: changed for %s", _redact_for_log(user_id))
         return Response(status_code=204)
 
+    from omnigent.server.google_accounts import register_google_routes
+
+    register_google_routes(router, auth_provider, account_store, config)
     return router
 
 

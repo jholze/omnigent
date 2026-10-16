@@ -426,6 +426,69 @@ class SqlUser(OmnigentBase):
     last_login_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class SqlGoogleIdentityLink(OmnigentBase):
+    """One Google account attached to one accounts-mode username.
+
+    Keyed by the issuer and Google ``sub``, not by the email. The email
+    is stored lowercased and is unique, as is the accounts user id, so
+    one address cannot move to a second username and one username cannot
+    hold two addresses.
+    """
+
+    __tablename__ = "google_identity_links"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    issuer: Mapped[str] = mapped_column(String(255), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "email",
+            name="uq_google_identity_links_email",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "user_id",
+            name="uq_google_identity_links_user",
+        ),
+    )
+
+
+class SqlGoogleBindNonce(OmnigentBase):
+    """Single-use proof that Google just verified an address.
+
+    Issued with the bind cookie and consumed in the same transaction as
+    the link insert. ``email`` and ``subject`` are stored so a re-signed
+    cookie cannot swap the address.
+    """
+
+    __tablename__ = "google_bind_nonces"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    issuer: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    expires_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    consumed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class SqlPreference(OmnigentBase):
     """Named user preferences, scoped to a workspace and stored as opaque JSON."""
 
