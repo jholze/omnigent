@@ -41,6 +41,7 @@ import type {
   SessionCreatedEvent,
   SessionInputConsumedEvent,
   SessionInterruptedEvent,
+  SessionHumanChatEvent,
   SessionPresenceEvent,
   SessionResource,
   SessionResourceCreatedEvent,
@@ -979,6 +980,20 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       conversationId,
       viewers,
     } satisfies SessionPresenceEvent;
+  }
+  if (eventType === "session.human_chat") {
+    const conversationId = data.conversation_id;
+    const id = data.id;
+    const createdAt = data.created_at;
+    if (typeof conversationId !== "string" || !conversationId) return null;
+    if (typeof id !== "string" || !id) return null;
+    if (typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
+    return {
+      type: "session_human_chat",
+      conversationId,
+      id,
+      createdAt,
+    } satisfies SessionHumanChatEvent;
   }
 
   // Embedded-browser action request: asks the desktop relay to run the agent's

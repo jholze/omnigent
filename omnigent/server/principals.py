@@ -33,7 +33,7 @@ def principals(sub: str) -> frozenset[str]:
         return frozenset(found)
     try:
         extra = resolver(sub)
-    except Exception:
+    except Exception:  # noqa: BLE001 — a resolver failure must not widen or drop access
         _logger.warning("principal lookup failed")
         return frozenset(found)
     for item in extra:
