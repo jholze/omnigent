@@ -200,9 +200,9 @@ class SqlAlchemySessionLifecycleStore(SessionLifecycleStore):
         elicitation_id: str,
         session_id: str,
         request_payload: str,
-        outbox_event_id: str,
-        transition_key: str,
-        outbox_payload: str,
+        outbox_event_id: str | None = None,
+        transition_key: str | None = None,
+        outbox_payload: str | None = None,
         now: int,
         outbox_event_type: str = "session.awaiting_decision",
     ) -> tuple[SessionElicitation, LifecycleOutboxEvent | None, bool]:
@@ -217,34 +217,51 @@ class SqlAlchemySessionLifecycleStore(SessionLifecycleStore):
                 request_payload=request_payload,
                 created_at=now,
             )
-            outbox_row = self._new_outbox_row(
-                session=session,
-                event_id=outbox_event_id,
-                session_id=session_id,
-                event_type=outbox_event_type,
-                transition_key=transition_key,
-                payload=outbox_payload,
-                now=now,
+            write_outbox = (
+                outbox_event_id is not None
+                and transition_key is not None
+                and outbox_payload is not None
             )
+            outbox_row: SqlSessionLifecycleOutbox | None = None
+            if write_outbox:
+                assert outbox_event_id is not None
+                assert transition_key is not None
+                assert outbox_payload is not None
+                outbox_row = self._new_outbox_row(
+                    session=session,
+                    event_id=outbox_event_id,
+                    session_id=session_id,
+                    event_type=outbox_event_type,
+                    transition_key=transition_key,
+                    payload=outbox_payload,
+                    now=now,
+                )
             try:
                 with session.begin_nested():
                     session.add(elicitation)
-                    session.add(outbox_row)
+                    if outbox_row is not None:
+                        session.add(outbox_row)
                     session.flush()
             except IntegrityError:
                 existing = session.get(
                     SqlSessionElicitation, (current_workspace_id(), elicitation_id)
                 )
                 assert existing is not None
-                existing_outbox = self._get_by_transition(
-                    session, session_id, outbox_event_type, transition_key
-                )
-                return (
-                    _elicitation_to_entity(existing),
-                    _outbox_to_entity(existing_outbox) if existing_outbox is not None else None,
-                    False,
-                )
-            return _elicitation_to_entity(elicitation), _outbox_to_entity(outbox_row), True
+                existing_outbox = None
+                if write_outbox:
+                    assert transition_key is not None
+                    existing_row = self._get_by_transition(
+                        session, session_id, outbox_event_type, transition_key
+                    )
+                    existing_outbox = (
+                        _outbox_to_entity(existing_row) if existing_row is not None else None
+                    )
+                return _elicitation_to_entity(existing), existing_outbox, False
+            return (
+                _elicitation_to_entity(elicitation),
+                _outbox_to_entity(outbox_row) if outbox_row is not None else None,
+                True,
+            )
 
     def get_elicitation(self, elicitation_id: str) -> SessionElicitation | None:
         with self._session("get_elicitation") as session:

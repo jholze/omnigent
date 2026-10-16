@@ -454,3 +454,70 @@ async def test_runner_2xx_without_resolved_header_does_not_resume(
     )
     types = [row.event_type for row in store.list_deliveries(session_id)[0]]
     assert "session.resumed" in types
+
+
+def test_resumed_only_subscription_keeps_the_ledger_and_emits_resumed(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, events="[session.resumed]")
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    session_id = _sid()
+    elicitation_id = "elicit_" + uuid.uuid4().hex
+    session_outbox.record_elicitation_raised(
+        session_id=session_id,
+        elicitation_id=elicitation_id,
+        request={"message": "Continue?"},
+    )
+    session_outbox.record_decision(
+        elicitation_id=elicitation_id,
+        session_id=session_id,
+        decision={"action": "accept"},
+    )
+    session_outbox.record_elicitation_resumed(elicitation_id=elicitation_id)
+    assert store.get_elicitation(elicitation_id) is not None
+    types = [row.event_type for row in store.list_deliveries(session_id)[0]]
+    assert types == ["session.resumed"]
+
+
+def test_decision_resolved_only_subscription_persists_the_verdict(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, events="[session.decision_resolved]")
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    session_id = _sid()
+    elicitation_id = "elicit_" + uuid.uuid4().hex
+    session_outbox.record_elicitation_raised(
+        session_id=session_id,
+        elicitation_id=elicitation_id,
+        request={"message": "Continue?"},
+    )
+    session_outbox.record_decision(
+        elicitation_id=elicitation_id,
+        session_id=session_id,
+        decision={"action": "accept"},
+    )
+    decided = store.get_elicitation(elicitation_id)
+    assert decided is not None
+    assert decided.status == "decided"
+    types = [row.event_type for row in store.list_deliveries(session_id)[0]]
+    assert "session.decision_resolved" in types
+    assert "session.awaiting_decision" not in types
+
+
+def test_no_elicitation_subscription_writes_no_ledger_or_outbox_row(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, events="[session.completed]")
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    session_id = _sid()
+    elicitation_id = "elicit_" + uuid.uuid4().hex
+    session_outbox.record_elicitation_raised(
+        session_id=session_id,
+        elicitation_id=elicitation_id,
+        request={"message": "Continue?"},
+    )
+    assert store.get_elicitation(elicitation_id) is None
+    assert store.list_deliveries(session_id)[0] == []
