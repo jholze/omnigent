@@ -2690,6 +2690,164 @@ describe("useMoveToProject", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
   });
 
+  it("overlays membership in the same tick as mutate so a following unpin stays filed", async () => {
+    // Drag-into-project fires move.mutate then pinAt({pinned:false}). The unpin
+    // patches cache synchronously; if the move overlay waits on cancelQueries,
+    // the cache is briefly unpinned and unfiled (Sessions flash on React 19).
+    fetchMock.mockReset();
+    fetchMock.mockReturnValue(new Promise<Response>(() => {}));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(["projects"], [{ id: "p_sprint", name: "Sprint 42" }]);
+    queryClient.setQueryData(
+      ["conversations", "", false],
+      infinitePage([
+        conversation({
+          id: "conv_move",
+          labels: { [PINNED_LABEL_KEY]: "123" },
+        }),
+      ]),
+    );
+    queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, {
+      conversations: [conversation({ id: "conv_move", labels: { [PINNED_LABEL_KEY]: "123" } })],
+      filterHonored: true,
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(
+      () => ({
+        move: useMoveToProject(),
+        pin: useTogglePinnedConversation(),
+      }),
+      { wrapper },
+    );
+
+    result.current.move.mutate({ id: "conv_move", project: "Sprint 42" });
+    result.current.pin.mutate({ id: "conv_move", pinned: false });
+
+    const data = queryClient.getQueryData<ConversationsInfiniteData>(["conversations", "", false]);
+    const row = data!.pages[0].data.find((c) => c.id === "conv_move")!;
+    expect(row.project_id).toBe("p_sprint");
+    expect(row.labels[PINNED_LABEL_KEY]).toBeUndefined();
+    expect(
+      queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)?.conversations,
+    ).toEqual([]);
+
+    // The post-cancelQueries overlay passes must not write the pin key back.
+    await act(async () => {});
+    const settled = queryClient.getQueryData<ConversationsInfiniteData>([
+      "conversations",
+      "",
+      false,
+    ]);
+    const settledRow = settled!.pages[0].data.find((c) => c.id === "conv_move")!;
+    expect(settledRow.project_id).toBe("p_sprint");
+    expect(settledRow.labels[PINNED_LABEL_KEY]).toBeUndefined();
+    expect(
+      queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)?.conversations,
+    ).toEqual([]);
+  });
+
+  it("keeps a same-tick unpin from erasing a label-only overlay", async () => {
+    // Unpin's findRow reads the pinned cache first. If the move overlay misses
+    // that cache, unpin writes the pre-move labels (no omni_project) over the
+    // conversations row and it flashes into Sessions.
+    fetchMock.mockReset();
+    fetchMock.mockReturnValue(new Promise<Response>(() => {}));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(["projects"], [{ id: null, name: "Legacy" }]);
+    queryClient.setQueryData(
+      ["conversations", "", false],
+      infinitePage([
+        conversation({
+          id: "conv_move",
+          labels: { [PINNED_LABEL_KEY]: "123" },
+        }),
+      ]),
+    );
+    queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, {
+      conversations: [conversation({ id: "conv_move", labels: { [PINNED_LABEL_KEY]: "123" } })],
+      filterHonored: true,
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(
+      () => ({
+        move: useMoveToProject(),
+        pin: useTogglePinnedConversation(),
+      }),
+      { wrapper },
+    );
+
+    result.current.move.mutate({ id: "conv_move", project: "Legacy" });
+    result.current.pin.mutate({ id: "conv_move", pinned: false });
+
+    const data = queryClient.getQueryData<ConversationsInfiniteData>(["conversations", "", false]);
+    const row = data!.pages[0].data.find((c) => c.id === "conv_move")!;
+    expect(row.labels).toEqual({ omni_project: "Legacy" });
+    expect(row.project_id).toBeNull();
+
+    // The post-cancelQueries overlay passes keep the label and drop the pin key.
+    await act(async () => {});
+    const settled = queryClient.getQueryData<ConversationsInfiniteData>([
+      "conversations",
+      "",
+      false,
+    ]);
+    const settledRow = settled!.pages[0].data.find((c) => c.id === "conv_move")!;
+    expect(settledRow.labels).toEqual({ omni_project: "Legacy" });
+    expect(settledRow.labels[PINNED_LABEL_KEY]).toBeUndefined();
+    expect(settledRow.project_id).toBeNull();
+    expect(
+      queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)?.conversations,
+    ).toEqual([]);
+  });
+
+  it("restores the pinned row's membership when the move PATCH fails", async () => {
+    // The overlay writes the pinned cache too; a failed move must put the
+    // pinned row back in its original project, not leave it in the target.
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(
+        mockResponse({ object: "list", data: [{ id: "p_sprint", name: "Sprint 42" }] }),
+      )
+      .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 403 }));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(
+      ["projects"],
+      [
+        { id: "p_old", name: "Old" },
+        { id: "p_sprint", name: "Sprint 42" },
+      ],
+    );
+    const original = conversation({
+      id: "conv_move",
+      project_id: "p_old",
+      labels: { [PINNED_LABEL_KEY]: "123" },
+    });
+    queryClient.setQueryData(["conversations", "", false], infinitePage([original]));
+    queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, {
+      conversations: [original],
+      filterHonored: true,
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useMoveToProject(), { wrapper });
+
+    result.current.mutate({ id: "conv_move", project: "Sprint 42" });
+    // Precondition: the overlay reached the pinned cache.
+    expect(
+      queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)
+        ?.conversations[0].project_id,
+    ).toBe("p_sprint");
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    const pinnedRow =
+      queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)!
+        .conversations[0];
+    expect(pinnedRow.project_id).toBe("p_old");
+    expect(pinnedRow.labels).toEqual({ [PINNED_LABEL_KEY]: "123" });
+  });
+
   it("overlays label-only folder membership through the legacy label before the network resolves", async () => {
     // The target folder exists only through another session's omni_project
     // label (no first-class row → null id in the projects cache), so there is
