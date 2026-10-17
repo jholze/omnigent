@@ -590,11 +590,12 @@ class SqlAlchemyAccountStore:
         with self._session("select_google_link_by_email") as session:
             return _linked_email_owner(session, username.strip().lower()) is not None
 
-    def rename_user(self, user_id: str, new_id: str) -> None:
+    def rename_user(self, _user_id: str, new_id: str) -> None:
         """Reject a rename onto a linked email before any other rename.
 
         There is no rename route. The linked-email check runs first so a
         caller can tell a collision from a store that does not rename.
+        The current id is unused because every rename is rejected.
         """
 
         def write(session: Session) -> None:

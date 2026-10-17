@@ -45,9 +45,7 @@ def may_read_human_chat(
     for pid in caller_ids:
         if permission_store.is_admin(pid):
             return True
-    return any(
-        permission_store.get(pid, root_conversation_id) is not None for pid in caller_ids
-    )
+    return any(permission_store.get(pid, root_conversation_id) is not None for pid in caller_ids)
 
 
 def human_chat_is_shared(

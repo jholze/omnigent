@@ -292,7 +292,11 @@ class RunnerExitReports:
             return None
         from omnigent.server.principals import same_account
 
-        if user_id is not None and report.owner is not None and not same_account(user_id, report.owner):
+        if (
+            user_id is not None
+            and report.owner is not None
+            and not same_account(user_id, report.owner)
+        ):
             return None
         return report.error
 
