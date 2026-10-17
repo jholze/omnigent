@@ -112,14 +112,11 @@ jobs:
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          # Tests that wipe OMNIGENT_OIDC_* still read ~/.omnigent unless the
-          # admin credentials path points at an empty data dir. An empty
-          # config home hides the Mac user's provider config (local Ollama
-          # endpoints, default models). Theme and host-id tests that read
-          # the file they just wrote clear this variable themselves.
-          export OMNIGENT_CONFIG_HOME="${RUNNER_TEMP}/omnigent-config"
+          # OIDC tests still read ~/.omnigent unless the admin credentials path
+          # is an empty data dir. Leave the config home unset: one shared empty
+          # directory is visible to every worker, and the app writes a host id.
           export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
-          mkdir -p "$OMNIGENT_CONFIG_HOME" "$OMNIGENT_DATA_DIR"
+          mkdir -p "$OMNIGENT_DATA_DIR"
           export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
           export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"

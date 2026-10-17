@@ -60,6 +60,7 @@ _BOOT_STORE_CLASSES = (
     "omnigent.stores.policy_store.sqlalchemy_store.SqlAlchemyPolicyStore",
     "omnigent.stores.project_store.sqlalchemy_store.SqlAlchemyProjectStore",
     "omnigent.stores.scheduled_task_store.sqlalchemy_store.SqlAlchemyScheduledTaskStore",
+    "omnigent.stores.session_chat_store.sqlalchemy_store.SqlAlchemySessionChatStore",
 )
 
 
@@ -92,8 +93,15 @@ def boot_exit_codes(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
     monkeypatch.setitem(sys.modules, "web_ui_archive", MagicMock())
 
     # No real engines: the migration step is patched per test, so engines
-    # are never used for I/O.
-    monkeypatch.setattr(sqlalchemy, "create_engine", lambda *a, **kw: MagicMock())
+    # are never used for I/O. utils binds create_engine at import, so
+    # patching sqlalchemy.create_engine alone still opens a socket.
+    def _fake_engine(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", _fake_engine)
+    import omnigent.db.utils as db_utils
+
+    monkeypatch.setattr(db_utils, "create_engine", _fake_engine)
 
     # The fatal path sleeps before exiting so platform logs get captured;
     # keep tests fast.

@@ -86,6 +86,20 @@ def _write_skill(bundle: Path, name: str) -> None:
     )
 
 
+def _skip_ambient_codex_provider(monkeypatch: pytest.MonkeyPatch, harness: str) -> None:
+    """Codex spawn-env construction refuses this runner's local Ollama.
+
+    The detected openai endpoint is Chat Completions, which codex will not
+    launch. These tests only assert which bundle dir is advertised.
+    """
+    if harness != "codex":
+        return
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._resolve_provider_for_build",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def _bundle_with_child(tmp_path: Path, *, harness: str = "claude-sdk") -> tuple[Path, Path]:
     """A parent bundle with one sub-agent ``worker``; both own a skill."""
     root = _write_agent(tmp_path / "root", "root", harness=harness)
@@ -101,13 +115,16 @@ def _bundle_with_child(tmp_path: Path, *, harness: str = "claude-sdk") -> tuple[
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness", sorted(_BUNDLE_DIR_ENV))
-async def test_spawn_env_bundle_dir_is_the_child_bundle(tmp_path: Path, harness: str) -> None:
+async def test_spawn_env_bundle_dir_is_the_child_bundle(
+    tmp_path: Path, harness: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``_resolve_harness_config`` advertises the CHILD's bundle dir.
 
     The bound ``agent_id`` resolves to the PARENT spec, so without
     re-resolving the workdir alongside the spec the harness would be
     handed the parent bundle and load the parent's skills.
     """
+    _skip_ambient_codex_provider(monkeypatch, harness)
     root, child = _bundle_with_child(tmp_path, harness=harness)
 
     async def _resolver(agent_id: str, session_id: str | None) -> Any:
@@ -128,7 +145,7 @@ async def test_spawn_env_bundle_dir_is_the_child_bundle(tmp_path: Path, harness:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness", sorted(_BUNDLE_DIR_ENV))
 async def test_spawn_env_omits_bundle_dir_when_child_has_none(
-    tmp_path: Path, harness: str
+    tmp_path: Path, harness: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An unresolvable child bundle yields no bundle dir — never the parent's.
 
@@ -136,6 +153,7 @@ async def test_spawn_env_omits_bundle_dir_when_child_has_none(
     to resolve the child against. Falling back to the parent bundle (or
     the runner workspace) is exactly the leak under test.
     """
+    _skip_ambient_codex_provider(monkeypatch, harness)
     root, _child = _bundle_with_child(tmp_path, harness=harness)
 
     async def _resolver(agent_id: str, session_id: str | None) -> Any:
@@ -176,12 +194,15 @@ async def test_spawn_env_bundle_dir_unchanged_for_top_level_sessions(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_child_harness_still_wins_over_the_parents(tmp_path: Path) -> None:
+async def test_child_harness_still_wins_over_the_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Rooting the child correctly must not disturb harness selection.
 
     The sub-agent swap exists so the child's own harness drives its turn;
     the bundle-dir fix rides the same resolution and must preserve that.
     """
+    _skip_ambient_codex_provider(monkeypatch, "codex")
     root = _write_agent(tmp_path / "root", "root", harness="claude-sdk")
     _write_agent(root / "agents" / "worker", "worker", harness="codex")
 

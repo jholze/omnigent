@@ -165,6 +165,13 @@ async def test_create_session_threads_workspace_to_pi_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pi pre-spawn receives the session workspace, not the bundle dir."""
+    # An empty config home still detects Ollama on localhost. That openai
+    # family has no catalog default, so spawn-env construction 400s before
+    # the cwd assertion.
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._resolve_provider_for_build",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
     # Isolate $HOME too: ambient provider detection reads ~/.databrickscfg,
     # which on a multi-profile Databricks dev box otherwise 400s the create
@@ -238,6 +245,13 @@ async def test_create_session_threads_runner_workspace_to_pi_cwd_when_session_wo
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pi pre-spawn falls back to runner workspace when session workspace is empty."""
+    # An empty config home still detects Ollama on localhost. That openai
+    # family has no catalog default, so spawn-env construction 400s before
+    # the cwd assertion.
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._resolve_provider_for_build",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
     # Isolate $HOME too: ambient provider detection reads ~/.databrickscfg,
     # which on a multi-profile Databricks dev box otherwise 400s the create
