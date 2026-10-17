@@ -28,6 +28,8 @@ from omnigent.db.utils import (
 )
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.stores.chat_store import (
+    ChangesPage,
+    ChatAgentAccount,
     ChatChannel,
     ChatMember,
     ChatMessage,
@@ -92,6 +94,17 @@ def _to_thread(row: SqlChatThread) -> ChatThread:
         reply_count=row.reply_count,
         last_reply_at=row.last_reply_at,
         participants=tuple(json.loads(row.participants or "[]")),
+    )
+
+
+def _to_agent_account(row: SqlChatAgentAccount) -> ChatAgentAccount:
+    """Copy an agent-account row into a detached value."""
+    return ChatAgentAccount(
+        id=row.id,
+        principal_id=row.principal_id,
+        owner_id=row.owner_id,
+        display_name=row.display_name,
+        handle=row.handle,
     )
 
 
@@ -217,6 +230,109 @@ class SqlAlchemyChatStore(ChatStore):
             row = session.get(SqlChatChannel, (current_workspace_id(), channel_id))
             return _to_channel(row) if row is not None else None
 
+    def get_channel_by_name(self, name: str) -> ChatChannel | None:
+        """Return a public channel by name. See the base class."""
+        with self._session("get_chat_channel_by_name") as session:
+            row = session.execute(
+                select(SqlChatChannel).where(
+                    SqlChatChannel.workspace_id == current_workspace_id(),
+                    SqlChatChannel.kind == "channel",
+                    SqlChatChannel.name == name,
+                )
+            ).scalar_one_or_none()
+            return _to_channel(row) if row is not None else None
+
+    def is_member(self, channel_id: str, principal_id: str) -> bool:
+        """Whether a principal is a member. See the base class."""
+        with self._session("get_chat_membership") as session:
+            row = session.execute(
+                select(SqlChatMember.channel_id).where(
+                    SqlChatMember.workspace_id == current_workspace_id(),
+                    SqlChatMember.channel_id == channel_id,
+                    SqlChatMember.principal_id == principal_id,
+                )
+            ).first()
+            return row is not None
+
+    def list_joined_channels(self, principal_id: str) -> tuple[ChatChannel, ...]:
+        """Public channels a principal joined. See the base class."""
+        with self._session("list_joined_chat_channels") as session:
+            member_channel_ids = select(SqlChatMember.channel_id).where(
+                SqlChatMember.workspace_id == current_workspace_id(),
+                SqlChatMember.principal_id == principal_id,
+            )
+            rows = (
+                session.execute(
+                    select(SqlChatChannel)
+                    .where(
+                        SqlChatChannel.workspace_id == current_workspace_id(),
+                        SqlChatChannel.kind == "channel",
+                        SqlChatChannel.id.in_(member_channel_ids),
+                    )
+                    .order_by(SqlChatChannel.created_at.asc(), SqlChatChannel.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            return tuple(_to_channel(row) for row in rows)
+
+    def list_joined_dms(self, principal_id: str) -> tuple[ChatChannel, ...]:
+        """Direct messages a principal participates in. See the base class."""
+        with self._session("list_joined_chat_dms") as session:
+            member_channel_ids = select(SqlChatMember.channel_id).where(
+                SqlChatMember.workspace_id == current_workspace_id(),
+                SqlChatMember.principal_id == principal_id,
+            )
+            rows = (
+                session.execute(
+                    select(SqlChatChannel)
+                    .where(
+                        SqlChatChannel.workspace_id == current_workspace_id(),
+                        SqlChatChannel.kind == "dm",
+                        SqlChatChannel.id.in_(member_channel_ids),
+                    )
+                    .order_by(SqlChatChannel.created_at.asc(), SqlChatChannel.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            return tuple(_to_channel(row) for row in rows)
+
+    def list_members(self, channel_id: str) -> tuple[ChatMember, ...]:
+        """Members of a channel. See the base class."""
+        with self._session("list_chat_members") as session:
+            rows = (
+                session.execute(
+                    select(SqlChatMember)
+                    .where(
+                        SqlChatMember.workspace_id == current_workspace_id(),
+                        SqlChatMember.channel_id == channel_id,
+                    )
+                    .order_by(SqlChatMember.joined_at.asc(), SqlChatMember.principal_id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            return tuple(_to_member(row) for row in rows)
+
+    def remove_member(self, channel_id: str, principal_id: str) -> bool:
+        """Drop a membership. See the base class."""
+
+        def _write(session: Session) -> bool:
+            row = session.execute(
+                select(SqlChatMember).where(
+                    SqlChatMember.workspace_id == current_workspace_id(),
+                    SqlChatMember.channel_id == channel_id,
+                    SqlChatMember.principal_id == principal_id,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
+        return run_write_transaction(self._session_immediate, "remove_chat_member", _write)
+
     def add_member(self, channel_id: str, principal_id: str, role: str = "member") -> ChatMember:
         """Add a member, keeping an existing row. See the base class."""
 
@@ -294,6 +410,25 @@ class SqlAlchemyChatStore(ChatStore):
                 if existing is None:
                     raise
                 return DmResult(DmStatus.EXISTING, _to_channel(existing))
+
+    # ── Directory ───────────────────────────────────────────────
+
+    def list_active_agent_accounts(self) -> tuple[ChatAgentAccount, ...]:
+        """Active agent accounts. See the base class."""
+        with self._session("list_chat_agent_accounts") as session:
+            rows = (
+                session.execute(
+                    select(SqlChatAgentAccount)
+                    .where(
+                        SqlChatAgentAccount.workspace_id == current_workspace_id(),
+                        SqlChatAgentAccount.revoked_at.is_(None),
+                    )
+                    .order_by(SqlChatAgentAccount.created_at.asc(), SqlChatAgentAccount.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            return tuple(_to_agent_account(row) for row in rows)
 
     # ── Messages ────────────────────────────────────────────────
 
@@ -451,6 +586,46 @@ class SqlAlchemyChatStore(ChatStore):
                 has_more=has_more,
                 next_after=next_after,
                 next_before=next_before,
+            )
+
+    # ── Changes ─────────────────────────────────────────────────
+
+    def list_changes(
+        self,
+        principal_id: str,
+        *,
+        after: tuple[int, str] | None = None,
+        limit: int = 1000,
+    ) -> ChangesPage:
+        """Return a caller's change feed. See the base class."""
+        with self._session("list_chat_changes") as session:
+            member_channel_ids = select(SqlChatMember.channel_id).where(
+                SqlChatMember.workspace_id == current_workspace_id(),
+                SqlChatMember.principal_id == principal_id,
+            )
+            filtered = select(SqlChatMessage).where(
+                SqlChatMessage.workspace_id == current_workspace_id(),
+                SqlChatMessage.channel_id.in_(member_channel_ids),
+            )
+            if after is not None:
+                filtered = filtered.where(_after_predicate(after))
+            rows = list(
+                session.execute(
+                    filtered.order_by(
+                        SqlChatMessage.created_at.asc(),
+                        SqlChatMessage.id.asc(),
+                    ).limit(limit + 1)
+                )
+                .scalars()
+                .all()
+            )
+            reset = len(rows) > limit
+            items = rows[:limit]
+            next_after = (items[-1].created_at, items[-1].id) if items else None
+            return ChangesPage(
+                items=tuple(_to_message(row) for row in items),
+                next_after=next_after,
+                reset=reset,
             )
 
     # ── Threads ─────────────────────────────────────────────────
