@@ -10,10 +10,11 @@ name: Fork CI
 # (the token is contents:read only).
 #
 # The repo is public. Every job is gated so only jholze's same-repo pull
-# requests and manual dispatches are queued. pull_request_target is not used.
-# A pull request from a fork, or any actor other than jholze, skips before the
-# Mac picks up work. DB-server, databricks, slack, and codex-parity lanes stay
-# out; pytest runs on SQLite.
+# requests and his manual dispatches are queued. A cloud-agent push keeps the
+# pull request author (jholze) even when github.actor is the bot, so that
+# author is accepted too. pull_request_target is not used. A fork pull
+# request skips before the Mac picks up work. DB-server, databricks, slack,
+# and codex-parity lanes stay out; pytest runs on SQLite.
 
 on:
   pull_request:
@@ -38,7 +39,7 @@ concurrency:
 jobs:
   python-lint:
     name: Python lint (ruff, pyrefly)
-    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 30
     steps:
@@ -69,7 +70,7 @@ jobs:
 
   pytest:
     name: Pytest (SQLite)
-    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 180
     steps:
@@ -133,7 +134,7 @@ jobs:
 
   web:
     name: Web (lint, typecheck, vitest, build)
-    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 45
     steps:
@@ -171,7 +172,7 @@ jobs:
     # NON-BLOCKING: many Playwright UI tests already fail on main.
     # continue-on-error keeps a red run from failing the workflow.
     name: E2E UI (Playwright, non-blocking)
-    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     continue-on-error: true
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 180
