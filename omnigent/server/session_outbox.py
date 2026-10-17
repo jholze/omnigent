@@ -12,11 +12,13 @@ can retract a prompt before the runner has consumed it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -65,11 +67,11 @@ _SAFE_FAILURE_MESSAGES: dict[str, str] = {
 }
 _DEFAULT_SAFE_FAILURE_MESSAGE = "The session turn failed."
 
-# A short word after "bearer" is prose. Quoted JSON keys and an
-# Authorization header without the word Bearer are still credentials.
+# A short word after "bearer" or "authorization" is prose. A credential
+# is a token-shaped value (16+ characters). Quoted JSON keys are included.
 _SECRET_VALUE_RE = re.compile(
     r"(?i)"
-    r"authorization\s*[:=]\s*(?:bearer\s+)?\S+"
+    r"authorization\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{16,}"
     r"|(?:bearer\s+)[A-Za-z0-9._\-]{16,}"
     r"|sk-[A-Za-z0-9_\-]{8,}"
     r"|ghp_[A-Za-z0-9]+"
@@ -79,6 +81,24 @@ _SECRET_VALUE_RE = re.compile(
     r"|(?:postgres|postgresql|mysql|mongodb|redis|amqp)://\S+"
     r"|[\"']?(?:api[_-]?key|token|secret|password)[\"']?\s*[=:]\s*[\"']?[^\s\"']+"
 )
+
+# Match a secret word as its own key, not as a substring of max_tokens
+# or tokenizer. Underscore and hyphen separate words.
+_SECRET_KEY_WORDS = frozenset(
+    {
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "credential",
+        "apikey",
+        "api_key",
+        "api-key",
+    }
+)
+
+# One worker so outbox inserts stay in publish order and off the event loop.
+_OUTBOX_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="manager-webhook-outbox")
 
 _FREE_TEXT_REQUEST_FIELDS = ("message", "requestedSchema", "url")
 
@@ -150,6 +170,43 @@ def _active_config() -> ManagerWebhookConfig | None:
     return config
 
 
+def _key_is_secret(key: object) -> bool:
+    """True when *key* is a credential name, not a nearby word.
+
+    ``token`` and ``api_key`` match. ``max_tokens`` and ``tokenizer`` do
+    not, because the secret word is not a whole component of the key.
+    """
+    lowered = str(key).lower()
+    if lowered in _SECRET_KEY_WORDS:
+        return True
+    parts = [part for part in re.split(r"[^a-z0-9]+", lowered) if part]
+    if "api" in parts and "key" in parts:
+        return True
+    return any(part in _SECRET_KEY_WORDS for part in parts)
+
+
+def schedule_outbox_write(fn: Callable[[], None]) -> None:
+    """Run *fn* off the event loop, in the order it was scheduled.
+
+    With no running loop the write is inline, so sync callers (and the
+    tests) can read the row immediately. A running loop uses one worker
+    thread: SQLite stays off the loop, and two events keep their order.
+    """
+
+    def _safe() -> None:
+        try:
+            fn()
+        except Exception:
+            _logger.exception("manager webhook outbox write failed")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _safe()
+        return
+    loop.run_in_executor(_OUTBOX_WRITER, _safe)
+
+
 def _notify() -> None:
     # Imported lazily: the dispatcher imports nothing from this module, but
     # keeping the edge one-way avoids an import cycle if that changes.
@@ -200,7 +257,7 @@ def _redact_content(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
-            if any(token in str(key).lower() for token in _REDACT_KEY_SUBSTRINGS):
+            if _key_is_secret(key):
                 redacted[key] = "[redacted]"
             else:
                 redacted[key] = _redact_content(item)
@@ -610,11 +667,15 @@ def _on_elicitation_event(conversation_id: str, event: dict[str, Any]) -> None:
         # against the session that owns the resolve route.
         if owner != conversation_id:
             return
-        record_elicitation_raised(
-            session_id=conversation_id,
-            elicitation_id=elicitation_id,
-            request=request,
-        )
+
+        def _raise() -> None:
+            record_elicitation_raised(
+                session_id=conversation_id,
+                elicitation_id=elicitation_id,
+                request=request,
+            )
+
+        schedule_outbox_write(_raise)
         return
     if event_type == "response.elicitation_resolved":
         action = event.get("action")
@@ -626,8 +687,12 @@ def _on_elicitation_event(conversation_id: str, event: dict[str, Any]) -> None:
         content = event.get("content")
         if isinstance(content, dict):
             decision["content"] = content
-        record_decision(
-            elicitation_id=elicitation_id,
-            session_id=conversation_id,
-            decision=decision,
-        )
+
+        def _decide() -> None:
+            record_decision(
+                elicitation_id=elicitation_id,
+                session_id=conversation_id,
+                decision=decision,
+            )
+
+        schedule_outbox_write(_decide)

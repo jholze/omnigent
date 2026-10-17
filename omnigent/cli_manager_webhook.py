@@ -56,6 +56,7 @@ def register_manager_webhook_commands(cli: click.Group) -> None:
                 config.endpoint,
                 key="endpoint",
                 allow_insecure_localhost=config.allow_insecure_localhost,
+                block_private_hosts=True,
             )
         except ManagerWebhookConfigError as exc:
             raise click.ClickException(str(exc)) from exc

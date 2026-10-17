@@ -6937,23 +6937,35 @@ def create_runner_app(
                     pass
             body = {**_data, "type": "approval"}
 
+        def _with_approval_header(response: JSONResponse) -> JSONResponse:
+            # resolve() already consumed the verdict. The header is what
+            # the server uses to emit session.resumed, including when no
+            # harness is left to forward into.
+            if approval_consumed:
+                response.headers["X-Omnigent-Pending-Approval-Resolved"] = "1"
+            return response
+
         try:
             harness_client = await process_manager.get_client(conversation_id, "any")
         except NoLiveHarnessError:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "error": "no_live_harness",
-                    "detail": "no harness subprocess is running for this conversation",
-                },
+            return _with_approval_header(
+                JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "no_live_harness",
+                        "detail": "no harness subprocess is running for this conversation",
+                    },
+                )
             )
         except RuntimeError as exc:
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": "no_harness",
-                    "detail": _client_safe_error_detail(exc, context="harness lookup"),
-                },
+            return _with_approval_header(
+                JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "no_harness",
+                        "detail": _client_safe_error_detail(exc, context="harness lookup"),
+                    },
+                )
             )
         try:
             resp = await harness_client.post(
@@ -6962,13 +6974,15 @@ def create_runner_app(
                 timeout=30.0,
             )
         except Exception as exc:  # noqa: BLE001
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "error": "harness_forward_failed",
-                    "detail": _client_safe_error_detail(exc, context="harness event forward"),
-                    "event_type": body_type,
-                },
+            return _with_approval_header(
+                JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": "harness_forward_failed",
+                        "detail": _client_safe_error_detail(exc, context="harness event forward"),
+                        "event_type": body_type,
+                    },
+                )
             )
         forwarded = _forward_harness_response(resp)
         if approval_consumed:

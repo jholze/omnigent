@@ -1326,16 +1326,19 @@ def _wire_manager_webhook(
     """Attach the lifecycle outbox to this process, or disable it.
 
     Validates ``manager_webhook`` from the mapping ``create_app`` already
-    loaded, so boot does not read the config file a second time. An enabled
-    block with a bad endpoint raises and the process does not start. The
-    default (block absent) leaves the feature off and still constructs the
-    store so a later config edit can be picked up by the dispatcher without
-    a code change — writes themselves stay gated on ``enabled``.
+    loaded, so boot does not read the config file a second time. An invalid
+    block is logged and the feature stays disabled; it does not stop the
+    process. The default (block absent) leaves the feature off and still
+    constructs the store so a later config edit can be picked up by the
+    dispatcher without a code change — writes themselves stay gated on
+    ``enabled``.
 
     :returns: The store, or ``None`` when this process has no database URI.
     """
     from omnigent.server.manager_webhook_context import build_lookups
     from omnigent.server.server_config import (
+        ManagerWebhookConfig,
+        ManagerWebhookConfigError,
         _parse_manager_webhook,
         prime_manager_webhook_config,
     )
@@ -1344,7 +1347,15 @@ def _wire_manager_webhook(
         SqlAlchemySessionLifecycleStore,
     )
 
-    prime_manager_webhook_config(_parse_manager_webhook(server_config or {}))
+    try:
+        parsed = _parse_manager_webhook(server_config or {})
+    except ManagerWebhookConfigError:
+        _logger.error(
+            "manager_webhook config is invalid; disabling the feature so the server can start",
+            exc_info=True,
+        )
+        parsed = ManagerWebhookConfig()
+    prime_manager_webhook_config(parsed)
     location = getattr(conversation_store, "storage_location", None)
     if not isinstance(location, str) or "://" not in location:
         configure(None)
