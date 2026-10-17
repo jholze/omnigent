@@ -565,6 +565,9 @@ extend-exclude = [
     # Protobuf-generated code (DO NOT EDIT); not ours to restyle.
     "omnigent/api/**/*_pb2.py",
     "omnigent/api/**/*_pb2.pyi",
+    # Intentionally broken shell fixtures. Repairing them would hide the cases
+    # the notebook viewer tests exist to render.
+    "web/src/shell/__fixtures__",
 ]
 
 [tool.ruff.lint]

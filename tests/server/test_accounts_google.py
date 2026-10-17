@@ -60,7 +60,10 @@ def _configure_google(monkeypatch: pytest.MonkeyPatch) -> None:
 def google_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """Accounts app with the four Google variables set and no OIDC issuer."""
     _configure_google(monkeypatch)
-    monkeypatch.setattr("omnigent.server.google_accounts.generate_code_verifier", lambda: _VERIFIER)
+    monkeypatch.setattr(
+        "omnigent.server.google_accounts.generate_code_verifier",
+        lambda: _VERIFIER,
+    )
     yield from _build_accounts_app(tmp_path, monkeypatch, init_admin_password="admin-pw-12345")
 
 
@@ -528,7 +531,9 @@ def test_unmatched_email_sets_bind_cookie_only(
     assert _issued(response, "ap_session") is None
     raw = _issued(response, "ap_google_bind")
     assert raw is not None
-    header = next(item for item in _set_cookie_headers(response) if item.startswith("ap_google_bind="))
+    header = next(
+        item for item in _set_cookie_headers(response) if item.startswith("ap_google_bind=")
+    )
     assert "HttpOnly" in header
     assert "SameSite=strict" in header or "SameSite=Strict" in header
     assert "Path=/auth" in header
@@ -895,9 +900,10 @@ def test_share_grant_follows_google_sign_in(
     mixed.hd = "example.com"
     repeat = _prepare(google_app, monkeypatch, mixed)
     assert repeat.status_code == 302
-    assert jwt.decode(_issued(repeat, "ap_session") or "", _secret(), algorithms=["HS256"])[
-        "sub"
-    ] == "jens"
+    assert (
+        jwt.decode(_issued(repeat, "ap_session") or "", _secret(), algorithms=["HS256"])["sub"]
+        == "jens"
+    )
 
     refresh = google_app.post(
         "/auth/login",

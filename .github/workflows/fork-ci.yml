@@ -1,0 +1,231 @@
+name: Fork CI
+
+# Fork-only PR CI for jholze/omnigent. Kept in its own file so upstream syncs of
+# ci.yml / lint.yml / web-tests.yml / e2e-ui.yml never conflict with it.
+#
+# Runs on the owner's Apple Silicon Mac (self-hosted label omnigent-ci).
+# There is one runner, so jobs share a workflow-wide concurrency group and
+# pytest is not sharded across machines. The runner disk persists: uv, pnpm,
+# and Playwright caches live in the runner user's home, not in actions/cache
+# (the token is contents:read only).
+#
+# The repo is public. Every job is gated so only jholze's same-repo pull
+# requests and his manual dispatches are queued. A cloud-agent push keeps the
+# pull request author (jholze) even when github.actor is the bot, so that
+# author is accepted too. pull_request_target is not used. A fork pull
+# request skips before the Mac picks up work. DB-server, databricks, slack,
+# and codex-parity lanes stay out; pytest runs on SQLite.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+concurrency:
+  # One Mac. A newer run cancels the older one instead of queueing behind it.
+  group: fork-ci-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  python-lint:
+    name: Python lint (ruff, pyrefly)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          uv --version
+      - name: Install dependencies (same extras as upstream lint.yml)
+        run: |
+          uv sync --locked --group lint \
+            --extra hindsight \
+            --extra nimble \
+            --extra s3 \
+            --extra tracing
+      - name: ruff check
+        run: .venv/bin/python -m ruff check --force-exclude .
+      - name: ruff format --check
+        run: .venv/bin/python -m ruff format --check --force-exclude .
+      - name: pyrefly check
+        run: .venv/bin/pyrefly check
+
+  pytest:
+    name: Pytest (SQLite)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        # Node is required by the local relay tests that used to be the misc shard.
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          command -v node
+          uv --version
+          node --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          test "$node_major" = "26"
+          command -v rg >/dev/null || echo "::warning::ripgrep (rg) is not on PATH; Grep-tool tests may fail."
+          command -v tmux >/dev/null || echo "::warning::tmux is not on PATH; terminal tests may fail."
+      - name: Install dependencies
+        run: uv sync --locked --extra all --group test
+      - name: Run pytest (SQLite, not databricks)
+        shell: bash
+        env:
+          PYTHONFAULTHANDLER: "1"
+          OMNIGENT_TEST_TIMEOUT_SCALE: "4"
+        run: |
+          mkdir -p artifacts
+          unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
+          # Integration stays serial below: its session fixtures share one mock server.
+          # e2e_ui has its own job. e2e and codex_parity are out of this lane.
+          uv run pytest tests \
+            --ignore=tests/e2e \
+            --ignore=tests/e2e_ui \
+            --ignore=tests/codex_parity \
+            --ignore=tests/integration \
+            -m "not databricks" \
+            -n auto \
+            --dist=worksteal \
+            --timeout=300 \
+            --junitxml=artifacts/pytest.xml \
+            -v --tb=short -r a \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected; treating as a pass." || exit "$rc"; }
+          uv run pytest tests/integration \
+            -m "not databricks" \
+            --timeout=300 \
+            --junitxml=artifacts/pytest-integration.xml \
+            -v --tb=short -r a \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No integration tests collected; treating as a pass." || exit "$rc"; }
+      - name: Upload pytest artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-pytest-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  web:
+    name: Web (lint, typecheck, vitest, build)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use Node and pnpm on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v node
+          command -v pnpm
+          node --version
+          pnpm --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          pnpm_major="$(pnpm --version | cut -d. -f1)"
+          test "$node_major" = "26"
+          test "$pnpm_major" = "11"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter web
+      - name: Format check (prettier)
+        run: pnpm --filter web run format:check
+      - name: Lint (oxlint)
+        run: pnpm --filter web run lint
+      - name: Typecheck (tsc -b)
+        run: pnpm --filter web run type-check
+      - name: Unit tests (vitest run)
+        run: pnpm --filter web run test
+      - name: Build
+        run: pnpm --filter web run build
+
+  e2e-ui:
+    # NON-BLOCKING: many Playwright UI tests already fail on main.
+    # continue-on-error keeps a red run from failing the workflow.
+    name: E2E UI (Playwright, non-blocking)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    continue-on-error: true
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 180
+    env:
+      ANTHROPIC_API_KEY: ""
+      DATABRICKS_TOKEN: ""
+      TERM: xterm-256color
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          command -v node
+          command -v pnpm
+          uv --version
+          node --version
+          pnpm --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          pnpm_major="$(pnpm --version | cut -d. -f1)"
+          test "$node_major" = "26"
+          test "$pnpm_major" = "11"
+      - name: Install project + test dependencies
+        run: uv sync --locked --extra all --group test
+      - name: Install Playwright Chromium
+        # No --with-deps: that path is apt-based and does not apply on macOS.
+        # The browser cache in the runner home persists across jobs.
+        run: uv run playwright install chromium
+      - name: Build web SPA
+        run: |
+          pnpm install --frozen-lockfile --filter web
+          pnpm --filter web run build
+      - name: Run UI e2e tests (not visual, not nightly)
+        run: |
+          mkdir -p artifacts
+          uv run pytest tests/e2e_ui \
+            -v --tb=short -r a \
+            --reruns=1 --reruns-delay=5 \
+            --ui-skip-build \
+            --junitxml=artifacts/e2e-ui.xml \
+            -m "not visual and not nightly" \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected; treating as a pass." || exit "$rc"; }
+      - name: Upload e2e artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-e2e-ui-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
