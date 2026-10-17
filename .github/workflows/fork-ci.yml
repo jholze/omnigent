@@ -182,6 +182,12 @@ jobs:
       - name: Typecheck (tsc -b)
         run: pnpm --filter web run type-check
       - name: Unit tests (vitest run)
+        env:
+          # Node 26 turns on a global localStorage that stays undefined unless
+          # --localstorage-file is set, and that getter shadows jsdom. Upstream
+          # web CI is Node 22 and does not do this. Disable it so tests call
+          # jsdom's Storage.
+          NODE_OPTIONS: --no-experimental-webstorage
         run: pnpm --filter web run test
       - name: Build
         run: pnpm --filter web run build
