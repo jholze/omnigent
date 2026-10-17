@@ -225,6 +225,34 @@ def test_ac_027b_invalid_user_mention_stays_literal(
     assert _mention_rows(db_uri) == []
 
 
+def test_user_mention_of_general_member_from_another_channel(
+    chat_store: SqlAlchemyChatStore, db_uri: str
+) -> None:
+    chat_store.bootstrap_channel("general", "anna@bloopark.de")
+    billing = chat_store.bootstrap_channel("billing", "jens@bloopark.de")
+
+    result = chat_store.post_message(
+        billing.id, "jens@bloopark.de", "<@user:anna@bloopark.de> bitte prüfen"
+    )
+    assert result.status is PostStatus.CREATED
+
+    assert _mention_rows(db_uri) == [("user", "anna@bloopark.de")]
+
+
+def test_agent_prefixed_id_is_not_a_user_mention(
+    chat_store: SqlAlchemyChatStore, db_uri: str
+) -> None:
+    channel = chat_store.bootstrap_channel("general", "jens@bloopark.de")
+    chat_store.add_member(channel.id, "agent:111")
+
+    result = chat_store.post_message(channel.id, "jens@bloopark.de", "<@user:agent:111> hallo")
+    assert result.status is PostStatus.CREATED
+    assert result.message is not None
+    assert result.message.body == "<@user:agent:111> hallo"
+
+    assert _mention_rows(db_uri) == []
+
+
 def test_agent_account_mention_validates_account(
     chat_store: SqlAlchemyChatStore, db_uri: str
 ) -> None:
