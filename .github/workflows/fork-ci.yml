@@ -10,9 +10,9 @@ name: Fork CI
 # manual dispatch): a push cancels only that ref's in-progress run. The
 # inner tree runs as its own process so its sys.path edits and worker
 # watchdog cannot leak into the rest of the suite. The runner disk persists:
-# uv, pnpm,
-# and Playwright caches live in the runner user's home, not in actions/cache
-# (the token is contents:read only).
+# uv and pnpm caches live in the runner user's home. Playwright browsers
+# live in each runner's tool cache so the two runners do not share one
+# install lock. Neither uses actions/cache (the token is contents:read only).
 #
 # The repo is public. Every job is gated so only jholze's same-repo pull
 # requests and his manual dispatches are queued. A cloud-agent push keeps the
@@ -240,11 +240,13 @@ jobs:
           test "$pnpm_major" = "11"
       - name: Install project + test dependencies
         run: uv sync --locked --extra all --group test
+      - name: Use a per-runner Playwright cache
+        # The default browser directory is one lock in the shared home.
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TOOL_CACHE}/ms-playwright" >> "$GITHUB_ENV"
       - name: Install Playwright Chromium
         # No --with-deps: that path is apt-based and does not apply on macOS.
-        # The browser cache in the runner home persists across jobs. Cap the
-        # step so a wedged install cannot hold the shared Mac for the whole
-        # job timeout.
+        # Browsers are in this runner's tool cache. Cap the step so a wedged
+        # install cannot hold the Mac for the whole job timeout.
         timeout-minutes: 20
         run: uv run playwright install chromium
       - name: Build web SPA

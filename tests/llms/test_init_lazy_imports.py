@@ -19,6 +19,7 @@ import contextlib
 import importlib
 import sys
 from collections.abc import Iterator
+from typing import Any
 
 
 def _purge(prefix: str) -> None:
@@ -27,6 +28,38 @@ def _purge(prefix: str) -> None:
     for mod_name in list(sys.modules):
         if mod_name == prefix or mod_name.startswith(prefix + "."):
             sys.modules.pop(mod_name, None)
+
+
+def _matches(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+
+
+def _parent_attrs(names: list[str]) -> list[tuple[Any, str, bool, Any]]:
+    """Parent-package attributes for *names*.
+
+    A reimport writes the new module onto its parent as well as
+    ``sys.modules``. Restoring only ``sys.modules`` leaves
+    ``from parent import child`` bound to that temporary copy.
+    """
+    snapshot: list[tuple[Any, str, bool, Any]] = []
+    for name in names:
+        parent_name, _, attr = name.rpartition(".")
+        if not parent_name:
+            continue
+        parent = sys.modules.get(parent_name)
+        if parent is None:
+            continue
+        had = attr in parent.__dict__
+        snapshot.append((parent, attr, had, parent.__dict__.get(attr)))
+    return snapshot
+
+
+def _restore_parent_attrs(snapshot: list[tuple[Any, str, bool, Any]]) -> None:
+    for parent, attr, had, old in snapshot:
+        if had:
+            setattr(parent, attr, old)
+        else:
+            parent.__dict__.pop(attr, None)
 
 
 @contextlib.contextmanager
@@ -38,31 +71,38 @@ def _isolated_import(*prefixes: str) -> Iterator[None]:
     worker fail ``isinstance`` or look up a bucket that was never written.
     """
     saved = {
-        name: module
-        for name, module in list(sys.modules.items())
-        if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+        name: module for name, module in list(sys.modules.items()) if _matches(name, prefixes)
     }
+    parent_attrs = _parent_attrs(list(saved))
     try:
         for prefix in prefixes:
             _purge(prefix)
         yield
     finally:
         for name in list(sys.modules):
-            if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes):
+            if _matches(name, prefixes):
                 sys.modules.pop(name, None)
         sys.modules.update(saved)
+        _restore_parent_attrs(parent_attrs)
 
 
 def test_sessions_routes_import_does_not_trigger_cycle() -> None:
     """The original failure shape: importing the server routes module
     triggered ``reasoning_effort`` -> ``llms.errors`` -> ``llms.__init__``
     -> ``llms.client`` -> ``reasoning_effort`` re-entry."""
+    import omnigent.server.routes.sessions as before
+
     with _isolated_import(
         "omnigent.llms",
         "omnigent.util.reasoning_effort",
         "omnigent.server.routes.sessions",
     ):
         importlib.import_module("omnigent.server.routes.sessions")
+    import omnigent.server.routes.sessions as via_sysmodules
+    from omnigent.server.routes import sessions as via_package_attr
+
+    assert via_sysmodules is before
+    assert via_package_attr is before
 
 
 def test_short_form_import_still_works() -> None:
