@@ -4,10 +4,11 @@ name: Fork CI
 # ci.yml / lint.yml / web-tests.yml / e2e-ui.yml never conflict with it.
 #
 # Runs on the owner's Apple Silicon Mac (self-hosted label omnigent-ci).
-# There is one runner, so jobs share a workflow-wide concurrency group and
-# pytest stays on that machine. The inner tree runs as its own process so
-# its sys.path edits and worker watchdog cannot leak into the rest of the
-# suite. The runner disk persists: uv, pnpm,
+# Two runners share those labels, so jobs in one run spread across both.
+# Concurrency is per pull request (or per ref, for a manual dispatch): a
+# push cancels only that ref's in-progress run. The inner tree runs as its
+# own process so its sys.path edits and worker watchdog cannot leak into
+# the rest of the suite. The runner disk persists: uv, pnpm,
 # and Playwright caches live in the runner user's home, not in actions/cache
 # (the token is contents:read only).
 #
@@ -34,8 +35,9 @@ env:
   NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
 
 concurrency:
-  # One Mac. A newer run cancels the older one instead of queueing behind it.
-  group: fork-ci-${{ github.workflow }}
+  # Per PR, or per ref for workflow_dispatch. A newer push cancels that
+  # ref's older run and leaves every other PR's run alone.
+  group: fork-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
