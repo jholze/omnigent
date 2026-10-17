@@ -588,9 +588,7 @@ def _write_mentions(
     # An id that starts with "agent:" is an agent account, never a user
     # mention target, even when that id is also a channel member.
     user_ids = [
-        t.target_id
-        for t in tokens
-        if t.kind == "user" and not t.target_id.startswith("agent:")
+        t.target_id for t in tokens if t.kind == "user" and not t.target_id.startswith("agent:")
     ]
     account_ids = [t.target_id for t in tokens if t.kind == "agent_account"]
 
