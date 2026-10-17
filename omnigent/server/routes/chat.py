@@ -230,6 +230,11 @@ def create_chat_router(
     :param feature_flags: Immutable release-feature snapshot; omitted
         resolves ``OMNIGENT_FEATURES`` at router construction.
     """
+    from omnigent.server.chat_agent_threads import _bind_store
+
+    # Idle after a restart can arrive before any chat request. Bind now so
+    # that status can still copy the assistant text into the thread.
+    _bind_store(chat_store)
     flags = feature_flags or resolve_feature_flags()
 
     def _require_team_chat() -> None:

@@ -7,14 +7,17 @@ assistant text back into the thread. Message bodies are never logged.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -76,6 +79,10 @@ _bound_chat_store: ChatStore | None = None
 _pending: set[asyncio.Task[None]] = set()
 _timeout_task: asyncio.Task[None] | None = None
 _result_counts: dict[str, int] = {}
+# Mirrors scheduled off the event loop. The status publish returns first.
+_status_jobs: set[asyncio.Future[Any]] = set()
+# One mirror at a time, so a repeated idle observes the row it just inserted.
+_status_gate = threading.RLock()
 
 
 class _StartFailure(Exception):
@@ -191,20 +198,23 @@ def _claim(chat_store: ChatStore, channel_id: str, root_id: str, caller: str) ->
 
     def write(session: Session) -> bool:
         now = now_epoch_us()
-        claimed = session.execute(
-            update(SqlChatThread)
-            .where(
-                SqlChatThread.workspace_id == current_workspace_id(),
-                SqlChatThread.root_message_id == root_id,
-                SqlChatThread.agent_state == "none",
-            )
-            .values(
-                agent_state="starting",
-                agent_handle=_HANDLE,
-                caller_id=caller,
-                start_requested_at=now,
-                updated_at=now,
-            )
+        claimed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(SqlChatThread)
+                .where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.root_message_id == root_id,
+                    SqlChatThread.agent_state == "none",
+                )
+                .values(
+                    agent_state="starting",
+                    agent_handle=_HANDLE,
+                    caller_id=caller,
+                    start_requested_at=now,
+                    updated_at=now,
+                )
+            ),
         )
         if claimed.rowcount == 1:
             return True
@@ -372,14 +382,17 @@ def _fail(
 
     def write(session: Session) -> _Notice | None:
         now = now_epoch_us()
-        changed = session.execute(
-            update(SqlChatThread)
-            .where(
-                SqlChatThread.workspace_id == current_workspace_id(),
-                SqlChatThread.root_message_id == root_id,
-                SqlChatThread.agent_state == "starting",
-            )
-            .values(agent_state="start_failed", updated_at=now)
+        changed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(SqlChatThread)
+                .where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.root_message_id == root_id,
+                    SqlChatThread.agent_state == "starting",
+                )
+                .values(agent_state="start_failed", updated_at=now)
+            ),
         )
         if changed.rowcount != 1:
             return None
@@ -412,20 +425,23 @@ def _mark_active(
 
     def write(session: Session) -> _Notice | None:
         now = now_epoch_us()
-        changed = session.execute(
-            update(SqlChatThread)
-            .where(
-                SqlChatThread.workspace_id == current_workspace_id(),
-                SqlChatThread.root_message_id == root_id,
-                SqlChatThread.agent_state == "starting",
-            )
-            .values(
-                agent_state="active",
-                session_id=session_id,
-                agent_id=agent_id,
-                agent_handle=_HANDLE,
-                updated_at=now,
-            )
+        changed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(SqlChatThread)
+                .where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.root_message_id == root_id,
+                    SqlChatThread.agent_state == "starting",
+                )
+                .values(
+                    agent_state="active",
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    agent_handle=_HANDLE,
+                    updated_at=now,
+                )
+            ),
         )
         if changed.rowcount != 1:
             return None
@@ -870,15 +886,18 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
         notices: list[_Notice] = []
         for root_id, channel_id, caller_id in rows:
             now = now_epoch_us()
-            changed = session.execute(
-                update(SqlChatThread)
-                .where(
-                    SqlChatThread.workspace_id == current_workspace_id(),
-                    SqlChatThread.root_message_id == root_id,
-                    SqlChatThread.agent_state == "starting",
-                    SqlChatThread.start_requested_at < cutoff,
-                )
-                .values(agent_state="start_failed", updated_at=now)
+            changed = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(SqlChatThread)
+                    .where(
+                        SqlChatThread.workspace_id == current_workspace_id(),
+                        SqlChatThread.root_message_id == root_id,
+                        SqlChatThread.agent_state == "starting",
+                        SqlChatThread.start_requested_at < cutoff,
+                    )
+                    .values(agent_state="start_failed", updated_at=now)
+                ),
             )
             if changed.rowcount != 1:
                 continue
@@ -1018,20 +1037,33 @@ def _mirror(
         _emit(chat_store, notice)
 
 
-def on_session_status(
+def _session_has_thread(chat_store: ChatStore, session_id: str) -> bool:
+    """Whether ``chat_threads.session_id`` links this session.
+
+    That column is indexed. Callers use the hit to skip the assistant
+    summary for every other session.
+    """
+
+    def read(session: Session) -> bool:
+        row = session.execute(
+            select(SqlChatThread.root_message_id).where(
+                SqlChatThread.workspace_id == current_workspace_id(),
+                SqlChatThread.session_id == session_id,
+            )
+        ).first()
+        return row is not None
+
+    return bool(_read(chat_store, "select_chat_thread_by_session", read))
+
+
+def _mirror_linked_status(
+    store: ChatStore,
     session_id: str,
     status: str,
-    response_id: str | None = None,
-    error_code: str | None = None,
+    response_id: str | None,
+    error_code: str | None,
 ) -> None:
-    """Mirror an idle assistant reply, or a failed turn, into its agent thread.
-
-    Called from the session status publisher. A missing chat thread, a missing
-    response id, or a store error leaves the status publish itself alone.
-    """
-    store = _bound_chat_store
-    if store is None or status not in ("idle", "failed"):
-        return
+    """Copy an idle assistant reply, or a failed turn, into the linked thread."""
     try:
         if status == "idle":
             if not response_id:
@@ -1061,3 +1093,56 @@ def on_session_status(
         )
     except Exception:
         _logger.exception("agent thread status mirror failed session=%s", session_id)
+
+
+def _run_status_work(work: Callable[[], None]) -> None:
+    """Run ``work`` inline when status publish is already off the event loop.
+
+    On the loop, schedule it and return so the publish is not blocked. A
+    worker that is already off the loop runs it inline.
+    """
+
+    def guarded() -> None:
+        with _status_gate:
+            work()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        guarded()
+        return
+    ctx = contextvars.copy_context()
+    job = loop.run_in_executor(None, ctx.run, guarded)
+    _status_jobs.add(job)
+    job.add_done_callback(_status_jobs.discard)
+
+
+def on_session_status(
+    session_id: str,
+    status: str,
+    response_id: str | None = None,
+    error_code: str | None = None,
+) -> None:
+    """Mirror an idle assistant reply, or a failed turn, into its agent thread.
+
+    Called from the session status publisher. A missing chat thread, a missing
+    response id, or a store error leaves the status publish itself alone.
+    The assistant summary runs only after a thread row matches ``session_id``.
+    """
+    store = _bound_chat_store
+    if store is None or status not in ("idle", "failed"):
+        return
+    if status == "idle" and not response_id:
+        return
+    try:
+        linked = _session_has_thread(store, session_id)
+    except Exception:
+        _logger.exception("agent thread status mirror failed session=%s", session_id)
+        return
+    if not linked:
+        return
+
+    def work() -> None:
+        _mirror_linked_status(store, session_id, status, response_id, error_code)
+
+    _run_status_work(work)

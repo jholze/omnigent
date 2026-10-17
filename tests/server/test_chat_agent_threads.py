@@ -7,6 +7,7 @@ import contextlib
 import json
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 import pytest
@@ -28,6 +29,7 @@ from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ
 from omnigent.server.chat_agent_threads import drain_pending, reconcile_due_starts
 from omnigent.server.feature_flags import FEATURES_ENV_VAR
 from omnigent.server.routes._sessions.helpers import _publish_status
+from omnigent.server.routes.chat import create_chat_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -116,6 +118,9 @@ async def _stop_agent_threads() -> AsyncIterator[None]:
     yield
     from omnigent.server import chat_agent_threads as threads
 
+    mirrors = list(threads._status_jobs)
+    if mirrors:
+        await asyncio.gather(*mirrors, return_exceptions=True)
     task = threads._timeout_task
     threads._timeout_task = None
     if task is not None and not task.done():
@@ -567,6 +572,15 @@ def _append_assistant(db_uri: str, session_id: str, text: str, response_id: str)
     )
 
 
+async def _wait_status_mirrors() -> None:
+    """Wait until idle mirrors scheduled off the event loop have finished."""
+    from omnigent.server import chat_agent_threads as threads
+
+    pending = list(threads._status_jobs)
+    if pending:
+        await asyncio.wait_for(asyncio.gather(*pending), timeout=10)
+
+
 def _agent_bodies(db_uri: str, root_id: str) -> list[str]:
     with _session(db_uri) as session:
         rows = session.execute(
@@ -597,6 +611,7 @@ async def test_ac_046a_idle_mirrors_assistant_text_once(
 
     _publish_status(session_id, "idle", response_id="resp-046a")
     _publish_status(session_id, "idle", response_id="resp-046a")
+    await _wait_status_mirrors()
 
     assert _agent_bodies(db_uri, root_id) == [answer]
     items = await _thread_items(chat_client, ANNA, channel_id, root_id)
@@ -622,10 +637,83 @@ async def test_ac_046b_idle_mirror_truncates_at_32000(
     _append_assistant(db_uri, session_id, full, "resp-046b")
 
     _publish_status(session_id, "idle", response_id="resp-046b")
+    await _wait_status_mirrors()
 
     (body,) = _agent_bodies(db_uri, root_id)
     assert body == ("A" * 32_000) + MIRROR_SUFFIX
     assert body != full
+
+
+async def test_router_bind_mirrors_idle_without_a_chat_request(
+    db_uri: str,
+    runtime_init: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building the chat router binds the store before any chat request.
+
+    An idle for a linked agent thread then copies the assistant text. An
+    idle for any other session does not read that summary.
+    """
+    from omnigent.server import chat_agent_threads as threads
+    from omnigent.server import manager_webhook_context as webhook_context
+
+    # runtime_init points the assistant summary at this database.
+    assert runtime_init is None
+    threads._bound_chat_store = None
+    calls: list[str] = []
+    real_build = webhook_context.build_lookups
+
+    def wrapped(**kwargs: Any) -> tuple[Any, Any]:
+        context_lookup, summary_lookup = real_build(**kwargs)
+
+        def counting(lookup_id: str) -> str | None:
+            calls.append(lookup_id)
+            return summary_lookup(lookup_id)
+
+        return context_lookup, counting
+
+    monkeypatch.setattr(webhook_context, "build_lookups", wrapped)
+    create_chat_router(SqlAlchemyChatStore(db_uri))
+
+    unrelated = uuid.uuid4().hex
+    _publish_status(unrelated, "idle", response_id="resp-unrelated")
+    await _wait_status_mirrors()
+    assert calls == []
+
+    conversation = SqlAlchemyConversationStore(db_uri).create_conversation()
+    session_id = conversation.id
+    answer = "Nach Neustart gespiegelt"
+    _append_assistant(db_uri, session_id, answer, "resp-restart")
+    root_id = uuid.uuid4().hex
+    channel_id = uuid.uuid4().hex
+    with _session(db_uri) as session:
+        session.add(
+            SqlChatChannel(
+                id=channel_id,
+                kind="channel",
+                visibility="public",
+                created_at=now_epoch_us(),
+            )
+        )
+        session.add(
+            SqlChatThread(
+                root_message_id=root_id,
+                channel_id=channel_id,
+                reply_count=0,
+                participants="[]",
+                bot_streak=0,
+                agent_state="active",
+                session_id=session_id,
+                updated_at=now_epoch_us(),
+            )
+        )
+        session.commit()
+
+    _publish_status(session_id, "idle", response_id="resp-restart")
+    await _wait_status_mirrors()
+
+    assert calls == [session_id]
+    assert _agent_bodies(db_uri, root_id) == [answer]
 
 
 async def test_ac_087a_stale_starting_thread_fails_on_read_and_sweep(
