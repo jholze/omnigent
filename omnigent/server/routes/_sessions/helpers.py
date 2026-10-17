@@ -5081,6 +5081,17 @@ def _publish_status(
         error=error,
         background_task_count=background_task_count,
     )
+    try:
+        from omnigent.server.chat_agent_threads import on_session_status
+
+        on_session_status(
+            session_id,
+            status,
+            tracked_response_id,
+            error_code=error.code if error is not None else None,
+        )
+    except Exception:  # noqa: BLE001 — a chat mirror must not fail the status edge
+        _logger.exception("chat agent thread status hook failed for %s", session_id)
     event = SessionStatusEvent(
         type="session.status",
         conversation_id=session_id,

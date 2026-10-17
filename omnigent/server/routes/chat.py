@@ -230,6 +230,11 @@ def create_chat_router(
     :param feature_flags: Immutable release-feature snapshot; omitted
         resolves ``OMNIGENT_FEATURES`` at router construction.
     """
+    from omnigent.server.chat_agent_threads import _bind_store
+
+    # Idle after a restart can arrive before any chat request. Bind now so
+    # that status can still copy the assistant text into the thread.
+    _bind_store(chat_store)
     flags = feature_flags or resolve_feature_flags()
 
     def _require_team_chat() -> None:
@@ -359,6 +364,10 @@ def create_chat_router(
 
         after_cursor = _parse_cursor(after)
         before_cursor = _parse_cursor(before)
+        if thread_root_id is not None:
+            from omnigent.server.chat_agent_threads import reconcile_thread_read
+
+            await reconcile_thread_read(chat_store, thread_root_id)
         page = await asyncio.to_thread(
             chat_store.list_messages,
             channel.id,
@@ -409,6 +418,9 @@ def create_chat_router(
         if result.status is PostStatus.CREATED and result.message is not None:
             response.status_code = 201
             await asyncio.to_thread(publish_message_created, chat_store, channel, result.message)
+            from omnigent.server.chat_agent_threads import schedule_after_human_post
+
+            await schedule_after_human_post(request, chat_store, channel, result.message)
             return _message_response(result.message)
         if result.status is PostStatus.REPLAYED and result.message is not None:
             response.status_code = 200
