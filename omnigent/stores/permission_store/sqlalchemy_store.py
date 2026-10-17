@@ -162,7 +162,8 @@ class SqlAlchemyPermissionStore(PermissionStore):
         self._resolve_cache_ttl_s = _resolve_access_cache_ttl_s()
         self._resolve_cache_max_entries = _resolve_access_cache_max_entries()
         self._resolve_cache: collections.OrderedDict[
-            tuple[str, str, str | None], tuple[float, ResolvedAccess]
+            tuple[str, str, str | None, tuple[str, ...]],
+            tuple[float, ResolvedAccess],
         ] = collections.OrderedDict()
         self._resolve_cache_lock = threading.Lock()
         self._resolve_cache_clock: Callable[[], float] = time.monotonic
@@ -557,7 +558,9 @@ class SqlAlchemyPermissionStore(PermissionStore):
         ]
         return max(levels) if levels else None
 
-    def _resolve_cache_key(self, conversation_id: str, user_id: str) -> tuple[object, ...]:
+    def _resolve_cache_key(
+        self, conversation_id: str, user_id: str
+    ) -> tuple[str, str, str | None, tuple[str, ...]]:
         """Cache identity includes the linked email so a new link is a miss.
 
         ``conversation_id`` stays first: invalidation scans ``key[0]``.

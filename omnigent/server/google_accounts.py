@@ -15,7 +15,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -23,6 +23,7 @@ import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.responses import Response
+from starlette.types import Scope
 
 from omnigent.db.account_authority import bind_account_authority
 from omnigent.server.accounts_config import AccountsConfig
@@ -196,7 +197,7 @@ def bind_email_for_display(request: Request, cookie_secret: bytes) -> str | None
     return None
 
 
-def inject_login_shell(response: Response, scope: dict[str, Any]) -> Response:
+def inject_login_shell(response: Response, scope: Scope) -> Response:
     """Append the accounts login fragment to the SPA shell for ``/login``."""
     body = getattr(response, "body", None)
     if not isinstance(body, (bytes, bytearray)) or b"</body>" not in body:
@@ -545,7 +546,13 @@ def _reject(status: int, secure: bool) -> JSONResponse:
     return response
 
 
-def _clear_named(response: Response, key: str, path: str, secure: bool, samesite: str) -> None:
+def _clear_named(
+    response: Response,
+    key: str,
+    path: str,
+    secure: bool,
+    samesite: Literal["lax", "none", "strict"],
+) -> None:
     response.delete_cookie(key=key, path=path, secure=secure, httponly=True, samesite=samesite)
 
 
