@@ -74,12 +74,16 @@ _FAILURE_TEXT = {
     "internal": "Agent-Start fehlgeschlagen (internal)",
 }
 
+# custom-lint: disable-next=workspace-scoped-cache -- one maker per database URI
 _makers: dict[str, Any] = {}
 _bound_chat_store: ChatStore | None = None
+# custom-lint: disable-next=workspace-scoped-cache -- task objects
 _pending: set[asyncio.Task[None]] = set()
 _timeout_task: asyncio.Task[None] | None = None
+# custom-lint: disable-next=workspace-scoped-cache -- reason-code counters, not tenant data
 _result_counts: dict[str, int] = {}
 # Mirrors scheduled off the event loop. The status publish returns first.
+# custom-lint: disable-next=workspace-scoped-cache -- task objects
 _status_jobs: set[asyncio.Future[Any]] = set()
 # One mirror at a time, so a repeated idle observes the row it just inserted.
 _status_gate = threading.RLock()

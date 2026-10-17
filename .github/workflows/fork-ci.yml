@@ -5,7 +5,9 @@ name: Fork CI
 #
 # Runs on the owner's Apple Silicon Mac (self-hosted label omnigent-ci).
 # There is one runner, so jobs share a workflow-wide concurrency group and
-# pytest is not sharded across machines. The runner disk persists: uv, pnpm,
+# pytest stays on that machine. The inner tree runs as its own process so
+# its sys.path edits and worker watchdog cannot leak into the rest of the
+# suite. The runner disk persists: uv, pnpm,
 # and Playwright caches live in the runner user's home, not in actions/cache
 # (the token is contents:read only).
 #
@@ -99,29 +101,45 @@ jobs:
         env:
           PYTHONFAULTHANDLER: "1"
           OMNIGENT_TEST_TIMEOUT_SCALE: "4"
+          # macOS AF_UNIX sun_path is ~104 bytes. The default per-user TMPDIR
+          # is already long enough that pytest's tmp_path overflows it.
+          TMPDIR: /tmp
         run: |
-          mkdir -p artifacts
+          mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
-          # Integration stays serial below: its session fixtures share one mock server.
-          # e2e_ui has its own job. e2e and codex_parity are out of this lane.
-          uv run pytest tests \
+          unset OMNIGENT_OIDC_ALLOWED_DOMAINS
+          # The runner user's ~/.omnigent/allowed_domains must not decide
+          # whether example.com may sign in during OIDC tests.
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${RUNNER_TEMP}/empty-allowed-domains"
+          : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
+          export PYTEST_PROGRESS_LOG_DIR="${GITHUB_WORKSPACE}/artifacts/progress"
+
+          run_suite() {
+            local name="$1"
+            shift
+            uv run pytest "$@" \
+              -m "not databricks" \
+              --timeout=300 \
+              --junitxml="artifacts/pytest-${name}.xml" \
+              -v --tb=short -r a \
+              || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in ${name}; treating as a pass." || exit "$rc"; }
+          }
+
+          # tests/inner prepends the tests directory to sys.path at import and
+          # loads a worker watchdog from its conftest. Upstream gives that
+          # tree its own job. A second process on this same runner keeps those
+          # mutations off deploy/scripts imports in the main suite.
+          # Integration stays serial: its session fixtures share one mock server.
+          run_suite main tests \
             --ignore=tests/e2e \
             --ignore=tests/e2e_ui \
             --ignore=tests/codex_parity \
             --ignore=tests/integration \
-            -m "not databricks" \
+            --ignore=tests/inner \
             -n auto \
-            --dist=worksteal \
-            --timeout=300 \
-            --junitxml=artifacts/pytest.xml \
-            -v --tb=short -r a \
-            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected; treating as a pass." || exit "$rc"; }
-          uv run pytest tests/integration \
-            -m "not databricks" \
-            --timeout=300 \
-            --junitxml=artifacts/pytest-integration.xml \
-            -v --tb=short -r a \
-            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No integration tests collected; treating as a pass." || exit "$rc"; }
+            --dist=worksteal
+          run_suite inner tests/inner -n auto --dist=worksteal
+          run_suite integration tests/integration
       - name: Upload pytest artifacts
         if: always()
         continue-on-error: true

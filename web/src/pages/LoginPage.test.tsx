@@ -238,7 +238,10 @@ describe("LoginPage Google sign-in", () => {
   });
 
   it("keeps the password form usable while Google status is still loading", async () => {
-    let resolveStatus: (value: { configured: boolean; bindEmail: string | null }) => void = () => {};
+    let resolveStatus: (value: {
+      configured: boolean;
+      bindEmail: string | null;
+    }) => void = () => {};
     vi.mocked(accountsApi.getGoogleStatus).mockImplementation(
       () =>
         new Promise((resolve) => {
