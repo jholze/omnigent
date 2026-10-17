@@ -2086,6 +2086,26 @@ def register_core_routes(
                                 "projects-changed push failed; client converges on next load",
                                 exc_info=True,
                             )
+                elif evt_type == "chat":
+                    # Chat frames are only published by the flag-gated chat
+                    # routes, but gate here too so a disabled deployment never
+                    # forwards a stray ``chat`` event (FR-003). The frame has no
+                    # body (NFR-014); the client fetches content over REST.
+                    from omnigent.server.feature_flags import Feature
+
+                    flags = getattr(websocket.app.state, "feature_flags", None)
+                    if flags is not None and not flags.enabled(Feature.TEAM_CHAT):
+                        continue
+                    async with emit_lock:
+                        try:
+                            await _send(dict(evt))
+                        except WebSocketDisconnect:
+                            raise
+                        except Exception:
+                            _logger.warning(
+                                "chat-frame push failed; client will refetch on next load",
+                                exc_info=True,
+                            )
 
         reader_task = asyncio.create_task(_reader(), name="session-updates-reader")
         ticker_task = asyncio.create_task(_ticker(), name="session-updates-ticker")

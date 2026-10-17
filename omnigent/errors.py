@@ -254,6 +254,20 @@ class ErrorCode:
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
     STALE_CURSOR = "stale_cursor"
+    # Team-chat errors (FR-003..FR-024).
+    EMPTY_BODY = "empty_body"
+    BODY_TOO_LONG = "body_too_long"
+    NUL_IN_BODY = "nul_in_body"
+    NESTED_THREAD = "nested_thread"
+    THREAD_ROOT_NOT_FOUND = "thread_root_not_found"
+    INVALID_CLIENT_ID = "invalid_client_id"
+    INVALID_CURSOR = "invalid_cursor"
+    INVALID_CHANNEL_NAME = "invalid_channel_name"
+    INVALID_PAGINATION = "invalid_pagination"
+    TOO_MANY_DM_PRINCIPALS = "too_many_dm_principals"
+    NOT_A_MEMBER = "not_a_member"
+    AGENT_OWNER_REQUIRED = "agent_owner_required"
+    CLIENT_ID_CONFLICT = "client_id_conflict"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -305,6 +319,20 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # succeed — the fix is to restart the enumeration without the cursor. The
     # distinct code is what a paging client keys that restart off.
     ErrorCode.STALE_CURSOR: 400,
+    # Team-chat validation (422), access (403) and idempotency (409) codes.
+    ErrorCode.EMPTY_BODY: 422,
+    ErrorCode.BODY_TOO_LONG: 422,
+    ErrorCode.NUL_IN_BODY: 422,
+    ErrorCode.NESTED_THREAD: 422,
+    ErrorCode.THREAD_ROOT_NOT_FOUND: 422,
+    ErrorCode.INVALID_CLIENT_ID: 422,
+    ErrorCode.INVALID_CURSOR: 422,
+    ErrorCode.INVALID_CHANNEL_NAME: 422,
+    ErrorCode.INVALID_PAGINATION: 422,
+    ErrorCode.TOO_MANY_DM_PRINCIPALS: 422,
+    ErrorCode.NOT_A_MEMBER: 403,
+    ErrorCode.AGENT_OWNER_REQUIRED: 403,
+    ErrorCode.CLIENT_ID_CONFLICT: 409,
 }
 
 
@@ -345,6 +373,20 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     # A stale reference: the cursor row was deleted (often by the same user
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
+    # Team-chat validation and access outcomes are all caller-side.
+    ErrorCode.EMPTY_BODY: ErrorCategory.USER,
+    ErrorCode.BODY_TOO_LONG: ErrorCategory.USER,
+    ErrorCode.NUL_IN_BODY: ErrorCategory.USER,
+    ErrorCode.NESTED_THREAD: ErrorCategory.USER,
+    ErrorCode.THREAD_ROOT_NOT_FOUND: ErrorCategory.USER,
+    ErrorCode.INVALID_CLIENT_ID: ErrorCategory.USER,
+    ErrorCode.INVALID_CURSOR: ErrorCategory.USER,
+    ErrorCode.INVALID_CHANNEL_NAME: ErrorCategory.USER,
+    ErrorCode.INVALID_PAGINATION: ErrorCategory.USER,
+    ErrorCode.TOO_MANY_DM_PRINCIPALS: ErrorCategory.USER,
+    ErrorCode.NOT_A_MEMBER: ErrorCategory.USER,
+    ErrorCode.AGENT_OWNER_REQUIRED: ErrorCategory.USER,
+    ErrorCode.CLIENT_ID_CONFLICT: ErrorCategory.USER,
 }
 
 
@@ -388,6 +430,20 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.ALREADY_EXISTS: ErrorImpact.BENIGN,
     ErrorCode.CONFLICT: ErrorImpact.BENIGN,
     ErrorCode.STALE_CURSOR: ErrorImpact.BENIGN,
+    # Team-chat validation/access rejections leave the workspace healthy.
+    ErrorCode.EMPTY_BODY: ErrorImpact.BENIGN,
+    ErrorCode.BODY_TOO_LONG: ErrorImpact.BENIGN,
+    ErrorCode.NUL_IN_BODY: ErrorImpact.BENIGN,
+    ErrorCode.NESTED_THREAD: ErrorImpact.BENIGN,
+    ErrorCode.THREAD_ROOT_NOT_FOUND: ErrorImpact.BENIGN,
+    ErrorCode.INVALID_CLIENT_ID: ErrorImpact.BENIGN,
+    ErrorCode.INVALID_CURSOR: ErrorImpact.BENIGN,
+    ErrorCode.INVALID_CHANNEL_NAME: ErrorImpact.BENIGN,
+    ErrorCode.INVALID_PAGINATION: ErrorImpact.BENIGN,
+    ErrorCode.TOO_MANY_DM_PRINCIPALS: ErrorImpact.BENIGN,
+    ErrorCode.NOT_A_MEMBER: ErrorImpact.BENIGN,
+    ErrorCode.AGENT_OWNER_REQUIRED: ErrorImpact.BENIGN,
+    ErrorCode.CLIENT_ID_CONFLICT: ErrorImpact.BENIGN,
 }
 
 
@@ -427,6 +483,20 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.UPSTREAM_CANCELLED: ErrorPhase.UNKNOWN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
+    # Team-chat validation/access fail at request time, before any session work.
+    ErrorCode.EMPTY_BODY: ErrorPhase.REQUEST,
+    ErrorCode.BODY_TOO_LONG: ErrorPhase.REQUEST,
+    ErrorCode.NUL_IN_BODY: ErrorPhase.REQUEST,
+    ErrorCode.NESTED_THREAD: ErrorPhase.REQUEST,
+    ErrorCode.THREAD_ROOT_NOT_FOUND: ErrorPhase.REQUEST,
+    ErrorCode.INVALID_CLIENT_ID: ErrorPhase.REQUEST,
+    ErrorCode.INVALID_CURSOR: ErrorPhase.REQUEST,
+    ErrorCode.INVALID_CHANNEL_NAME: ErrorPhase.REQUEST,
+    ErrorCode.INVALID_PAGINATION: ErrorPhase.REQUEST,
+    ErrorCode.TOO_MANY_DM_PRINCIPALS: ErrorPhase.REQUEST,
+    ErrorCode.NOT_A_MEMBER: ErrorPhase.REQUEST,
+    ErrorCode.AGENT_OWNER_REQUIRED: ErrorPhase.REQUEST,
+    ErrorCode.CLIENT_ID_CONFLICT: ErrorPhase.REQUEST,
 }
 
 

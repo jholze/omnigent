@@ -141,6 +141,7 @@ from omnigent.stores import (
     ConversationStore,
     FileStore,
 )
+from omnigent.stores.chat_store import ChatStore as TeamChatStore
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import (
     ConversationNotFoundError,
@@ -1392,6 +1393,7 @@ def create_app(
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
     chat_store: SessionChatStore | None = None,
+    team_chat_store: TeamChatStore | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -1532,6 +1534,10 @@ def create_app(
         root deployment.
     :param chat_store: Store for human lines beside a shared session.
         ``None`` leaves ``/v1/sessions/{id}/chat`` unmounted.
+    :param team_chat_store: Store for team chat (channels, DMs, messages).
+        When omitted it is derived from ``conversation_store``'s storage
+        location, so the ``/v1/chat`` routes mount on every real database
+        and are gated per-request by the ``team_chat`` flag.
     :returns: A fully configured :class:`FastAPI` application.
     :raises ValueError: If ``permission_store`` is provided
         without an ``auth_provider``.
@@ -1558,6 +1564,18 @@ def create_app(
     resolved_feature_flags = feature_flags or resolve_feature_flags()
     resolved_extension_state = _resolve_extension_state(extension_state)
     extension_bundles, extension_asset_errors = _resolve_extension_assets(resolved_extension_state)
+
+    # Team chat shares the main database, so when no explicit store is
+    # injected the app derives one from the conversation store's URI. This
+    # keeps the flag-gated /v1/chat routes mounted on every real database
+    # (and in the OpenAPI spec) without threading a store through every
+    # caller; the routes themselves answer 404 until the flag is on.
+    if team_chat_store is None:
+        chat_location = getattr(conversation_store, "storage_location", None)
+        if isinstance(chat_location, str) and "://" in chat_location:
+            from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
+
+            team_chat_store = SqlAlchemyChatStore(chat_location)
 
     # First-boot admin bootstrap for the accounts auth provider.
     # Runs before any route is mounted so the login page is never
@@ -3428,6 +3446,18 @@ def create_app(
             ),
             prefix="/v1",
             tags=["session_chat"],
+        )
+    if team_chat_store is not None:
+        from omnigent.server.routes.chat import create_chat_router
+
+        app.include_router(
+            create_chat_router(
+                team_chat_store,
+                auth_provider=auth_provider,
+                feature_flags=resolved_feature_flags,
+            ),
+            prefix="/v1",
+            tags=["chat"],
         )
     if policy_store is not None:
         app.include_router(

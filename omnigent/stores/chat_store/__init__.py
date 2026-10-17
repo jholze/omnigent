@@ -75,6 +75,21 @@ class ChatThread:
     participants: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ChatAgentAccount:
+    """An active agent account surfaced in the chat directory.
+
+    :param principal_id: The account's principal id (``agent:<uuid>``).
+    :param owner_id: The owning human principal.
+    """
+
+    id: str
+    principal_id: str
+    owner_id: str
+    display_name: str
+    handle: str
+
+
 class PostStatus(StrEnum):
     """Outcome of storing one message."""
 
@@ -125,6 +140,23 @@ class MessagePage:
     has_more: bool
     next_after: tuple[int, str] | None
     next_before: tuple[int, str] | None
+
+
+@dataclass(frozen=True)
+class ChangesPage:
+    """One ascending page of the caller's change feed.
+
+    :param items: Messages in channels the caller can read, ordered by
+        ``(created_at, id)`` ascending.
+    :param next_after: The ``(created_at, id)`` cursor of the last item,
+        or ``None`` when the page is empty.
+    :param reset: ``True`` when more than the page limit is pending, so
+        the caller should reload bootstrap instead of paging further.
+    """
+
+    items: tuple[ChatMessage, ...]
+    next_after: tuple[int, str] | None
+    reset: bool
 
 
 class ChatStore(ABC):
@@ -219,6 +251,65 @@ class ChatStore(ABC):
         :param tail: Return the newest *tail* messages, ascending.
         :param after: Exclusive forward cursor ``(created_at, id)``.
         :param before: Exclusive backward cursor ``(created_at, id)``.
+        """
+        ...
+
+    @abstractmethod
+    def get_channel_by_name(self, name: str) -> ChatChannel | None:
+        """Return the public channel named *name*, or ``None``.
+
+        Only ``kind="channel"`` rows carry a name, so this never matches
+        a DM or session chat.
+        """
+        ...
+
+    @abstractmethod
+    def is_member(self, channel_id: str, principal_id: str) -> bool:
+        """Whether *principal_id* is a member of *channel_id*."""
+        ...
+
+    @abstractmethod
+    def list_joined_channels(self, principal_id: str) -> tuple[ChatChannel, ...]:
+        """Public channels *principal_id* is a member of, oldest first."""
+        ...
+
+    @abstractmethod
+    def list_joined_dms(self, principal_id: str) -> tuple[ChatChannel, ...]:
+        """Direct messages *principal_id* is a participant of, oldest first."""
+        ...
+
+    @abstractmethod
+    def list_members(self, channel_id: str) -> tuple[ChatMember, ...]:
+        """Members of *channel_id*, ordered by join time."""
+        ...
+
+    @abstractmethod
+    def remove_member(self, channel_id: str, principal_id: str) -> bool:
+        """Drop *principal_id* from *channel_id*.
+
+        :returns: ``True`` when a row was removed, ``False`` when the
+            principal was not a member.
+        """
+        ...
+
+    @abstractmethod
+    def list_active_agent_accounts(self) -> tuple[ChatAgentAccount, ...]:
+        """Return the workspace's non-revoked agent accounts, oldest first."""
+        ...
+
+    @abstractmethod
+    def list_changes(
+        self,
+        principal_id: str,
+        *,
+        after: tuple[int, str] | None = None,
+        limit: int = 1000,
+    ) -> ChangesPage:
+        """Return messages created after *after* in channels the caller reads.
+
+        Only messages in channels where *principal_id* is a member are
+        included, in ascending ``(created_at, id)`` order. When more than
+        *limit* rows are pending the result sets :attr:`ChangesPage.reset`.
         """
         ...
 
