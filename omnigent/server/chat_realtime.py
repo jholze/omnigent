@@ -38,6 +38,30 @@ def publish_chat(principals: Iterable[str], frame: Mapping[str, object]) -> None
             user_session_stream.publish(_discovery_key(principal), payload)
 
 
+def publish_read_updated(
+    principal_id: str,
+    *,
+    channel_id: str,
+    thread_root_id: str,
+    created_at: int,
+    message_id: str,
+) -> None:
+    """Tell the same principal that their read cursor moved (FR-009).
+
+    The frame has no message body. Other principals are not recipients.
+    """
+    publish_chat(
+        [principal_id],
+        {
+            "kind": "read.updated",
+            "channel_id": channel_id,
+            "thread_root_id": thread_root_id,
+            "created_at": created_at,
+            "id": message_id,
+        },
+    )
+
+
 def publish_message_created(store: ChatStore, channel: ChatChannel, message: ChatMessage) -> None:
     """Announce a stored message to every member of its channel.
 

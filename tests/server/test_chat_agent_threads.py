@@ -758,3 +758,55 @@ async def test_ac_087a_stale_starting_thread_fails_on_read_and_sweep(
 
     assert _thread(db_uri, later_root).agent_state == "start_failed"
     assert (TIMEOUT, "timeout") in _system_rows(db_uri, later_root)
+
+
+async def test_ac_036a_bot_mention_starts_a_session_owned_by_the_owner(
+    chat_client: httpx.AsyncClient,
+    db_uri: str,
+    runner_202: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot mention starts the owner's project agent and names the initiator."""
+    monkeypatch.setenv("OMNIGENT_CHAT_AGENT_SECRET", "test-chat-agent-secret")
+    agent_id = _create_agent(db_uri)
+    project_id = _create_project(db_uri, JENS, "omnigent", {"agent_id": agent_id})
+    _set_default_project(db_uri, JENS, project_id)
+    channel = await _create_channel(chat_client, JENS, "general")
+    created = await chat_client.post(
+        "/v1/chat/agent-accounts",
+        json={
+            "display_name": "Grok",
+            "handle": "grok-jens",
+            "webhook_url": "https://bot.example.com/hook",
+        },
+        headers=_headers(JENS),
+    )
+    assert created.status_code == 201, created.text
+    account = created.json()["account"]
+    token = created.json()["token"]
+    SqlAlchemyChatStore(db_uri).add_member(channel, account["principal_id"])
+    before = _conversation_count(db_uri)
+    posted = await chat_client.post(
+        f"/v1/chat/channels/{channel}/messages",
+        json={"body": "<@omnigent_agent:coder> mach was"},
+        headers={"authorization": f"Bearer {token}"},
+    )
+    assert posted.status_code == 201, posted.text
+    root_id = posted.json()["id"]
+    await _wait_for_start()
+    assert _conversation_count(db_uri) == before + 1
+    thread = _thread(db_uri, root_id)
+    assert thread.agent_state == "active"
+    assert thread.started_by_agent_account_id == account["id"]
+    assert thread.caller_id == JENS
+    conversation = SqlAlchemyConversationStore(db_uri).get_conversation(thread.session_id or "")
+    assert conversation is not None
+    assert conversation.agent_id == agent_id
+    assert (
+        SqlAlchemyPermissionStore(db_uri).get_permission_level(JENS, thread.session_id or "")
+        == LEVEL_OWNER
+    )
+    items = await _thread_items(chat_client, JENS, channel, root_id)
+    bodies = [item["body"] for item in items]
+    assert "gestartet von Grok (Jens)" in bodies
+    assert "Nur Menschen können Omnigent-Agenten starten" not in bodies
