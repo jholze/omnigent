@@ -108,9 +108,15 @@ jobs:
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          # The runner user's ~/.omnigent/allowed_domains must not decide
-          # whether example.com may sign in during OIDC tests.
-          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${RUNNER_TEMP}/empty-allowed-domains"
+          # The Mac user's ~/.omnigent holds an email allowlist and a local
+          # model endpoint. Tests that wipe OMNIGENT_OIDC_* still read that
+          # data dir, and codex tests pick up the endpoint. Point both at an
+          # empty tree for this job.
+          export OMNIGENT_CONFIG_HOME="${RUNNER_TEMP}/omnigent-config-home"
+          export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
+          mkdir -p "$OMNIGENT_CONFIG_HOME" "$OMNIGENT_DATA_DIR"
+          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
           export PYTEST_PROGRESS_LOG_DIR="${GITHUB_WORKSPACE}/artifacts/progress"
 
@@ -130,15 +136,18 @@ jobs:
           # tree its own job. A second process on this same runner keeps those
           # mutations off deploy/scripts imports in the main suite.
           # Integration stays serial: its session fixtures share one mock server.
+          # -n 4, not -n auto: this Mac also runs the other jobs, and auto
+          # spawned enough workers that xdist reported them "not properly
+          # terminated" for the rest of the suite.
           run_suite main tests \
             --ignore=tests/e2e \
             --ignore=tests/e2e_ui \
             --ignore=tests/codex_parity \
             --ignore=tests/integration \
             --ignore=tests/inner \
-            -n auto \
+            -n 4 \
             --dist=worksteal
-          run_suite inner tests/inner -n auto --dist=worksteal
+          run_suite inner tests/inner -n 4 --dist=worksteal
           run_suite integration tests/integration
       - name: Upload pytest artifacts
         if: always()
