@@ -354,6 +354,10 @@ class SqlAlchemyChatStore(ChatStore):
                 client_id=client_id,
             )
             session.add(row)
+            # Flush the message now so a message-insert IntegrityError
+            # (e.g. a lost client_id race) surfaces here, uncaught, rather
+            # than inside _update_thread's thread-INSERT recovery.
+            session.flush()
 
             if root is not None:
                 _update_thread(session, channel_id, root.id, author_id, created_at)
@@ -507,33 +511,65 @@ def _update_thread(
     author_id: str,
     created_at: int,
 ) -> None:
-    """Bump a root message's reply counter and latest participants."""
+    """Bump a root message's reply counter and latest participants.
+
+    The existing row is read under ``SELECT ... FOR UPDATE`` so concurrent
+    replies on Postgres/MySQL serialize on the row instead of both reading
+    ``reply_count`` and writing ``N+1``. The first reply for a root has no row
+    to lock, so it INSERTs; when two first replies race, the loser's INSERT
+    raises ``IntegrityError``. That is recovered by rolling back only the
+    INSERT (the message was already flushed) and re-reading the winning row
+    under the same lock.
+    """
+
+    def _apply(thread: SqlChatThread) -> None:
+        participants = json.loads(thread.participants or "[]")
+        participants = [author_id] + [p for p in participants if p != author_id]
+        thread.participants = json.dumps(participants[:_MAX_PARTICIPANTS])
+        thread.reply_count = thread.reply_count + 1
+        thread.last_reply_at = created_at
+        thread.updated_at = created_at
+
     thread = session.execute(
-        select(SqlChatThread).where(
+        select(SqlChatThread)
+        .where(
             SqlChatThread.workspace_id == current_workspace_id(),
             SqlChatThread.root_message_id == root_message_id,
         )
+        .with_for_update()
     ).scalar_one_or_none()
-    participants: list[str] = []
-    if thread is None:
-        thread = SqlChatThread(
-            root_message_id=root_message_id,
-            channel_id=channel_id,
-            reply_count=0,
-            last_reply_at=None,
-            participants="[]",
-            agent_state="none",
-            updated_at=created_at,
-        )
-        session.add(thread)
-    else:
-        participants = json.loads(thread.participants or "[]")
 
-    participants = [author_id] + [p for p in participants if p != author_id]
-    thread.participants = json.dumps(participants[:_MAX_PARTICIPANTS])
-    thread.reply_count = thread.reply_count + 1
-    thread.last_reply_at = created_at
-    thread.updated_at = created_at
+    if thread is not None:
+        _apply(thread)
+        return
+
+    thread = SqlChatThread(
+        root_message_id=root_message_id,
+        channel_id=channel_id,
+        reply_count=0,
+        last_reply_at=None,
+        participants="[]",
+        agent_state="none",
+        updated_at=created_at,
+    )
+    _apply(thread)
+    try:
+        with session.begin_nested():
+            session.add(thread)
+            session.flush()
+    except IntegrityError:
+        # Lost the first-reply INSERT race. The nested transaction rolled
+        # back only the failed INSERT, so re-read the winner with FOR UPDATE
+        # and apply the counter/participant update to it.
+        thread = session.execute(
+            select(SqlChatThread)
+            .where(
+                SqlChatThread.workspace_id == current_workspace_id(),
+                SqlChatThread.root_message_id == root_message_id,
+            )
+            .with_for_update()
+        ).scalar_one()
+        _apply(thread)
 
 
 def _write_mentions(
@@ -549,16 +585,35 @@ def _write_mentions(
     if not tokens:
         return
 
-    user_ids = [t.target_id for t in tokens if t.kind == "user"]
+    # An id that starts with "agent:" is an agent account, never a user
+    # mention target, even when that id is also a channel member.
+    user_ids = [
+        t.target_id
+        for t in tokens
+        if t.kind == "user" and not t.target_id.startswith("agent:")
+    ]
     account_ids = [t.target_id for t in tokens if t.kind == "agent_account"]
 
     valid_users: set[str] = set()
     if user_ids:
+        # The human directory is the members of the "general" channel plus
+        # active agent accounts. A user mention is therefore valid when the
+        # target is a member of the posting channel or of "general".
+        member_channel_ids = [channel_id]
+        general_id = session.execute(
+            select(SqlChatChannel.id).where(
+                SqlChatChannel.workspace_id == current_workspace_id(),
+                SqlChatChannel.kind == "channel",
+                SqlChatChannel.name == "general",
+            )
+        ).scalar_one_or_none()
+        if general_id is not None and general_id != channel_id:
+            member_channel_ids.append(general_id)
         valid_users = set(
             session.execute(
                 select(SqlChatMember.principal_id).where(
                     SqlChatMember.workspace_id == current_workspace_id(),
-                    SqlChatMember.channel_id == channel_id,
+                    SqlChatMember.channel_id.in_(member_channel_ids),
                     SqlChatMember.principal_id.in_(user_ids),
                 )
             ).scalars()
