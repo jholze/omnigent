@@ -28,15 +28,14 @@ def publish_chat(principals: Iterable[str], frame: Mapping[str, object]) -> None
     payload = dict(frame)
     payload["type"] = "chat"
     for principal in principals:
-        # The no-auth caller is stored as ``RESERVED_USER_LOCAL`` ("local"),
-        # but its updates socket subscribes under the shared single-user
-        # discovery key ``_discovery_key(None)``. Routing the frame to
-        # ``_discovery_key("local")`` would send it to a channel nobody
-        # listens on, so map the reserved principal back to the shared key.
-        key = (
-            _discovery_key(None) if principal == RESERVED_USER_LOCAL else _discovery_key(principal)
-        )
-        user_session_stream.publish(key, payload)
+        # The reserved local principal listens under the shared single-user
+        # key or its own "local" key depending on the auth provider, so
+        # publish to both; only one key has subscribers on a given server.
+        if principal == RESERVED_USER_LOCAL:
+            user_session_stream.publish(_discovery_key(RESERVED_USER_LOCAL), payload)
+            user_session_stream.publish(_discovery_key(None), payload)
+        else:
+            user_session_stream.publish(_discovery_key(principal), payload)
 
 
 def publish_message_created(store: ChatStore, channel: ChatChannel, message: ChatMessage) -> None:

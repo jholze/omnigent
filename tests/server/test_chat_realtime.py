@@ -77,6 +77,21 @@ def _build_no_auth_app(db_uri: str, tmp_path: Path) -> FastAPI:
     )
 
 
+def _build_local_single_user_app(db_uri: str, tmp_path: Path) -> FastAPI:
+    # Header-auth app in single-user local mode: an absent header resolves to
+    # ``RESERVED_USER_LOCAL`` and the updates socket subscribes under "local".
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    return create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        permission_store=SqlAlchemyPermissionStore(db_uri),
+        auth_provider=UnifiedAuthProvider(source="header", local_single_user=True),
+    )
+
+
 @pytest.fixture()
 def no_auth_chat_app(
     db_uri: str, runtime_init: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -84,6 +99,15 @@ def no_auth_chat_app(
     """Client against a single-user (no auth) app built with ``team_chat`` on."""
     monkeypatch.setenv(FEATURES_ENV_VAR, "team_chat")
     yield TestClient(_build_no_auth_app(db_uri, tmp_path))
+
+
+@pytest.fixture()
+def local_single_user_app(
+    db_uri: str, runtime_init: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
+    """Client against a header-auth single-user app built with ``team_chat`` on."""
+    monkeypatch.setenv(FEATURES_ENV_VAR, "team_chat")
+    yield TestClient(_build_local_single_user_app(db_uri, tmp_path))
 
 
 @pytest.fixture()
@@ -266,3 +290,32 @@ def test_ac_014_no_auth_member_socket_gets_bodyless_frame(no_auth_chat_app: Test
     assert frame["message_id"] == posted.json()["id"]
     assert frame["author_id"] == RESERVED_USER_LOCAL
     assert "body" not in frame
+
+
+def test_ac_014_local_single_user_header_socket_gets_bodyless_frame(
+    local_single_user_app: TestClient,
+) -> None:
+    """In header single-user mode the absent header resolves to ``local`` and
+    the frame reaches the ``"local"`` updates socket exactly once (FR-014)."""
+    bootstrap = local_single_user_app.get("/v1/chat/bootstrap")
+    assert bootstrap.status_code == 200, bootstrap.text
+    (general,) = (c for c in bootstrap.json()["channels"] if c["name"] == "general")
+
+    with local_single_user_app.websocket_connect("/v1/sessions/updates") as ws:
+        _wait_for_subscriber(RESERVED_USER_LOCAL)
+        posted = local_single_user_app.post(
+            f"/v1/chat/channels/{general['id']}/messages",
+            json={"body": "Deploy heute 16 Uhr?"},
+        )
+        assert posted.status_code == 201, posted.text
+        frame = json.loads(_recv_raw(ws, {"chat"}))
+        # No second copy: the next frame the socket sees must be the sentinel.
+        user_session_stream.publish(RESERVED_USER_LOCAL, {"type": "hosts_changed"})
+        sentinel = json.loads(_recv_raw(ws, {"chat", "hosts_changed"}))
+
+    assert frame["kind"] == "message.created"
+    assert frame["channel_id"] == general["id"]
+    assert frame["message_id"] == posted.json()["id"]
+    assert frame["author_id"] == RESERVED_USER_LOCAL
+    assert "body" not in frame
+    assert sentinel["type"] == "hosts_changed"
