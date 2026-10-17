@@ -2288,13 +2288,13 @@ export function useMoveToProject() {
   const queryClient = useQueryClient();
 
   // Write a membership (project_id + labels) onto the row in every list cache
-  // that may hold it, plus the pinned-row backfill cache. Fields are overlaid
-  // in place. Folder-page membership is a move: the target folder's cache
-  // gains the row when nothing else could render it there (a row outside the
-  // flat window has no other source — the sidebar unions folder pages with
-  // the window's members), and folders the row just left drop it, but only
-  // while it stays visible somewhere else — a briefly-stale old folder beats
-  // the row vanishing from the sidebar until the reconcile refetches land.
+  // that may hold it, plus the pinned list and the pinned-row backfill cache.
+  // Fields are overlaid in place. Folder-page membership is a move: the target
+  // folder's cache gains the row when nothing else could render it there (a row
+  // outside the flat window has no other source — the sidebar unions folder
+  // pages with the window's members), and folders the row just left drop it,
+  // but only while it stays visible somewhere else — a briefly-stale old folder
+  // beats the row vanishing from the sidebar until the reconcile refetches land.
   const overlayMembership = (
     row: Conversation,
     projectId: string | null | undefined,
@@ -2358,6 +2358,18 @@ export function useMoveToProject() {
     queryClient.setQueryData<Conversation | null>(["conversation-backfill", id], (old) =>
       old ? { ...old, project_id: projectId, labels } : old,
     );
+    // Pin lookups read this cache first; overlay membership so a same-tick
+    // unpin keeps the new project label instead of the pre-move snapshot.
+    queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, (old) => {
+      if (!old) return old;
+      let changed = false;
+      const conversations = old.conversations.map((c) => {
+        if (c.id !== id) return c;
+        changed = true;
+        return { ...c, project_id: projectId, labels };
+      });
+      return changed ? { ...old, conversations } : old;
+    });
   };
 
   return useMutation({
@@ -2374,12 +2386,6 @@ export function useMoveToProject() {
               .getQueryData<ProjectSummary[]>(["projects"])
               ?.find((p) => p.name === project) ?? undefined);
       if (target === undefined) return undefined;
-      // Cancel in-flight list refetches so a response that started before the
-      // overlay can't resolve after it and snap the row back to its old spot.
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: ["conversations"] }),
-        queryClient.cancelQueries({ queryKey: ["project-sessions"] }),
-      ]);
       const row = findCachedConversationRow(queryClient, id);
       if (!row) return undefined;
       // Wholesale snapshots for rollback: the overlay also drops the row from
@@ -2392,18 +2398,37 @@ export function useMoveToProject() {
           queryKey: ["project-sessions"],
         }),
         backfill: queryClient.getQueryData<Conversation | null>(["conversation-backfill", id]),
+        pinned: queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY),
       };
-      const baseLabels = Object.fromEntries(
-        Object.entries(row.labels).filter(([labelKey]) => labelKey !== PROJECT_LABEL_KEY),
-      );
       // A label-only folder has no first-class id to overlay yet, so its
       // membership is written through the legacy label — the sidebar
       // dual-reads it into the same folder the eventual PATCH files into.
-      const labels =
-        target !== null && target.id === null
+      const membershipLabels = (source: Conversation) => {
+        const baseLabels = Object.fromEntries(
+          Object.entries(source.labels).filter(([labelKey]) => labelKey !== PROJECT_LABEL_KEY),
+        );
+        return target !== null && target.id === null
           ? { ...baseLabels, [PROJECT_LABEL_KEY]: project }
           : baseLabels;
-      overlayMembership(row, target?.id ?? null, labels, project === "" ? null : project);
+      };
+      const applyOverlay = (source: Conversation) =>
+        overlayMembership(
+          row,
+          target?.id ?? null,
+          membershipLabels(source),
+          project === "" ? null : project,
+        );
+      // Overlay before yielding so a same-tick unpin cannot paint "unpinned, no
+      // project". Re-apply after cancel (it may revert fetches); later passes
+      // rebuild labels from the current row so they don't restore the pin key.
+      applyOverlay(row);
+      const cancel = Promise.all([
+        queryClient.cancelQueries({ queryKey: ["conversations"] }),
+        queryClient.cancelQueries({ queryKey: ["project-sessions"] }),
+      ]);
+      applyOverlay(findCachedConversationRow(queryClient, id) ?? row);
+      await cancel;
+      applyOverlay(findCachedConversationRow(queryClient, id) ?? row);
       return previous;
     },
     onError: (_err, { id }, previous) => {
@@ -2413,6 +2438,9 @@ export function useMoveToProject() {
       }
       if (previous.backfill !== undefined) {
         queryClient.setQueryData(["conversation-backfill", id], previous.backfill);
+      }
+      if (previous.pinned !== undefined) {
+        queryClient.setQueryData(PINNED_CONVERSATIONS_KEY, previous.pinned);
       }
     },
     onSuccess: (updated, { project }) => {

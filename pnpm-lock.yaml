@@ -72,7 +72,7 @@ overrides:
   '@tiptap/starter-kit': 3.30.5
   express-rate-limit>ip-address: 10.3.1
 
-packageExtensionsChecksum: sha256-pFEExG4o57joHucsVi/dgGpp9BfdxYD7y4blLQUpCqI=
+packageExtensionsChecksum: sha256-t4u6UxRCz0n9q1U5QaL2NQM0+WIPo5ZOEzFXnamvj20=
 
 importers:
 
