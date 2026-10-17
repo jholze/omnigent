@@ -1,11 +1,19 @@
 name: Fork CI
 
 # Fork-only PR CI for jholze/omnigent. Kept in its own file so upstream syncs of
-# ci.yml / lint.yml / web-tests.yml never conflict with it. GitHub-hosted
-# runners only, no secrets, no security-gate dependency. Commands mirror the
-# upstream workflows (ci.yml, lint.yml, web-tests.yml, e2e-ui.yml) so results
-# are comparable. DB-server lanes (Postgres/MySQL/CockroachDB), databricks,
-# slack and codex-parity lanes are intentionally left out; pytest runs on SQLite.
+# ci.yml / lint.yml / web-tests.yml / e2e-ui.yml never conflict with it.
+#
+# Runs on the owner's Apple Silicon Mac (self-hosted label omnigent-ci).
+# There is one runner, so jobs share a workflow-wide concurrency group and
+# pytest is not sharded across machines. The runner disk persists: uv, pnpm,
+# and Playwright caches live in the runner user's home, not in actions/cache
+# (the token is contents:read only).
+#
+# The repo is public. Every job is gated so only jholze's same-repo pull
+# requests and manual dispatches are queued. pull_request_target is not used.
+# A pull request from a fork, or any actor other than jholze, skips before the
+# Mac picks up work. DB-server, databricks, slack, and codex-parity lanes stay
+# out; pytest runs on SQLite.
 
 on:
   pull_request:
@@ -23,23 +31,28 @@ env:
   NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  # One Mac. A newer run cancels the older one instead of queueing behind it.
+  group: fork-ci-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
   python-lint:
     name: Python lint (ruff, pyrefly)
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version-file: ".python-version"
-      - uses: ./.github/actions/setup-uv
-        with:
-          enable-cache: true
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          uv --version
       - name: Install dependencies (same extras as upstream lint.yml)
         run: |
           uv sync --locked --group lint \
@@ -55,69 +68,29 @@ jobs:
         run: .venv/bin/pyrefly check
 
   pytest:
-    name: Pytest (${{ matrix.group }})
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - group: runtime
-            paths: tests/runtime
-          - group: inner-tools
-            paths: tests/inner tests/tools tests/test_errors.py
-          - group: repl-sdk
-            paths: tests/frontends tests/repl tests/terminals
-          - group: server
-            paths: tests/server tests/onboarding
-          - group: spec-llms
-            paths: tests/spec tests/llms
-          - group: integration-mock
-            paths: tests/integration
-            workers: "0"
-          - group: runner-stores
-            paths: tests/runner tests/stores
-          - group: misc
-            paths: >-
-              tests
-              --ignore=tests/e2e
-              --ignore=tests/integration
-              --ignore=tests/runtime
-              --ignore=tests/inner
-              --ignore=tests/tools
-              --ignore=tests/test_errors.py
-              --ignore=tests/frontends
-              --ignore=tests/repl
-              --ignore=tests/terminals
-              --ignore=tests/server
-              --ignore=tests/onboarding
-              --ignore=tests/spec
-              --ignore=tests/llms
-              --ignore=tests/codex_parity
-              --ignore=tests/runner
-              --ignore=tests/stores
+    name: Pytest (SQLite)
+    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version-file: ".python-version"
-      - uses: ./.github/actions/setup-uv
-        with:
-          enable-cache: true
-      - name: Set up Node.js for local relay tests
-        if: matrix.group == 'misc'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-        with:
-          node-version: "22"
-      - name: Install test system dependencies (as upstream ci.yml)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        # Node is required by the local relay tests that used to be the misc shard.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep bubblewrap tmux
-          if [ "${{ matrix.group }}" = "inner-tools" ]; then
-            sudo apt-get install -y --no-install-recommends dbus-daemon gnome-keyring
-          fi
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          command -v node
+          uv --version
+          node --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          test "$node_major" = "26"
+          command -v rg >/dev/null || echo "::warning::ripgrep (rg) is not on PATH; Grep-tool tests may fail."
+          command -v tmux >/dev/null || echo "::warning::tmux is not on PATH; terminal tests may fail."
       - name: Install dependencies
         run: uv sync --locked --extra all --group test
       - name: Run pytest (SQLite, not databricks)
@@ -127,34 +100,60 @@ jobs:
           OMNIGENT_TEST_TIMEOUT_SCALE: "4"
         run: |
           mkdir -p artifacts
-          # matrix.paths is unquoted on purpose: it word-splits into pytest args.
-          # shellcheck disable=SC2086
-          env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u DATABRICKS_TOKEN \
-            uv run pytest ${{ matrix.paths }} \
-              -m "not databricks" \
-              -n ${{ matrix.workers || '4' }} \
-              --dist=worksteal \
-              --timeout=300 \
-              --junitxml=artifacts/pytest-${{ matrix.group }}.xml \
-              -v --tb=short -r a \
-              || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in this shard; treating as a pass." || exit "$rc"; }
+          unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
+          # Integration stays serial below: its session fixtures share one mock server.
+          # e2e_ui has its own job. e2e and codex_parity are out of this lane.
+          uv run pytest tests \
+            --ignore=tests/e2e \
+            --ignore=tests/e2e_ui \
+            --ignore=tests/codex_parity \
+            --ignore=tests/integration \
+            -m "not databricks" \
+            -n auto \
+            --dist=worksteal \
+            --timeout=300 \
+            --junitxml=artifacts/pytest.xml \
+            -v --tb=short -r a \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected; treating as a pass." || exit "$rc"; }
+          uv run pytest tests/integration \
+            -m "not databricks" \
+            --timeout=300 \
+            --junitxml=artifacts/pytest-integration.xml \
+            -v --tb=short -r a \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No integration tests collected; treating as a pass." || exit "$rc"; }
       - name: Upload pytest artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fork-pytest-${{ matrix.group }}-${{ github.run_id }}
+          name: fork-pytest-${{ github.run_id }}
           path: artifacts/
           retention-days: 7
+          if-no-files-found: ignore
 
   web:
     name: Web (lint, typecheck, vitest, build)
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - name: Set up pnpm + Node 22
-        uses: ./.github/actions/setup-pnpm
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use Node and pnpm on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v node
+          command -v pnpm
+          node --version
+          pnpm --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          pnpm_major="$(pnpm --version | cut -d. -f1)"
+          test "$node_major" = "26"
+          test "$pnpm_major" = "11"
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --filter web
       - name: Format check (prettier)
@@ -169,34 +168,43 @@ jobs:
         run: pnpm --filter web run build
 
   e2e-ui:
-    # NON-BLOCKING: many Playwright UI tests already fail on main (~26 known).
-    # continue-on-error keeps a red shard from failing the workflow run.
-    name: E2E UI (Playwright, non-blocking, shard ${{ matrix.shard }})
-    if: ${{ !github.event.pull_request.draft }}
+    # NON-BLOCKING: many Playwright UI tests already fail on main.
+    # continue-on-error keeps a red run from failing the workflow.
+    name: E2E UI (Playwright, non-blocking)
+    if: ${{ github.actor == 'jholze' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event.pull_request.draft != true }}
     continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 180
     env:
       ANTHROPIC_API_KEY: ""
       DATABRICKS_TOKEN: ""
       TERM: xterm-256color
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version-file: ".python-version"
-      - uses: ./.github/actions/setup-pnpm
-      - uses: ./.github/actions/setup-uv
-        with:
-          enable-cache: true
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          command -v node
+          command -v pnpm
+          uv --version
+          node --version
+          pnpm --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          pnpm_major="$(pnpm --version | cut -d. -f1)"
+          test "$node_major" = "26"
+          test "$pnpm_major" = "11"
       - name: Install project + test dependencies
         run: uv sync --locked --extra all --group test
       - name: Install Playwright Chromium
-        run: uv run playwright install --with-deps chromium
+        # No --with-deps: that path is apt-based and does not apply on macOS.
+        # The browser cache in the runner home persists across jobs.
+        run: uv run playwright install chromium
       - name: Build web SPA
         run: |
           pnpm install --frozen-lockfile --filter web
@@ -208,15 +216,15 @@ jobs:
             -v --tb=short -r a \
             --reruns=1 --reruns-delay=5 \
             --ui-skip-build \
-            --splits=4 \
-            --group=${{ matrix.shard }} \
-            --junitxml=artifacts/e2e-ui-${{ matrix.shard }}.xml \
+            --junitxml=artifacts/e2e-ui.xml \
             -m "not visual and not nightly" \
-            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in this shard; treating as a pass." || exit "$rc"; }
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected; treating as a pass." || exit "$rc"; }
       - name: Upload e2e artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fork-e2e-ui-${{ matrix.shard }}-${{ github.run_id }}
+          name: fork-e2e-ui-${{ github.run_id }}
           path: artifacts/
           retention-days: 7
+          if-no-files-found: ignore
