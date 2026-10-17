@@ -178,6 +178,25 @@ async def test_ac_003b_mcp_tools_list_has_no_chat_tools_when_flag_off(
     assert not [name for name in names if name.startswith("chat_")]
 
 
+async def test_ac_003c_malformed_channel_body_is_404_not_422_when_flag_off(
+    flag_off_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    resp = await flag_off_client.post("/v1/chat/channels", json={}, headers=_headers(ANNA))
+
+    assert resp.status_code == 404, resp.text
+    assert _count(db_uri, SqlChatChannel) == 0
+
+
+async def test_ac_003d_malformed_messages_query_is_404_not_422_when_flag_off(
+    flag_off_client: httpx.AsyncClient,
+) -> None:
+    resp = await flag_off_client.get(
+        "/v1/chat/channels/nope/messages", params={"limit": "abc"}, headers=_headers(ANNA)
+    )
+
+    assert resp.status_code == 404, resp.text
+
+
 async def test_ac_004a_concurrent_bootstrap_creates_one_general_with_both_members(
     chat_client: httpx.AsyncClient, db_uri: str
 ) -> None:

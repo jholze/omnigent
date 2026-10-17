@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 
 from omnigent.runtime import user_session_stream
+from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.routes._sessions.helpers import _discovery_key
 from omnigent.stores.chat_store import ChatChannel, ChatMessage, ChatStore
 
@@ -27,7 +28,15 @@ def publish_chat(principals: Iterable[str], frame: Mapping[str, object]) -> None
     payload = dict(frame)
     payload["type"] = "chat"
     for principal in principals:
-        user_session_stream.publish(_discovery_key(principal), payload)
+        # The no-auth caller is stored as ``RESERVED_USER_LOCAL`` ("local"),
+        # but its updates socket subscribes under the shared single-user
+        # discovery key ``_discovery_key(None)``. Routing the frame to
+        # ``_discovery_key("local")`` would send it to a channel nobody
+        # listens on, so map the reserved principal back to the shared key.
+        key = (
+            _discovery_key(None) if principal == RESERVED_USER_LOCAL else _discovery_key(principal)
+        )
+        user_session_stream.publish(key, payload)
 
 
 def publish_message_created(store: ChatStore, channel: ChatChannel, message: ChatMessage) -> None:

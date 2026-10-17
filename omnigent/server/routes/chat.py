@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
 from omnigent.db.utils import now_epoch_us
@@ -139,12 +139,6 @@ class DmCreateBody(BaseModel):
     principals: list[str]
 
 
-def _require_team_chat(flags: FeatureFlags) -> None:
-    """Refuse every chat route with 404 when the flag is off (FR-003)."""
-    if not flags.enabled(Feature.TEAM_CHAT):
-        raise OmnigentError("team chat is disabled", code=ErrorCode.NOT_FOUND)
-
-
 def _resolve_caller(request: Request, auth_provider: AuthProvider | None) -> str:
     """Resolve the caller principal, falling back to the local user.
 
@@ -237,7 +231,18 @@ def create_chat_router(
         resolves ``OMNIGENT_FEATURES`` at router construction.
     """
     flags = feature_flags or resolve_feature_flags()
-    router = APIRouter()
+
+    def _require_team_chat() -> None:
+        """Refuse every chat route with 404 when the flag is off (FR-003)."""
+        if not flags.enabled(Feature.TEAM_CHAT):
+            raise OmnigentError("team chat is disabled", code=ErrorCode.NOT_FOUND)
+
+    # The gate lives on the router, not on each handler: FastAPI validates
+    # request bodies/query params before a handler runs, so a per-handler
+    # check would let a malformed body surface as 422 even with the flag off.
+    # A router dependency runs first, so every ``/v1/chat/*`` request answers
+    # 404 regardless of its payload (FR-003).
+    router = APIRouter(dependencies=[Depends(_require_team_chat)])
 
     @router.get("/chat/bootstrap", response_model=BootstrapResponse)
     async def bootstrap(request: Request) -> BootstrapResponse:
@@ -245,7 +250,6 @@ def create_chat_router(
 
         :raises OmnigentError: 404 when the flag is off.
         """
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         human_caller = caller if principal_kind(caller) == "user" else None
         general = await asyncio.to_thread(
@@ -284,7 +288,6 @@ def create_chat_router(
         body: ChannelCreateBody,
     ) -> ChannelResponse:
         """Create a public channel and make the caller a member (FR-005)."""
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         if not _CHANNEL_NAME_RE.fullmatch(body.name):
             raise OmnigentError(
@@ -300,7 +303,6 @@ def create_chat_router(
     @router.post("/chat/channels/{channel_id}/join", status_code=204)
     async def join_channel(request: Request, channel_id: str) -> None:
         """Add the caller to a public channel (FR-006)."""
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
         if channel is None or channel.kind != "channel":
@@ -310,7 +312,6 @@ def create_chat_router(
     @router.post("/chat/channels/{channel_id}/leave", status_code=204)
     async def leave_channel(request: Request, channel_id: str) -> None:
         """Remove the caller from a public channel; leaving ``general`` is 409."""
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
         if channel is None or channel.kind != "channel":
@@ -334,7 +335,6 @@ def create_chat_router(
         ``tail`` selects the newest ``limit`` messages; otherwise ``before``
         or ``after`` (mutually exclusive) select a cursor-bound page.
         """
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
         if channel is None:
@@ -384,7 +384,6 @@ def create_chat_router(
         response: Response,
     ) -> MessageResponse:
         """Store one message and announce it to members (FR-013..FR-016)."""
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
         if channel is None:
@@ -438,7 +437,6 @@ def create_chat_router(
         response: Response,
     ) -> ChannelResponse:
         """Return or create the DM for the caller plus 1–8 others (FR-021, FR-022)."""
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         if len(body.principals) < _MIN_DM_OTHERS or len(body.principals) > _MAX_DM_OTHERS:
             raise OmnigentError(
@@ -468,7 +466,6 @@ def create_chat_router(
         after: str | None = None,
     ) -> ChangesResponse:
         """Return message ids created after ``after`` for backfill."""
-        _require_team_chat(flags)
         caller = _resolve_caller(request, auth_provider)
         after_cursor = _parse_cursor(after)
         page = await asyncio.to_thread(

@@ -19,9 +19,10 @@ from fastapi.testclient import TestClient
 from omnigent.runtime import user_session_stream
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
-from omnigent.server.auth import UnifiedAuthProvider
+from omnigent.server.auth import RESERVED_USER_LOCAL, UnifiedAuthProvider
 from omnigent.server.chat_realtime import publish_chat
 from omnigent.server.feature_flags import FEATURES_ENV_VAR
+from omnigent.server.routes._sessions.helpers import _discovery_key
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -62,6 +63,29 @@ def _build_app(db_uri: str, tmp_path: Path) -> FastAPI:
     )
 
 
+def _build_no_auth_app(db_uri: str, tmp_path: Path) -> FastAPI:
+    # Single-user mode: no permission store and no auth provider, so the chat
+    # caller resolves to ``RESERVED_USER_LOCAL`` and the updates socket
+    # subscribes under the shared discovery key.
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    return create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+    )
+
+
+@pytest.fixture()
+def no_auth_chat_app(
+    db_uri: str, runtime_init: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
+    """Client against a single-user (no auth) app built with ``team_chat`` on."""
+    monkeypatch.setenv(FEATURES_ENV_VAR, "team_chat")
+    yield TestClient(_build_no_auth_app(db_uri, tmp_path))
+
+
 @pytest.fixture()
 def chat_app(
     db_uri: str, runtime_init: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -88,6 +112,17 @@ def _wait_for_subscriber(user: str, *, timeout_s: float = 5.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError(f"no updates subscriber for {user}")
+
+
+def _wait_for_shared_subscriber(*, timeout_s: float = 5.0) -> None:
+    """Block until the shared single-user updates socket has subscribed."""
+    key = _discovery_key(None)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if user_session_stream._subscribers.get(key):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"no updates subscriber for {key}")
 
 
 def _recv_raw(ws: Any, wanted: set[str], *, max_frames: int = 50) -> str:
@@ -208,3 +243,26 @@ def test_ac_014_flag_off_socket_drops_chat_frame(flag_off_app: TestClient) -> No
         frame = json.loads(_recv_raw(ws, {"chat", "hosts_changed"}))
 
     assert frame["type"] == "hosts_changed"
+
+
+def test_ac_014_no_auth_member_socket_gets_bodyless_frame(no_auth_chat_app: TestClient) -> None:
+    """In single-user mode the ``local`` member's frame reaches the shared
+    updates socket, not a ``"local"`` channel nobody subscribes to (FR-014)."""
+    bootstrap = no_auth_chat_app.get("/v1/chat/bootstrap")
+    assert bootstrap.status_code == 200, bootstrap.text
+    (general,) = (c for c in bootstrap.json()["channels"] if c["name"] == "general")
+
+    with no_auth_chat_app.websocket_connect("/v1/sessions/updates") as ws:
+        _wait_for_shared_subscriber()
+        posted = no_auth_chat_app.post(
+            f"/v1/chat/channels/{general['id']}/messages",
+            json={"body": "Deploy heute 16 Uhr?"},
+        )
+        assert posted.status_code == 201, posted.text
+        frame = json.loads(_recv_raw(ws, {"chat"}))
+
+    assert frame["kind"] == "message.created"
+    assert frame["channel_id"] == general["id"]
+    assert frame["message_id"] == posted.json()["id"]
+    assert frame["author_id"] == RESERVED_USER_LOCAL
+    assert "body" not in frame
