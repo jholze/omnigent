@@ -1,0 +1,561 @@
+name: Upstream sync + Mac update
+
+# Mergt täglich um 05:00 Europe/Berlin upstream main per PR in den
+# Fork-main (nur bei grüner Gate) und aktualisiert danach das MacBook,
+# wenn keine Session läuft. Schedule läuft nur auf dem Default-Branch.
+
+on:
+  schedule:
+    # GitHub-Cron ist UTC. 05:00 Berlin ist 03:00 UTC (CEST) oder 04:00 UTC (CET).
+    # Beide Läufe starten; der Wächter lässt nur die Stunde 05 in Berlin durch.
+    - cron: "0 3 * * *"
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      install:
+        description: "Nach dem Merge auf dem MacBook installieren"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: omnigent-ai/omnigent
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: main
+  SYNC_BRANCH: sync/upstream
+
+jobs:
+  schedule-window:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      proceed: ${{ steps.tz.outputs.proceed }}
+    steps:
+      - name: Nur 05:00 Europe/Berlin
+        id: tz
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "schedule" ]; then
+            echo "proceed=true" >> "${GITHUB_OUTPUT}"
+            echo "workflow_dispatch: Zeitfenster wird nicht geprüft."
+            exit 0
+          fi
+          hour="$(TZ=Europe/Berlin date +%H)"
+          printf 'Berlin: %s\n' "$(TZ=Europe/Berlin date '+%Y-%m-%d %H:%M %Z')"
+          if [ "${hour}" = "05" ]; then
+            echo "proceed=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "proceed=false" >> "${GITHUB_OUTPUT}"
+            echo "Übersprungen: nicht 05:00 Europe/Berlin (das andere DST-Cron)."
+          fi
+
+  sync:
+    needs: schedule-window
+    if: needs.schedule-window.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+      sha: ${{ steps.merge.outputs.sha }}
+      conflict: ${{ steps.merge.outputs.conflict }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          # GITHUB_TOKEN darf Workflow-Dateien nicht pushen. Der PAT braucht
+          # repo + workflow, und für feinkörnige Tokens zusätzlich
+          # Pull requests, Checks und Actions (lesen).
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
+
+      - name: PR öffnen, Gate abwarten, mergen
+        id: merge
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}"
+          git checkout -B "${SYNC_BRANCH}" "origin/${TARGET_BRANCH}"
+          main_sha="$(git rev-parse HEAD)"
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" HEAD; then
+            echo "merged=false" >> "${GITHUB_OUTPUT}"
+            echo "sha=${main_sha}" >> "${GITHUB_OUTPUT}"
+            echo "Bereits auf dem Stand von upstream/${UPSTREAM_BRANCH} (${main_sha})."
+            exit 0
+          fi
+          if ! git merge --no-ff -m "$(printf '%s\n\n%s\n' \
+            "Merge upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} into ${TARGET_BRANCH}" \
+            "Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>")" \
+            "upstream/${UPSTREAM_BRANCH}"; then
+            git diff --name-only --diff-filter=U > conflicts.txt || true
+            git merge --abort || true
+            if [ -s conflicts.txt ]; then
+              echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            fi
+            echo "::error::Merge-Konflikt mit ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+            exit 1
+          fi
+          head="$(git rev-parse HEAD)"
+          git push --force-with-lease origin "HEAD:${SYNC_BRANCH}"
+
+          tick="$(printf '\140')"
+          {
+            printf 'Automatischer Merge von %s in %s.\n\n' \
+              "${tick}${UPSTREAM_REPO}@${UPSTREAM_BRANCH}${tick}" \
+              "${tick}${TARGET_BRANCH}${tick}"
+            printf 'Branch-Head: %s%s%s\n\n' "${tick}" "${head}" "${tick}"
+            printf '%s\n' \
+              "Der Workflow markiert das PR als bereit, damit die vorhandenen Workflows Lint, CI, E2E, Docker build, UI Snapshot und Integration laufen. Drafts starten diese Checks nicht. Die Gate ist die REQUIRED-Liste aus .github/scripts/merge-ready/required.sh. Bei Rot wird das PR wieder ein Draft und nicht gemerged. Bei Grün merged der Workflow ohne weitere Bestätigung."
+            printf '\nLauf: %s/%s/actions/runs/%s\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+          } > pr.md
+          title="Upstream-Sync: ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+          if ! gh pr create --draft --base "${TARGET_BRANCH}" --head "${SYNC_BRANCH}" \
+            --title "${title}" --body-file pr.md; then
+            echo "PR existiert bereits oder wurde gerade angelegt; es wird das offene PR benutzt."
+          fi
+          number="$(gh pr list --head "${SYNC_BRANCH}" --base "${TARGET_BRANCH}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -z "${number}" ]; then
+            echo "::error::Kein offenes PR für ${SYNC_BRANCH}"
+            exit 1
+          fi
+          gh pr edit "${number}" --title "${title}" --body-file pr.md
+          if [ "$(gh pr view "${number}" --json isDraft --jq '.isDraft')" = "true" ]; then
+            gh pr ready "${number}"
+          fi
+
+          for _ in $(seq 1 300); do
+            set +e
+            bash .github/scripts/upstream-sync/gate.sh "${head}" > gate.log 2>&1
+            gate_rc=$?
+            set -e
+            cat gate.log
+            if [ "${gate_rc}" -eq 0 ]; then
+              break
+            fi
+            if [ "${gate_rc}" -eq 1 ]; then
+              {
+                printf '%s\n\n' "Test-Gate rot. Kein Merge. Das PR bleibt offen und wird wieder ein Draft."
+                grep -E '^(NOT GREEN:|MISSING :)' gate.log || true
+                printf '\nLauf: %s/%s/actions/runs/%s\n' \
+                  "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+              } > gate.md
+              gh pr comment "${number}" --body-file gate.md
+              gh pr ready "${number}" --undo || true
+              echo "::error::Test-Gate rot, PR #${number} bleibt offen."
+              exit 1
+            fi
+            echo "Gate noch nicht grün (Exit ${gate_rc}), nächster Blick in 60s."
+            sleep 60
+          done
+          if [ "${gate_rc}" -ne 0 ]; then
+            {
+              printf '%s\n\n' "Test-Gate nach 5 Stunden nicht grün. Kein Merge."
+              grep -E '^(NOT GREEN:|MISSING :)' gate.log || true
+              printf '\nLauf: %s/%s/actions/runs/%s\n' \
+                "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            } > gate.md
+            gh pr comment "${number}" --body-file gate.md
+            gh pr ready "${number}" --undo || true
+            echo "::error::Zeitüberschreitung der Test-Gate, PR #${number} bleibt offen."
+            exit 1
+          fi
+
+          if ! gh pr merge "${number}" --merge --match-head-commit "${head}" \
+            --subject "Merge upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} into ${TARGET_BRANCH}" \
+            --body "Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"; then
+            {
+              printf '%s\n\n' "Test-Gate ist grün, gh pr merge wurde aber abgelehnt. Typisch: Branch Protection verlangt Reviews oder einen Status, den dieses Workflow nicht setzt. Kein direkter Push auf main."
+              printf 'Lauf: %s/%s/actions/runs/%s\n' \
+                "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            } > gate.md
+            gh pr comment "${number}" --body-file gate.md
+            echo "::error::Merge von PR #${number} abgelehnt."
+            exit 1
+          fi
+          oid=""
+          state=""
+          for _ in 1 2 3 4 5 6; do
+            state="$(gh pr view "${number}" --json state --jq '.state')"
+            oid="$(gh pr view "${number}" --json mergeCommit --jq '.mergeCommit.oid // empty')"
+            if [ "${state}" = "MERGED" ] && [[ "${oid}" =~ ^[0-9a-f]{40}$ ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ "${state}" != "MERGED" ] || ! [[ "${oid}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::PR #${number} ist nach gh pr merge nicht MERGED."
+            exit 1
+          fi
+          echo "merged=true" >> "${GITHUB_OUTPUT}"
+          echo "sha=${oid}" >> "${GITHUB_OUTPUT}"
+          echo "main ist jetzt ${oid} (PR #${number})."
+
+      - name: Issue bei Konflikt
+        if: failure() && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Upstream-Sync: Merge-Konflikt auf ${TARGET_BRANCH}"
+          tick="$(printf '\140')"
+          fence="${tick}${tick}${tick}"
+          {
+            printf 'Der automatische Merge von %s in %s ist fehlgeschlagen.\n\n' \
+              "${tick}${UPSTREAM_REPO}@${UPSTREAM_BRANCH}${tick}" \
+              "${tick}${TARGET_BRANCH}${tick}"
+            printf 'Konflikt-Dateien:\n%s\n' "${fence}"
+            cat conflicts.txt
+            printf '%s\n\nLokal lösen:\n%s\n' "${fence}" "${fence}"
+            printf 'cd ~/Documents/scripts/omnigent-src\n'
+            printf 'git fetch upstream && git checkout %s\n' "${TARGET_BRANCH}"
+            printf 'git merge upstream/%s\n' "${UPSTREAM_BRANCH}"
+            printf '# Konflikte lösen, committen, pushen\n'
+            printf '%s\n' "${fence}"
+            printf 'Lauf: %s\n' \
+              "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > issue.md
+          number="$(
+            gh issue list --state open --limit 30 --json number,title \
+              --search "in:title \"${title}\"" \
+              | jq -r --arg title "${title}" \
+                '[.[] | select(.title == $title) | .number][0] // empty'
+          )"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --body-file issue.md
+          else
+            gh issue create --title "${title}" --body-file issue.md
+          fi
+
+  install-on-mac:
+    needs: sync
+    if: >-
+      needs.sync.result == 'success'
+      && (github.event_name == 'schedule' || inputs.install)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: SSH-Key einrichten
+        env:
+          MAC_SSH_KEY: ${{ secrets.MAC_SSH_KEY }}
+          MAC_SSH_KNOWN_HOSTS: ${{ secrets.MAC_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${MAC_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${MAC_SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+
+      - name: Sessions prüfen, dann installieren
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOST: ${{ secrets.MAC_SSH_HOST }}
+          PORT: ${{ secrets.MAC_SSH_PORT }}
+          SHA: ${{ needs.sync.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unerwarteter Commit-SHA: ${SHA}"
+            exit 1
+          fi
+          port="${PORT:-22}"
+          set +e
+          ssh -i "${HOME}/.ssh/id_ed25519" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            -p "${port}" \
+            "jholze@${HOST}" \
+            "REPO='${GITHUB_REPOSITORY}' SHA='${SHA}' bash -s" <<'REMOTE' | tee /tmp/mac-update.log
+          set -euo pipefail
+          REPO="${REPO:?REPO fehlt}"
+          SHA="${SHA:?SHA fehlt}"
+          export PATH="${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+          if [ -s "${HOME}/.nvm/nvm.sh" ]; then
+            # shellcheck disable=SC1091
+            . "${HOME}/.nvm/nvm.sh"
+          fi
+          pybin=""
+          if command -v python3 >/dev/null 2>&1; then
+            pybin="$(command -v python3)"
+          elif [ -x "${HOME}/.local/share/uv/tools/omnigent/bin/python" ]; then
+            pybin="${HOME}/.local/share/uv/tools/omnigent/bin/python"
+          else
+            echo "python3 fehlt, Session-Check nicht möglich." >&2
+            exit 1
+          fi
+          cat > "${HOME}/.upstream-sync-sessions.py" <<'PY'
+          import glob
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          BASE = "http://127.0.0.1:6767"
+
+
+          def request(method, url, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(url, data=data, method=method)
+              if data is not None:
+                  req.add_header("content-type", "application/json")
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      return resp.status, resp.read()
+              except urllib.error.HTTPError as exc:
+                  return exc.code, exc.read()
+              except urllib.error.URLError as exc:
+                  print(f"unreachable {exc}", file=sys.stderr)
+                  return 0, b""
+
+
+          def list_running():
+              after = None
+              found = []
+              while True:
+                  query = {"limit": "100", "kind": "any", "include_archived": "true"}
+                  if after:
+                      query["after"] = after
+                  url = BASE + "/v1/sessions?" + urllib.parse.urlencode(query)
+                  status, body = request("GET", url)
+                  if status == 0:
+                      return "down", []
+                  if status != 200:
+                      print(body.decode(errors="replace")[:500], file=sys.stderr)
+                      return f"http{status}", []
+                  page = json.loads(body)
+                  for item in page.get("data") or []:
+                      if item.get("status") == "running" and item.get("id"):
+                          found.append(item["id"])
+                  if not page.get("has_more"):
+                      return "ok", found
+                  after = page.get("last_id")
+                  if not after:
+                      return "ok", found
+
+
+          def installed_sha():
+              root = os.path.expanduser("~/.local/share/uv/tools/omnigent")
+              paths = glob.glob(root + "/lib/python*/site-packages/*.dist-info/direct_url.json")
+              for path in paths:
+                  parent = os.path.basename(os.path.dirname(path))
+                  if not parent.startswith("omnigent-"):
+                      continue
+                  try:
+                      info = json.load(open(path))
+                  except (OSError, json.JSONDecodeError):
+                      continue
+                  commit = (info.get("vcs_info") or {}).get("commit_id") or ""
+                  if commit:
+                      return commit
+              return ""
+
+
+          def interrupt(session_id):
+              url = BASE + "/v1/sessions/" + urllib.parse.quote(session_id, safe="") + "/events"
+              status, _body = request("POST", url, {"type": "interrupt"})
+              print(f"interrupt {session_id} -> {status}", file=sys.stderr)
+              return status
+
+
+          command = sys.argv[1]
+          if command == "list":
+              state, ids = list_running()
+              print(state, *ids)
+          elif command == "installed":
+              print(installed_sha())
+          elif command == "interrupt":
+              print(interrupt(sys.argv[2]))
+          else:
+              sys.exit(2)
+          PY
+          finish() {
+            printf 'UPSTREAM_SYNC_RESULT result=%s\n' "$1"
+            printf 'UPSTREAM_SYNC_RESULT running=%s\n' "$2"
+            printf 'UPSTREAM_SYNC_RESULT aborted=%s\n' "$3"
+          }
+          installed="$("${pybin}" "${HOME}/.upstream-sync-sessions.py" installed || true)"
+          if [ "${installed}" = "${SHA}" ]; then
+            echo "Mac bereits auf ${SHA}."
+            finish current "" ""
+            exit 0
+          fi
+          read -r state rest < <("${pybin}" "${HOME}/.upstream-sync-sessions.py" list)
+          case "${state}" in
+            ok)
+              if [ -n "${rest:-}" ]; then
+                echo "Laufende Sessions, Update verschoben: ${rest}"
+                finish skipped "${rest}" ""
+                exit 0
+              fi
+              ;;
+            down)
+              echo "Server unter 127.0.0.1:6767 nicht erreichbar; keine laufende Session angenommen."
+              ;;
+            *)
+              echo "Session-Liste fehlgeschlagen (${state}). Update wird nicht gestartet." >&2
+              exit 1
+              ;;
+          esac
+          if ! command -v node >/dev/null 2>&1; then
+            echo "Node.js >= 22.13 fehlt. setup.py baut die Web-UI beim Wheel-Build." >&2
+            exit 1
+          fi
+          if ! command -v pnpm >/dev/null 2>&1 && ! command -v corepack >/dev/null 2>&1; then
+            echo "pnpm oder corepack fehlt. Die Web-UI ist ein pnpm-Workspace." >&2
+            exit 1
+          fi
+          node -e 'const p=process.versions.node.split(".").map(Number); if (p[0]<22 || (p[0]===22 && p[1]<13)) { console.error("Node.js "+process.versions.node+" ist älter als 22.13"); process.exit(1); }'
+          aborted_file="$(mktemp)"
+          watch_loop() {
+            while true; do
+              line="$("${pybin}" "${HOME}/.upstream-sync-sessions.py" list || echo down)"
+              read -r watch_state watch_rest <<<"${line}"
+              if [ "${watch_state}" = "ok" ] && [ -n "${watch_rest:-}" ]; then
+                # Session-IDs sind einzelne Tokens (conv_…), deshalb Wort-Split.
+                # shellcheck disable=SC2086
+                for session_id in ${watch_rest}; do
+                  if grep -qxF "${session_id}" "${aborted_file}"; then
+                    continue
+                  fi
+                  "${pybin}" "${HOME}/.upstream-sync-sessions.py" interrupt "${session_id}" || true
+                  printf '%s\n' "${session_id}" >> "${aborted_file}"
+                done
+              fi
+              sleep 10
+            done
+          }
+          watch_loop &
+          watch_pid=$!
+          cleanup() { kill "${watch_pid}" 2>/dev/null || true; }
+          trap cleanup EXIT
+          # --no-sources: path-sources sind editable und 0.18.0.dev0 ist nicht
+          # auf PyPI. --reinstall statt --force, damit ein fehlgeschlagener
+          # Web-UI-Build die bestehende Installation nicht vorher löscht.
+          base="git+https://github.com/${REPO}.git@${SHA}"
+          set +e
+          "${HOME}/.local/bin/uv" tool install --reinstall --python 3.12 --no-sources \
+            --with "omnigent-client @ ${base}#subdirectory=sdks/python-client" \
+            --with "omnigent-ui-sdk @ ${base}#subdirectory=sdks/ui" \
+            "omnigent[dictation] @ ${base}"
+          uv_rc=$?
+          set -e
+          cleanup
+          trap - EXIT
+          wait "${watch_pid}" || true
+          aborted="$(tr '\n' ' ' < "${aborted_file}" | sed 's/ *$//')"
+          if [ "${uv_rc}" -ne 0 ]; then
+            echo "uv tool install fehlgeschlagen" >&2
+            finish failed "" "${aborted}"
+            exit "${uv_rc}"
+          fi
+          "${HOME}/.local/bin/omnigent" --version || true
+          launchctl kickstart -k "gui/$(id -u)/ai.omnigent.host"
+          i=0
+          until curl -fsS http://127.0.0.1:6767/health; do
+            i=$((i + 1))
+            if [ "${i}" -ge 12 ]; then
+              echo "Health-Check http://127.0.0.1:6767/health fehlgeschlagen" >&2
+              finish failed "" "${aborted}"
+              exit 1
+            fi
+            sleep 5
+          done
+          finish updated "" "${aborted}"
+          REMOTE
+          set -e
+
+          result="$(sed -n 's/^UPSTREAM_SYNC_RESULT result=//p' /tmp/mac-update.log | tail -n 1)"
+          running="$(sed -n 's/^UPSTREAM_SYNC_RESULT running=//p' /tmp/mac-update.log | tail -n 1)"
+          aborted="$(sed -n 's/^UPSTREAM_SYNC_RESULT aborted=//p' /tmp/mac-update.log | tail -n 1)"
+          if [ -z "${result}" ]; then
+            echo "::error::Mac-Skript hat kein Ergebnis gemeldet."
+            exit 1
+          fi
+          {
+            echo "## Mac-Update"
+            echo
+            echo "- Ergebnis: ${result}"
+            echo "- Commit: ${SHA}"
+            if [ -n "${running}" ]; then
+              echo "- Laufende Sessions (Update übersprungen): ${running}"
+            fi
+            if [ -n "${aborted}" ]; then
+              echo "- Hart abgebrochene Sessions: ${aborted}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${result}" = "current" ]; then
+            echo "Mac bereits auf ${SHA}, kein Neustart."
+            exit 0
+          fi
+          if [ "${result}" = "updated" ] && [ -z "${aborted}" ]; then
+            echo "Mac auf ${SHA} aktualisiert."
+            exit 0
+          fi
+          if [ "${result}" = "failed" ] && [ -z "${aborted}" ]; then
+            echo "::error::Mac-Update fehlgeschlagen."
+            exit 1
+          fi
+
+          title="Upstream-Sync: Server-Update"
+          tick="$(printf '\140')"
+          fence="${tick}${tick}${tick}"
+          if [ "${result}" = "skipped" ]; then
+            status="übersprungen"
+            detail="Laufende Sessions, der Server wurde nicht neu installiert. Der Stand auf main bleibt für den nächsten Lauf liegen."
+            ids="${running}"
+          elif [ "${result}" = "failed" ]; then
+            status="abgebrochen"
+            detail="Sessions wurden während des Updates abgebrochen. Die Installation ist danach fehlgeschlagen."
+            ids="${aborted}"
+          else
+            status="abgebrochen"
+            detail="Während des Updates sind Sessions angelaufen. Sie wurden per POST /v1/sessions/{id}/events mit type interrupt abgebrochen; Installation und Neustart sind weitergelaufen."
+            ids="${aborted}"
+          fi
+          {
+            printf 'Status: %s\n\n' "${status}"
+            printf '%s\n\n' "${detail}"
+            printf 'Commit auf main: %s%s%s\n\n' "${tick}" "${SHA}" "${tick}"
+            printf 'Sessions:\n%s\n' "${fence}"
+            printf '%s\n' "${ids}"
+            printf '%s\n\n' "${fence}"
+            printf 'Lauf: %s\n' \
+              "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > issue.md
+          number="$(
+            gh issue list --state open --limit 30 --json number,title \
+              --search "in:title \"${title}\"" \
+              | jq -r --arg title "${title}" \
+                '[.[] | select(.title == $title) | .number][0] // empty'
+          )"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --body-file issue.md
+          else
+            gh issue create --title "${title}" --body-file issue.md
+          fi
+          if [ "${result}" = "skipped" ]; then
+            echo "::warning::Update übersprungen, laufende Sessions: ${running}"
+            exit 0
+          fi
+          echo "::warning::Sessions während des Updates abgebrochen: ${aborted}"
+          if [ "${result}" = "failed" ]; then
+            exit 1
+          fi
