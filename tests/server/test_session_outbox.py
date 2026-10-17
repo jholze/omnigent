@@ -83,6 +83,7 @@ def test_failed_summary_is_redacted_and_reason_message_is_safe() -> None:
         error_message=(
             "boom sk-supersecretvalue token=abc123 "
             'bearer of bad news {"api_key": "supersecretvalue"} '
+            "Authorization: which level do I have? "
             "Authorization: ya29.supersecretvalue "
             "Bearer ya29.a0AfH6SMBx1234567890"
         ),
@@ -96,6 +97,7 @@ def test_failed_summary_is_redacted_and_reason_message_is_safe() -> None:
     assert "supersecretvalue" not in summary
     assert "ya29.a0AfH6SMBx1234567890" not in summary
     assert "bearer of bad news" in summary
+    assert "Authorization: which level do I have?" in summary
     assert "[redacted]" in summary
     unknown = session_outbox.build_failed_data(
         response_id="resp",
@@ -395,6 +397,8 @@ def test_awaiting_decision_and_verdict_redact_free_text(
                 "api_key": "supersecretvalue",
                 "note": "Authorization: ya29.supersecretvalue",
                 "aside": "bearer of bad news",
+                "max_tokens": 128,
+                "tokenizer": "cl100k",
             },
         },
         decided_by="owner@example.com",
@@ -405,6 +409,8 @@ def test_awaiting_decision_and_verdict_redact_free_text(
     assert content["api_key"] == "[redacted]"
     assert "ya29.supersecretvalue" not in content["note"]
     assert content["aside"] == "bearer of bad news"
+    assert content["max_tokens"] == 128
+    assert content["tokenizer"] == "cl100k"
 
 
 async def test_runner_2xx_without_resolved_header_does_not_resume(
@@ -521,3 +527,58 @@ def test_no_elicitation_subscription_writes_no_ledger_or_outbox_row(
     )
     assert store.get_elicitation(elicitation_id) is None
     assert store.list_deliveries(session_id)[0] == []
+
+
+def test_repeated_failed_publish_is_one_episode_until_the_session_runs_again(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch)
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    from omnigent.server.routes._sessions import helpers as session_helpers
+    from omnigent.server.schemas import ErrorDetail
+
+    session_id = _sid()
+    error = ErrorDetail(code="runner_error", message="runner offline")
+    session_helpers._publish_status(session_id, "failed", error=error)
+    session_helpers._publish_status(session_id, "failed", error=error)
+    failed = [
+        row for row in store.list_deliveries(session_id)[0] if row.event_type == "session.failed"
+    ]
+    assert len(failed) == 1
+
+    session_helpers._publish_status(session_id, "running")
+    session_helpers._publish_status(session_id, "failed", error=error)
+    failed = [
+        row for row in store.list_deliveries(session_id)[0] if row.event_type == "session.failed"
+    ]
+    assert len(failed) == 2
+    assert len({row.transition_key for row in failed}) == 2
+
+
+async def test_status_write_from_the_event_loop_still_records_one_failure(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    _enable(tmp_path, monkeypatch)
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    from omnigent.server.routes._sessions import helpers as session_helpers
+    from omnigent.server.schemas import ErrorDetail
+
+    session_id = _sid()
+    error = ErrorDetail(code="runner_error", message="from the loop")
+    session_helpers._publish_status(session_id, "failed", error=error)
+    session_helpers._publish_status(session_id, "failed", error=error)
+    rows: list[object] = []
+    for _ in range(50):
+        rows = [
+            row
+            for row in store.list_deliveries(session_id)[0]
+            if row.event_type == "session.failed"
+        ]
+        if rows:
+            break
+        await asyncio.sleep(0.01)
+    assert len(rows) == 1
