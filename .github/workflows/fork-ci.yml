@@ -99,7 +99,7 @@ jobs:
           command -v rg >/dev/null || echo "::warning::ripgrep (rg) is not on PATH; Grep-tool tests may fail."
           command -v tmux >/dev/null || echo "::warning::tmux is not on PATH; terminal tests may fail."
       - name: Install dependencies
-        run: uv sync --locked --extra all --group test
+        run: uv sync --locked --extra all --extra postgres --group test
       - name: Run pytest (SQLite, not databricks)
         shell: bash
         env:
@@ -113,11 +113,13 @@ jobs:
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
           # Tests that wipe OMNIGENT_OIDC_* still read ~/.omnigent unless the
-          # admin credentials path points at an empty data dir. Leave
-          # OMNIGENT_CONFIG_HOME unset: theme and host-id tests read the
-          # config file they just wrote under the default config path.
+          # admin credentials path points at an empty data dir. An empty
+          # config home hides the Mac user's provider config (local Ollama
+          # endpoints, default models). Theme and host-id tests that read
+          # the file they just wrote clear this variable themselves.
+          export OMNIGENT_CONFIG_HOME="${RUNNER_TEMP}/omnigent-config"
           export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
-          mkdir -p "$OMNIGENT_DATA_DIR"
+          mkdir -p "$OMNIGENT_CONFIG_HOME" "$OMNIGENT_DATA_DIR"
           export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
           export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
@@ -243,7 +245,10 @@ jobs:
         run: uv sync --locked --extra all --group test
       - name: Install Playwright Chromium
         # No --with-deps: that path is apt-based and does not apply on macOS.
-        # The browser cache in the runner home persists across jobs.
+        # The browser cache in the runner home persists across jobs. Cap the
+        # step so a wedged install cannot hold the shared Mac for the whole
+        # job timeout.
+        timeout-minutes: 20
         run: uv run playwright install chromium
       - name: Build web SPA
         run: |
