@@ -5,10 +5,12 @@ name: Fork CI
 #
 # Runs on the owner's Apple Silicon Mac (self-hosted label omnigent-ci).
 # Two runners share those labels, so jobs in one run spread across both.
-# Concurrency is per pull request (or per ref, for a manual dispatch): a
-# push cancels only that ref's in-progress run. The inner tree runs as its
-# own process so its sys.path edits and worker watchdog cannot leak into
-# the rest of the suite. The runner disk persists: uv, pnpm,
+# They also share one machine's memory, so the Playwright job waits until
+# pytest has finished. Concurrency is per pull request (or per ref, for a
+# manual dispatch): a push cancels only that ref's in-progress run. The
+# inner tree runs as its own process so its sys.path edits and worker
+# watchdog cannot leak into the rest of the suite. The runner disk persists:
+# uv, pnpm,
 # and Playwright caches live in the runner user's home, not in actions/cache
 # (the token is contents:read only).
 #
@@ -110,13 +112,12 @@ jobs:
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          # The Mac user's ~/.omnigent holds an email allowlist and a local
-          # model endpoint. Tests that wipe OMNIGENT_OIDC_* still read that
-          # data dir, and codex tests pick up the endpoint. Point both at an
-          # empty tree for this job.
-          export OMNIGENT_CONFIG_HOME="${RUNNER_TEMP}/omnigent-config-home"
+          # Tests that wipe OMNIGENT_OIDC_* still read ~/.omnigent unless the
+          # admin credentials path points at an empty data dir. Leave
+          # OMNIGENT_CONFIG_HOME unset: theme and host-id tests read the
+          # config file they just wrote under the default config path.
           export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
-          mkdir -p "$OMNIGENT_CONFIG_HOME" "$OMNIGENT_DATA_DIR"
+          mkdir -p "$OMNIGENT_DATA_DIR"
           export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
           export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
@@ -206,8 +207,11 @@ jobs:
   e2e-ui:
     # NON-BLOCKING: many Playwright UI tests already fail on main.
     # continue-on-error keeps a red run from failing the workflow.
+    # Waits for pytest so Chromium and the xdist workers do not share the
+    # Mac at the same time. !cancelled() still runs this job when pytest fails.
     name: E2E UI (Playwright, non-blocking)
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    needs: [pytest]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     continue-on-error: true
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 180

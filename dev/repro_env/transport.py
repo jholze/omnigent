@@ -10,24 +10,45 @@ import asyncio
 import contextlib
 import logging
 import os
+import sys
+import tempfile
 import threading
 from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
+# macOS sun_path is 104 bytes; Linux is 108. A longer path makes bind return
+# ENOENT on Darwin instead of creating the socket.
+_SUN_PATH_LIMIT = 104 if sys.platform == "darwin" else 108
+
 
 @contextlib.contextmanager
 def _socket_address(path: Path):
-    """Anchor long Linux socket paths without changing the process working directory."""
+    """Bind *path* even when it is longer than the platform sun_path limit.
+
+    Linux can name the parent through ``/proc/self/fd``. macOS has no proc
+    filesystem, so a short symlink in ``/tmp`` points at the same directory
+    and the socket file still lands at *path*.
+    """
     path = path.resolve()
-    if len(os.fsencode(path)) < 108:
+    if len(os.fsencode(path)) < _SUN_PATH_LIMIT:
         yield str(path)
         return
-    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    if sys.platform.startswith("linux"):
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            yield f"/proc/self/fd/{fd}/{path.name}"
+        finally:
+            os.close(fd)
+        return
+    short_dir = Path(tempfile.mkdtemp(prefix="omni-sock-", dir="/tmp"))
+    link = short_dir / "d"
     try:
-        yield f"/proc/self/fd/{fd}/{path.name}"
+        link.symlink_to(path.parent)
+        yield str(link / path.name)
     finally:
-        os.close(fd)
+        link.unlink(missing_ok=True)
+        short_dir.rmdir()
 
 
 class Relay:

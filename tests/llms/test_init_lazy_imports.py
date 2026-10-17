@@ -15,8 +15,10 @@ short-form and long-form import paths work.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sys
+from collections.abc import Iterator
 
 
 def _purge(prefix: str) -> None:
@@ -27,45 +29,71 @@ def _purge(prefix: str) -> None:
             sys.modules.pop(mod_name, None)
 
 
+@contextlib.contextmanager
+def _isolated_import(*prefixes: str) -> Iterator[None]:
+    """Reimport *prefixes*, then restore the modules this worker already held.
+
+    A purged ``omnigent.llms`` builds new classes while ``llm_retry`` and the
+    usage recorder still hold the old ones, so later tests on this xdist
+    worker fail ``isinstance`` or look up a bucket that was never written.
+    """
+    saved = {
+        name: module
+        for name, module in list(sys.modules.items())
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+    }
+    try:
+        for prefix in prefixes:
+            _purge(prefix)
+        yield
+    finally:
+        for name in list(sys.modules):
+            if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+
+
 def test_sessions_routes_import_does_not_trigger_cycle() -> None:
     """The original failure shape: importing the server routes module
     triggered ``reasoning_effort`` -> ``llms.errors`` -> ``llms.__init__``
     -> ``llms.client`` -> ``reasoning_effort`` re-entry."""
-    _purge("omnigent.llms")
-    _purge("omnigent.util.reasoning_effort")
-    _purge("omnigent.server.routes.sessions")
-    importlib.import_module("omnigent.server.routes.sessions")
+    with _isolated_import(
+        "omnigent.llms",
+        "omnigent.util.reasoning_effort",
+        "omnigent.server.routes.sessions",
+    ):
+        importlib.import_module("omnigent.server.routes.sessions")
 
 
 def test_short_form_import_still_works() -> None:
     """``from omnigent.llms import Client`` must keep working
     after the lazy-attribute switch."""
-    _purge("omnigent.llms")
-    from omnigent.llms import Client, get_model_context_window
+    with _isolated_import("omnigent.llms"):
+        from omnigent.llms import Client, get_model_context_window
 
-    assert Client is not None
-    assert callable(get_model_context_window)
+        assert Client is not None
+        assert callable(get_model_context_window)
 
 
 def test_module_only_import_does_not_load_client() -> None:
     """Importing ``omnigent.llms`` by itself should NOT eagerly pull
     in ``client.py`` -- that's the whole point of the lazy shim."""
-    _purge("omnigent.llms")
-    importlib.import_module("omnigent.llms")
-    assert "omnigent.llms.client" not in sys.modules, (
-        "omnigent.llms.client was imported eagerly; lazy shim regressed"
-    )
+    with _isolated_import("omnigent.llms"):
+        importlib.import_module("omnigent.llms")
+        assert "omnigent.llms.client" not in sys.modules, (
+            "omnigent.llms.client was imported eagerly; lazy shim regressed"
+        )
 
 
 def test_unknown_attribute_raises_attribute_error() -> None:
     """The ``__getattr__`` shim should preserve normal AttributeError
     semantics for unknown names."""
-    _purge("omnigent.llms")
-    import omnigent.llms as llms_pkg
+    with _isolated_import("omnigent.llms"):
+        import omnigent.llms as llms_pkg
 
-    try:
-        llms_pkg.does_not_exist  # noqa: B018
-    except AttributeError as e:
-        assert "does_not_exist" in str(e)
-    else:
-        raise AssertionError("expected AttributeError")
+        try:
+            llms_pkg.does_not_exist  # noqa: B018
+        except AttributeError as e:
+            assert "does_not_exist" in str(e)
+        else:
+            raise AssertionError("expected AttributeError")
