@@ -388,9 +388,15 @@ def add_audit_attrs(**attrs: object) -> None:
     bag = _audit_attrs_var.get()
     if bag is None:
         return
+    # A quota refusal is written before the chat.post envelope. Later writers
+    # still add identity, but they must not replace this outcome.
+    locked = bag.get("action") == "agent_thread_start" and bag.get("outcome") == "refused/quota"
     for key, value in attrs.items():
-        if value is not None:
-            bag[str(key)] = str(value)
+        if value is None:
+            continue
+        if locked and key in {"action", "outcome"}:
+            continue
+        bag[str(key)] = str(value)
 
 
 def current_request_audit_attrs() -> dict[str, str]:

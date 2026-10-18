@@ -219,6 +219,10 @@ async def record_subagent_activity(
                     return
                 # A runner can die before producing any transcript for its first turn.
                 turn_id = child.id
+        # Captured before a native completion rewrites turn_id to the request
+        # id. The runner wake uses the response id, so the rewrite must not
+        # change the shared dedupe key.
+        wake_turn_key = turn_id or child.id
         if native_completion and turn_id is not None:
             # Native notifications can finish new responses for the same request.
             request_id = await asyncio.to_thread(_native_request_id, child.id, turn_id, store)
@@ -261,6 +265,18 @@ async def record_subagent_activity(
                     turn_id=child.labels.get("omnigent.claude_native.tool_use_id") or child.id,
                     status=completion_status,
                 )
+        if phase == "returned":
+            # Also on a deduplicated returned event: the first wake may have
+            # failed before its delivery label was written.
+            from omnigent.server.subagent_wake import schedule_subagent_return_wake
+
+            schedule_subagent_return_wake(
+                child=child,
+                parent_id=parent_id,
+                store=store,
+                turn_key=wake_turn_key,
+                status=status or "completed",
+            )
     except Exception:  # noqa: BLE001 — display metadata must not interrupt child delivery
         _logger.warning("Could not record subagent activity for %s", child_id, exc_info=True)
 
