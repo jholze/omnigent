@@ -170,7 +170,7 @@ def _discover_parent() -> str:
     env = os.environ.get("OMNIGENT_PARENT_SESSION", "").strip()
     if env:
         return env
-    _, listing = _req("GET", "/v1/sessions?limit=100")
+    _, listing = _req("GET", "/v1/sessions?limit=100&visibility=all")
     sessions = (
         listing.get("sessions")
         or listing.get("items")
