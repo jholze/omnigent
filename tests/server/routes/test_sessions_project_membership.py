@@ -112,6 +112,35 @@ def test_file_and_unfile_session_single_user(db_uri: str) -> None:
     assert conv.id in [s["id"] for s in unfiled.json()["data"]]
 
 
+def test_side_chat_is_listed_in_its_project(db_uri: str) -> None:
+    """A side chat keeps the source project and shows only in that folder."""
+    _ensure_agent(db_uri)
+    conv = SqlAlchemyConversationStore(db_uri).create_conversation(title="s", agent_id=AGENT_ID)
+    client = TestClient(_single_user_app(db_uri))
+    project = client.post("/v1/projects", json={"name": "Work"}).json()
+    filed = client.patch(f"/v1/sessions/{conv.id}", json={"project_id": project["id"]})
+    assert filed.status_code == 200
+
+    forked = client.post(
+        f"/v1/sessions/{conv.id}/fork",
+        json={"side_chat": True, "title": "Side chat"},
+    )
+    assert forked.status_code == 201, forked.text
+    side_id = forked.json()["id"]
+    assert forked.json()["project_id"] == project["id"]
+    assert forked.json()["labels"]["omnigent.side_chat"] == "1"
+
+    in_project = {row["id"] for row in client.get("/v1/sessions?project=Work").json()["data"]}
+    assert in_project == {conv.id, side_id}
+
+    flat = {row["id"] for row in client.get("/v1/sessions").json()["data"]}
+    assert conv.id in flat
+    assert side_id not in flat
+
+    unfiled = {row["id"] for row in client.get("/v1/sessions?project=").json()["data"]}
+    assert side_id not in unfiled
+
+
 def test_omitting_project_id_leaves_membership_unchanged(db_uri: str) -> None:
     """A PATCH that doesn't mention project_id must not clear the filing."""
     _ensure_agent(db_uri)

@@ -1555,10 +1555,13 @@ def register_core_routes(
             # Pins are per-user: filter to the caller's own pin key.
             pinned_owner=user_id,
         )
-        # Side chats surface only as Workspace-rail tabs, so drop any
-        # side-chat-labeled fork from the sidebar list (it is still a normal
-        # session, just not listed as a top-level one here).
-        page.data = [conv for conv in page.data if SIDE_CHAT_LABEL_KEY not in (conv.labels or {})]
+        # A side chat of a filed session belongs in that project's session
+        # list. The flat list and the unfiled slice keep it out, so it does
+        # not also sit as its own top-level row.
+        if not project:
+            page.data = [
+                conv for conv in page.data if SIDE_CHAT_LABEL_KEY not in (conv.labels or {})
+            ]
         # list_conversations may return rows with agent_id=None for
         # legacy conversations; skip them before building the batch IDs.
         conv_ids = [conv.id for conv in page.data if conv.agent_id is not None]

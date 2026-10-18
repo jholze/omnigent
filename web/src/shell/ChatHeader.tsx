@@ -203,6 +203,8 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   /** Toggle the right workspace panel. */
   onToggleRightPanel: () => void;
+  /** Open the people chat as a tab in the right workspace panel. */
+  onOpenSessionChat?: () => void;
   /** Show dependency-free disabled chrome while the server session is pending. */
   pending?: boolean;
   /** Gating + handlers for the mobile session-menu FAB. */
@@ -349,6 +351,7 @@ export function ChatHeader({
   hasRailContent,
   rightPanelOpen,
   onToggleRightPanel,
+  onOpenSessionChat,
   pending = false,
   mobileMenu,
 }: ChatHeaderProps) {
@@ -612,7 +615,7 @@ export function ChatHeader({
         {conversationId && !isMobile && (
           <>
             <PresenceAvatars />
-            <SessionChatColumn conversationId={conversationId} />
+            <SessionChatColumn conversationId={conversationId} onOpen={onOpenSessionChat} />
           </>
         )}
         {/* Desktop (md+) action buttons. On mobile these collapse into

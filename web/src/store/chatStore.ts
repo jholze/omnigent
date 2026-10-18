@@ -7739,13 +7739,18 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       }
       finalizeCurrentActive("cancelled", event.responseId, sourceConversationId);
       return;
-    case "session_created":
+    case "session_created": {
       // A side chat the user asked for (via `/side`, the `+` tray, or the rail's
       // "+"): open it as a soft tab in the main chat's Workspace rail — the user
       // stays in the main conversation, the side chat streams beside it. Guarded
       // on `awaitingSideChatFor` so an agent-spawned sub-agent never opens a tab.
+      // The same latch files the row into the source project: the folder list
+      // refetches below.
+      const sideChatLatched =
+        Boolean(event.childSessionId) &&
+        useChatStore.getState().awaitingSideChatFor === event.conversationId;
       useChatStore.setState((s) => {
-        if (!event.childSessionId || s.awaitingSideChatFor !== event.conversationId) return {};
+        if (!sideChatLatched) return {};
         // Open on the user's explicit side-chat latch: they just asked for a
         // side chat on THIS parent, so the child arriving under it is the one to
         // open. (A concurrent ordinary sub-agent under the same parent could in
@@ -7764,7 +7769,13 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           queryKey: childSessionsQueryKey(event.conversationId),
         });
       }
+      // The side chat is a session of the source's project. Refresh the
+      // project folders so the new row shows in that session list.
+      if (sideChatLatched) {
+        queryClient?.invalidateQueries({ queryKey: ["project-sessions"] });
+      }
       return;
+    }
     case "session_superseded":
       // The conversation we're viewing was rotated away (e.g. Claude
       // `/clear`): follow it to the new one. Guard on the active

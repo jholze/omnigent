@@ -146,3 +146,70 @@ def test_session_chat_journey_unread_reply_reload_and_sub_agent(
     finally:
         alice_ctx.close()
         bob_ctx.close()
+
+
+def test_session_chat_two_more_people(
+    browser: Browser,
+    seeded_session: tuple[str, str],
+) -> None:
+    """Cara and Dan join Alice and Bob. Both closed columns get the dot, Dan sees the line live, and Cara's reply reaches the open columns."""
+    base_url, session_id = seeded_session
+    run_tag = uuid.uuid4().hex[:8]
+    names = ("alice", "bob", "cara", "dan")
+    emails = {name: f"{name}-more-{run_tag}@example.com" for name in names}
+    for email in emails.values():
+        httpx.put(
+            f"{base_url}/v1/sessions/{session_id}/permissions",
+            json={"user_id": email, "level": 2},
+            timeout=10.0,
+        ).raise_for_status()
+
+    first = f"human-four-{run_tag}"
+    reply = f"human-four-reply-{run_tag}"
+    contexts = {
+        name: browser.new_context(extra_http_headers={"X-Forwarded-Email": emails[name]})
+        for name in names
+    }
+    try:
+        pages = {name: contexts[name].new_page() for name in names}
+        for page in pages.values():
+            page.goto(f"{base_url}/c/{session_id}", wait_until="domcontentloaded")
+        for page in pages.values():
+            expect(page.get_by_role("button", name="Session chat")).to_be_visible(timeout=45_000)
+
+        alice_column = _open_column(pages["alice"])
+        dan_column = _open_column(pages["dan"])
+        for name in ("bob", "cara"):
+            expect(_toggle(pages[name])).to_be_visible(timeout=15_000)
+            expect(pages[name].locator(_COLUMN)).to_have_count(0)
+
+        _send(alice_column, first)
+        expect(alice_column).to_contain_text(first, timeout=15_000)
+        expect(dan_column).to_contain_text(first, timeout=30_000)
+        for name in ("bob", "cara"):
+            toggle = _toggle(pages[name])
+            expect(toggle.locator(_UNREAD)).to_be_visible(timeout=30_000)
+            expect(toggle).to_have_attribute("title", first, timeout=15_000)
+            expect(pages[name].locator(_COLUMN)).to_have_count(0)
+        for page in pages.values():
+            expect(page.locator(_BUBBLE, has_text=first)).to_have_count(0)
+
+        pages["alice"].evaluate("() => { window.__sessionChatNoReload = true; }")
+        pages["dan"].evaluate("() => { window.__sessionChatNoReload = true; }")
+        cara_column = _open_column(pages["cara"])
+        expect(cara_column).to_contain_text(first, timeout=15_000)
+        expect(_toggle(pages["cara"]).locator(_UNREAD)).to_have_count(0)
+        _send(cara_column, reply)
+
+        expect(alice_column).to_contain_text(reply, timeout=30_000)
+        expect(dan_column).to_contain_text(reply, timeout=30_000)
+        assert pages["alice"].evaluate("() => window.__sessionChatNoReload === true")
+        assert pages["dan"].evaluate("() => window.__sessionChatNoReload === true")
+        for page in pages.values():
+            expect(page.locator(_BUBBLE, has_text=reply)).to_have_count(0)
+
+        bob_column = _open_column(pages["bob"])
+        expect(bob_column.locator("li p")).to_have_text([first, reply], timeout=15_000)
+    finally:
+        for context in contexts.values():
+            context.close()

@@ -1,5 +1,6 @@
 import { filterSessionScope } from "@/lib/sessionVisibility";
 import { getCurrentUserId } from "@/lib/identity";
+import { useSessionChatRowUnreadTip } from "./SessionChatColumn";
 import { PinCapacityContext, SidebarConfigContext } from "@/lib/sidebarConfig";
 import { useSidebarDisplayPagination } from "@/hooks/useSidebarDisplayPagination";
 import { useSidebarData, useSidebarView, type SidebarListQuery } from "@/hooks/useSidebarData";
@@ -4007,6 +4008,8 @@ function ConversationRowImpl({
   // row). The explicit override only lifts the active-row suppression, so
   // flagging the thread you're currently viewing surfaces the dot at once.
   const hasUnseenMessages = readState.unseen && (!isActive || readState.explicitlyUnread);
+  const peopleChatTip = useSessionChatRowUnreadTip(conversation.id);
+  const peopleChatUnread = peopleChatTip !== null;
   // "Mark as unread" is offered on any row not already showing the dot.
   const canMarkUnread = !hasUnseenMessages;
   // Approvals and failures outrank the unread dot without clearing read state.
@@ -4313,6 +4316,14 @@ function ConversationRowImpl({
           {label}
           {hasUnseenMessages && <span className="sr-only"> (unread)</span>}
         </span>
+        {peopleChatUnread && (
+          <span
+            data-testid="session-chat-row-unread"
+            title={peopleChatTip || "Session chat"}
+            className="ml-1.5 size-1.5 shrink-0 rounded-full bg-primary"
+            aria-label="Session chat unread"
+          />
+        )}
       </div>
     </Link>
   );

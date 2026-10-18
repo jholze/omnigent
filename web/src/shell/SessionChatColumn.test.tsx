@@ -3,10 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { emitHumanChat } from "@/lib/humanChat";
 import { authenticatedFetch } from "@/lib/identity";
-import { SessionChatColumn } from "./SessionChatColumn";
+import {
+  SessionChatColumn,
+  SessionChatDock,
+  SessionChatPane,
+  resetSessionChatStore,
+  setSessionChatPlacement,
+  useSessionChatPlacement,
+  useSessionChatRowUnreadTip,
+} from "./SessionChatColumn";
 
 vi.mock("@/lib/identity", () => ({
   authenticatedFetch: vi.fn(),
+  getCurrentUserId: () => null,
 }));
 
 const fetchMock = vi.mocked(authenticatedFetch);
@@ -34,6 +43,14 @@ function line(id: string, body: string) {
 afterEach(() => {
   cleanup();
   fetchMock.mockReset();
+  resetSessionChatStore();
+  setSessionChatPlacement("panel");
+  try {
+    localStorage.removeItem("omnigent:session-chat-placement");
+    localStorage.removeItem("omnigent:session-chat-width");
+  } catch {
+    // This Node build exposes a localStorage stub with no Storage methods.
+  }
 });
 
 async function expectHidden(response: Response) {
@@ -81,15 +98,31 @@ describe("SessionChatColumn", () => {
     expect(await screen.findByRole("button", { name: "Session chat" })).toBeInTheDocument();
   });
 
-  it("opens a column that is not side chat and not the comments panel", async () => {
+  it("asks the shell to open the panel instead of floating a column", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], shared: true }));
-    render(<SessionChatColumn conversationId={SESSION} />);
+    const onOpen = vi.fn();
+    render(<SessionChatColumn conversationId={SESSION} onOpen={onOpen} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Session chat" }));
 
-    const column = screen.getByTestId("session-human-chat-column");
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("session-human-chat-column")).toBeNull();
+    expect(screen.queryByPlaceholderText("Message the people in this session")).toBeNull();
+  });
+
+  it("renders the transcript in the pane, not as side chat or comments", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], shared: true }));
+    render(
+      <>
+        <SessionChatColumn conversationId={SESSION} />
+        <SessionChatPane onSplit={() => setSessionChatPlacement("split")} />
+      </>,
+    );
+
+    const column = await screen.findByTestId("session-human-chat-column");
     expect(column).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Message the people in this session")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Split beside the agent" })).toBeInTheDocument();
     expect(screen.queryByText("Comments")).toBeNull();
     expect(screen.queryByTestId("comments-panel")).toBeNull();
     expect(screen.queryByTestId("side-chat-send")).toBeNull();
@@ -99,11 +132,15 @@ describe("SessionChatColumn", () => {
   it("posts the line to /chat and not to /events", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], shared: true }));
     fetchMock.mockResolvedValueOnce(jsonResponse(line("m1", "I'll look at the test"), 201));
-    render(<SessionChatColumn conversationId={SESSION} />);
+    render(
+      <>
+        <SessionChatColumn conversationId={SESSION} />
+        <SessionChatPane />
+      </>,
+    );
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Session chat" }));
     await user.type(
-      screen.getByPlaceholderText("Message the people in this session"),
+      await screen.findByPlaceholderText("Message the people in this session"),
       "I'll look at the test{Enter}",
     );
 
@@ -152,23 +189,79 @@ describe("SessionChatColumn", () => {
     await waitFor(() => expect(button).toHaveAttribute("title", "I'll look at the test"));
   });
 
-  it("returns focus to the agent composer on Escape without writing into it", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], shared: true }));
-    render(
-      <>
-        <textarea aria-label="Message the agent" defaultValue="keep me" />
-        <SessionChatColumn conversationId={SESSION} />
-      </>,
+  it("docks the transcript between the agent and the panel, then moves it back", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ items: [line("m1", "Ada is here.")], shared: true }),
     );
-    const composer = screen.getByRole("textbox", { name: "Message the agent" });
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Session chat" }));
-    const draft = screen.getByPlaceholderText("Message the people in this session");
-    await user.type(draft, "not for the agent");
-    await user.keyboard("{Escape}");
+    function Surface() {
+      const placement = useSessionChatPlacement();
+      return (
+        <>
+          <SessionChatColumn conversationId={SESSION} />
+          {placement === "split" ? (
+            <SessionChatDock onMoveToPanel={() => setSessionChatPlacement("panel")} />
+          ) : (
+            <SessionChatPane onSplit={() => setSessionChatPlacement("split")} />
+          )}
+        </>
+      );
+    }
+    render(<Surface />);
+    expect(await screen.findByText("Ada is here.")).toBeInTheDocument();
+    expect(screen.queryByTestId("session-human-chat-dock")).toBeNull();
 
-    expect(screen.queryByTestId("session-human-chat-column")).toBeNull();
-    expect(composer).toHaveFocus();
-    expect(composer).toHaveValue("keep me");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Split beside the agent" }));
+    const dock = screen.getByTestId("session-human-chat-dock");
+    expect(dock).toBeInTheDocument();
+    expect(dock).toHaveStyle({ width: "320px" });
+    expect(screen.getByText("Ada is here.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Split beside the agent" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Move into the panel" }));
+    expect(screen.queryByTestId("session-human-chat-dock")).toBeNull();
+    expect(screen.getByRole("button", { name: "Split beside the agent" })).toBeInTheDocument();
+    expect(screen.getByText("Ada is here.")).toBeInTheDocument();
+  });
+
+  it("keeps a session-chat dot after the sidebar switches to another session", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [line("m0", "earlier")], shared: true }));
+    function Rows({ id }: { id: string }) {
+      const first = useSessionChatRowUnreadTip(SESSION);
+      const second = useSessionChatRowUnreadTip("sess-2");
+      return (
+        <>
+          <SessionChatColumn conversationId={id} />
+          <span>{first === null ? "first-clear" : "first-dotted"}</span>
+          <span>{second === null ? "second-clear" : "second-dotted"}</span>
+        </>
+      );
+    }
+    const view = render(<Rows id={SESSION} />);
+    await screen.findByRole("button", { name: "Session chat" });
+    const gate = deferred<Response>();
+    fetchMock.mockReturnValueOnce(gate.promise);
+    act(() => {
+      emitHumanChat({
+        conversationId: SESSION,
+        id: "m1",
+        createdAt: 1_700_000_000_000_001,
+      });
+    });
+    expect(screen.getByText("first-dotted")).toBeInTheDocument();
+
+    view.rerender(<Rows id="sess-2" />);
+    expect(screen.getByText("first-dotted")).toBeInTheDocument();
+    expect(screen.getByText("second-clear")).toBeInTheDocument();
+
+    await act(async () => {
+      gate.resolve(
+        jsonResponse({
+          items: [line("m0", "earlier"), line("m1", "I'll look at the test")],
+          shared: true,
+        }),
+      );
+      await gate.promise;
+    });
   });
 });

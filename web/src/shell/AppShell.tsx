@@ -145,6 +145,13 @@ import { ForkDialogContextProvider, type ForkDialogContextValue } from "./ForkDi
 import { InlineTerminalsSection } from "./InlineTerminalsSection";
 import { resolveDefaultShell } from "./preferredShell";
 import { WorkspacePanel } from "./WorkspacePanel";
+import {
+  SessionChatDock,
+  setSessionChatPlacement,
+  setSessionChatViewing,
+  useSessionChatDockOffset,
+  useSessionChatPlacement,
+} from "./SessionChatColumn";
 import { SessionRail } from "./SessionRail";
 import type { RightRailTab } from "./railTabs";
 
@@ -1287,9 +1294,10 @@ export function AppShell() {
   // Validate the latest selection, including a tab queued by session restoration.
   useEffect(() => {
     setRightRailTab((tab) => {
-      // "sidechat" is a dynamic mode (a side-chat tab is selected), not a
-      // gated nav tab — always valid, and never a fallback target.
-      if (tab === "sidechat") return tab;
+      // "sidechat" and "people" are dynamic modes (a side-chat tab, or the
+      // shared-session human chat), not gated nav tabs. Always valid here;
+      // the rail drops "people" itself once the chat is hidden.
+      if (tab === "sidechat" || tab === "people") return tab;
       if (railTabsAvailable[tab]) return tab;
       return (
         (["files", "changes", "github", "subagents", "browser"] as const).find(
@@ -1807,6 +1815,7 @@ export function AppShell() {
   // open file to reveal the picked tab's scope list.
   const handleRightRailTabChange = useCallback(
     (next: RightRailTab) => {
+      if (next === "people") setSessionChatPlacement("panel");
       setRightRailTab(next);
       if (selectedFilePath !== null) {
         setSelectedFilePath(null);
@@ -2319,6 +2328,35 @@ export function AppShell() {
     focusWorkspaceTabsOnOpenRef.current = false;
     focusWorkspaceTabs();
   }, [workspacePanelVisible, focusWorkspaceTabs]);
+  const sessionChatPlacement = useSessionChatPlacement();
+  const sessionChatDockOffset = useSessionChatDockOffset();
+  useEffect(() => {
+    setSessionChatViewing(
+      sessionChatPlacement === "split" ||
+        (workspacePanelVisible &&
+          rightRailTab === "people" &&
+          selectedFilePath === null &&
+          selectedTerminalKey === null),
+    );
+  }, [
+    sessionChatPlacement,
+    workspacePanelVisible,
+    rightRailTab,
+    selectedFilePath,
+    selectedTerminalKey,
+  ]);
+  const moveSessionChatToPanel = useCallback(() => {
+    setSessionChatPlacement("panel");
+    handleRightRailTabChange("people");
+    setRightPanelOpenAnimated(true);
+  }, [handleRightRailTabChange, setRightPanelOpenAnimated]);
+  const openSessionChat = useCallback(() => {
+    if (sessionChatPlacement === "split") {
+      setRightPanelOpenAnimated(true);
+      return;
+    }
+    moveSessionChatToPanel();
+  }, [sessionChatPlacement, moveSessionChatToPanel, setRightPanelOpenAnimated]);
 
   return (
     <FileViewerContext.Provider value={fileViewerContextValue}>
@@ -2437,9 +2475,12 @@ export function AppShell() {
                 )}
                 style={
                   {
-                    "--workspace-panel-offset": workspacePanelVisible
-                      ? `${inlinePanelWidth}px`
-                      : "0px",
+                    // The header stops at the agent column. A split session chat
+                    // sits between that column and the workspace card, so its
+                    // width is reserved too.
+                    "--workspace-panel-offset": `${
+                      (workspacePanelVisible ? inlinePanelWidth : 0) + sessionChatDockOffset
+                    }px`,
                   } as CSSProperties
                 }
               >
@@ -2481,6 +2522,7 @@ export function AppShell() {
                     hasRailContent={hasRailContent}
                     rightPanelOpen={rightPanelOpen}
                     onToggleRightPanel={toggleRightPanel}
+                    onOpenSessionChat={openSessionChat}
                     pending={pendingConversation}
                     mobileMenu={{
                       fileViewerOpen,
@@ -2522,6 +2564,8 @@ export function AppShell() {
                 >
                   <Outlet />
                 </main>
+
+                {conversationId && <SessionChatDock onMoveToPanel={moveSessionChatToPanel} />}
 
                 {/* Debug-mode execution-logs rail — desktop only, hidden when a
               push panel is open (the panel itself becomes the focus). Only

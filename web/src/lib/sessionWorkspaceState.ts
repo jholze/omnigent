@@ -15,6 +15,7 @@ const RAIL_TABS: readonly RightRailTab[] = [
   "subagents",
   "browser",
   "sidechat",
+  "people",
 ];
 
 export interface SessionWorkspaceState {

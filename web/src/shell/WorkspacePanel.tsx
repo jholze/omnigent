@@ -70,6 +70,7 @@ import type { ChangedSort } from "./FlatFileList";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { useTerminalStatuses } from "./useTerminalStatuses";
 import { type RightRailTab, TAB_BADGE_BASE } from "./railTabs";
+import { SessionChatPane, setSessionChatPlacement, useSessionChat } from "./SessionChatColumn";
 import { Button } from "../components/ui/button";
 
 const TerminalView = lazy(() =>
@@ -796,6 +797,9 @@ function WorkspacePanelImpl({
   mobileSideChatsOpen = false,
   onMobileSideChatsOpenChange,
 }: WorkspacePanelProps) {
+  const sessionChat = useSessionChat();
+  const sessionChatShown =
+    sessionChat.status === "shown" && sessionChat.conversationId === conversationId;
   const browsers = useBrowserTabs(conversationId);
   const closeBrowserTab = async (tabId: string) => {
     const closed = await browsers.close(tabId);
@@ -867,6 +871,14 @@ function WorkspacePanelImpl({
     selectedFilePath === null &&
     selectedTerminalKey === null &&
     sideChats.selected !== null;
+  const peopleInPanel =
+    sessionChatShown &&
+    sessionChat.placement === "panel" &&
+    rightRailTab === "people" &&
+    selectedFilePath === null &&
+    selectedTerminalKey === null &&
+    !browserSelected &&
+    !sideChatSelected;
   // "New side chat" opens an EMPTY tab; the fork isn't created until the first
   // message is sent in it (startPendingSideChat below). Offered on every harness
   // that supports side chat.
@@ -1050,6 +1062,22 @@ function WorkspacePanelImpl({
     }) ?? "subagents";
   useEffect(() => {
     if (
+      rightRailTab === "people" &&
+      sessionChat.conversationId === conversationId &&
+      sessionChat.status === "hidden"
+    ) {
+      onRightRailTabChange(browserFallbackTab);
+    }
+  }, [
+    rightRailTab,
+    sessionChat.conversationId,
+    sessionChat.status,
+    conversationId,
+    browserFallbackTab,
+    onRightRailTabChange,
+  ]);
+  useEffect(() => {
+    if (
       rightRailTab === "browser" &&
       browsers.selected === null &&
       selectedFilePath === null &&
@@ -1118,6 +1146,17 @@ function WorkspacePanelImpl({
       },
       disabled: false,
     })),
+    ...(sessionChatShown
+      ? [
+          {
+            key: "people",
+            label: "Session chat",
+            active: peopleInPanel,
+            select: () => selectPermanentTab("people"),
+            disabled: false,
+          },
+        ]
+      : []),
   ];
   const tabTriggers = {
     files: (pending || showFilesPanel) && (
@@ -1286,6 +1325,29 @@ function WorkspacePanelImpl({
           >
             <TabsList variant="pill" className="gap-1">
               {tabOrder.map((tab) => tabTriggers[tab])}
+              {sessionChatShown && (
+                <WorkspaceTabTooltip
+                  key="people"
+                  label={sessionChat.unread && sessionChat.tip ? sessionChat.tip : "Session chat"}
+                >
+                  <TabsTrigger
+                    value="people"
+                    aria-label="Session chat"
+                    data-workspace-tab="people"
+                    disabled={pending}
+                    className="relative size-6 shrink-0 p-0 hover:border-1 hover:border-muted rounded-md!"
+                  >
+                    <MessagesSquareIcon />
+                    <span className="sr-only">Session chat</span>
+                    {sessionChat.unread && (
+                      <span
+                        className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-primary"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </TabsTrigger>
+                </WorkspaceTabTooltip>
+              )}
             </TabsList>
           </Tabs>
           {/* The divider follows the fixed panel icons' visibility. */}
@@ -1519,6 +1581,14 @@ function WorkspacePanelImpl({
               permissionLevel={permissionLevel}
               onCommentsOpenChange={onCommentsOpenChange}
               sort={filesPanelSort}
+            />
+          ) : peopleInPanel ? (
+            <SessionChatPane
+              onSplit={() => {
+                setSessionChatPlacement("split");
+                if (maximized) onToggleMaximized();
+                onRightRailTabChange(readDefaultWorkspaceTab());
+              }}
             />
           ) : sideChatSelected && !isMobile ? (
             // A side chat: a forked child conversation streamed here in its own
