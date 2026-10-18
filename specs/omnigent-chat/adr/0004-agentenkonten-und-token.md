@@ -1,5 +1,5 @@
 # ADR-0004: Agentenkonten als eigener Principal-Typ mit gehashtem Bearer-Token und Pfad-Allowlist
-Status: accepted · Date: 2026-10-16
+Status: accepted, amended by ADR-0010 (2026-10-17: Pfadgrenze `/mcp` + `/v1/chat/*` bleibt nach außen; In-Process-Aufrufe aus `/mcp` handeln mit den Rechten des Owners; „nur Chat-Rechte“ entfällt) · Date: 2026-10-16
 ## Context
 Grok Bots sollen in R1 als eigene Teilnehmer lesen/schreiben (ST-7.1.1, ST-7.1.4), jeder gehört einem Menschen, nur Chat-Rechte, nie mehr sehen als der Owner (NFR-012/013). PR #14 `/mcp` akzeptiert nur User-JWT/Cookie und lehnt Scope-Tokens ab; `_DELEGATED_ALLOWED_PREFIXES` (`omnigent/server/auth.py:70`) gilt für alle Scope-Tokens (Device-Grant, Client-Credentials). Client-Credentials kennt genau einen Env-konfigurierten Client.
 ## Decision

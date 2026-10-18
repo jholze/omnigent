@@ -56,7 +56,41 @@ Gelöst: Q-19 (Branch lokal auf Jens' Mac, Session `6c30fca5…`) → Abhängigk
 - Sicherheitsmodell klar: Bot ⊆ Owner, Token gehasht, keine Bodies in Frames/Logs/Webhooks, SSRF-Prüfung über `omnigent/util/ssrf.py`.
 - Risiken mit Gegenmaßnahmen und ehrlicher Termineinschätzung (R-1, R-2, R-5).
 
+## Nachtrag 3 (2026-10-17): MCP-Bot-Pfad – Selbstcheck
+Anlass: Gap-Analyse des gemergten MCP-Endpoints (PR #14) und MCP-Spec 2026-07-28; Änderung freigegeben von Jens 17.10.2026 19:19. Kein vollständiger 29148-Review, sondern Selbstcheck der geänderten Teile (vollständiger Review-Pass empfohlen vor Freigabe 04/05 v0.5).
+
+| Prüfung | Ergebnis |
+|---|---|
+| IDs eindeutig (FR, NFR, AC, T, Q, A, R, C, ADR) | ok – keine Doppelvergabe; neu FR-091…FR-100, NFR-031, AC-069c/070c/070d/074b/076b/088c/091a/092a–c/093a/094a/b/095a/b/096a/097a/b/098a/b/099a/100a/b, T-125…T-131, Q-21…Q-25, A-24…A-28, R-17…R-20, C-10/C-11, ADR-0009 |
+| Jede neue FR ≥ 1 AC | ok (FR-091 → AC-091a, AC-074b; FR-092 → AC-092a–c; FR-093 → AC-093a; FR-094 → AC-094a/b; FR-095 → AC-095a/b; FR-096 → AC-096a; FR-097 → AC-097a/b; FR-098 → AC-098a/b; FR-099 → AC-099a; FR-100 → AC-100a/b) |
+| Jede Must-FR ≥ 1 Fehler-/Randfall | ok (FR-091 Fehler per Definition; FR-092 AC-092b/c; FR-095 AC-095b; FR-097 AC-097b; FR-098 AC-098a; FR-099 Fehler per Definition; FR-096 nur Happy Path – Beschreibungstext ist statisch, akzeptiert) |
+| Jede neue FR/AC ≥ 1 Task | ok (Coverage `07-tasks.md` v0.4) |
+| Traceability Goal → Story → FR → AC → Task | ok für ST-7.1.1/7.1.2/7.1.3/7.1.5/7.1.6 (04 §10) |
+| Präzisierungen statt Duplikate | FR-070 (Allowlist), FR-074 (MCP-Code), FR-076 (`last_seen_at`), NFR-013/017/028 präzisiert; FR-092 konkretisiert NFR-017 als Verhalten, FR-100 konkretisiert NFR-028 |
+| Unsicherheiten markiert | A-24…A-28 als [ANNAHME]; Q-21…Q-25 mit empfohlenem Default |
+
+Inventory v0.5: G 4 · ST 39 · FR 100 (Must 77 · Should 20 · Could 3) · NFR 31 · AC 171 · open Q 15 (Q-3, 6, 7, 12–17, 20–25) · A 28 · Tasks R0 10 · R1 30 · R1.1 2.
+
+Hinweis: Der Must-Anteil steigt weiter (07 Schätzung ≈ 80 % nach Aufwand); Cut-Line in 05 §Rollout um FR-094, FR-100, FR-093 ergänzt.
+
+## Nachtrag 4 (2026-10-17): Bots mit Owner-Rechten – Selbstcheck
+Anlass: Entscheidung Jens Sa 17.10.2026 20:11 „Bots dürfen alles, was der Owner darf.“ (ADR-0010 ersetzt ADR-0009 Punkt 1). Kein unabhängiger 29148-Review, nur Selbstcheck der geänderten Teile; **spec-quality-review für 04/05 v0.6 steht aus** (Schwerpunkt Security: R-21, Q-25, Q-26).
+
+| Prüfung | Ergebnis |
+|---|---|
+| IDs eindeutig | ok – neu FR-101…FR-104, AC-036b, AC-068b–e, AC-070e, AC-077b, AC-100c, AC-101a/b, AC-102a, AC-103a/b, AC-104a/b, A-29…A-32, Q-26…Q-28, R-21/R-22, ADR-0010; keine ID wiederverwendet (FR-036/068/070/077 behalten ihre IDs mit neuem Inhalt, Changelog 04 v0.6) |
+| Jede neue/geänderte FR ≥ 1 AC | ok (FR-036 → AC-036a/b; FR-068 → AC-068a–e; FR-070 → AC-070a–e, AC-069c; FR-077 → AC-077a/b; FR-100 → AC-100a–c; FR-101 → AC-101a/b, AC-070c/d; FR-102 → AC-102a; FR-103 → AC-103a/b; FR-104 → AC-104a/b) |
+| Jede Must-FR ≥ 1 Fehler-/Randfall | ok (AC-036b, AC-068b/c/d, AC-070c/e, AC-077b, AC-100c, AC-101b, AC-102a, AC-103a Marker) |
+| ACs 04 = 07 | ok – alle 186 ACs wortgleich in genau einem Task zitiert (automatischer Abgleich) |
+| Jede FR/NFR ≥ 1 Task | ok (Coverage `07-tasks.md` v0.5) |
+| Verbotene Wörter / Mehrdeutigkeit | FR-068 ist eine „iff“-Formulierung (erlaubt + Ablehnungsfall) – akzeptiert, weil symmetrisch und testbar (AC-068a/b); FR-104 Grenzwerte bewusst [OFFEN Q-28] |
+| Unsicherheiten markiert | A-29…A-32 als [ANNAHME]; Q-26 (Owner-Schalter) bewusst nicht entschieden; Q-24/Q-25 offen und als „relevanter“ markiert |
+
+Inventory v0.6: G 4 · ST 39 · FR 104 (Must 81 · Should 20 · Could 3) · NFR 31 · AC 186 · open Q 18 (Q-3, 6, 7, 12–17, 20–28) · A 32 · Tasks R0 10 · R1 30 · R1.1 2 (R1 141 h).
+
 ## Changelog
+- v1.4 (2026-10-17) Nachtrag 4: Selbstcheck „Bots mit Owner-Rechten“ (04/05 v0.6, 03 v0.5, 07 v0.5, ADR-0010); Review ausstehend.
+- v1.3 (2026-10-17) Nachtrag 3: Selbstcheck MCP-Bot-Pfad (04/05 v0.5, 07 v0.4, ADR-0009).
 - v1.2 (2026-10-16) Nachtrag 2: interior.dev TaskSteps (FR-089/090, 4 ACs, NFR-007-Werte, Q-20), Q-19 gelöst; Inventory v0.4: FR 90 (Must 70 · Should 17 · Could 3) · NFR 30 · AC 148 · open Q 10 (Q-3, 6, 7, 12–17, 20).
 - v1.1 (2026-10-16) Nachtrag: Entscheidungen Jens 23:25 (Q-18 → R1.1/Polling, React 19 als Voraussetzung) in 03/04/05 v0.3 und 07 eingearbeitet; Findings #24, #25.
 - v1 (2026-10-16) Review von v0.1; Fixes #1–#13 in 03/04/05 v0.2 angewandt; #14–#23 Minor offen bzw. über Tasks gelöst.
