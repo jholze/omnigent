@@ -3306,7 +3306,6 @@ def _build_session_create_body(
     agent_id: str,
     conversation_id: str,
     title: object,
-    message: object,
     model: object = None,
     reasoning_effort: object = None,
 ) -> _JsonObject:
@@ -3315,10 +3314,10 @@ def _build_session_create_body(
 
     ``parent_session_id`` is hard-forced to ``conversation_id`` — this is
     what makes the write child-only (an orchestrator cannot create a
-    top-level or sibling session). A non-empty ``title``, ``message``,
-    ``model``, and ``reasoning_effort`` are included when provided; the
-    message becomes the child's first queued user turn via
-    ``initial_items``.
+    top-level or sibling session). A non-empty ``title``, ``model``, and
+    ``reasoning_effort`` are included when provided. The optional first
+    message is posted only after the runner registers the child turn, so
+    its completion can be queued in the parent inbox.
 
     ``model`` and ``reasoning_effort`` are passed through unvalidated:
     this path never resolves the child's harness (the agent is named by
@@ -3330,8 +3329,6 @@ def _build_session_create_body(
     :param conversation_id: The caller's session id — the forced parent.
     :param title: Optional session label; included only when a non-empty
         string.
-    :param message: Optional first user message; included only when a
-        non-empty string.
     :param model: Optional model override, e.g. ``"databricks-glm-5-2"``;
         written as ``model_override`` on the session.
     :param reasoning_effort: Optional reasoning level, e.g. ``"high"``;
@@ -3348,13 +3345,6 @@ def _build_session_create_body(
         body["model_override"] = model
     if isinstance(reasoning_effort, str) and reasoning_effort:
         body["reasoning_effort"] = reasoning_effort
-    if isinstance(message, str) and message:
-        body["initial_items"] = [
-            {
-                "type": "message",
-                "data": {"role": "user", "content": [{"type": "input_text", "text": message}]},
-            }
-        ]
     return body
 
 
@@ -3421,6 +3411,125 @@ def _finalize_created_session(
     )
 
 
+def _created_child_agent_label(data: _JsonObject) -> str:
+    """Return the agent name a created child's inbox notice should use."""
+    agent_name = data.get("agent_name")
+    if isinstance(agent_name, str) and agent_name:
+        return agent_name
+    return "agent"
+
+
+async def _start_created_child_turn(
+    data: _JsonObject,
+    message: object,
+    *,
+    title: object,
+    server_client: httpx.AsyncClient,
+    conversation_id: str,
+    session_inbox: asyncio.Queue[_JsonObject] | None,
+) -> str | None:
+    """Register a created child's turn, then post its first message.
+
+    ``sys_session_create`` used to start the turn without a runner work
+    entry. The server still wakes the parent and tells it a result is
+    waiting in the inbox, but ``sys_read_inbox`` drains a queue nothing
+    was put into. The work entry has to exist before the message is
+    posted: the child turn can finish on this runner, and only a
+    registered dispatch is copied into the parent inbox.
+
+    A create with no message does not start a turn, so it stays
+    untracked until a later ``sys_session_send``.
+
+    :param data: Create response. Reads ``id`` (or ``session_id``) and
+        ``agent_name``.
+    :param message: First user message. A non-string or empty value
+        starts nothing.
+    :param title: Caller-supplied instance title, used in the wake notice.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :param conversation_id: Parent session id.
+    :param session_inbox: Parent inbox, installed before the turn starts.
+    :returns: ``None`` when no message was posted or the turn was
+        started. A JSON error string (carrying ``conversation_id``) when
+        the dispatch could not be recorded or the message post failed.
+    """
+    if not isinstance(message, str) or not message:
+        return None
+    child_id = data.get("id") or data.get("session_id")
+    if not isinstance(child_id, str) or not child_id:
+        return json.dumps({"error": "server did not return a child session id"})
+    from omnigent.runner import subagent_work as _subagent_work
+
+    if session_inbox is not None:
+        _subagent_work._session_inboxes_ref.setdefault(conversation_id, session_inbox)
+    created_by = await _session_turn_actor(
+        server_client=server_client,
+        conversation_id=conversation_id,
+    )
+    work_id = _subagent_work.new_subagent_work_id()
+    stamp_error = await _patch_subagent_label(
+        server_client,
+        child_id,
+        _subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY,
+        work_id,
+    )
+    if stamp_error is not None:
+        return json.dumps(
+            {
+                "error": f"failed to record sub-agent dispatch: {stamp_error}",
+                "conversation_id": child_id,
+            }
+        )
+    instance_title = title if isinstance(title, str) else ""
+    agent = _created_child_agent_label(data)
+    _subagent_work.register_child_session(
+        child_id,
+        parent_session_id=conversation_id,
+        title=instance_title,
+        tool=agent,
+        session_name=instance_title,
+    )
+    _subagent_work.register_subagent_work(
+        parent_session_id=conversation_id,
+        child_session_id=child_id,
+        agent=agent,
+        title=instance_title,
+        created_by=created_by,
+        work_id=work_id,
+    )
+
+    def _abandon() -> None:
+        _subagent_work.unregister_subagent_work(child_id, work_id=work_id)
+        _subagent_work.unregister_child_session(child_id)
+
+    try:
+        msg_resp = await _post_child_message_event(
+            server_client,
+            child_id,
+            content=[{"type": "input_text", "text": message}],
+            created_by=created_by,
+        )
+    except httpx.HTTPError as exc:
+        _abandon()
+        return json.dumps(
+            {
+                "error": f"child session created but message failed: {exc}",
+                "conversation_id": child_id,
+            }
+        )
+    if msg_resp.status_code >= 400:
+        _abandon()
+        return json.dumps(
+            {
+                "error": (
+                    "child session created but message failed: "
+                    f"{msg_resp.status_code} {msg_resp.text[:200]}"
+                ),
+                "conversation_id": child_id,
+            }
+        )
+    return None
+
+
 async def _execute_session_create(
     args: _JsonObject,
     *,
@@ -3429,6 +3538,7 @@ async def _execute_session_create(
     publish_event: Callable[[str, _JsonObject], None] | None,
     agent_spec: AgentSpec | None = None,
     runner_workspace: Path | None = None,
+    session_inbox: asyncio.Queue[_JsonObject] | None = None,
 ) -> str:
     """
     Create a child session (``sys_session_create``).
@@ -3443,12 +3553,11 @@ async def _execute_session_create(
       ``POST /v1/sessions`` create.
 
     Both modes force ``parent_session_id`` to the caller (child-only).
-    The child inherits the caller's runner (server-side affinity), so a
-    queued initial message starts a turn immediately. Returns a handle
-    the orchestrator can monitor (``sys_session_get_history`` /
-    ``sys_session_get_info``) or drive (``sys_session_send`` by
-    ``conversation_id``) — unlike named-mode send, it does NOT block on
-    the child turn.
+    The child inherits the caller's runner (server-side affinity). When
+    ``message`` is set, the runner registers the child turn and then
+    posts that message, so the completion is queued in the parent's
+    inbox for ``sys_read_inbox`` — the same delivery ``sys_session_send``
+    uses. The call still returns as soon as the turn is started.
 
     Maps a 404 to ``agent_not_found`` and 401/403 to ``access_denied``.
 
@@ -3464,6 +3573,9 @@ async def _execute_session_create(
         os_env cwd that ``config_path`` is read from.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param session_inbox: Parent inbox queue. Installed before the child
+        turn starts so the completion is queued where ``sys_read_inbox``
+        drains it.
     :returns: JSON handle on success; a JSON error object otherwise.
     """
     if server_client is None:
@@ -3507,12 +3619,12 @@ async def _execute_session_create(
             publish_event=publish_event,
             agent_spec=agent_spec,
             runner_workspace=runner_workspace,
+            session_inbox=session_inbox,
         )
     body = _build_session_create_body(
         str(agent_id),
         conversation_id,
         args.get("title"),
-        args.get("message"),
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
     )
@@ -3531,6 +3643,16 @@ async def _execute_session_create(
     data = resp.json()
     if not isinstance(data.get("id"), str) or not data["id"]:
         return json.dumps({"error": "server did not return a child session id"})
+    started = await _start_created_child_turn(
+        data,
+        args.get("message"),
+        title=args.get("title"),
+        server_client=server_client,
+        conversation_id=conversation_id,
+        session_inbox=session_inbox,
+    )
+    if started is not None:
+        return started
     return _finalize_created_session(
         data,
         conversation_id=conversation_id,
@@ -3579,58 +3701,6 @@ def _bundle_local_agent_source(source: Path) -> bytes:
                         arcname=str(file_path.relative_to(bundle_dir)),
                     )
         return buf.getvalue()
-
-
-async def _post_child_first_message(
-    child_session_id: str,
-    message: str,
-    server_client: httpx.AsyncClient,
-) -> str | None:
-    """
-    Queue a bundle-created child's first user message.
-
-    Posted as a separate event so the server's post_event forwards it
-    to the runner and starts the child turn (same pattern as
-    named-mode ``sys_session_send``).
-
-    :param child_session_id: The new child session id,
-        e.g. ``"conv_abc123"``.
-    :param message: The first user message text.
-    :param server_client: HTTP client pointed at the Omnigent server.
-    :returns: ``None`` on success; a JSON error string (carrying the
-        created ``conversation_id`` so the orchestrator can retry via
-        ``sys_session_send``) on failure.
-    """
-    try:
-        msg_resp = await server_client.post(
-            f"/v1/sessions/{child_session_id}/events",
-            json={
-                "type": "message",
-                "data": {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": message}],
-                },
-            },
-            timeout=30.0,
-        )
-    except httpx.HTTPError as exc:
-        return json.dumps(
-            {
-                "error": f"child session created but message failed: {exc}",
-                "conversation_id": child_session_id,
-            }
-        )
-    if msg_resp.status_code >= 400:
-        return json.dumps(
-            {
-                "error": (
-                    "child session created but message failed: "
-                    f"{msg_resp.status_code} {msg_resp.text[:200]}"
-                ),
-                "conversation_id": child_session_id,
-            }
-        )
-    return None
 
 
 async def _upload_config_bundle(
@@ -3709,14 +3779,15 @@ async def _session_create_from_config_path(
     publish_event: Callable[[str, _JsonObject], None] | None,
     agent_spec: AgentSpec | None,
     runner_workspace: Path | None,
+    session_inbox: asyncio.Queue[_JsonObject] | None = None,
 ) -> str:
     """
     Bundle-mode ``sys_session_create``: upload a new agent and launch it.
 
     Delegates the resolve/bundle/upload pipeline to
     :func:`_upload_config_bundle`, validates the server's
-    ``CreatedSessionResponse``, queues the optional first ``message``
-    via :func:`_post_child_first_message`, and returns the
+    ``CreatedSessionResponse``, registers and posts the optional first
+    ``message`` via :func:`_start_created_child_turn`, and returns the
     orchestrator handle.
 
     :param config_path: Caller-supplied path to the agent config YAML,
@@ -3729,6 +3800,7 @@ async def _session_create_from_config_path(
     :param publish_event: SSE publish callback for ``session.created``.
     :param agent_spec: The calling agent's spec, for os_env resolution.
     :param runner_workspace: The runner workspace, authoritative cwd.
+    :param session_inbox: Parent inbox queue for the child turn's result.
     :returns: JSON handle on success; a JSON error object otherwise.
     """
     data = await _upload_config_bundle(
@@ -3756,11 +3828,21 @@ async def _session_create_from_config_path(
             }
         )
 
-    message = args.get("message")
-    if isinstance(message, str) and message:
-        message_error = await _post_child_first_message(child_session_id, message, server_client)
-        if message_error is not None:
-            return message_error
+    created = {
+        "id": child_session_id,
+        "agent_name": data.get("agent_name"),
+        "status": "created",
+    }
+    started = await _start_created_child_turn(
+        created,
+        args.get("message"),
+        title=args.get("title"),
+        server_client=server_client,
+        conversation_id=conversation_id,
+        session_inbox=session_inbox,
+    )
+    if started is not None:
+        return started
 
     return _finalize_created_session(
         # Adapt the multipart CreatedSessionResponse shape to the
@@ -6677,6 +6759,7 @@ async def execute_tool(
                 publish_event=publish_event,
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
+                session_inbox=session_inbox,
             )
         elif tool_name in _SESSION_SELF_WRITE_TOOLS:
             output = await _rename_current_session_via_rest(

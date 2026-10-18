@@ -64,7 +64,19 @@ def google_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Test
         "omnigent.server.google_accounts.generate_code_verifier",
         lambda: _VERIFIER,
     )
-    yield from _build_accounts_app(tmp_path, monkeypatch, init_admin_password="admin-pw-12345")
+    # The app must see the redirect host (localhost:8000) or /auth/google/start
+    # bounces. TestClient websockets always dial ws://testserver, and the
+    # session cookie is stored for the client host, so the HTTP base URL stays
+    # testserver and the public host is carried in the forwarded headers.
+    yield from _build_accounts_app(
+        tmp_path,
+        monkeypatch,
+        init_admin_password="admin-pw-12345",
+        headers={
+            "x-forwarded-proto": "http",
+            "x-forwarded-host": "localhost:8000",
+        },
+    )
 
 
 class _Identity:

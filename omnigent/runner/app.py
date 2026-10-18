@@ -492,7 +492,7 @@ class _SessionSnapshot:
         conversation's id, e.g. ``"conv_parent987"``. ``None`` for
         top-level sessions. Lets ``_ensure_subagent_work_entry`` rebuild a lost
         work entry when the in-memory map was wiped (reconnect / restart) or
-        never populated (a ``sys_session_create`` child).
+        the child was created outside a runner dispatch.
     :param agent_name: Human-readable bound agent name, e.g.
         ``"cursor-native-ui"``. Used as the sub-agent label when rebuilding a
         work entry for a child the server did not record a ``sub_agent_name``

@@ -102,7 +102,7 @@ async def test_oidc_manifest_names_mode_and_cookie(
 async def test_non_oidc_manifest_lists_no_native_redirects(
     runtime_init: None, db_uri: str, tmp_path: Path, mode: str
 ) -> None:
-    """Only OIDC runs the native sign-in, so other modes advertise no app redirect."""
+    """Accounts without Google, and header mode, advertise no app redirect."""
     if mode == "accounts":
         accounts_config = AccountsConfig(
             cookie_secret=bytes.fromhex("cc" * 32),

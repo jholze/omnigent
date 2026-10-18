@@ -8211,14 +8211,21 @@ async def test_sys_session_create_spawns_child_under_caller() -> None:
     """
     ``sys_session_create`` POSTs a JSON create with
     ``parent_session_id`` forced to the caller (child-only), passes the
-    agent_id, title, and a queued initial message, and returns a handle
-    carrying the new child's id. If parent_session_id weren't forced to
-    the caller, an orchestrator could create top-level/sibling sessions —
-    so the asserted request body is the security-critical check.
+    agent_id and title, and returns a handle carrying the new child's id.
+    If parent_session_id weren't forced to the caller, an orchestrator
+    could create top-level/sibling sessions — so the asserted request
+    body is the security-critical check.
+
+    A first message is posted only after the child turn is registered, so
+    the completion lands in the parent inbox instead of a wake notice that
+    ``sys_read_inbox`` cannot collect.
     """
-    from omnigent.runner.tool_dispatch import execute_tool
+    from omnigent.runner.tool_dispatch import _drain_inbox, execute_tool
 
     captured: dict[str, Any] = {}
+    labels: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/sessions":
@@ -8232,29 +8239,101 @@ async def test_sys_session_create_spawns_child_under_caller() -> None:
                     "status": "idle",
                 },
             )
+        if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_child":
+            labels.update(json.loads(request.content).get("labels") or {})
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child/events":
+            events.append(json.loads(request.content))
+            return httpx.Response(202, json={"queued": True})
+        if request.method == "POST" and request.url.path.endswith("/policies/evaluate"):
+            return httpx.Response(200, json={"result": "POLICY_ACTION_ALLOW"})
         return httpx.Response(404, json={"error": str(request.url)})
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_server_handler),
         base_url="http://server",
     ) as server_client:
-        output = await execute_tool(
-            tool_name="sys_session_create",
-            arguments=json.dumps({"agent_id": "ag_x", "title": "auth", "message": "start"}),
-            server_client=server_client,
-            conversation_id="conv_caller",
-        )
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "ag_x", "title": "auth", "message": "start"}),
+                server_client=server_client,
+                conversation_id="conv_caller",
+                session_inbox=inbox,
+            )
+            entry = subagent_work.get_subagent_work("conv_child")
+            assert entry is not None, output
+            ack = subagent_work.mark_subagent_work_terminal(
+                "conv_child",
+                status="completed",
+                output="child answer",
+            )
+            drained = await _drain_inbox(
+                inbox,
+                server_client=server_client,
+                conversation_id="conv_caller",
+            )
+        finally:
+            subagent_work.unregister_subagent_work("conv_child")
+            subagent_work.unregister_child_session("conv_child")
+            subagent_work._session_inboxes_ref.pop("conv_caller", None)
 
-    # Child-only: parent forced to the caller; agent + title + queued
-    # message threaded through to the create body.
+    # Child-only: parent forced to the caller. The message is not part of
+    # the create body — it is posted after the dispatch id is stamped.
     assert captured["parent_session_id"] == "conv_caller"
     assert captured["agent_id"] == "ag_x"
     assert captured["title"] == "auth"
-    assert captured["initial_items"][0]["data"]["content"][0]["text"] == "start"
+    assert "initial_items" not in captured
+    assert labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY] == entry.work_id
+    assert events[0]["data"]["content"][0]["text"] == "start"
     handle = json.loads(output)
     assert handle["conversation_id"] == "conv_child"
     assert handle["agent_id"] == "ag_x"
     assert handle["agent_name"] == "researcher"
+    assert entry.parent_session_id == "conv_caller"
+    assert (entry.agent, entry.title) == ("researcher", "auth")
+    assert ack.delivered_now is True
+    assert "child answer" in drained
+    assert "Inbox is empty" not in drained
+    assert await _drain_inbox(inbox, conversation_id="conv_caller") == (
+        "Inbox is empty — no completed tasks."
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_session_create_without_message_does_not_track_a_turn() -> None:
+    """A child with no first message has no turn to deliver.
+
+    Tracking it would leave a ``launching`` dispatch that a later idle
+    edge could report as a finished result.
+    """
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            return httpx.Response(
+                201,
+                json={"id": "conv_idle_child", "agent_id": "ag_x", "agent_name": "researcher"},
+            )
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "ag_x", "title": "auth"}),
+                server_client=server_client,
+                conversation_id="conv_caller",
+            )
+            entry = subagent_work.get_subagent_work("conv_idle_child")
+        finally:
+            subagent_work.unregister_child_session("conv_idle_child")
+
+    assert json.loads(output)["conversation_id"] == "conv_idle_child"
+    assert entry is None
 
 
 @pytest.mark.asyncio
@@ -8362,6 +8441,8 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
                     "agent_name": "helper",
                 },
             )
+        if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_child":
+            return httpx.Response(200, json={"ok": True})
         if request.method == "POST" and request.url.path == "/v1/sessions/conv_child/events":
             event_bodies.append(json.loads(request.content))
             return httpx.Response(200, json={})
@@ -8371,15 +8452,21 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
         transport=httpx.MockTransport(_server_handler),
         base_url="http://server",
     ) as server_client:
-        output = await execute_tool(
-            tool_name="sys_session_create",
-            arguments=json.dumps(
-                {"config_path": "helper.yaml", "title": "auth", "message": "start"}
-            ),
-            server_client=server_client,
-            conversation_id="conv_caller",
-            runner_workspace=tmp_path,
-        )
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {"config_path": "helper.yaml", "title": "auth", "message": "start"}
+                ),
+                server_client=server_client,
+                conversation_id="conv_caller",
+                runner_workspace=tmp_path,
+            )
+            entry = subagent_work.get_subagent_work("conv_child")
+        finally:
+            subagent_work.unregister_subagent_work("conv_child")
+            subagent_work.unregister_child_session("conv_child")
+            subagent_work._session_inboxes_ref.pop("conv_caller", None)
 
     # Exactly one multipart create; parent forced to the caller
     # (child-only) and the title threaded into the metadata part.
@@ -8409,6 +8496,9 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
     # not the caller's args — the orchestrator needs the NEW agent's id.
     assert handle["agent_id"] == "ag_new"
     assert handle["agent_name"] == "helper"
+    assert entry is not None
+    assert entry.parent_session_id == "conv_caller"
+    assert (entry.agent, entry.title) == ("helper", "auth")
 
 
 @pytest.mark.asyncio
