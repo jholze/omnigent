@@ -1,8 +1,7 @@
 """The per-session human-lines table is removed at the current head.
 
-Upgrade past the team-chat revision drops the table. Downgrade one step
-recreates it, so a database that already applied the earlier revisions
-can move in either direction without a second head.
+The drop revision follows td1a2b3c4d5e, the bot-initiator column.
+Downgrade one step recreates the table, so the chain stays a single head.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from alembic.script import ScriptDirectory
 from omnigent.db.utils import _build_alembic_config, clear_engine_cache
 
 _HEAD = "dx1a2b3c4d5e"
-_PARENT = "tc1a2b3c4d5e"
+_PARENT = "td1a2b3c4d5e"
 _TABLE = "session_chat_messages"
 
 

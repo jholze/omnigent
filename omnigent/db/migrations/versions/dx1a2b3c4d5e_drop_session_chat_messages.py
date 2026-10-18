@@ -1,7 +1,7 @@
 """drop session chat messages
 
 Revision ID: dx1a2b3c4d5e
-Revises: tc1a2b3c4d5e
+Revises: td1a2b3c4d5e
 Create Date: 2026-10-18 00:00:00.000000
 
 The per-session human chat column is gone. Rows already stored on the
@@ -18,7 +18,7 @@ from alembic import op
 from omnigent.db.db_models import Uuid16
 
 revision: str = "dx1a2b3c4d5e"
-down_revision: str | None = "tc1a2b3c4d5e"
+down_revision: str | None = "td1a2b3c4d5e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
