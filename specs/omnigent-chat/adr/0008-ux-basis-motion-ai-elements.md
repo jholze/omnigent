@@ -1,0 +1,9 @@
+# ADR-0008: UX-Basis AI Elements + Motion, Muster nachgebaut, UX-Agent prüft gegen Doku
+Status: accepted · Date: 2026-10-16 · Amended: 2026-10-16 (interior.dev)
+## Context
+UX ist harte Anforderung (G-3, ST-UX-1/2). Im Repo sind AI Elements teilweise vorhanden (`web/src/components/ai-elements/`: conversation, message, reasoning, shimmer, code-block); keine Motion-Dependency; `tw-animate-css` vorhanden; React 18 auf `main`; Jens hat am 16.10. 23:25 entschieden, dass das React-19-Upgrade (Issue #16, `feat/react-19`) vor der Chat-UI gemergt wird. agent-native-Code ist lizenzrechtlich unklar.
+## Decision
+Wir fügen `motion` (Import `motion/react`, `LazyMotion` + `domAnimation`, `MotionConfig reducedMotion="user"`) hinzu, definieren zentrale Motion-Tokens (`web/src/chat/motion.ts`) und bauen Muster aus agent-native, prompt-kit, Slack und **interior.dev** (https://www.interior.dev, Wunsch von Jens) ohne Code-Kopie nach. **interior.dev TaskSteps** ist die Referenz für Agent-Schritte und Status im Thread (FR-048, FR-089, FR-090): Status pending/active/done/error, Pop-Spring für Häkchen/Kreuz, drehender Bogen, Shimmer auf dem aktiven Label, Mono-Meta (Dauer) bei done, `useReducedMotion`, sr-only Live-Ansage „X, Schritt n von m“. interior.dev wird per shadcn-Registry kopiert (`bunx shadcn add https://www.interior.dev/r/task-steps.json`, einzige Dependency `motion`); eine Code-Übernahme erfolgt erst nach Lizenzprüfung [OFFEN Q-20], bis dahin Nachbau mit lucide-Icons. Fehlende AI-Elements-Bausteine (Tool-Gruppe, Task-Liste, Prompt-Vorschläge) entstehen schlank in `web/src/chat/`. Ein UX-Agent prüft jede UI-PR gegen eine Checkliste aus der plugin87/ux-ui-agent-skills-Doku (motion-choreography, icon-system, a11y), ohne Plugin-Hooks.
+## Consequences
++ Messbare UX-Kriterien (NFR-006…NFR-011, NFR-030) und einheitliche Bewegungssprache.
+− Neue Dependency (+Bundle, R-13); Muster müssen selbst getestet werden.
