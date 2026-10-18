@@ -49,7 +49,6 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.policy_store.sqlalchemy_store import SqlAlchemyPolicyStore
-from omnigent.stores.session_chat_store.sqlalchemy_store import SqlAlchemySessionChatStore
 
 # ── Controllable mock LLM ─────────────────────────────
 
@@ -730,7 +729,6 @@ def auth_app(runtime_init: None, db_uri: str, tmp_path: Path) -> FastAPI:
             cache_dir=tmp_path / "cache",
         ),
         comment_store=SqlAlchemyCommentStore(db_uri),
-        chat_store=SqlAlchemySessionChatStore(db_uri),
         permission_store=SqlAlchemyPermissionStore(db_uri),
         auth_provider=UnifiedAuthProvider(source="header"),
     )
