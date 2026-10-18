@@ -260,14 +260,34 @@ jobs:
           pnpm install --frozen-lockfile --filter web
           pnpm --filter web run build
       - name: Run UI e2e tests (not visual, not nightly)
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p artifacts
-          # Classic style prints each failure as it happens, so a timeout
-          # still leaves the traceback in the log.
-          uv run pytest tests/e2e_ui \
+          # pytest 9 holds tracebacks for the session summary. The job
+          # timeout cancels the suite before that summary, so write each
+          # failure as soon as the call phase ends.
+          cat > "${RUNNER_TEMP}/e2e_tb.py" << 'PY'
+          from pathlib import Path
+
+          def pytest_runtest_logreport(report):
+              if report.when != "call" or report.outcome not in {"failed", "rerun"}:
+                  return
+              text = str(getattr(report, "longrepr", "") or "")
+              if not text:
+                  return
+              block = f"\n===== {report.outcome} {report.nodeid} =====\n{text}\n"
+              print(block, flush=True)
+              path = Path("artifacts/e2e-failures.txt")
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open("a", encoding="utf-8") as handle:
+                  handle.write(block)
+          PY
+          PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
+            uv run pytest tests/e2e_ui \
             -v --tb=short -r a \
-            --override-ini console_output_style=classic \
-            --reruns=1 --reruns-delay=5 \
+            -p e2e_tb \
+            --reruns=1 --reruns-delay=5 --rerun-show-tracebacks \
             --ui-skip-build \
             --junitxml=artifacts/e2e-ui.xml \
             -m "not visual and not nightly" \
