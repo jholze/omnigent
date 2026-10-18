@@ -78,6 +78,10 @@ export function LoginPage() {
   // again (a loop). The user must re-enter their password; a successful submit
   // mints a new session whose iat clears the consent page's freshness check.
   const forceReauth = params.get("reauth") === "1";
+  // Desktop native handoff (?native=1) must show this page even when the
+  // browser already holds a session, so the password or Google button can
+  // finish the loopback code exchange.
+  const nativeSignIn = params.get("native") === "1";
 
   const [username, setUsername] = useState(readLastUsername);
   const [password, setPassword] = useState("");
@@ -101,7 +105,7 @@ export function LoginPage() {
   // the whole point is to re-prove the password, so an existing session must
   // NOT short-circuit — show the form and require a fresh submit.
   useEffect(() => {
-    if (forceReauth) return;
+    if (forceReauth || nativeSignIn) return;
     void (async () => {
       const account = await getMe();
       if (account !== null) {
@@ -154,8 +158,9 @@ export function LoginPage() {
     if (result.ok) {
       rememberUsername(username);
       // Hard-navigate so identity.ts re-runs and every cached
-      // query is rebuilt against the new session.
-      window.location.href = returnTo;
+      // query is rebuilt against the new session. A desktop handoff
+      // sends the browser to the app's loopback redirect instead.
+      window.location.href = result.nativeRedirect || returnTo;
       return;
     }
     setSubmitting(false);
@@ -175,7 +180,7 @@ export function LoginPage() {
     setError(null);
     const result = await createGoogleAccount();
     if (result.ok) {
-      window.location.href = returnTo;
+      window.location.href = result.nativeRedirect || returnTo;
       return;
     }
     setSubmitting(false);

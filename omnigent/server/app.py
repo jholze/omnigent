@@ -2969,14 +2969,19 @@ def create_app(
            ``"header"``, ``"custom"`` (an embedding app's own provider), or
            ``"none"``. ``"oidc"`` also promises the native loopback sign-in
            (``/auth/login`` native parameters + ``POST /auth/native-token``).
-           ``session_cookie`` names the session cookie for ``oidc`` and
-           ``accounts`` and is ``null`` otherwise. ``native_redirect_uris``
-           lists the private-use-scheme redirects (e.g. the iOS app's
+           Accounts mode with Continue with Google configured reports
+           ``"oidc"`` too, so the desktop app uses that handoff against the
+           accounts session cookie. ``/v1/info`` stays ``accounts`` and the
+           browser login page is unchanged. ``session_cookie`` names the
+           session cookie for ``oidc`` and ``accounts`` and is ``null``
+           otherwise. ``native_redirect_uris`` lists the private-use-scheme
+           redirects (e.g. the iOS app's
            ``ai.omnigent.ios:/oauth/callback``) the native sign-in accepts
-           besides loopback, sorted, for ``oidc``; ``null`` otherwise. The
-           iOS app gates on its URI being listed, because servers that only
-           support loopback answer the custom scheme with 400. A missing
-           ``auth`` (older servers) means "sign in as before".
+           besides loopback, sorted, whenever ``mode`` is ``"oidc"``;
+           ``null`` otherwise. The iOS app gates on its URI being listed,
+           because servers that only support loopback answer the custom
+           scheme with 400. A missing ``auth`` (older servers) means "sign
+           in as before".
         6. ``server_name`` (str | null) is the operator's display name for
            this deployment (``branding.server_name``), for clients that list
            several servers. Self-asserted by the server, so clients show it
@@ -3004,8 +3009,16 @@ def create_app(
         """
         mode = auth_mode(auth_provider)
         native_redirect_uris: list[str] | None = None
+        # Google-on-accounts speaks the same native handoff as OIDC. The
+        # desktop keys off auth.mode, so advertise "oidc" only then.
+        if mode == "accounts":
+            from omnigent.server.auth import resolve_auth_source
+            from omnigent.server.google_accounts import google_accounts_config
+
+            if resolve_auth_source() == "accounts" and google_accounts_config() is not None:
+                mode = "oidc"
         if mode == "oidc":
-            from omnigent.server.routes.auth import NATIVE_APP_REDIRECT_URIS
+            from omnigent.server.native_signin import NATIVE_APP_REDIRECT_URIS
 
             native_redirect_uris = sorted(NATIVE_APP_REDIRECT_URIS)
         return {
@@ -3052,7 +3065,9 @@ def create_app(
         """
         from omnigent.server.auth import local_single_user_enabled
 
-        # Same helper as the manifest's auth.mode, so the two never disagree.
+        # The manifest may say auth.mode "oidc" when accounts mode has Google
+        # sign-in, so the desktop uses the native handoff. This probe stays
+        # on the real provider so the SPA keeps the password form.
         accounts_enabled = auth_mode(auth_provider) == "accounts"
         login_url = getattr(auth_provider, "login_url", None)
         # single_user marks the explicit single-user local runtime

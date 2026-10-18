@@ -23,9 +23,7 @@ These routes are only mounted when ``OMNIGENT_AUTH_PROVIDER=oidc``.
 
 from __future__ import annotations
 
-import hmac
 import logging
-import re
 import secrets
 import time
 from collections.abc import Mapping
@@ -45,6 +43,28 @@ from omnigent.server.auth import (
     UnifiedAuthProvider,
 )
 from omnigent.server.device_grant_store import DeviceGrantStore
+from omnigent.server.native_signin import (
+    NATIVE_APP_REDIRECT_URIS as NATIVE_APP_REDIRECT_URIS,
+)
+from omnigent.server.native_signin import (
+    NATIVE_CODE_TTL_SECONDS as _NATIVE_CODE_TTL_SECONDS,
+)
+from omnigent.server.native_signin import (
+    NativeCode as _NativeCode,
+)
+from omnigent.server.native_signin import (
+    consume_native_code,
+    issue_native_code,
+)
+from omnigent.server.native_signin import (
+    native_from_state as _native_from_state,
+)
+from omnigent.server.native_signin import (
+    native_redirect as _native_redirect,
+)
+from omnigent.server.native_signin import (
+    parse_native_sign_in as _parse_native_sign_in,
+)
 from omnigent.server.oidc import (
     _GITHUB_EMAILS_ENDPOINT,
     derive_code_challenge,
@@ -63,22 +83,6 @@ _AUTH_STATE_COOKIE_SECURE = "__Host-ap_auth_state"
 _AUTH_STATE_COOKIE_PLAIN = "ap_auth_state"
 _AUTH_STATE_TTL_SECONDS = 300  # 5 minutes
 _CLI_TICKET_TTL_SECONDS = 300  # 5 minutes
-# A native sign-in code is exchanged by the app right after the browser
-# hands it over, so it only needs to outlive one redirect round trip.
-_NATIVE_CODE_TTL_SECONDS = 60
-# RFC 8252 §7.3 loopback literals. ``localhost`` is excluded (§8.3): its
-# resolution can be redirected away from this machine.
-_NATIVE_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
-# RFC 8252 §7.1 private-use-scheme redirects of first-party apps, matched
-# exactly. The well-known manifest lists them so an app can tell whether
-# this server accepts its redirect before opening the browser.
-NATIVE_APP_REDIRECT_URIS: frozenset[str] = frozenset({"ai.omnigent.ios:/oauth/callback"})
-_NATIVE_PARAMS = ("native_redirect_uri", "native_state", "code_challenge", "code_challenge_method")
-# RFC 7636: an S256 challenge is a 43-char base64url SHA-256 digest, and a
-# verifier is 43-128 unreserved characters.
-_S256_CHALLENGE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
-_CODE_VERIFIER_RE = re.compile(r"[A-Za-z0-9._~-]{43,128}")
-_NATIVE_STATE_RE = re.compile(r"[A-Za-z0-9._~-]{1,256}")
 # How long an OIDC invite URL stays redeemable. Matches the accounts
 # provider's default invite window (72h) — long enough to share
 # out-of-band, short enough to bound exposure of an unused link.
@@ -110,27 +114,6 @@ class _CliTicket:
     token: str | None = None
     user_id: str | None = None
     refresh_token: str | None = None
-
-
-@dataclass
-class _NativeCode:
-    """A one-time code issued to a native app's redirect.
-
-    Created by ``/auth/callback`` for a native sign-in and consumed by
-    ``POST /auth/native-token``.
-
-    :param user_id: The authenticated user's email.
-    :param code_challenge: The PKCE S256 challenge the app sent to
-        ``/auth/login``; the exchange must present its verifier.
-    :param redirect_uri: The redirect URI the code was delivered to; the
-        exchange must name the same URI.
-    :param created_at: Unix timestamp when the code was issued.
-    """
-
-    user_id: str
-    code_challenge: str
-    redirect_uri: str
-    created_at: float = field(default_factory=time.time)
 
 
 def create_auth_router(
@@ -517,12 +500,12 @@ def create_auth_router(
         # the session is minted when the app exchanges it with its verifier.
         # The browser gets no session cookie: it never asked for one.
         if native is not None:
-            _evict_expired_native_codes(_native_codes)
-            native_code = secrets.token_urlsafe(32)
-            _native_codes[native_code] = _NativeCode(
+            native_code = issue_native_code(
+                _native_codes,
                 user_id=email,
                 code_challenge=native["code_challenge"],
                 redirect_uri=native["redirect_uri"],
+                ttl_seconds=_NATIVE_CODE_TTL_SECONDS,
             )
             response = _native_redirect(native, {"code": native_code})
             response.delete_cookie(
@@ -788,20 +771,17 @@ def create_auth_router(
         redirect_uri = form.get("redirect_uri")
         if not isinstance(code, str) or not code:
             return oauth_error("invalid_request")
-        _evict_expired_native_codes(_native_codes)
         # Consumed before anything else is checked, so even a malformed
-        # attempt burns the code.
-        pending = _native_codes.pop(code, None)
-        if not isinstance(verifier, str) or not isinstance(redirect_uri, str):
-            return oauth_error("invalid_request")
-        if (
-            pending is None
-            or time.time() - pending.created_at > _NATIVE_CODE_TTL_SECONDS
-            or redirect_uri != pending.redirect_uri
-            or not _CODE_VERIFIER_RE.fullmatch(verifier)
-            or not hmac.compare_digest(derive_code_challenge(verifier), pending.code_challenge)
-        ):
-            return oauth_error("invalid_grant")
+        # attempt burns the code. TTL is read here so tests can shorten it.
+        pending, error = consume_native_code(
+            _native_codes,
+            code=code,
+            verifier=verifier,
+            redirect_uri=redirect_uri,
+            ttl_seconds=_NATIVE_CODE_TTL_SECONDS,
+        )
+        if error is not None or pending is None:
+            return oauth_error(error or "invalid_grant")
 
         content: dict[str, object] = {
             "token": mint_session_cookie(
@@ -898,99 +878,6 @@ def _evict_expired_tickets(tickets: dict[str, _CliTicket]) -> None:
     expired = [k for k, v in tickets.items() if now - v.created_at > _CLI_TICKET_TTL_SECONDS]
     for k in expired:
         del tickets[k]
-
-
-def _evict_expired_native_codes(codes: dict[str, _NativeCode]) -> None:
-    """Remove native sign-in codes past their TTL.
-
-    :param codes: The mutable code dict to prune.
-    """
-    now = time.time()
-    expired = [k for k, v in codes.items() if now - v.created_at > _NATIVE_CODE_TTL_SECONDS]
-    for k in expired:
-        del codes[k]
-
-
-def _is_loopback_redirect_uri(raw: str) -> bool:
-    """Whether ``raw`` is an RFC 8252 loopback redirect a native app can listen on.
-
-    Only ``http://127.0.0.1:<port>/...`` and ``http://[::1]:<port>/...``
-    qualify: an explicit port, no userinfo, query, or fragment. Anything
-    else could deliver the sign-in code off this machine.
-
-    :param raw: The ``native_redirect_uri`` query parameter, e.g.
-        ``"http://127.0.0.1:53682/callback"``.
-    :returns: True when the URI is an acceptable loopback redirect.
-    """
-    if not raw or "?" in raw or "#" in raw or "\\" in raw or any(c.isspace() for c in raw):
-        return False
-    try:
-        parts = urlsplit(raw)
-        port = parts.port
-    except ValueError:
-        return False
-    return (
-        parts.scheme == "http"
-        and parts.hostname in _NATIVE_LOOPBACK_HOSTS
-        and port is not None
-        and port > 0
-        and parts.username is None
-        and parts.password is None
-    )
-
-
-def _parse_native_sign_in(params: Mapping[str, str]) -> dict[str, str] | None:
-    """Read the native sign-in parameters of a ``/auth/login`` request.
-
-    :param params: The request's query parameters.
-    :returns: ``{"redirect_uri", "state", "code_challenge"}``, or ``None``
-        when the request carries no native parameter.
-    :raises ValueError: When any native parameter is present but the set
-        is incomplete or invalid. Only S256 challenges are accepted.
-    """
-    if not any(name in params for name in _NATIVE_PARAMS):
-        return None
-    redirect_uri = params.get("native_redirect_uri", "")
-    native_state = params.get("native_state", "")
-    challenge = params.get("code_challenge", "")
-    if (
-        params.get("code_challenge_method") != "S256"
-        or not (
-            redirect_uri in NATIVE_APP_REDIRECT_URIS or _is_loopback_redirect_uri(redirect_uri)
-        )
-        or not _NATIVE_STATE_RE.fullmatch(native_state)
-        or not _S256_CHALLENGE_RE.fullmatch(challenge)
-    ):
-        raise ValueError("invalid native sign-in parameters")
-    return {"redirect_uri": redirect_uri, "state": native_state, "code_challenge": challenge}
-
-
-def _native_from_state(state_payload: Mapping[str, object] | None) -> dict[str, str] | None:
-    """Return the native sign-in recorded in a verified auth state, if any.
-
-    :param state_payload: The decoded, signature-checked state cookie.
-    :returns: The dict :func:`_parse_native_sign_in` produced at login, or
-        ``None`` for a browser or CLI-ticket sign-in.
-    """
-    native = state_payload.get("native") if state_payload else None
-    if not isinstance(native, dict):
-        return None
-    fields = ("redirect_uri", "state", "code_challenge")
-    if not all(isinstance(native.get(name), str) for name in fields):
-        return None
-    return {name: native[name] for name in fields}
-
-
-def _native_redirect(native: Mapping[str, str], params: dict[str, str]) -> RedirectResponse:
-    """Redirect the browser to a native app's redirect URI.
-
-    :param native: The native sign-in from :func:`_native_from_state`.
-    :param params: Query parameters to deliver, e.g. ``{"code": ...}``;
-        the app's ``state`` is appended.
-    :returns: A 302 to the native redirect URI.
-    """
-    query = urlencode({**params, "state": native["state"]})
-    return RedirectResponse(url=f"{native['redirect_uri']}?{query}", status_code=302)
 
 
 def _sanitize_return_to(raw: str | None) -> str:
