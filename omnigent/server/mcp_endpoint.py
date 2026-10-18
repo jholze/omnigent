@@ -1538,38 +1538,65 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
 
 
 async def _require_parent_edit(api: _Api, parent_session_id: str) -> None:
-    """Require edit on ``parent_session_id`` before a child create.
+    """Require edit on the parent's effective grant before a child create.
 
     Uses ``GET /v1/sessions/{id}`` on the in-process app, so an ``ogc_`` bot
     is checked as its owner — the same principal the following POST uses.
     No access and an unknown id are both not-found, matching the session
-    route. Read-only access is forbidden. A null ``permission_level`` means
-    permissions are off, which that route also allows. A parent filed in
-    another project is not rejected here: ``POST /v1/sessions`` does not
-    compare the parent's project with the create request.
+    route.
+
+    ``permission_level`` on a sub-agent is only the display field. Grants
+    live on the top-level session, and ``check_session_access`` walks
+    ``parent_conversation_id`` to find them. This follows
+    ``parent_session_id`` the same way. A null level on that top-level
+    session means permissions are off. Read-only access is forbidden,
+    including when the named parent is itself a sub-agent. A parent filed
+    in another project is not rejected here: ``POST /v1/sessions`` does
+    not compare projects.
 
     :param api: In-process client for the MCP request.
     :param parent_session_id: Parent session id, e.g. ``"conv_abc123"``.
-    :raises ToolFailure: Not found, or the caller has less than edit.
+    :raises ToolFailure: Not found, a parent cycle, or less than edit.
     """
-    parent = await api.call(
-        "GET",
-        _with_query(
-            _session_path(parent_session_id),
-            {
-                "include_items": False,
-                "include_usage": False,
-                "include_liveness": False,
-            },
-        ),
-    )
-    level = parent.get("permission_level") if isinstance(parent, dict) else None
-    if isinstance(level, int) and level < LEVEL_EDIT:
-        raise ToolFailure(
-            f"edit permission is required on parent session {parent_session_id}",
-            code="forbidden",
-            http_status=403,
+    seen: set[str] = set()
+    current = parent_session_id
+    while True:
+        if current in seen:
+            raise ToolFailure(
+                f"edit permission is required on parent session {parent_session_id}",
+                code="forbidden",
+                http_status=403,
+            )
+        seen.add(current)
+        parent = await api.call(
+            "GET",
+            _with_query(
+                _session_path(current),
+                {
+                    "include_items": False,
+                    "include_usage": False,
+                    "include_liveness": False,
+                },
+            ),
         )
+        if not isinstance(parent, dict):
+            raise ToolFailure(
+                f"edit permission is required on parent session {parent_session_id}",
+                code="forbidden",
+                http_status=403,
+            )
+        ancestor = parent.get("parent_session_id")
+        if isinstance(ancestor, str) and ancestor:
+            current = ancestor
+            continue
+        level = parent.get("permission_level")
+        if isinstance(level, int) and level < LEVEL_EDIT:
+            raise ToolFailure(
+                f"edit permission is required on parent session {parent_session_id}",
+                code="forbidden",
+                http_status=403,
+            )
+        return
 
 
 async def _control(api: _Api, args: Mapping[str, Any], event_type: str) -> Any:

@@ -1616,6 +1616,82 @@ async def test_create_session_parent_requires_edit(
         assert session["id"] in {row["id"] for row in children.json()["data"]}
 
 
+async def test_create_session_grandchild_uses_root_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-agent parent reports a null permission_level.
+
+    The grant lives on the top-level session. A read-only collaborator
+    there cannot create a grandchild, and the dry-run is refused too.
+    The owner of the root still can.
+    """
+    from omnigent.server.auth import LEVEL_READ
+
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    provider = UnifiedAuthProvider(
+        source="header", local_single_user=False, header_name="X-Forwarded-Email"
+    )
+    app = _sync_app(tmp_path, monkeypatch, auth_provider=provider, server_config={})
+    alice = {"X-Forwarded-Email": "alice@example.com"}
+    bob = {"X-Forwarded-Email": "bob@example.com"}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        agent = await create_test_agent(client, name="acl-grandchild", user="alice@example.com")
+        parent_id = str(agent["_session_id"])
+        agent_id = str(agent["id"])
+        child = await _mcp_create(
+            client,
+            agent_id=agent_id,
+            parent_session_id=parent_id,
+            title="alice-child",
+            confirm=True,
+            headers=alice,
+        )
+        child_id = str(_tool_text(child)["session"]["id"])
+
+        grant = await client.put(
+            f"/v1/sessions/{parent_id}/permissions",
+            json={"user_id": "bob@example.com", "level": LEVEL_READ},
+            headers=alice,
+        )
+        assert grant.status_code == 200, grant.text
+        before = await _session_ids(client, kind="any", headers=alice)
+
+        denied = await _mcp_create(
+            client,
+            agent_id=agent_id,
+            parent_session_id=child_id,
+            title="bob-grandchild",
+            confirm=True,
+            headers=bob,
+        )
+        code, text = _tool_error(denied)
+        assert code == "forbidden"
+        assert "edit permission" in text
+        dry = await _mcp_create(
+            client,
+            agent_id=agent_id,
+            parent_session_id=child_id,
+            confirm=False,
+            headers=bob,
+        )
+        assert _tool_error(dry)[0] == "forbidden"
+        assert await _session_ids(client, kind="any", headers=alice) == before
+
+        created = await _mcp_create(
+            client,
+            agent_id=agent_id,
+            parent_session_id=child_id,
+            title="alice-grandchild",
+            confirm=True,
+            headers=alice,
+        )
+        session = _tool_text(created)["session"]
+        assert session["kind"] == "sub_agent"
+        assert session["parent_session_id"] == child_id
+        assert session["root_conversation_id"] == parent_id
+
+
 async def test_wait_stops_when_the_client_disconnects() -> None:
     """A disconnect during the turn wait returns without sitting out the budget."""
     request = _DroppingRequest()
