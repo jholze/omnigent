@@ -10,6 +10,7 @@ Usage:
 Prints the ratio and pass/fail for AA/AAA (normal & large text, UI components).
 Exit code 0 if it passes AA normal text, else 1.
 """
+
 import sys
 
 
@@ -19,7 +20,7 @@ def parse_hex(h):
         h = "".join(c * 2 for c in h)
     if len(h) != 6:
         raise ValueError(f"bad hex: {h!r}")
-    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
 
 
 def _lin(c):
