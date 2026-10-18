@@ -14,9 +14,10 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from omnigent.db.db_models import SqlChatAgentAccount, SqlChatChannel, SqlChatMember
+from omnigent.db.db_models import SqlChatAgentAccount, SqlChatChannel, SqlChatMember, SqlUser
 from omnigent.db.utils import get_or_create_engine, now_epoch_us
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
@@ -117,6 +118,28 @@ async def post_message(
     )
 
 
+def ensure_live_user(db_uri: str, user_id: str) -> None:
+    """Insert a live accounts row so a bot token can resolve its owner."""
+    with Session(get_or_create_engine(db_uri)) as session:
+        existing = session.execute(
+            select(SqlUser).where(SqlUser.id == user_id)
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(SqlUser(id=user_id, is_admin=False))
+            session.commit()
+        elif existing.deleted_at is not None:
+            existing.deleted_at = None
+            session.commit()
+
+
+def _client_db_uri(client: httpx.AsyncClient) -> str | None:
+    transport = getattr(client, "_transport", None)
+    app = getattr(transport, "app", None)
+    store = getattr(getattr(app, "state", None), "team_chat_store", None)
+    location = getattr(store, "storage_location", None)
+    return location if isinstance(location, str) else None
+
+
 async def create_account(
     client: httpx.AsyncClient,
     owner: str,
@@ -125,6 +148,9 @@ async def create_account(
     display_name: str = "Grok",
     webhook_url: str = WEBHOOK_OK,
 ) -> httpx.Response:
+    db_uri = _client_db_uri(client)
+    if db_uri is not None:
+        ensure_live_user(db_uri, owner)
     return await client.post(
         "/v1/chat/agent-accounts",
         json={"display_name": display_name, "handle": handle, "webhook_url": webhook_url},

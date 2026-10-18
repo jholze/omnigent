@@ -183,6 +183,7 @@ def _record(
         account_id=account_id,
         owner_id=owner_id,
         result=reason,
+        outcome=reason,
     )
     _logger.info(
         "agent thread start result=%s count=%s",
@@ -388,11 +389,15 @@ def _fail(
     channel_id: str,
     root_id: str,
     message_id: str,
-    caller: str,
+    account_id: str,
+    owner_id: str,
     reason: str,
-    owner_id: str | None = None,
 ) -> None:
-    """Mark a still-starting thread failed and post one classed system line."""
+    """Mark a still-starting thread failed and post one classed system line.
+
+    *account_id* is the bot account when a bot started the thread, otherwise
+    the author's principal. *owner_id* is the human who would own the session.
+    """
     reason = reason if reason in _REASON_CLASSES else "internal"
     body = _FAILURE_TEXT[reason]
 
@@ -430,8 +435,8 @@ def _fail(
         reason,
         channel_id=channel_id,
         message_id=message_id,
-        account_id=caller,
-        owner_id=owner_id or caller,
+        account_id=account_id,
+        owner_id=owner_id,
         session_id=None,
     )
 
@@ -714,12 +719,17 @@ def _request_as_owner(request: Any) -> Any:
     """Clone the request so in-process auth acts as the bot's owner.
 
     The flag is set on this scope copy only. The original request, and any
-    client header, stay unchanged.
+    client header, stay unchanged. Accounts mode caches the authenticated
+    principal on the scope; leaving the bot's entry there makes
+    ``get_user_id`` return ``agent:<id>`` and the session edit check fails.
     """
     from starlette.requests import Request
 
+    from omnigent.server.auth import _CONNECTION_IDENTITY_KEY
+
     scope = dict(request.scope)
     scope["mcp_inprocess"] = True
+    scope.pop(_CONNECTION_IDENTITY_KEY, None)
     return Request(scope)
 
 
@@ -851,7 +861,7 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=started_by or message.author_id,
+            account_id=started_by or message.author_id,
             owner_id=caller or message.author_id,
             reason=exc.reason,
         )
@@ -870,7 +880,7 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=started_by or message.author_id,
+            account_id=started_by or message.author_id,
             owner_id=caller or message.author_id,
             reason=reason,
         )
@@ -886,7 +896,7 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=started_by or message.author_id,
+            account_id=started_by or message.author_id,
             owner_id=caller or message.author_id,
             reason="internal",
         )
@@ -929,6 +939,16 @@ def _quota_blocks(chat_store: ChatStore, account_id: str) -> bool:
 
 def _post_quota_notice(chat_store: ChatStore, channel: ChatChannel, message: ChatMessage) -> None:
     """Tell the thread the bot's session quota is exhausted. No session starts."""
+    account = chat_store.get_agent_account_by_principal(message.author_id)
+    if account is not None:
+        _record(
+            "refused/quota",
+            channel_id=channel.id,
+            message_id=message.id,
+            account_id=account.id,
+            owner_id=account.owner_id,
+            session_id=None,
+        )
     result = chat_store.post_message(
         channel.id,
         _AUTHOR_SYSTEM,

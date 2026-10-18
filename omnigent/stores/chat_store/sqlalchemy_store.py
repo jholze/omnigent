@@ -791,7 +791,7 @@ class SqlAlchemyChatStore(ChatStore):
                 )
             ).first()
         if row is None:
-            return True
+            return False
         return row[0] is None
 
     def count_sessions_started_by(self, account_id: str, since_us: int) -> int:

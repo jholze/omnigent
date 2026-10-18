@@ -373,7 +373,22 @@ async def test_ac_102a_deleted_owner_rejects_the_token(chat_client, db_uri: str)
     created = await create_account(chat_client, JENS, "grok-jens")
     token = created.json()["token"]
     with Session(get_or_create_engine(db_uri)) as session:
-        session.add(SqlUser(id=JENS, is_admin=False, deleted_at=1))
+        user = session.execute(select(SqlUser).where(SqlUser.id == JENS)).scalar_one()
+        user.deleted_at = 1
+        session.commit()
+    listed = await rpc(chat_client, "tools/list", token=token)
+    channels = await chat_client.get("/v1/chat/channels", headers=headers_for(token=token))
+    assert listed.status_code == 401, listed.text
+    assert channels.status_code == 401, channels.text
+
+
+async def test_missing_owner_row_rejects_the_token(chat_client, db_uri: str) -> None:
+    """A bot whose owner row was deleted does not authenticate."""
+    created = await create_account(chat_client, JENS, "grok-jens")
+    token = created.json()["token"]
+    with Session(get_or_create_engine(db_uri)) as session:
+        user = session.execute(select(SqlUser).where(SqlUser.id == JENS)).scalar_one()
+        session.delete(user)
         session.commit()
     listed = await rpc(chat_client, "tools/list", token=token)
     channels = await chat_client.get("/v1/chat/channels", headers=headers_for(token=token))
@@ -487,6 +502,56 @@ async def test_ac_104a_configured_quota_blocks_the_next_start(
     )
     assert messages.status_code == 200, messages.text
     assert "Bot-Kontingent erschöpft" in [item["body"] for item in messages.json()["items"]]
+
+
+async def test_quota_refusal_audits_the_owner(chat_client, db_uri: str, monkeypatch) -> None:
+    """A quota refusal writes agent_thread_start with outcome refused/quota."""
+    from omnigent.server import chat_agent_threads
+
+    monkeypatch.setenv("OMNIGENT_BOT_SESSION_QUOTA", "1")
+    created = await create_account(chat_client, JENS, "grok-jens")
+    account = created.json()["account"]
+    token = created.json()["token"]
+    general = await channel_id(chat_client, JENS, "general")
+    add_member(db_uri, general, account["principal_id"])
+    now = now_epoch_us()
+    with Session(get_or_create_engine(db_uri)) as session:
+        session.add(
+            SqlChatThread(
+                root_message_id=uuid.uuid4().hex,
+                channel_id=general,
+                reply_count=0,
+                participants="[]",
+                bot_streak=0,
+                agent_state="active",
+                session_id=uuid.uuid4().hex,
+                caller_id=JENS,
+                started_by_agent_account_id=account["id"],
+                start_requested_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+    seen: list[dict] = []
+    real = chat_agent_threads.add_audit_attrs
+
+    def spy(**attrs: object) -> None:
+        if attrs.get("action") == "agent_thread_start":
+            seen.append(dict(attrs))
+        real(**attrs)
+
+    monkeypatch.setattr(chat_agent_threads, "add_audit_attrs", spy)
+    posted = await chat_client.post(
+        f"/v1/chat/channels/{general}/messages",
+        json={"body": "<@omnigent_agent:coder> weiter MARKER-quota"},
+        headers=headers_for(token=token),
+    )
+    assert posted.status_code == 201, posted.text
+    assert seen
+    assert seen[-1]["account_id"] == account["id"]
+    assert seen[-1]["owner_id"] == JENS
+    assert seen[-1]["outcome"] == "refused/quota"
+    assert "MARKER-quota" not in str(seen[-1])
     called = await tools_call(
         chat_client,
         "create_session",

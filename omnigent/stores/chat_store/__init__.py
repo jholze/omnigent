@@ -449,8 +449,9 @@ class ChatStore(ABC):
     def owner_account_live(self, owner_id: str) -> bool:
         """Whether *owner_id* may still act for an agent account.
 
-        A missing accounts row is live, so header and single-user modes keep
-        working. A row whose ``deleted_at`` is set is not.
+        A missing row is inactive: identity remap deletes the old user, and a
+        bot whose ``owner_id`` still names that user must not authenticate.
+        A row whose ``deleted_at`` is set is inactive too.
         """
         ...
 
