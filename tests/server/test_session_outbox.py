@@ -395,6 +395,12 @@ def test_awaiting_decision_and_verdict_redact_free_text(
             "action": "accept",
             "content": {
                 "api_key": "supersecretvalue",
+                "apiToken": "abcd1234efgh5678",
+                "clientSecret": "s3cr3tvalue",
+                "dbPassword": "hunter2hunter2",
+                "accessTokens": "tok_access_1",
+                "tokens": "tok_plural",
+                "secrets": "sec_plural",
                 "note": "Authorization: ya29.supersecretvalue",
                 "aside": "bearer of bad news",
                 "max_tokens": 128,
@@ -407,6 +413,12 @@ def test_awaiting_decision_and_verdict_redact_free_text(
     assert written.elicitation.decided_by == "owner@example.com"
     content = json.loads(written.elicitation.decision_payload or "{}")["content"]
     assert content["api_key"] == "[redacted]"
+    assert content["apiToken"] == "[redacted]"
+    assert content["clientSecret"] == "[redacted]"
+    assert content["dbPassword"] == "[redacted]"
+    assert content["accessTokens"] == "[redacted]"
+    assert content["tokens"] == "[redacted]"
+    assert content["secrets"] == "[redacted]"
     assert "ya29.supersecretvalue" not in content["note"]
     assert content["aside"] == "bearer of bad news"
     assert content["max_tokens"] == 128

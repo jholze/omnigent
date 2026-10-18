@@ -173,16 +173,27 @@ def _active_config() -> ManagerWebhookConfig | None:
 def _key_is_secret(key: object) -> bool:
     """True when *key* is a credential name, not a nearby word.
 
-    ``token`` and ``api_key`` match. ``max_tokens`` and ``tokenizer`` do
-    not, because the secret word is not a whole component of the key.
+    CamelCase is split on the hump, so ``apiToken`` matches and
+    ``tokenizer`` does not. A key that is only a plural (``tokens``) or
+    a camelCase plural (``accessTokens``) matches the singular word.
+    ``max_tokens`` stays visible: that ``tokens`` part is already
+    snake_case, which is the false positive this check ignores.
     """
-    lowered = str(key).lower()
+    text = str(key)
+    split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    lowered = split.lower()
     if lowered in _SECRET_KEY_WORDS:
         return True
     parts = [part for part in re.split(r"[^a-z0-9]+", lowered) if part]
     if "api" in parts and "key" in parts:
         return True
-    return any(part in _SECRET_KEY_WORDS for part in parts)
+    if any(part in _SECRET_KEY_WORDS for part in parts):
+        return True
+    # A trailing s on every snake_case part would also hide max_tokens.
+    hump = split != text
+    if not hump and len(parts) != 1:
+        return False
+    return any(part.rstrip("s") in _SECRET_KEY_WORDS for part in parts)
 
 
 def schedule_outbox_write(fn: Callable[[], None]) -> None:
