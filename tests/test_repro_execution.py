@@ -1197,17 +1197,24 @@ for _ in range(4000):
 print('survived')
 sys.exit(7)
 """
-    assert run(tmp_path, [sys.executable, "-c", script, nested]) == 7
-    attempt = next((tmp_path / "execution").glob("*/attempt.json")).parent
-    saved = (attempt / "stdout.txt").read_text()
-    assert nested not in saved
-    assert saved.endswith("survived\n")
-    record = json.loads((attempt / "attempt.json").read_text())
-    assert record["command"] is None
-    assert not record["output_complete"]
-    assert {"command_redaction", "output_redaction"} <= {
-        e["operation"] for e in record["collection_errors"]
-    }
+    # celpy sets the process recursion limit to 2500 on import. xdist reuses
+    # that worker, and this payload then redacts instead of raising.
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        assert run(tmp_path, [sys.executable, "-c", script, nested]) == 7
+        attempt = next((tmp_path / "execution").glob("*/attempt.json")).parent
+        saved = (attempt / "stdout.txt").read_text()
+        assert nested not in saved
+        assert saved.endswith("survived\n")
+        record = json.loads((attempt / "attempt.json").read_text())
+        assert record["command"] is None
+        assert not record["output_complete"]
+        assert {"command_redaction", "output_redaction"} <= {
+            e["operation"] for e in record["collection_errors"]
+        }
+    finally:
+        sys.setrecursionlimit(limit)
 
 
 @pytest.mark.parametrize("sid", ["conv_custom-id", "ac82ef19", "name:child", "with space"])

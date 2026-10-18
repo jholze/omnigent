@@ -82,6 +82,7 @@ class MarkSubagentTerminalAndWake(Protocol):
         status: str,
         output: str | None,
         only_if_work_id: str | None = None,
+        response_id: str | None = None,
     ) -> SubagentDeliveryAck:
         raise NotImplementedError
 
