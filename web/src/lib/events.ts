@@ -919,18 +919,6 @@ export interface SessionPresenceEvent {
 }
 
 /**
- * `session.human_chat` — someone sent a line to the people in this session.
- * The payload has no text. The column loads it with GET /chat.
- */
-export interface SessionHumanChatEvent {
-  type: "session_human_chat";
-  conversationId: string;
-  id: string;
-  /** Unix epoch microseconds. */
-  createdAt: number;
-}
-
-/**
  * `session.superseded` — this conversation was superseded and the client
  * should follow to `targetConversationId`.
  *
@@ -1043,6 +1031,5 @@ export type StreamEvent =
   | SessionTerminalActivityEvent
   | SessionModelOptionsEvent
   | SessionPresenceEvent
-  | SessionHumanChatEvent
   | SessionBtwSidechatEvent
   | BrowserActionRequestEvent;

@@ -9374,7 +9374,6 @@ async def _stream_live_events(
     viewer_user_id: str | None = None,
     viewer_idle: bool = False,
     presence_root_id: str | None = None,
-    include_human_chat: bool = False,
 ) -> AsyncIterator[str]:
     """
     Yield SSE-formatted events from the conversation's live stream.
@@ -9438,10 +9437,6 @@ async def _stream_live_events(
         viewers of different agents/sub-agents in one session see
         each other. Required when *viewer_user_id* is set; ignored
         otherwise.
-    :param include_human_chat: When ``False`` (the default), drop
-        ``session.human_chat``. The stream route only requires read
-        access, which a public-link visitor has, so the caller passes
-        ``True`` only for a viewer who may read the human chat.
     :returns: An async iterator of SSE message strings.
     :raises ValueError: If *viewer_user_id* is set without
         *presence_root_id* — a per-conversation presence scope would
@@ -9483,10 +9478,6 @@ async def _stream_live_events(
                     raise ValueError(
                         f"session stream event missing string ``type`` field: {event!r}",
                     )
-                # Public-link viewers satisfy LEVEL_READ. The event has no
-                # body, and they still must not learn that a line was sent.
-                if event_type == "session.human_chat" and not include_human_chat:
-                    continue
                 validated = _SERVER_STREAM_EVENT_ADAPTER.validate_python(event)
                 yield _format_sse(event_type, validated.model_dump())
     except session_stream.SubscriberOverflowError:

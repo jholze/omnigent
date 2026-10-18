@@ -7,8 +7,8 @@ Create Date: 2026-10-17 00:00:00.000000
 Creates the R0 and R1 team-chat tables in a single migration so the schema
 only gains one head. Tables follow 05-design.md §Datenmodell: no foreign keys
 (Rule R032), ids as ``Uuid16`` (bare 32-char hex), and all timestamps as epoch
-microseconds (``BigInteger``). ``session_chat_messages`` is intentionally NOT
-migrated here — that copy is deferred to T-102.
+microseconds (``BigInteger``). The earlier per-session human-lines table is
+not part of this migration.
 
 Partial indexes from the design are expressed as plain unique indexes where a
 nullable column already scopes the predicate (``name`` is NULL for dm/session,
