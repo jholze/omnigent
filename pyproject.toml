@@ -568,6 +568,10 @@ extend-exclude = [
     # Intentionally broken shell fixtures. Repairing them would hide the cases
     # the notebook viewer tests exist to render.
     "web/src/shell/__fixtures__",
+    # Imported legacy prototype and the fork lead team (unchanged imports, see
+    # experiments/README.md and agents/lead/); not part of the product build.
+    "experiments",
+    "agents/lead",
 ]
 
 [tool.ruff.lint]

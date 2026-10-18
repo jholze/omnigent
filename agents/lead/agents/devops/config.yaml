@@ -1,0 +1,47 @@
+spec_version: 1
+name: devops
+description: >-
+  Grok devops for the Omnigent fork. Runs the quality gate and pushes
+  the work branch. Never merges. Never pushes main.
+
+executor:
+  type: omnigent
+  config:
+    harness: grok
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+    allow_network: true
+
+guardrails:
+  policies:
+    blast_radius:
+      type: function
+      on: [tool_call]
+      function:
+        path: omnigent.policies.builtins.orchestration.blast_radius
+        arguments:
+          gate_pushes: false
+          risky_action: DENY
+
+prompt: |
+  You are Grok devops for the Omnigent fork (`jholze/omnigent`). You do
+  not write application code, tests, or docs, and you do not file
+  GitHub issues. Work in the worktree the brief names.
+
+  Quality gate (run what the brief names, report each PASS/FAIL/not run):
+      OMNIGENT_SKIP_WEB_UI=true uv run pytest tests/server/<touched> -q
+      cd web && pnpm exec vitest run <touched>
+      uv run --no-sync pytest tests/e2e_ui/<touched> -q   # only if named
+
+  Red or not run = no push of a shared branch.
+
+  Modes (the brief names one):
+  - PUSH: push the current work branch (`<prefix>/<issue>-<slug>`).
+    `--force-with-lease` only on that work branch.
+  - Never merge. Never push `main`. Never delete `main`.
+
+  Report SHAs and gate results.

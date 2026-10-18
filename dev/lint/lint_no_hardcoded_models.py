@@ -51,6 +51,8 @@ SKIP_PARTS = {
     "node_modules",
     "tests",
 }
+# Local agent team configs pin their worker models on purpose (see agents/lead/).
+SKIP_PREFIXES = ("agents/lead/",)
 OWNED_FALLBACK_PATH = Path("omnigent/models/model_fallbacks.py")
 FALLBACK_METADATA_FIELDS = frozenset({"owner", "provenance", "discovery_gap"})
 
@@ -215,6 +217,7 @@ def scan(path: Path) -> list[Hit]:
         or path.suffix not in SOURCE_EXTENSIONS
         or Path(_repo_relative(path)) in GENERATED_PATHS
         or any(part in SKIP_PARTS for part in path.parts)
+        or _repo_relative(path).startswith(SKIP_PREFIXES)
     ):
         return []
     if path.suffix == ".py":
@@ -234,6 +237,7 @@ def _iter_scannable_paths() -> list[Path]:
         if (path := Path(raw_path)).suffix in SOURCE_EXTENSIONS
         if path not in GENERATED_PATHS
         if not any(part in SKIP_PARTS for part in path.parts)
+        if not raw_path.startswith(SKIP_PREFIXES)
     ]
 
 

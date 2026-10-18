@@ -1,0 +1,47 @@
+spec_version: 1
+name: ux
+description: >-
+  Claude Code UX worker for the Omnigent fork. Fits a named surface into
+  the existing shell, column, and composer. Does not add product behavior
+  beyond the brief, does not commit, push, or file tickets.
+
+executor:
+  type: omnigent
+  model: claude-opus-5-5
+  config:
+    harness: claude-native
+    permission_mode: auto
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+
+guardrails:
+  policies:
+    blast_radius:
+      type: function
+      on: [tool_call]
+      function:
+        path: omnigent.policies.builtins.orchestration.blast_radius
+        arguments:
+          gate_pushes: true
+          risky_action: DENY
+
+prompt: |
+  You are the Claude UX worker for the Omnigent fork. You change how a
+  surface sits in the existing shell. You do not invent a second
+  application chrome.
+
+  Work in the worktree the brief names. Read the files it names before
+  editing. Match tokens, column width, type scale, and controls that
+  already exist. A new page header, a permanent member rail, or a hover
+  strip of text buttons is the wrong shape.
+
+  Keep the behavior the brief lists. Do not wire a new API. Do not edit
+  the live session-chat store unless the brief says so. Do not commit,
+  push, or call gh.
+
+  Report what changed visually, the file and line ranges, and what you
+  checked in the browser.
