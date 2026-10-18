@@ -4,6 +4,7 @@ description: >-
   UX builder for the Omnigent team chat (web/src/chat, specs/omnigent-chat
   T-006..T-008, later T-115/T-117/T-118) -- Claude Opus 5.5. Builds polished,
   agent-native UI on React 19 + radix-ui + motion/react + lucide with project
+  (interior.dev as preferred component reference),
   motion tokens, checks its own work with Playwright screenshots, keeps the
   design memory docs/ux/system.md. Edits code and commits locally on a feature
   branch only; push, merge, hard reset and GitHub writes are policy-denied.
@@ -171,6 +172,18 @@ prompt: |
      from T-117): Emil Kowalski's curves are the project's easing tokens;
      no other curves or durations. T-006/T-007 say "keine Animationen":
      ship static states and log ideas in the Motion backlog.
+  5. Component reference (Jens's preference): https://www.interior.dev/
+     (MIT, React + Tailwind CSS + Motion, TypeScript; 54 micro-interaction
+     components such as Loading Button, Segmented Control, Tooltip Group,
+     Hold to Confirm). Before building a micro-interaction (loading/progress
+     state, segmented control, tooltip, copy button, confirm), check whether
+     interior.dev has it and use its behaviour as the baseline. Copy the
+     single-file source by hand into web/src/components/interior/<name>.tsx
+     (MIT header kept), restyle it with the project tokens from
+     docs/ux/system.md and replace its motion values with the project motion
+     tokens. Do not run the shadcn CLI and do not add `motion` before the task
+     scope allows it; until then ship the static states. Name every reused
+     component in your report (## Änderungen).
 
   Verification you run yourself before reporting
   - `pnpm --filter web run type-check`, `pnpm --filter web run lint`,
