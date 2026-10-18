@@ -10102,6 +10102,19 @@
             "description": "Runtime-native session id captured by a wrapper bridge (e.g. Claude Code's session uuid for `omnigent claude` sessions). Idempotent on same-value writes; the server rejects attempts to overwrite an already-set different value with `invalid_input` to surface programmer errors. `None` leaves unchanged.",
             "title": "External Session Id"
           },
+          "host_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Host that should launch the session's runner, e.g. a 32-char hex id. The caller must own the host. Omitting the field leaves the host unchanged. An explicit JSON `null` is rejected with 422 and does not unbind. Owner-only. A host requires a workspace, either already stored or in this request, and the host must be connected to this replica.",
+            "title": "Host Id"
+          },
           "labels": {
             "anyOf": [
               {
@@ -10234,6 +10247,19 @@
             ],
             "description": "New title, e.g. `\"debugging auth flow\"`. `None` leaves unchanged.",
             "title": "Title"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absolute workspace path on the session's host, e.g. `\"/Users/corey/projects/myapp\"` or `\"C:/Users/corey/projects\"`. Rebinds an idle session: the metadata column, the composer-context label, and (with `host_id`) the host binding are updated, and a stale `runner_id` is cleared so the next message launches on the new path. Omitting the field leaves the path unchanged. An explicit JSON `null` is rejected with 422. A relative path is 422. A path the host rejects (missing, not a directory, outside the agent's `os_env.cwd`) is 400. Owner-only, including an administrator who is not the session owner; the host must still belong to the caller.",
+            "title": "Workspace"
           }
         },
         "title": "UpdateSessionRequest",
@@ -14139,7 +14165,7 @@
         ]
       },
       "patch": {
-        "description": "Update a session's mutable fields. When `runner_id` is\nprovided, this is the mutable affinity primitive for the Alpha\nrunner-state pivot: create-bind, resume-bind, and recover-bind\nall send the currently registered runner id, and the server\natomically replaces `conversations.runner_id` with that\nvalue using last-write-wins semantics. Title, labels, and\nreasoning-effort updates remain supported for existing\nsessions clients.\n\n**Parameters**\n\n- `body` \u2014 The validated `UpdateSessionRequest`.\n\n**Returns:** The updated `SessionResponse` snapshot, with `items` always empty \u2014 PATCH callers use only scalar fields, and transcripts are served by `GET /sessions/{id}/items`.\n\n**Raises**\n\n- `OmnigentError` \u2014 400 if the runner is not registered; 404 if no session exists.",
+        "description": "Update a session's mutable fields. When `runner_id` is\nprovided, this is the mutable affinity primitive for the Alpha\nrunner-state pivot: create-bind, resume-bind, and recover-bind\nall send the currently registered runner id, and the server\natomically replaces `conversations.runner_id` with that\nvalue using last-write-wins semantics. Title, labels, and\nreasoning-effort updates remain supported for existing\nsessions clients.\n\n**Parameters**\n\n- `body` \u2014 The validated `UpdateSessionRequest`.\n\n**Returns:** The updated `SessionResponse` snapshot, with `items` always empty \u2014 PATCH callers use only scalar fields, and transcripts are served by `GET /sessions/{id}/items`.\n\n**Raises**\n\n- `OmnigentError` \u2014 400 if the runner is not registered, or a workspace fails the session-create checks (missing, not a directory, outside the agent boundary); 404 if no session or host exists; 409 if a workspace or host change targets a running session, a running session that shares its runner, an archived session, or an offline host. A foreign host is 403. An explicit JSON null for `workspace` or `host_id` is 422.",
         "operationId": "update_session_v1_sessions__session_id__patch",
         "parameters": [
           {
