@@ -170,7 +170,8 @@ def _record(
     *,
     channel_id: str,
     message_id: str,
-    caller: str,
+    account_id: str,
+    owner_id: str,
     session_id: str | None,
 ) -> None:
     """Count one start outcome. The row names the class, never the message."""
@@ -179,7 +180,8 @@ def _record(
         action="agent_thread_start",
         channel_id=channel_id,
         message_id=message_id,
-        account_id=caller,
+        account_id=account_id,
+        owner_id=owner_id,
         result=reason,
     )
     _logger.info(
@@ -189,7 +191,7 @@ def _record(
         extra=debug_event(
             "agent_thread_start",
             session_id=session_id,
-            user_id=caller,
+            user_id=owner_id,
             result=reason,
             channel_id=channel_id,
             message_id=message_id,
@@ -388,6 +390,7 @@ def _fail(
     message_id: str,
     caller: str,
     reason: str,
+    owner_id: str | None = None,
 ) -> None:
     """Mark a still-starting thread failed and post one classed system line."""
     reason = reason if reason in _REASON_CLASSES else "internal"
@@ -423,7 +426,14 @@ def _fail(
     if notice is None:
         return
     _emit(chat_store, notice)
-    _record(reason, channel_id=channel_id, message_id=message_id, caller=caller, session_id=None)
+    _record(
+        reason,
+        channel_id=channel_id,
+        message_id=message_id,
+        account_id=caller,
+        owner_id=owner_id or caller,
+        session_id=None,
+    )
 
 
 def _mark_active(
@@ -675,17 +685,23 @@ def _stores(request: Any, chat_store: ChatStore) -> tuple[Any, Any, Any, Any, An
 
 async def _post_first_message(request: Any, session_id: str, text: str) -> None:
     """Send the thread context through the existing session-event handler."""
+    from omnigent.server.mcp_chat import untrusted_text
     from omnigent.server.schemas import SessionEventInput
 
     endpoint = _find_post_event(request.app)
     if endpoint is None:
         raise _StartFailure("internal")
+    # Chat text is data. The same wrapper chat_read uses stops a body from
+    # closing the marker or being read as instructions (FR-095).
     result = await endpoint(
         request,
         session_id,
         SessionEventInput(
             type="message",
-            data={"role": "user", "content": [{"type": "input_text", "text": text}]},
+            data={
+                "role": "user",
+                "content": [{"type": "input_text", "text": untrusted_text({"text": text})}],
+            },
         ),
     )
     if isinstance(result, dict) and result.get("denied"):
@@ -802,7 +818,8 @@ async def _start_impl(
         "active",
         channel_id=channel.id,
         message_id=message.id,
-        caller=caller,
+        account_id=started_by or caller,
+        owner_id=caller,
         session_id=session_id,
     )
 
@@ -834,7 +851,8 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=message.author_id,
+            caller=started_by or message.author_id,
+            owner_id=caller or message.author_id,
             reason=exc.reason,
         )
     except OmnigentError as exc:
@@ -852,7 +870,8 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=message.author_id,
+            caller=started_by or message.author_id,
+            owner_id=caller or message.author_id,
             reason=reason,
         )
     except Exception:
@@ -867,7 +886,8 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=message.author_id,
+            caller=started_by or message.author_id,
+            owner_id=caller or message.author_id,
             reason="internal",
         )
 
@@ -1064,6 +1084,7 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
                 SqlChatThread.root_message_id,
                 SqlChatThread.channel_id,
                 SqlChatThread.caller_id,
+                SqlChatThread.started_by_agent_account_id,
             ).where(
                 SqlChatThread.workspace_id == current_workspace_id(),
                 SqlChatThread.agent_state == "starting",
@@ -1072,7 +1093,7 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
             )
         ).all()
         notices: list[_Notice] = []
-        for root_id, channel_id, caller_id in rows:
+        for root_id, channel_id, caller_id, started_by in rows:
             now = now_epoch_us()
             changed = cast(
                 CursorResult[Any],
@@ -1100,11 +1121,13 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
                     system_code="timeout",
                 )
             )
+            owner = caller_id or _AUTHOR_SYSTEM
             _record(
                 "timeout",
                 channel_id=channel_id,
                 message_id=root_id,
-                caller=caller_id or _AUTHOR_SYSTEM,
+                account_id=started_by or owner,
+                owner_id=owner,
                 session_id=None,
             )
         return notices
