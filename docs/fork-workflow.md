@@ -31,7 +31,9 @@ Conflicts are resolved by hand (or by a PM HUB coder) on a
 
 Schedule: weekly is enough while the fork carries its own features. Run it
 from a launchd agent at 05:00 (template below) or let PM HUB run it on its
-daily loop. The sync PR goes through the same review and CI as any PR.
+daily loop (`mkdir -p ~/.omnigent/logs` first for the launchd log). On a
+conflict the script removes its scratch branch; recreate `sync/upstream-*`
+by hand to resolve. The sync PR goes through the same review and CI as any PR.
 
 ```xml
 <!-- ~/Library/LaunchAgents/ai.omnigent.upstream-sync.plist -->

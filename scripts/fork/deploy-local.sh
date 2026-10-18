@@ -22,7 +22,10 @@ URL="http://127.0.0.1:6767"
 TOOL_PY="${HOME}/.local/share/uv/tools/omnigent/bin/python"
 
 rollback=0
-if [ "${1:-}" = "--rollback" ]; then rollback=1; shift; fi
+if [ "${1:-}" = "--rollback" ]; then
+  rollback=1; shift
+  [ -n "${1:-}" ] || { echo "--rollback needs the SHA of an existing wheels-<sha> backup" >&2; exit 1; }
+fi
 git -C "${SRC}" fetch -q origin main
 sha="$(git -C "${SRC}" rev-parse "${1:-origin/main}")"
 short="${sha:0:7}"
@@ -38,7 +41,7 @@ if [ "${rollback}" = 1 ]; then
   [ -d "${wheels}" ] || { echo "no ${wheels} to roll back to" >&2; exit 1; }
 elif [ ! -f "${wheels}/omnigent-0.18.0.dev0-py3-none-any.whl" ] || [ "$(ls "${wheels}"/*.whl | wc -l)" -lt 3 ]; then
   log "building wheels for ${short} in ${BUILD}"
-  git -C "${BUILD}" fetch -q origin main
+  git -C "${BUILD}" fetch -q origin main "${sha}" 2>/dev/null || git -C "${BUILD}" fetch -q origin main
   git -C "${BUILD}" checkout -q --detach "${sha}"
   mkdir -p "${wheels}"
   (cd "${BUILD}" && unset OMNIGENT_SKIP_WEB_UI && \
