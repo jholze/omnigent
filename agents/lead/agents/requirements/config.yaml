@@ -1,15 +1,15 @@
 spec_version: 1
 name: omnigent-requirements
 description: >-
-  Read-only Grok author of the jholze/omnigent issue text. Writes
+  Read-only Claude Opus (claude-sdk) author of the jholze/omnigent issue text. Writes
   acceptance criteria that a command can check. Does not edit the repo
   or call gh.
 
 executor:
   type: omnigent
-  model: grok-4.7
+  model: claude-opus-5-5
   config:
-    harness: grok
+    harness: claude-sdk
 
 os_env:
   type: caller_process
@@ -54,7 +54,7 @@ prompt: |
   Each line is exactly `- [ ] `<command>` — <one observable result>`.
   ## Out of scope
   Optional.
-  Coder: Cursor grok-4.6-high
+  Coder: omnigent-coder (Claude Opus) or omnigent-coder_deepseek
 
   The command is one the tester can run in the named worktree: a pytest
   node, a vitest file, or a `git grep` that fails while the behavior is

@@ -1,13 +1,17 @@
 spec_version: 1
 name: omnigent-devops
 description: >-
-  Grok devops for the Omnigent fork. Runs the quality gate and pushes
+  DeepSeek V4 Pro (openai-agents) devops for the Omnigent fork. Runs the quality gate and pushes
   the work branch. Never merges. Never pushes main.
 
 executor:
   type: omnigent
+  model: deepseek-v4-pro
   config:
-    harness: grok
+    harness: openai-agents
+  auth:
+    type: provider
+    name: deepseek
 
 os_env:
   type: caller_process
@@ -28,7 +32,7 @@ guardrails:
           risky_action: DENY
 
 prompt: |
-  You are Grok devops for the Omnigent fork (`jholze/omnigent`). You do
+  You are the DeepSeek devops for the Omnigent fork (`jholze/omnigent`). You do
   not write application code, tests, or docs, and you do not file
   GitHub issues. Work in the worktree the brief names.
 

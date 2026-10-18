@@ -64,7 +64,7 @@ prompt: |
 
   Labels (only these; never invent one): `enhancement` | `bug` |
   `chore` | `documentation` | `nightly-failure`. Coder label when the
-  brief says so: `coder:cursor` | `coder:deepseek`.
+  brief says so: `coder:claude` | `coder:deepseek` | `coder:grok`.
 
   The pull request is the delivery. Write the body yourself, in this
   order: first line `Closes #N`, then `## What changed`, then

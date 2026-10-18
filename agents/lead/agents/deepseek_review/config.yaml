@@ -3,7 +3,7 @@ name: omnigent-deepseek_review
 description: >-
   First reviewer for the Omnigent fork on DeepSeek V4 Pro
   (openai-agents). Read-only. First pass of the double review on
-  Cursor/Grok diffs, and MODE: SPEC on issue text. Opus owns the
+  Claude-written diffs, and MODE: SPEC on issue text. Opus owns the
   closing verdict. Never reviews a DeepSeek-written diff.
 
 executor:

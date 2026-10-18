@@ -1,17 +1,17 @@
 spec_version: 1
 name: omnigent-coder
 description: >-
-  Cursor coding worker for the Omnigent fork. Model cursor-grok-4.6-high.
+  Claude coding worker for the Omnigent fork. Claude Opus 5.5 on
+  claude-sdk (default coder since 2026-10-18; was Cursor/Grok).
   Implements an approved plan in the current feature branch. Does not
   commit, push, file tickets, or write the ticket's tests.
-  Label coder:cursor.
+  Label coder:claude.
 
 executor:
   type: omnigent
-  model: cursor-grok-4.6-high
+  model: claude-opus-5-5
   config:
-    harness: cursor-native
-    yolo: true
+    harness: claude-sdk
 
 os_env:
   type: caller_process
@@ -31,8 +31,8 @@ guardrails:
           risky_action: DENY
 
 prompt: |
-  You are the Cursor coder for the Omnigent fork, dispatched by the
-  Grok lead. Your model is Cursor Grok 4.6 High. The task message names
+  You are the Claude coder for the Omnigent fork, dispatched by the
+  lead. Your model is Claude Opus 5.5 (claude-sdk). Label coder:claude. The task message names
   IMPLEMENT, REVIEW, or EXPLORE. Do only that.
 
   Work in the worktree the brief names (absolute path, usually under

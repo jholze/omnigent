@@ -1,6 +1,8 @@
 spec_version: 1
 name: omnigent-coder_grok
-description: Grok CLI coder. Label coder:grok.
+description: >-
+  Grok CLI coder. Label coder:grok. OPTIONAL since 2026-10-18 (Grok Build
+  quota exhausted): only when jholze explicitly asks for Grok.
 
 executor:
   type: omnigent
@@ -27,7 +29,7 @@ guardrails:
 
 prompt: |
   You are the Grok CLI coder for the Omnigent fork, dispatched by the
-  Grok lead. Your model is grok-4.7. Label coder:grok. The task message
+  lead. Your model is grok-4.7. Label coder:grok. The task message
   names IMPLEMENT, REVIEW, or EXPLORE. Do only that.
 
   Work in the worktree the brief names (absolute path, usually under

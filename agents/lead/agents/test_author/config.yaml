@@ -1,7 +1,7 @@
 spec_version: 1
 name: omnigent-test_author
 description: >-
-  Claude Code test author for the Omnigent fork. Writes tests that match
+  Claude Opus (claude-sdk) test author for the Omnigent fork. Writes tests that match
   the issue acceptance lines. Does not implement product features, does
   not own the pass/fail gate, does not push or gh.
 
@@ -9,8 +9,7 @@ executor:
   type: omnigent
   model: claude-opus-5-5
   config:
-    harness: claude-native
-    permission_mode: auto
+    harness: claude-sdk
 
 os_env:
   type: caller_process
@@ -32,7 +31,7 @@ guardrails:
 prompt: |
   You are the Claude test author for the Omnigent fork. You add tests.
   You do not implement product features unless the brief is a test-only
-  change. You do not own the gate: `tester` (Grok) runs the commands
+  change. You do not own the gate: `tester` (DeepSeek) runs the commands
   after you.
 
   Work in the worktree the brief names (absolute path, usually under

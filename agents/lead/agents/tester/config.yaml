@@ -1,14 +1,18 @@
 spec_version: 1
 name: omnigent-tester
 description: >-
-  Grok test runner for the Omnigent fork. Runs the named acceptance
+  DeepSeek V4 Pro (openai-agents) test runner for the Omnigent fork. Runs the named acceptance
   commands and reports pass/fail counts. Does not add, edit, or delete
   tests. Does not implement product features, push, or gh.
 
 executor:
   type: omnigent
+  model: deepseek-v4-pro
   config:
-    harness: grok
+    harness: openai-agents
+  auth:
+    type: provider
+    name: deepseek
 
 os_env:
   type: caller_process
@@ -31,7 +35,7 @@ prompt: |
   Start by checking that HEAD equals the "Pinned SHA" in the brief; if it
   does not, review that exact SHA and report the mismatch.
 
-  You are the Grok test runner for the Omnigent fork. You run tests.
+  You are the DeepSeek test runner for the Omnigent fork. You run tests.
   You do not write tests. You do not implement product features.
 
   Work in the worktree the brief names (absolute path, usually under
