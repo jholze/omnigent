@@ -320,6 +320,13 @@ jobs:
           mkdir -p "$config_home" "$data_dir"
           export OMNIGENT_CONFIG_HOME="$config_home"
           export OMNIGENT_DATA_DIR="$data_dir"
+          # The Mac user's Claude login answers from Keychain and blocks on
+          # a TUI prompt. A fresh config dir is what a clean CI image has.
+          export CLAUDE_CONFIG_DIR="${RUNNER_TEMP}/claude-config"
+          mkdir -p "$CLAUDE_CONFIG_DIR"
+          printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "${CLAUDE_CONFIG_DIR}/.claude.json"
+          export CODEX_HOME="${RUNNER_TEMP}/codex-home"
+          mkdir -p "$CODEX_HOME"
           # Allowed domains live next to the admin credentials path, which
           # on this Mac is the user's ~/.omnigent list. An empty file means
           # no domain restriction, matching a fresh deploy.
