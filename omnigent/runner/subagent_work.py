@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import logging
 import math
 import os
@@ -88,6 +89,21 @@ SUBAGENT_DISPATCH_ID_LABEL_KEY = "omnigent.subagent.dispatch_id"
 SUBAGENT_DELIVERED_ID_LABEL_KEY = "omnigent.subagent.delivered_id"
 
 
+def subagent_wake_message_id(child_id: str, turn_key: str) -> str:
+    """Stable id shared by the runner wake and the server's returned-event wake.
+
+    Both sides post the same parent notice when a tool-registered child
+    finishes. The id is the dedupe key, so it must be derived from values
+    both sides already know: the child id plus the response id when the
+    turn has one, otherwise the dispatch id.
+
+    :param child_id: Child session id, e.g. ``"conv_child456"``.
+    :param turn_key: Response id, dispatch id, or the child id as a last resort.
+    :returns: 32 hex characters, e.g. ``"a1b2c3..."``.
+    """
+    return hashlib.sha256(f"subagent-wake:{child_id}:{turn_key}".encode()).hexdigest()[:32]
+
+
 # Bounded retry budget for the sub-agent wake POST. The wake is the sole
 # delivery signal for the last child of a fan-out, and Omnigent routinely
 # returns a transient 503 RUNNER_UNAVAILABLE while the parent's runner tunnel
@@ -136,6 +152,9 @@ class _SubagentWorkEntry:
         launch-liveness reaper rather than from the child itself. Such a
         failure is a guess ("no start acknowledgment"), so a genuine
         terminal edge from the child afterwards must replace it.
+    :param wake_turn_key: Response id of the child turn, when the caller
+        knows it. The parent-wake dedupe key prefers this over ``work_id``
+        so it matches the server's returned-event wake.
     """
 
     parent_session_id: str
@@ -152,6 +171,7 @@ class _SubagentWorkEntry:
     delivered: bool = False
     cancellation_confirmed: bool = False
     launch_timed_out: bool = False
+    wake_turn_key: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -891,6 +911,7 @@ async def _deliver_subagent_wake_post(
     notice: str,
     *,
     created_by: str | None = None,
+    wake_key: str | None = None,
 ) -> bool:
     """
     POST a sub-agent wake notice with a bounded retry on transient failure.
@@ -908,26 +929,28 @@ async def _deliver_subagent_wake_post(
     :param notice: The ``[System: ...]`` notice text to inject.
     :param created_by: Human actor that dispatched the completed child
         turn, if known.
+    :param wake_key: Dedupe id shared with the server's returned-event
+        wake (:func:`subagent_wake_message_id`). ``None`` for a re-wake,
+        which must still be able to nudge a parent that did not drain.
     :returns: ``True`` if a 2xx was confirmed, ``False`` if every attempt
         failed (transport error, timeout, or non-2xx response).
     """
     attribution_created_by = created_by
     for attempt in range(1, _WAKE_POST_MAX_ATTEMPTS + 1):
         try:
+            data: dict[str, object] = {
+                "role": "user",
+                "content": [{"type": "input_text", "text": notice}],
+            }
+            payload: dict[str, object] = {"type": "message", "data": data}
+            if wake_key is not None:
+                data["stable_id"] = wake_key
+                payload["subagent_wake_key"] = wake_key
+            if attribution_created_by is not None:
+                payload["created_by"] = attribution_created_by
             resp = await server_client.post(
                 f"/v1/sessions/{parent_id}/events",
-                json={
-                    "type": "message",
-                    "data": {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": notice}],
-                    },
-                    **(
-                        {"created_by": attribution_created_by}
-                        if attribution_created_by is not None
-                        else {}
-                    ),
-                },
+                json=payload,
                 # The server gates this injected wake at the parent's REQUEST
                 # phase, which can PARK on a human ASK (e.g. session_cost_budget)
                 # for up to the deciding policy's ``ask_timeout`` (default one

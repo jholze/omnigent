@@ -192,6 +192,7 @@ from omnigent.runner.subagent_work import (
     list_subagent_work,
     mark_subagent_work_started,
     mark_subagent_work_terminal,
+    subagent_wake_message_id,
     unregister_child_session,
     unregister_subagent_work_for_session,
 )
@@ -3865,24 +3866,28 @@ def create_runner_app(
                     conv_id,
                     status="failed",
                     output="Error: sub-agent turn failed: runner turn-context desync.",
+                    response_id=owner_response_id,
                 )
             else:
                 _mark_subagent_terminal_and_wake(
                     conv_id,
                     status="cancelled",
                     output=None,
+                    response_id=owner_response_id,
                 )
         elif error is not None:
             _mark_subagent_terminal_and_wake(
                 conv_id,
                 status="failed",
                 output=f"Error: sub-agent turn failed: {error.get('message', 'unknown')}",
+                response_id=owner_response_id,
             )
         elif not _is_native_harness(conv_id) and not has_buffered:
             _mark_subagent_terminal_and_wake(
                 conv_id,
                 status="completed",
                 output=_extract_last_assistant_text(conv_id),
+                response_id=owner_response_id,
             )
         elif _is_native_harness(conv_id):
             # A clean native turn end acknowledges prompt submission, so the
@@ -4341,9 +4346,14 @@ def create_runner_app(
         created_by: str | None,
         *,
         is_rewake: bool = False,
+        wake_key: str | None = None,
     ) -> None:
         delivered = await _deliver_subagent_wake_post(
-            server_client, parent_id, notice, created_by=created_by
+            server_client,
+            parent_id,
+            notice,
+            created_by=created_by,
+            wake_key=wake_key,
         )
         if delivered:
             _stranded_wake_parents.discard(parent_id)
@@ -4392,6 +4402,12 @@ def create_runner_app(
         )
         if is_rewake and notice == _last_rewake_notice.get(entry.parent_session_id):
             return
+        # A re-wake must stay deliverable after the first notice was accepted
+        # but not drained. The first wake shares its key with the server.
+        wake_key = None
+        if not is_rewake:
+            turn_key = entry.wake_turn_key or entry.work_id
+            wake_key = subagent_wake_message_id(entry.child_session_id, turn_key)
         _subagent_wake_pending.add(entry.parent_session_id)
         _wake_task = loop.create_task(
             _post_subagent_wake_notice(
@@ -4400,6 +4416,7 @@ def create_runner_app(
                 entry.child_session_id,
                 entry.created_by,
                 is_rewake=is_rewake,
+                wake_key=wake_key,
             )
         )
         _wake_task.add_done_callback(_background_tasks.discard)
@@ -4501,19 +4518,30 @@ def create_runner_app(
         _retry_task.add_done_callback(_clear_retry_refs)
         _background_tasks.add(_retry_task)
 
+    def _stamp_wake_turn_key(child_session_id: str, response_id: str | None) -> None:
+        if not response_id:
+            return
+        entry = get_subagent_work(child_session_id)
+        if entry is not None and not entry.wake_turn_key:
+            entry.wake_turn_key = response_id
+
     def _mark_subagent_terminal_and_wake(
         child_session_id: str,
         *,
         status: str,
         output: str | None,
         only_if_work_id: str | None = None,
+        response_id: str | None = None,
     ) -> _SubagentDeliveryAck:
+        _stamp_wake_turn_key(child_session_id, response_id)
         ack = mark_subagent_work_terminal(
             child_session_id,
             status=status,
             output=output,
             only_if_work_id=only_if_work_id,
         )
+        if response_id and ack.entry is not None and not ack.entry.wake_turn_key:
+            ack.entry.wake_turn_key = response_id
         if ack.entry is not None and ack.delivered_now:
             _schedule_subagent_wake(ack.entry)
         return ack
@@ -6508,6 +6536,10 @@ def create_runner_app(
             status = data.get("status") if isinstance(data, dict) else None
             forwarded_output = data.get("output") if isinstance(data, dict) else None
             output = forwarded_output if isinstance(forwarded_output, str) else None
+            raw_response_id = data.get("response_id") if isinstance(data, dict) else None
+            status_response_id = (
+                raw_response_id if isinstance(raw_response_id, str) and raw_response_id else None
+            )
             delivery_ack: _SubagentDeliveryAck | None = None
             recovered_entry: _SubagentWorkEntry | None = None
             terminal_status = None
@@ -6579,6 +6611,7 @@ def create_runner_app(
                     conversation_id,
                     status=terminal_status,
                     output=output if output is not None else "",
+                    response_id=status_response_id,
                 )
             elif ambiguous_idle:
                 # This harness's forwarder marks genuine turn completions
@@ -6596,6 +6629,7 @@ def create_runner_app(
                 # child's own report and spend its flag.
                 delivery_ack = _deliver_subagent_completion(entry)
                 if delivery_ack.delivered_now:
+                    _stamp_wake_turn_key(conversation_id, status_response_id)
                     _schedule_subagent_wake(entry)
             else:
                 if status in ("idle", "failed"):
@@ -6610,6 +6644,7 @@ def create_runner_app(
                         status="cancelled",
                         output=output,
                         only_if_work_id=interrupt_work_id,
+                        response_id=status_response_id,
                     )
                 elif status == "idle":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -6617,6 +6652,7 @@ def create_runner_app(
                         conversation_id,
                         status="completed",
                         output=output if output is not None else "",
+                        response_id=status_response_id,
                     )
                 elif status == "failed":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -6624,6 +6660,7 @@ def create_runner_app(
                         conversation_id,
                         status="failed",
                         output=output or "Error: native sub-agent turn failed",
+                        response_id=status_response_id,
                     )
             if delivery_ack is not None:
                 if (
