@@ -1765,6 +1765,12 @@ async def test_claude_native_model_options_use_session_launch_catalog(
     from omnigent.harnesses.claude_native.main import ClaudeModelProbe, ClaudeNativeUcodeConfig
     from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
 
+    # A logged-in Claude CLI on the runner attaches a subscription source
+    # to every row. These assertions compare the launch catalog itself.
+    monkeypatch.setattr(
+        "omnigent.models.model_catalog.model_configuration_source",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG
     )
@@ -1983,6 +1989,12 @@ async def test_claude_native_model_options_serves_probe_rows_after_pending(
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
     from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
 
+    # A logged-in Claude CLI on the runner attaches a subscription source
+    # to every row. This assertion compares the probed catalog itself.
+    monkeypatch.setattr(
+        "omnigent.models.model_catalog.model_configuration_source",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG
     )

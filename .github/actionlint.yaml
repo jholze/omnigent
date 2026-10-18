@@ -1,0 +1,5 @@
+# Custom label for the owner's Apple Silicon self-hosted runner.
+# actionlint otherwise rejects omnigent-ci as an unknown runner label.
+self-hosted-runner:
+  labels:
+    - omnigent-ci

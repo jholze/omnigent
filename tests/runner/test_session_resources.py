@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
@@ -533,6 +534,10 @@ class _SwitchableServerClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="linux_bwrap sandbox is only available on Linux",
+)
 async def test_reset_state_rematerializes_env_from_new_agent_spec(tmp_path: Path) -> None:
     """``POST /reset-state`` makes the next filesystem access resolve the
     NEW agent's spec — and therefore its ``os_env`` / sandbox.

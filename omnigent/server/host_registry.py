@@ -290,7 +290,13 @@ class RunnerExitReports:
             report: RunnerExitReport | None = self._reports.get(runner_id)
         if report is None:
             return None
-        if user_id is not None and report.owner is not None and report.owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if (
+            user_id is not None
+            and report.owner is not None
+            and not same_account(user_id, report.owner)
+        ):
             return None
         return report.error
 

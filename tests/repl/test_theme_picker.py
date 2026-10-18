@@ -191,6 +191,7 @@ def test_startup_picker_non_tty_defaults_to_light(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When stdin is not a tty, the picker skips interactive mode and uses light."""
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     # Ensure stdin.isatty() returns False.
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
@@ -213,6 +214,7 @@ def test_startup_picker_non_tty_respects_dark_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When OSC 11 detects dark on a non-tty, the picker selects dark."""
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     monkeypatch.setattr(
@@ -232,6 +234,7 @@ def test_startup_picker_falls_back_without_unix_terminal_modules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Windows-style TTY without termios falls back instead of crashing."""
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)

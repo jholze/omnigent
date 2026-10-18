@@ -11,6 +11,10 @@ import * as accountsApi from "@/lib/accountsApi";
 vi.mock("@/lib/accountsApi", () => ({
   getMe: vi.fn(),
   login: vi.fn(),
+  getGoogleStatus: vi.fn(),
+  bindGoogle: vi.fn(),
+  createGoogleAccount: vi.fn(),
+  cancelGoogleBind: vi.fn(),
 }));
 
 const ORIGIN = "https://app.example.com";
@@ -49,6 +53,10 @@ beforeEach(() => {
     is_admin: false,
     created_at: null,
     last_login_at: null,
+  });
+  vi.mocked(accountsApi.getGoogleStatus).mockResolvedValue({
+    configured: false,
+    bindEmail: null,
   });
 });
 
@@ -203,6 +211,92 @@ describe("LoginPage v2 (?login-v2=1) flow", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid credentials");
     expect(hrefWrites).toHaveLength(0);
+  });
+});
+
+describe("LoginPage Google sign-in", () => {
+  function renderForm() {
+    vi.mocked(accountsApi.getMe).mockResolvedValue(null);
+    return render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <LoginPage />
+      </MemoryRouter>,
+    );
+  }
+
+  it("shows Continue with Google only when the server says it is configured", async () => {
+    vi.mocked(accountsApi.getGoogleStatus).mockResolvedValue({
+      configured: true,
+      bindEmail: null,
+    });
+    renderForm();
+    expect(await screen.findByRole("link", { name: /continue with google/i })).toHaveAttribute(
+      "href",
+      "/auth/google/start",
+    );
+    expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
+  });
+
+  it("keeps the password form usable while Google status is still loading", async () => {
+    let resolveStatus: (value: {
+      configured: boolean;
+      bindEmail: string | null;
+    }) => void = () => {};
+    vi.mocked(accountsApi.getGoogleStatus).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+    renderForm();
+    expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /continue with google/i })).not.toBeInTheDocument();
+    resolveStatus({ configured: false, bindEmail: null });
+    await waitFor(() => expect(accountsApi.getGoogleStatus).toHaveBeenCalled());
+    expect(screen.queryByRole("link", { name: /continue with google/i })).not.toBeInTheDocument();
+  });
+
+  it("binds a confirmed Google address with the password form and a separate create control", async () => {
+    vi.mocked(accountsApi.getGoogleStatus).mockResolvedValue({
+      configured: true,
+      bindEmail: "jens@example.com",
+    });
+    vi.mocked(accountsApi.bindGoogle).mockResolvedValue({
+      ok: true,
+      user: { id: "jens", is_admin: false },
+      token: "",
+      expires_in: 3600,
+    });
+    renderForm();
+    expect(await screen.findByText("Google confirmed jens@example.com.")).toBeInTheDocument();
+    const create = screen.getByRole("button", {
+      name: /sessions owned by another username will not appear/i,
+    });
+    expect(create).toHaveAttribute("type", "button");
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: "jens" } });
+    fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "pw" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+    await waitFor(() =>
+      expect(accountsApi.bindGoogle).toHaveBeenCalledWith({ username: "jens", password: "pw" }),
+    );
+    expect(accountsApi.login).not.toHaveBeenCalled();
+  });
+
+  it("still calls login when no Google address is waiting", async () => {
+    vi.mocked(accountsApi.login).mockResolvedValue({
+      ok: true,
+      user: { id: "alice", is_admin: false },
+      token: "t",
+      expires_in: 3600,
+    });
+    renderForm();
+    fireEvent.change(await screen.findByLabelText(/username/i), { target: { value: "alice" } });
+    fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "pw" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+    await waitFor(() =>
+      expect(accountsApi.login).toHaveBeenCalledWith({ username: "alice", password: "pw" }),
+    );
+    expect(accountsApi.bindGoogle).not.toHaveBeenCalled();
   });
 });
 

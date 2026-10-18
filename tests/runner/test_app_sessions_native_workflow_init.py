@@ -2142,6 +2142,7 @@ async def test_action_required_marker_round_trips_to_relayed_frame() -> None:
 @pytest.mark.asyncio
 async def test_create_session_threads_resolved_bundle_dir_to_codex_spawn_env(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Session pre-spawn must include bundle-dir env for Codex skills.
 
@@ -2152,6 +2153,12 @@ async def test_create_session_threads_resolved_bundle_dir_to_codex_spawn_env(
     Codex then only sees host/default skills, not bundled fixture
     skills.
     """
+    # This runner's local Ollama is an openai chat endpoint. Codex refuses
+    # it while building spawn env, before the bundle dir is recorded.
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._resolve_provider_for_build",
+        lambda *_args, **_kwargs: None,
+    )
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()
     spec = AgentSpec(

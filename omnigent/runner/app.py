@@ -6912,6 +6912,7 @@ def create_runner_app(
                 )
             return Response(status_code=204)
 
+        approval_consumed = False
         if body_type == "approval":
             _data = body.get("data") or body
             _elicit_action = _data.get("action", "")
@@ -6919,7 +6920,7 @@ def create_runner_app(
             # more than consent (an MCP ``requestedSchema``). Dropping it here
             # is what used to make the awaiting caller invent one.
             _elicit_content = _data.get("content")
-            pending_approvals.resolve(
+            approval_consumed = pending_approvals.resolve(
                 _data.get("elicitation_id", ""),
                 _elicit_action == "accept",
                 _elicit_content if isinstance(_elicit_content, dict) else None,
@@ -6969,7 +6970,10 @@ def create_runner_app(
                     "event_type": body_type,
                 },
             )
-        return _forward_harness_response(resp)
+        forwarded = _forward_harness_response(resp)
+        if approval_consumed:
+            forwarded.headers["X-Omnigent-Pending-Approval-Resolved"] = "1"
+        return forwarded
 
     async def _ensure_session_registered(session_id: str) -> None:
         if session_id in _session_start_cache:

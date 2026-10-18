@@ -38,6 +38,7 @@ from omnigent.server.auth import (
     SharingMode,
     workspace_sharing_blocked,
 )
+from omnigent.server.principals import same_account
 from omnigent.server.routes._auth_helpers import (
     get_session_owner_id as _get_session_owner_id,
 )
@@ -240,8 +241,9 @@ def register_permissions_routes(
         # Leaving is self-service; revoking someone else is management. Read
         # access is the floor for the self case — enough to prove the session
         # exists and is visible to the caller without leaking others' via
-        # 403/404.
-        leaving_self = target_user_id == user_id
+        # 403/404. A linked Google email is the same person, so deleting that
+        # grant is leave even when the cookie subject is the username.
+        leaving_self = same_account(user_id, target_user_id)
         await _require_access(
             user_id,
             session_id,

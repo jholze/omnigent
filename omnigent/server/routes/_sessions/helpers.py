@@ -1286,9 +1286,12 @@ def _permission_level_from_grants(
         return None
     if is_admin:
         return LEVEL_OWNER
-    user_grant = next((g for g in grants if g.user_id == user_id), None)
-    if user_grant is not None:
-        return user_grant.level
+    from omnigent.server.principals import principals
+
+    allowed = principals(user_id)
+    best = max((g.level for g in grants if g.user_id in allowed), default=None)
+    if best is not None:
+        return best
     public_grant = next((g for g in grants if g.user_id == RESERVED_USER_PUBLIC), None)
     if public_grant is not None:
         return public_grant.level
@@ -3235,7 +3238,7 @@ async def _forward_approval_to_runner(
     session_id: str,
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
-) -> None:
+) -> httpx.Response | None:
     """
     Forward an approval verdict to the session's bound runner.
 
@@ -3258,9 +3261,9 @@ async def _forward_approval_to_runner(
     """
     runner_client = await _get_runner_client(session_id, runner_router)
     if runner_client is None:
-        return
+        return None
     try:
-        await runner_client.post(
+        return await runner_client.post(
             f"/v1/sessions/{session_id}/events",
             json={"type": _APPROVAL_TYPE, "data": data},
             timeout=10.0,
@@ -3271,6 +3274,7 @@ async def _forward_approval_to_runner(
             session_id,
             extra={"session_id": session_id},
         )
+        return None
 
 
 def _parse_external_assistant_message(
@@ -4859,6 +4863,50 @@ def _failure_log_detail(error: ErrorDetail | None) -> str:
     return f"{message[:_FAILURE_LOG_DETAIL_MAX_CHARS]}… (+{dropped} chars)"
 
 
+def _record_manager_webhook_status(
+    session_id: str,
+    status: str,
+    *,
+    response_id: str | None,
+    error: ErrorDetail | None,
+    background_task_count: int | None,
+) -> None:
+    """Write a completed/failed outbox row. Failures are logged, not raised.
+
+    The session status cache and the live-status persist are not one SQL
+    transaction with this outbox insert. A store error is logged at ERROR
+    and the status edge still publishes; that delivery is not retried from
+    the status row. A failure with no response id is its own event, so a
+    later failure of the same session is not collapsed.
+    """
+    if status not in ("idle", "failed"):
+        return
+    try:
+        from omnigent.server import session_outbox
+
+        if status == "idle":
+            if response_id is None:
+                return
+            session_outbox.record_session_completed(
+                session_id=session_id,
+                response_id=response_id,
+                background_task_count=background_task_count,
+            )
+            return
+        session_outbox.record_session_failed(
+            session_id=session_id,
+            response_id=response_id,
+            error_code=error.code if error is not None else "unknown",
+            error_message=error.message if error is not None else "",
+        )
+    except Exception:  # noqa: BLE001 — webhook failure must not swallow the status edge
+        _logger.exception(
+            "manager webhook status write failed for %s; the session status "
+            "was already published and this outbox row is not in that transaction",
+            session_id,
+        )
+
+
 def _publish_status(
     session_id: str,
     status: str,
@@ -4924,6 +4972,10 @@ def _publish_status(
         # snapshot to reopen a streaming bubble.
         _session_active_response_cache.pop(session_id, None)
         return
+    # Captured before the terminal edge clears the in-flight id. A turn id
+    # dedupes the manager-webhook completed/failed row. With no id, each
+    # failure is recorded on its own so later failures are not dropped.
+    tracked_response_id = response_id or _session_active_response_cache.get(session_id)
     previous_status = _session_status_cache.get(session_id)
     _session_status_cache[session_id] = status
     if previous_status != status:
@@ -5022,6 +5074,24 @@ def _publish_status(
     elif status == "failed":
         _session_background_task_count_cache.pop(session_id, None)
         _session_background_tasks_cache.pop(session_id, None)
+    _record_manager_webhook_status(
+        session_id,
+        status,
+        response_id=tracked_response_id,
+        error=error,
+        background_task_count=background_task_count,
+    )
+    try:
+        from omnigent.server.chat_agent_threads import on_session_status
+
+        on_session_status(
+            session_id,
+            status,
+            tracked_response_id,
+            error_code=error.code if error is not None else None,
+        )
+    except Exception:  # noqa: BLE001 — a chat mirror must not fail the status edge
+        _logger.exception("chat agent thread status hook failed for %s", session_id)
     event = SessionStatusEvent(
         type="session.status",
         conversation_id=session_id,
@@ -9304,6 +9374,7 @@ async def _stream_live_events(
     viewer_user_id: str | None = None,
     viewer_idle: bool = False,
     presence_root_id: str | None = None,
+    include_human_chat: bool = False,
 ) -> AsyncIterator[str]:
     """
     Yield SSE-formatted events from the conversation's live stream.
@@ -9367,6 +9438,10 @@ async def _stream_live_events(
         viewers of different agents/sub-agents in one session see
         each other. Required when *viewer_user_id* is set; ignored
         otherwise.
+    :param include_human_chat: When ``False`` (the default), drop
+        ``session.human_chat``. The stream route only requires read
+        access, which a public-link visitor has, so the caller passes
+        ``True`` only for a viewer who may read the human chat.
     :returns: An async iterator of SSE message strings.
     :raises ValueError: If *viewer_user_id* is set without
         *presence_root_id* — a per-conversation presence scope would
@@ -9408,6 +9483,10 @@ async def _stream_live_events(
                     raise ValueError(
                         f"session stream event missing string ``type`` field: {event!r}",
                     )
+                # Public-link viewers satisfy LEVEL_READ. The event has no
+                # body, and they still must not learn that a line was sent.
+                if event_type == "session.human_chat" and not include_human_chat:
+                    continue
                 validated = _SERVER_STREAM_EVENT_ADAPTER.validate_python(event)
                 yield _format_sse(event_type, validated.model_dump())
     except session_stream.SubscriberOverflowError:
@@ -10604,7 +10683,9 @@ async def _authorize_bundled_parent_and_inherit_runner(
     inherited_runner_id = parent_conv.runner_id
     if inherited_runner_id is not None and user_id is not None and runner_router is not None:
         runner_owner = runner_router.runner_owner(inherited_runner_id)
-        if runner_owner is not None and runner_owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if runner_owner is not None and not same_account(user_id, runner_owner):
             return parent_conv, None
     return parent_conv, inherited_runner_id
 
@@ -10699,7 +10780,9 @@ def _registered_runner_id(
     # they are trying to bind to a session.
     if user_id is not None:
         runner_owner = runner_router.runner_owner(runner_id)
-        if runner_owner is not None and runner_owner != user_id:
+        from omnigent.server.principals import same_account
+
+        if runner_owner is not None and not same_account(user_id, runner_owner):
             raise OmnigentError(
                 f"runner {runner_id!r} is not owned by the requesting user",
                 code=ErrorCode.FORBIDDEN,

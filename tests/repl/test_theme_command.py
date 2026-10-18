@@ -35,6 +35,7 @@ def test_startup_theme_falls_back_to_light_for_corrupt_config(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     config_path = tmp_path / ".omnigent" / "config.yaml"
     config_path.parent.mkdir()
@@ -48,6 +49,7 @@ def test_startup_theme_returns_persisted_dark(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When config already has a theme, return it without showing picker."""
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     config_path = tmp_path / ".omnigent" / "config.yaml"
     config_path.parent.mkdir()
@@ -61,6 +63,7 @@ def test_startup_theme_shows_picker_on_first_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When no theme is persisted, _load_startup_theme calls the picker."""
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     # Mock the picker to return DARK_THEME without requiring a tty.
@@ -91,6 +94,7 @@ async def test_theme_light_updates_host_and_formatter(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     host = DummyHost()
     fmt = RichBlockFormatter()
@@ -115,6 +119,7 @@ async def test_theme_dark_and_default_reset_to_default_theme(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     host = DummyHost()
     fmt = RichBlockFormatter(theme=LIGHT_THEME)

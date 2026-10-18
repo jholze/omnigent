@@ -29,6 +29,8 @@ from omnigent.db.db_models import (
     SqlConnection,
     SqlConversationMetadata,
     SqlDeviceGrant,
+    SqlGoogleBindNonce,
+    SqlGoogleIdentityLink,
     SqlHost,
     SqlPreference,
     SqlProject,
@@ -53,6 +55,65 @@ from omnigent.entities import Account, AccountToken
 from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
 
 _HIDDEN_LIST_USERS = frozenset({RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL})
+
+
+class _GoogleBindConflict(Exception):
+    """Abort the bind transaction without inserting a user or a link."""
+
+
+def _linked_email_owner(session: Session, email: str) -> str | None:
+    """Username that owns this lowercased email, or ``None``."""
+    return session.execute(
+        select(SqlGoogleIdentityLink.user_id).where(
+            SqlGoogleIdentityLink.workspace_id == current_workspace_id(),
+            SqlGoogleIdentityLink.email == email.strip().lower(),
+        )
+    ).scalar_one_or_none()
+
+
+def _insert_google_link(
+    session: Session,
+    issuer: str,
+    subject: str,
+    user_id: str,
+    email: str,
+) -> str:
+    """Insert one link or return ``ok`` / ``conflict`` without committing."""
+    email = email.strip().lower()
+    workspace_id = current_workspace_id()
+    existing = session.get(SqlGoogleIdentityLink, (workspace_id, issuer, subject))
+    if existing is not None:
+        if existing.user_id == user_id and existing.email == email:
+            return "ok"
+        return "conflict"
+    owner = _linked_email_owner(session, email)
+    if owner is not None:
+        return "conflict"
+    already = session.execute(
+        select(SqlGoogleIdentityLink.user_id).where(
+            SqlGoogleIdentityLink.workspace_id == workspace_id,
+            SqlGoogleIdentityLink.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if already is not None:
+        return "conflict"
+    other = session.get(SqlUser, (workspace_id, email))
+    if other is not None and other.deleted_at is None and other.id != user_id:
+        return "conflict"
+    user = session.get(SqlUser, (workspace_id, user_id))
+    if user is None or user.deleted_at is not None:
+        return "conflict"
+    session.add(
+        SqlGoogleIdentityLink(
+            issuer=issuer,
+            subject=subject,
+            user_id=user_id,
+            email=email,
+            created_at=int(time.time()),
+        )
+    )
+    session.flush()
+    return "ok"
 
 
 def _to_account(row: SqlUser) -> Account:
@@ -229,6 +290,8 @@ class SqlAlchemyAccountStore:
         now = int(time.time())
 
         def write(session: Session) -> Account:
+            if _linked_email_owner(session, user_id) is not None:
+                raise ValueError("username collides with a linked email")
             existing = lock_account(session, user_id)
             if existing is not None and existing.deleted_at is None:
                 raise ValueError(f"user {user_id!r} already exists")
@@ -521,6 +584,255 @@ class SqlAlchemyAccountStore:
         with self._session("select_password_hash") as session:
             row = session.get(SqlUser, (current_workspace_id(), user_id))
             return row.password_hash if row is not None and row.deleted_at is None else None
+
+    def username_collides_with_linked_email(self, username: str) -> bool:
+        """Whether ``username`` is an email already linked to an account."""
+        with self._session("select_google_link_by_email") as session:
+            return _linked_email_owner(session, username.strip().lower()) is not None
+
+    def rename_user(self, _user_id: str, new_id: str) -> None:
+        """Reject a rename onto a linked email before any other rename.
+
+        There is no rename route. The linked-email check runs first so a
+        caller can tell a collision from a store that does not rename.
+        The current id is unused because every rename is rejected.
+        """
+
+        def write(session: Session) -> None:
+            if _linked_email_owner(session, new_id.strip().lower()) is not None:
+                raise ValueError("username collides with a linked email")
+            raise ValueError("rename not supported")
+
+        run_write_transaction(self._session_immediate, "rename_user", write)
+
+    def extra_principals(self, user_id: str) -> frozenset[str]:
+        """The linked Google email for ``user_id``, if it is a second id."""
+        email = self.linked_email(user_id)
+        if email is None or email == user_id:
+            return frozenset()
+        return frozenset({email})
+
+    def linked_email(self, user_id: str) -> str | None:
+        """Return the lowercased Google email linked to ``user_id``."""
+        with self._session("select_google_link_by_user") as session:
+            return session.execute(
+                select(SqlGoogleIdentityLink.email).where(
+                    SqlGoogleIdentityLink.workspace_id == current_workspace_id(),
+                    SqlGoogleIdentityLink.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+
+    def google_user_for_subject(self, issuer: str, subject: str) -> str | None:
+        """Return the username linked to this Google subject, if any."""
+        with self._session("select_google_link_by_subject") as session:
+            return session.execute(
+                select(SqlGoogleIdentityLink.user_id).where(
+                    SqlGoogleIdentityLink.workspace_id == current_workspace_id(),
+                    SqlGoogleIdentityLink.issuer == issuer,
+                    SqlGoogleIdentityLink.subject == subject,
+                )
+            ).scalar_one_or_none()
+
+    def google_user_for_email(self, email: str) -> str | None:
+        """Return the username that already owns this lowercased email."""
+        with self._session("select_google_link_by_email") as session:
+            return _linked_email_owner(session, email.strip().lower())
+
+    def ensure_account_generation(self, user_id: str) -> str | None:
+        """Return a generation, assigning one when a passwordless row lacks it."""
+
+        def write(session: Session) -> str | None:
+            row = lock_account(session, user_id)
+            if row is None or row.deleted_at is not None:
+                return None
+            if not row.account_generation:
+                row.account_generation = uuid.uuid4().hex
+            return row.account_generation
+
+        return run_write_transaction(self._session_immediate, "ensure_account_generation", write)
+
+    def create_passwordless_user(self, user_id: str) -> Account:
+        """Insert an active user with no password. Raises if the id exists."""
+        now = int(time.time())
+
+        def write(session: Session) -> Account:
+            if _linked_email_owner(session, user_id) is not None:
+                raise ValueError("username collides with a linked email")
+            existing = lock_account(session, user_id)
+            if existing is not None and existing.deleted_at is None:
+                raise ValueError(f"user {user_id!r} already exists")
+            row = existing or SqlUser(id=user_id)
+            row.is_admin = False
+            row.password_hash = None
+            row.created_at = now
+            row.last_login_at = None
+            row.deleted_at = None
+            row.account_generation = uuid.uuid4().hex
+            session.add(row)
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                raise ValueError(f"user {user_id!r} already exists") from exc
+            return _to_account(row)
+
+        return run_write_transaction(self._session_immediate, "create_passwordless_user", write)
+
+    def issue_bind_nonce(
+        self,
+        jti: str,
+        *,
+        issuer: str,
+        subject: str,
+        email: str,
+        expires_at: int,
+    ) -> None:
+        """Store the single-use proof that matches a bind cookie."""
+
+        def write(session: Session) -> None:
+            session.add(
+                SqlGoogleBindNonce(
+                    jti=jti,
+                    issuer=issuer,
+                    subject=subject,
+                    email=email.strip().lower(),
+                    expires_at=expires_at,
+                    consumed_at=None,
+                )
+            )
+
+        run_write_transaction(self._session_immediate, "issue_bind_nonce", write)
+
+    def link_google(self, issuer: str, subject: str, user_id: str, email: str) -> str:
+        """Attach a Google subject to ``user_id``. Returns ok or conflict."""
+
+        def write(session: Session) -> str:
+            return _insert_google_link(session, issuer, subject, user_id, email)
+
+        try:
+            return run_write_transaction(self._session_immediate, "link_google", write)
+        except IntegrityError:
+            return "conflict"
+
+    def consume_bind_and_link(
+        self,
+        *,
+        jti: str,
+        issuer: str,
+        subject: str,
+        email: str,
+        user_id: str,
+        now: int,
+    ) -> str:
+        """Consume a bind nonce and insert the link in one transaction.
+
+        Returns ``ok``, ``replay``, or ``conflict``. A conflict leaves the
+        nonce unused so the person can still bind the right username.
+        """
+
+        def write(session: Session) -> str:
+            require_active_account(session, user_id)
+            nonce = session.get(SqlGoogleBindNonce, (current_workspace_id(), jti))
+            if nonce is None or nonce.consumed_at is not None or nonce.expires_at <= now:
+                return "replay"
+            if (
+                nonce.issuer != issuer
+                or nonce.subject != subject
+                or nonce.email != email.strip().lower()
+            ):
+                return "replay"
+            result = _insert_google_link(session, issuer, subject, user_id, email)
+            if result != "ok":
+                return result
+            nonce.consumed_at = now
+            return "ok"
+
+        try:
+            return run_write_transaction(self._session_immediate, "consume_bind_and_link", write)
+        except IntegrityError:
+            return "conflict"
+
+    def consume_bind_and_create(
+        self,
+        *,
+        jti: str,
+        issuer: str,
+        subject: str,
+        email: str,
+        now: int,
+    ) -> str:
+        """Create a passwordless user whose id is the email, and link it.
+
+        A 409 (the id already exists, or the email is already linked) changes
+        no row and leaves the nonce unused.
+        """
+        email = email.strip().lower()
+
+        def write(session: Session) -> str:
+            nonce = session.get(SqlGoogleBindNonce, (current_workspace_id(), jti))
+            if nonce is None or nonce.consumed_at is not None or nonce.expires_at <= now:
+                return "replay"
+            if nonce.issuer != issuer or nonce.subject != subject or nonce.email != email:
+                return "replay"
+            if _linked_email_owner(session, email) is not None:
+                return "conflict"
+            existing = lock_account(session, email)
+            if existing is not None and existing.deleted_at is None:
+                return "conflict"
+            row = existing or SqlUser(id=email)
+            row.is_admin = False
+            row.password_hash = None
+            row.created_at = now
+            row.last_login_at = None
+            row.deleted_at = None
+            row.account_generation = uuid.uuid4().hex
+            session.add(row)
+            session.flush()
+            result = _insert_google_link(session, issuer, subject, email, email)
+            if result != "ok":
+                raise _GoogleBindConflict
+            nonce.consumed_at = now
+            return "ok"
+
+        try:
+            return run_write_transaction(self._session_immediate, "consume_bind_and_create", write)
+        except (IntegrityError, _GoogleBindConflict):
+            return "conflict"
+
+    def consume_bind_nonce(self, jti: str, *, now: int) -> bool:
+        """Mark a nonce used without inserting a user or a link."""
+
+        def write(session: Session) -> bool:
+            nonce = session.get(SqlGoogleBindNonce, (current_workspace_id(), jti))
+            if nonce is None or nonce.consumed_at is not None or nonce.expires_at <= now:
+                return False
+            nonce.consumed_at = now
+            return True
+
+        return run_write_transaction(self._session_immediate, "consume_bind_nonce", write)
+
+    def unlink_google(self, user_id: str) -> str:
+        """Delete only the link row.
+
+        Returns ``ok``, ``missing``, or ``passwordless_identity`` when the
+        user's own id is the linked email and they have no password.
+        """
+
+        def write(session: Session) -> str:
+            link = session.execute(
+                select(SqlGoogleIdentityLink).where(
+                    SqlGoogleIdentityLink.workspace_id == current_workspace_id(),
+                    SqlGoogleIdentityLink.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+            if link is None:
+                return "missing"
+            user = session.get(SqlUser, (current_workspace_id(), user_id))
+            if user is not None and user.password_hash is None and user.id == link.email:
+                return "passwordless_identity"
+            session.delete(link)
+            return "ok"
+
+        return run_write_transaction(self._session_immediate, "unlink_google", write)
 
     def update_password(self, user_id: str, password_hash: str) -> None:
         """Replace a user's stored password hash.

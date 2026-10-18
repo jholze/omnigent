@@ -124,7 +124,13 @@ def _terminate(proc: subprocess.Popen[bytes]) -> None:
             proc.wait(timeout=5)
 
 
-def spawn_accounts_server(mock_llm_server_url: str, server_tmp) -> Iterator[AccountsServer]:
+def spawn_accounts_server(
+    mock_llm_server_url: str,
+    server_tmp,
+    *,
+    extra_env: dict[str, str] | None = None,
+    preamble: str = "",
+) -> Iterator[AccountsServer]:
     """Spawn an accounts-mode server with the device grant; yield a handle.
 
     Mirrors the shared ``live_server`` spawn but in accounts mode with a
@@ -133,6 +139,9 @@ def spawn_accounts_server(mock_llm_server_url: str, server_tmp) -> Iterator[Acco
 
     :param mock_llm_server_url: Session-scoped mock LLM base (no real creds).
     :param server_tmp: A per-test temp dir (``tmp_path_factory.mktemp(...)``).
+    :param extra_env: Extra server variables. ``{public_url}`` in a value is
+        replaced with the browser-visible origin.
+    :param preamble: Python run in the server process before ``main()``.
     :yields: An :class:`AccountsServer` handle.
     """
     import secrets
@@ -169,6 +178,7 @@ def spawn_accounts_server(mock_llm_server_url: str, server_tmp) -> Iterator[Acco
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
         "OPENAI_API_KEY": "mock-key",
         "ANTHROPIC_API_KEY": "",
+        **{k: v.replace("{public_url}", public_url) for k, v in (extra_env or {}).items()},
     }
 
     log_handle = open(log_path, "w")  # noqa: SIM115 — lives for the Popen; closed in finally
@@ -176,7 +186,7 @@ def spawn_accounts_server(mock_llm_server_url: str, server_tmp) -> Iterator[Acco
         [
             sys.executable,
             "-c",
-            "from omnigent.cli import main; main()",
+            f"{preamble}\nfrom omnigent.cli import main; main()",
             "server",
             "--host",
             "127.0.0.1",

@@ -10,7 +10,7 @@ import re
 import tarfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from importlib import import_module
@@ -114,6 +114,7 @@ from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
+from omnigent.server.routes.session_chat import create_session_chat_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
@@ -140,6 +141,7 @@ from omnigent.stores import (
     ConversationStore,
     FileStore,
 )
+from omnigent.stores.chat_store import ChatStore as TeamChatStore
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import (
     ConversationNotFoundError,
@@ -151,6 +153,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.stores.session_chat_store import SessionChatStore
 
 _logger = logging.getLogger(__name__)
 _RECONNECT_BINDING_BATCH_SIZE = 128
@@ -1313,6 +1316,49 @@ def _ensure_default_polly_agent(
     )
 
 
+def _wire_manager_webhook(
+    *,
+    conversation_store: ConversationStore,
+    agent_store: AgentStore,
+    project_store: ProjectStore | None,
+    server_config: Mapping[str, Any] | None = None,
+) -> Any:
+    """Attach the lifecycle outbox to this process, or disable it.
+
+    Validates ``manager_webhook`` from the mapping ``create_app`` already
+    loaded, so boot does not read the config file a second time. An enabled
+    block with a bad endpoint raises and the process does not start. The
+    default (block absent) leaves the feature off and still constructs the
+    store so a later config edit can be picked up by the dispatcher without
+    a code change — writes themselves stay gated on ``enabled``.
+
+    :returns: The store, or ``None`` when this process has no database URI.
+    """
+    from omnigent.server.manager_webhook_context import build_lookups
+    from omnigent.server.server_config import (
+        _parse_manager_webhook,
+        prime_manager_webhook_config,
+    )
+    from omnigent.server.session_outbox import configure
+    from omnigent.stores.session_lifecycle_store.sqlalchemy_store import (
+        SqlAlchemySessionLifecycleStore,
+    )
+
+    prime_manager_webhook_config(_parse_manager_webhook(server_config or {}))
+    location = getattr(conversation_store, "storage_location", None)
+    if not isinstance(location, str) or "://" not in location:
+        configure(None)
+        return None
+    store = SqlAlchemySessionLifecycleStore(location)
+    context_lookup, summary_lookup = build_lookups(
+        conversation_store=conversation_store,
+        agent_store=agent_store,
+        project_store=project_store,
+    )
+    configure(store, context_lookup=context_lookup, summary_lookup=summary_lookup)
+    return store
+
+
 def create_app(
     agent_store: AgentStore,
     file_store: FileStore,
@@ -1346,6 +1392,8 @@ def create_app(
     feature_flags: FeatureFlags | None = None,
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
+    chat_store: SessionChatStore | None = None,
+    team_chat_store: TeamChatStore | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -1477,11 +1525,19 @@ def create_app(
         authoritative. Never grants past ``sharing_mode``/``public_sharing``.
     :param server_config: Resolved non-secret server settings. The optional
         ``session_title_instructions`` string augments the isolated automatic
-        title prompt. ``None`` loads the standard server config.
+        title prompt. ``mcp_enabled`` (default true; overridable with
+        ``OMNIGENT_MCP_ENABLED``) turns the ``POST /mcp`` endpoint on or off.
+        ``None`` loads the standard server config.
     :param base_path: Public URL prefix the server is served under by a
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal
         root deployment.
+    :param chat_store: Store for human lines beside a shared session.
+        ``None`` leaves ``/v1/sessions/{id}/chat`` unmounted.
+    :param team_chat_store: Store for team chat (channels, DMs, messages).
+        When omitted it is derived from ``conversation_store``'s storage
+        location, so the ``/v1/chat`` routes mount on every real database
+        and are gated per-request by the ``team_chat`` flag.
     :returns: A fully configured :class:`FastAPI` application.
     :raises ValueError: If ``permission_store`` is provided
         without an ``auth_provider``.
@@ -1509,6 +1565,18 @@ def create_app(
     resolved_extension_state = _resolve_extension_state(extension_state)
     extension_bundles, extension_asset_errors = _resolve_extension_assets(resolved_extension_state)
 
+    # Team chat shares the main database, so when no explicit store is
+    # injected the app derives one from the conversation store's URI. This
+    # keeps the flag-gated /v1/chat routes mounted on every real database
+    # (and in the OpenAPI spec) without threading a store through every
+    # caller; the routes themselves answer 404 until the flag is on.
+    if team_chat_store is None:
+        chat_location = getattr(conversation_store, "storage_location", None)
+        if isinstance(chat_location, str) and "://" in chat_location:
+            from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
+
+            team_chat_store = SqlAlchemyChatStore(chat_location)
+
     # First-boot admin bootstrap for the accounts auth provider.
     # Runs before any route is mounted so the login page is never
     # served against an empty user table (avoids the Immich-style
@@ -1524,6 +1592,8 @@ def create_app(
     # an AccountStore, defeating the whole "accounts is opt-in"
     # framing.
     _bootstrap_result = None  # populated below for the lifespan hook
+    from omnigent.server.principals import set_principal_resolver
+
     if auth_provider is not None and account_store is not None:
         from omnigent.server.auth import UnifiedAuthProvider
 
@@ -1540,6 +1610,13 @@ def create_app(
                 session_ttl_hours=_accounts_cfg.session_ttl_hours,
                 cookie_secret=_accounts_cfg.cookie_secret,
             )
+            set_principal_resolver(account_store.extra_principals)
+        else:
+            # A header or OIDC app in this process must not keep the previous
+            # accounts store. Lifespan shutdown clears it again on the way out.
+            set_principal_resolver(None)
+    else:
+        set_principal_resolver(None)
 
     from omnigent.runner.routing import RunnerRouter
     from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
@@ -1584,6 +1661,12 @@ def create_app(
     _mcp_pool = ServerMcpPool()
     server_metrics = ServerPerformanceMetrics()
     server_metrics_otel = ServerMetricsOtelPublisher()
+    lifecycle_store = _wire_manager_webhook(
+        conversation_store=conversation_store,
+        agent_store=agent_store,
+        project_store=project_store,
+        server_config=resolved_server_config,
+    )
 
     @asynccontextmanager
     async def _lifespan(
@@ -1720,6 +1803,11 @@ def create_app(
                 otel_publisher=server_metrics_otel,
             )
         )
+        webhook_dispatcher_task: asyncio.Task[None] | None = None
+        if lifecycle_store is not None:
+            from omnigent.server.manager_webhook_dispatcher import start_dispatcher
+
+            webhook_dispatcher_task = start_dispatcher(lifecycle_store)
         # Runner ``runner_last_seen`` is refreshed per-tunnel from each
         # runner tunnel's ping loop (``runner_tunnel._ping_loop``), inside
         # that handler's ``workspace_scope`` — not from a lifespan sweep,
@@ -1803,6 +1891,9 @@ def create_app(
         try:
             yield
         finally:
+            from omnigent.server.principals import set_principal_resolver
+
+            set_principal_resolver(None)
             if managed_sandbox_reaper is not None:
                 await managed_sandbox_reaper.shutdown()
             # Run completion is event-driven (the _publish_status hook) plus a
@@ -1813,6 +1904,13 @@ def create_app(
             metrics_publish_task.cancel()
             with suppress(asyncio.CancelledError):
                 await metrics_publish_task
+            if webhook_dispatcher_task is not None:
+                from omnigent.server.manager_webhook_dispatcher import cancel_dispatcher
+
+                await cancel_dispatcher(webhook_dispatcher_task)
+            from omnigent.server import session_outbox as _session_outbox
+
+            _session_outbox.configure(None)
             # Stop in-flight background managed-sandbox launches so a
             # slow provision doesn't outlive the ASGI shutdown (the
             # sandbox itself, if already provisioned, is reaped by the
@@ -1862,6 +1960,7 @@ def create_app(
             host_store.admit_launch, require_account_owner=runner_account_store is not None
         )
     app.state.agent_store = agent_store
+    app.state.session_lifecycle_store = lifecycle_store
     app.state.sandbox_config = sandbox_config
     app.state.branding_snapshot = branding_snapshot
     app.state.feature_flags = resolved_feature_flags
@@ -3337,6 +3436,29 @@ def create_app(
             prefix="/v1",
             tags=["comments"],
         )
+    if chat_store is not None:
+        app.include_router(
+            create_session_chat_router(
+                chat_store,
+                conversation_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
+            prefix="/v1",
+            tags=["session_chat"],
+        )
+    if team_chat_store is not None:
+        from omnigent.server.routes.chat import create_chat_router
+
+        app.include_router(
+            create_chat_router(
+                team_chat_store,
+                auth_provider=auth_provider,
+                feature_flags=resolved_feature_flags,
+            ),
+            prefix="/v1",
+            tags=["chat"],
+        )
     if policy_store is not None:
         app.include_router(
             create_session_policies_router(
@@ -4247,6 +4369,14 @@ def create_app(
     for router, prefix, tags in all_extra_routers:
         app.include_router(router, prefix=prefix, tags=[*tags])
 
+    # Before the SPA catch-all: a disabled flag still owns ``/mcp`` so the
+    # path returns JSON 404 instead of ``index.html``. Auth matches ``/v1``.
+    from omnigent.server.mcp_endpoint import create_mcp_router, mcp_endpoint_enabled
+
+    app.state.mcp_enabled = mcp_endpoint_enabled(resolved_server_config)
+    app.include_router(create_mcp_router(auth_provider))
+    _logger.info("mcp: POST /mcp %s", "enabled" if app.state.mcp_enabled else "disabled")
+
     web_ui_dist = _WEB_UI_DIST
     web_ui_present = web_ui_dist.is_dir() and (web_ui_dist / "index.html").is_file()
     if web_ui_present:
@@ -4269,6 +4399,28 @@ def create_app(
         async def root() -> FileResponse:
             """Serve the API-only landing page (no web UI bundle present)."""
             return FileResponse(_API_ONLY_LANDING_HTML, media_type="text/html")
+
+        from omnigent.server.auth import UnifiedAuthProvider as _AccountsAuthProvider
+
+        if (
+            isinstance(auth_provider, _AccountsAuthProvider)
+            and getattr(auth_provider, "_source", None) == "accounts"
+        ):
+
+            @app.get("/login", include_in_schema=False)
+            async def accounts_login_page(request: Request) -> Response:
+                """Password form for API-only installs. The SPA shell owns /login when built."""
+                from omnigent.server.google_accounts import (
+                    bind_email_for_display,
+                    login_page_html,
+                )
+
+                cookie_secret = b""
+                accounts_cfg = getattr(auth_provider, "_accounts_config", None)
+                if accounts_cfg is not None:
+                    cookie_secret = accounts_cfg.cookie_secret
+                email = bind_email_for_display(request, cookie_secret)
+                return Response(login_page_html(bind_email=email), media_type="text/html")
 
     app.add_middleware(AccountAuthorityMiddleware, auth_provider=auth_provider)
     app.add_middleware(PublicSharingPolicyMiddleware, max_level=app.state.public_sharing_max_level)
@@ -4345,6 +4497,10 @@ class _SPAStaticFiles(StaticFiles):
         # asset refs and the injected base-path global reflect `base_path`.
         if self._index_html is not None and path in ("", ".", "index.html"):
             return _apply_web_ui_cache_headers(self._shell_response(scope), "index.html")
+        if path == "login" and self._index_html is not None:
+            from omnigent.server.google_accounts import inject_login_shell
+
+            return inject_login_shell(self._shell_response(scope), scope)
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:

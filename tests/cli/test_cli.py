@@ -2341,6 +2341,12 @@ def test_server_command_reads_tunnel_token_and_does_not_spawn_runner(
     monkeypatch.setattr(_local_server_mod, "register_local_server", lambda port: None)
     monkeypatch.setattr(_local_server_mod, "clear_local_server_record", lambda: None)
 
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        free_port = str(sock.getsockname()[1])
+
     config_home = tmp_path / "config"
     config_home.mkdir()
     (config_home / "config.yaml").write_text(
@@ -2360,7 +2366,7 @@ def test_server_command_reads_tunnel_token_and_does_not_spawn_runner(
             "--host",
             "127.0.0.1",
             "--port",
-            "9999",
+            free_port,
             "--database-uri",
             f"sqlite:///{db_path}",
             "--artifact-location",
