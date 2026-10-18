@@ -51,8 +51,8 @@ SKIP_PARTS = {
     "node_modules",
     "tests",
 }
-# Local agent team configs pin their worker models on purpose (see agents/lead/).
-SKIP_PREFIXES = ("agents/lead/",)
+# Local agent team configs pin their worker models on purpose.
+SKIP_PREFIXES = ("agents/lead/", "agent-configs/")
 OWNED_FALLBACK_PATH = Path("omnigent/models/model_fallbacks.py")
 FALLBACK_METADATA_FIELDS = frozenset({"owner", "provenance", "discovery_gap"})
 
