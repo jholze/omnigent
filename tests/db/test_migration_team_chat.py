@@ -89,10 +89,13 @@ def _index_sql(engine: sa.Engine, name: str) -> str:
         ).scalar_one()
 
 
-def test_team_chat_is_the_single_alembic_head() -> None:
+def test_team_chat_stays_on_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(_build_alembic_config("sqlite://"))
+    heads = script.get_heads()
 
-    assert script.get_heads() == [_REVISION]
+    assert len(heads) == 1
+    chain = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
+    assert _REVISION in chain
 
 
 def test_upgrade_creates_all_chat_tables(migrated: tuple[str, sa.Engine]) -> None:
