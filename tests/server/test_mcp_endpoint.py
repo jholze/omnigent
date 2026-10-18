@@ -1368,6 +1368,254 @@ async def test_wait_refuses_subscribe_without_read(monkeypatch: pytest.MonkeyPat
     assert subscribed == []
 
 
+def _tool_error(response: httpx.Response) -> tuple[str | None, str]:
+    """Return ``(structured code, text)`` for a failed MCP tool call."""
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result.get("isError") is True, result
+    structured = result.get("structuredContent")
+    code = structured.get("code") if isinstance(structured, dict) else None
+    return code if isinstance(code, str) else None, str(result["content"][0]["text"])
+
+
+async def _session_ids(
+    client: httpx.AsyncClient, *, kind: str | None = None, headers: dict[str, str] | None = None
+) -> list[str]:
+    """Session ids from ``list_sessions``. Omitted ``kind`` is the top-level default."""
+    arguments: dict[str, Any] = {"limit": 1000}
+    if kind is not None:
+        arguments["kind"] = kind
+    listed = await client.post(
+        "/mcp",
+        json=_rpc_body("tools/call", {"name": "list_sessions", "arguments": arguments}),
+        headers=headers,
+    )
+    return [str(row["id"]) for row in _tool_text(listed)["data"]]
+
+
+async def _mcp_create(
+    client: httpx.AsyncClient,
+    *,
+    agent_id: str,
+    parent_session_id: str | None = None,
+    sub_agent_name: str | None = None,
+    title: str | None = None,
+    confirm: bool | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    arguments: dict[str, Any] = {"agent_id": agent_id}
+    if parent_session_id is not None:
+        arguments["parent_session_id"] = parent_session_id
+    if sub_agent_name is not None:
+        arguments["sub_agent_name"] = sub_agent_name
+    if title is not None:
+        arguments["title"] = title
+    if confirm is not None:
+        arguments["confirm"] = confirm
+    return await client.post(
+        "/mcp",
+        json=_rpc_body("tools/call", {"name": "create_session", "arguments": arguments}),
+        headers=headers,
+    )
+
+
+async def test_create_session_parent_nests_as_sub_agent(mcp_client: httpx.AsyncClient) -> None:
+    """A confirmed child is a sub-agent under the parent and stays out of the default list.
+
+    The web sidebar lists ``kind=default`` only. The Agents rail lists
+    ``GET /v1/sessions/{id}/child_sessions``, which is ``kind=sub_agent`` rows
+    whose parent is that session. ``root_conversation_id`` follows the parent,
+    including for a grandchild. A parent filed in a project is still accepted:
+    ``POST /v1/sessions`` does not reject a cross-project parent.
+    """
+    agent = await create_test_agent(
+        mcp_client,
+        name="nest-agent",
+        sub_agents=[{"name": "worker"}],
+    )
+    parent_id = str(agent["_session_id"])
+    agent_id = str(agent["id"])
+    project = await mcp_client.post("/v1/projects", json={"name": "Nest", "config": {}})
+    assert project.status_code == 200, project.text
+    filed = await mcp_client.patch(
+        f"/v1/sessions/{parent_id}",
+        json={"project_id": project.json()["id"]},
+    )
+    assert filed.status_code == 200, filed.text
+
+    catalog = await mcp_client.post("/mcp", json=_rpc_body("tools/list"))
+    tools = {tool["name"]: tool for tool in catalog.json()["result"]["tools"]}
+    assert "parent_session_id" in tools["create_session"]["inputSchema"]["properties"]
+    assert "sub_agent_name" in tools["create_session"]["inputSchema"]["properties"]
+    assert "sub-agent" in tools["create_session"]["description"]
+    assert "top-level" in tools["list_sessions"]["description"]
+    assert "parent_session_id" in tools["get_session"]["description"]
+
+    before = await _session_ids(mcp_client, kind="any")
+    dry = await _mcp_create(
+        mcp_client,
+        agent_id=agent_id,
+        parent_session_id=parent_id,
+        sub_agent_name="worker",
+        title="preview child",
+        confirm=False,
+    )
+    planned = _tool_text(dry)
+    assert planned["dry_run"] is True
+    assert planned["body"]["parent_session_id"] == parent_id
+    assert planned["body"]["sub_agent_name"] == "worker"
+    assert planned["body"]["title"] == "preview child"
+    assert await _session_ids(mcp_client, kind="any") == before
+
+    created = await _mcp_create(
+        mcp_client,
+        agent_id=agent_id,
+        parent_session_id=parent_id,
+        sub_agent_name="worker",
+        title="worker:child",
+        confirm=True,
+    )
+    session = _tool_text(created)["session"]
+    child_id = str(session["id"])
+    assert session["kind"] == "sub_agent"
+    assert session["parent_session_id"] == parent_id
+    assert session["root_conversation_id"] == parent_id
+    assert session["sub_agent_name"] == "worker"
+    assert session["items_omitted"] is True
+    assert "items" not in session
+
+    fetched = await mcp_client.post(
+        "/mcp",
+        json=_rpc_body(
+            "tools/call",
+            {"name": "get_session", "arguments": {"session_id": child_id}},
+        ),
+    )
+    got = _tool_text(fetched)
+    assert got["parent_session_id"] == parent_id
+    assert got["root_conversation_id"] == parent_id
+    assert got["kind"] == "sub_agent"
+    assert got["sub_agent_name"] == "worker"
+
+    assert child_id not in await _session_ids(mcp_client)
+    assert parent_id in await _session_ids(mcp_client)
+    sub_ids = await _session_ids(mcp_client, kind="sub_agent")
+    assert child_id in sub_ids
+    assert parent_id not in sub_ids
+
+    children = await mcp_client.get(f"/v1/sessions/{parent_id}/child_sessions")
+    assert children.status_code == 200, children.text
+    assert child_id in {row["id"] for row in children.json()["data"]}
+
+    grandchild = await _mcp_create(
+        mcp_client,
+        agent_id=agent_id,
+        parent_session_id=child_id,
+        title="worker:grandchild",
+        confirm=True,
+    )
+    grand = _tool_text(grandchild)["session"]
+    assert grand["kind"] == "sub_agent"
+    assert grand["parent_session_id"] == child_id
+    assert grand["root_conversation_id"] == parent_id
+    assert grand["id"] not in await _session_ids(mcp_client)
+    assert grand["id"] in await _session_ids(mcp_client, kind="sub_agent")
+    direct = await mcp_client.get(f"/v1/sessions/{parent_id}/child_sessions")
+    direct_ids = {row["id"] for row in direct.json()["data"]}
+    assert child_id in direct_ids
+    assert grand["id"] not in direct_ids
+
+    missing = await _mcp_create(
+        mcp_client,
+        agent_id=agent_id,
+        parent_session_id="conv_missing_parent",
+        confirm=True,
+    )
+    code, text = _tool_error(missing)
+    assert code == "not_found"
+    assert "not found" in text.lower()
+    assert "conv_missing_parent" not in await _session_ids(mcp_client, kind="any")
+
+
+async def test_create_session_parent_requires_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read access on the parent is not enough. No access is not-found, like the session route."""
+    from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
+
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    provider = UnifiedAuthProvider(
+        source="header", local_single_user=False, header_name="X-Forwarded-Email"
+    )
+    app = _sync_app(tmp_path, monkeypatch, auth_provider=provider, server_config={})
+    alice = {"X-Forwarded-Email": "alice@example.com"}
+    bob = {"X-Forwarded-Email": "bob@example.com"}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        agent = await create_test_agent(client, name="acl-parent", user="alice@example.com")
+        parent_id = str(agent["_session_id"])
+        agent_id = str(agent["id"])
+
+        stranger = await _mcp_create(
+            client, agent_id=agent_id, parent_session_id=parent_id, confirm=True, headers=bob
+        )
+        code, text = _tool_error(stranger)
+        assert code == "not_found"
+        assert "not found" in text.lower()
+
+        grant = await client.put(
+            f"/v1/sessions/{parent_id}/permissions",
+            json={"user_id": "bob@example.com", "level": LEVEL_READ},
+            headers=alice,
+        )
+        assert grant.status_code == 200, grant.text
+        before = await _session_ids(client, kind="any", headers=alice)
+        denied = await _mcp_create(
+            client,
+            agent_id=agent_id,
+            parent_session_id=parent_id,
+            title="should-not-exist",
+            confirm=True,
+            headers=bob,
+        )
+        code, text = _tool_error(denied)
+        assert code == "forbidden"
+        assert "edit permission" in text
+        dry = await _mcp_create(
+            client, agent_id=agent_id, parent_session_id=parent_id, confirm=False, headers=bob
+        )
+        assert _tool_error(dry)[0] == "forbidden"
+        assert await _session_ids(client, kind="any", headers=alice) == before
+
+        upgraded = await client.put(
+            f"/v1/sessions/{parent_id}/permissions",
+            json={"user_id": "bob@example.com", "level": LEVEL_EDIT},
+            headers=alice,
+        )
+        assert upgraded.status_code == 200, upgraded.text
+        created = await _mcp_create(
+            client,
+            agent_id=agent_id,
+            parent_session_id=parent_id,
+            title="bob-child",
+            confirm=True,
+            headers=bob,
+        )
+        session = _tool_text(created)["session"]
+        assert session["kind"] == "sub_agent"
+        assert session["parent_session_id"] == parent_id
+        assert session["root_conversation_id"] == parent_id
+        assert session["id"] not in await _session_ids(client, headers=alice)
+        assert session["id"] not in await _session_ids(client, headers=bob)
+        assert session["id"] in await _session_ids(client, kind="sub_agent", headers=bob)
+        children = await client.get(
+            f"/v1/sessions/{parent_id}/child_sessions",
+            headers=alice,
+        )
+        assert children.status_code == 200, children.text
+        assert session["id"] in {row["id"] for row in children.json()["data"]}
+
+
 async def test_wait_stops_when_the_client_disconnects() -> None:
     """A disconnect during the turn wait returns without sitting out the budget."""
     request = _DroppingRequest()

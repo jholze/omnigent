@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from sqlalchemy import func, select
@@ -11,7 +12,7 @@ import omnigent.debug_logging as debug_logging
 import omnigent.server.mcp_endpoint as mcp_endpoint
 from omnigent.db.db_models import SqlChatThread, SqlConversation, SqlUser
 from omnigent.db.utils import get_or_create_engine, now_epoch_us
-from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER
+from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ
 from omnigent.server.mcp_chat import CHAT_TOOL_NAMES
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
@@ -26,6 +27,7 @@ from tests.server.chat_testkit import (
     rpc,
     tools_call,
 )
+from tests.server.helpers import create_test_agent
 
 _ = chat_client
 _MUST_INCLUDE = {
@@ -199,6 +201,77 @@ async def test_ac_070b_create_session_preview_then_owner_audit(
     assert attrs["account_id"] == account["id"]
     assert attrs["owner_id"] == JENS
     assert attrs["confirm"] == "true"
+
+
+async def test_bot_create_session_parent_follows_owner_edit(chat_client, db_uri: str) -> None:
+    """An ogc_ bot creates a child only when its owner has edit on the parent.
+
+    The in-process session call acts as the owner, so the bot and the owner
+    get the same not-found, forbidden, and created-child result.
+    """
+    agent = await create_test_agent(chat_client, name="nest-bot", user=ANNA)
+    agent_id = str(agent["id"])
+    parent_id = str(agent["_session_id"])
+    created = await create_account(chat_client, JENS, "nest-bot")
+    token = created.json()["token"]
+    arguments = {
+        "agent_id": agent_id,
+        "parent_session_id": parent_id,
+        "title": "bot child",
+        "confirm": True,
+    }
+
+    missing = await tools_call(
+        chat_client,
+        "create_session",
+        {**arguments, "parent_session_id": "conv_missing_parent"},
+        token=token,
+    )
+    assert _outcome(missing) == ("error", "not_found")
+
+    hidden = await tools_call(chat_client, "create_session", arguments, token=token)
+    owner_hidden = await tools_call(chat_client, "create_session", arguments, user=JENS)
+    assert _outcome(hidden) == _outcome(owner_hidden) == ("error", "not_found")
+
+    grant = await chat_client.put(
+        f"/v1/sessions/{parent_id}/permissions",
+        json={"user_id": JENS, "level": LEVEL_READ},
+        headers=headers_for(ANNA),
+    )
+    assert grant.status_code == 200, grant.text
+    before = _conversation_count(db_uri)
+    denied = await tools_call(chat_client, "create_session", arguments, token=token)
+    owner_denied = await tools_call(chat_client, "create_session", arguments, user=JENS)
+    assert _outcome(denied) == _outcome(owner_denied) == ("error", "forbidden")
+    preview = await tools_call(
+        chat_client, "create_session", {**arguments, "confirm": False}, token=token
+    )
+    assert _outcome(preview) == ("error", "forbidden")
+    assert _conversation_count(db_uri) == before
+
+    upgraded = await chat_client.put(
+        f"/v1/sessions/{parent_id}/permissions",
+        json={"user_id": JENS, "level": LEVEL_EDIT},
+        headers=headers_for(ANNA),
+    )
+    assert upgraded.status_code == 200, upgraded.text
+    made = await tools_call(chat_client, "create_session", arguments, token=token)
+    assert _outcome(made) == ("ok",)
+    session = json.loads(made.json()["result"]["content"][0]["text"])["session"]
+    assert session["kind"] == "sub_agent"
+    assert session["parent_session_id"] == parent_id
+    assert session["root_conversation_id"] == parent_id
+
+    listed = await tools_call(chat_client, "list_sessions", {"limit": 100}, token=token)
+    ids = [row["id"] for row in json.loads(listed.json()["result"]["content"][0]["text"])["data"]]
+    assert session["id"] not in ids
+    children = await tools_call(
+        chat_client, "list_sessions", {"limit": 100, "kind": "sub_agent"}, token=token
+    )
+    child_ids = [
+        row["id"] for row in json.loads(children.json()["result"]["content"][0]["text"])["data"]
+    ]
+    assert session["id"] in child_ids
 
 
 async def test_ac_070c_revoked_owner_grant_is_revoked_for_the_bot(
