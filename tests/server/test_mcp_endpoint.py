@@ -567,7 +567,9 @@ async def _bind_local_runner(
 
 
 async def test_confirmed_create_and_send(
-    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    mcp_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A confirmed create and send are dispatched to a co-located runner.
 
@@ -600,6 +602,13 @@ async def test_confirmed_create_and_send(
     server, server_task, runner_http, process_manager, short_parent = await _bind_local_runner(
         app, session_id
     )
+    # A Keychain-logged-in Claude CLI on this Mac starts a real turn and
+    # holds the wait until timeout. A CLI that exits still proves the send
+    # was dispatched; the test accepts a failed start.
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text("#!/bin/sh\nexit 1\n")
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("OMNIGENT_CLAUDE_PATH", str(fake_claude))
 
     try:
         sent = await mcp_client.post(
@@ -1177,15 +1186,15 @@ def test_protocol_version_is_negotiated(mcp_app: FastAPI) -> None:
             "/mcp", json=_rpc_body("initialize", {"protocolVersion": "1999-01-01"})
         )
         assert unknown.status_code == 200, unknown.text
-        assert unknown.json()["result"]["protocolVersion"] == "2025-03-26"
-        assert unknown.headers["mcp-protocol-version"] == "2025-03-26"
+        assert unknown.json()["result"]["protocolVersion"] == "2025-11-25"
+        assert unknown.headers["mcp-protocol-version"] == "2025-11-25"
         older = client.post(
             "/mcp", json=_rpc_body("initialize", {"protocolVersion": "2024-11-05"})
         )
         assert older.json()["result"]["protocolVersion"] == "2024-11-05"
         assert older.headers["mcp-protocol-version"] == "2024-11-05"
         missing = client.post("/mcp", json=_rpc_body("initialize", {}))
-        assert missing.json()["result"]["protocolVersion"] == "2025-03-26"
+        assert missing.json()["result"]["protocolVersion"] == "2025-11-25"
 
 
 def test_delegated_scope_token_is_rejected(
@@ -1304,7 +1313,7 @@ async def test_send_message_wait_requires_read(
     result = denied.json()["result"]
     assert result["isError"] is True
     text = result["content"][0]["text"]
-    assert f"GET /v1/sessions/{session_id}?include_items=false returned HTTP" in text
+    assert "Conversation not found" in text
     assert subscribed == []
 
 

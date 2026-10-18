@@ -45,7 +45,7 @@ from omnigent.server.auth import (
 from omnigent.server.chat_access import principal_kind
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.server.chat_realtime import publish_chat, publish_message_created
-from omnigent.stores.chat_store import ChatChannel, ChatMessage, ChatStore
+from omnigent.stores.chat_store import ChatChannel, ChatMessage, ChatStore, PostStatus
 
 _logger = logging.getLogger("omnigent.chat")
 
@@ -74,12 +74,16 @@ _FAILURE_TEXT = {
     "internal": "Agent-Start fehlgeschlagen (internal)",
 }
 
+# custom-lint: disable-next=workspace-scoped-cache -- one maker per database URI
 _makers: dict[str, Any] = {}
 _bound_chat_store: ChatStore | None = None
+# custom-lint: disable-next=workspace-scoped-cache -- task objects
 _pending: set[asyncio.Task[None]] = set()
 _timeout_task: asyncio.Task[None] | None = None
+# custom-lint: disable-next=workspace-scoped-cache -- reason-code counters, not tenant data
 _result_counts: dict[str, int] = {}
 # Mirrors scheduled off the event loop. The status publish returns first.
+# custom-lint: disable-next=workspace-scoped-cache -- task objects
 _status_jobs: set[asyncio.Future[Any]] = set()
 # One mirror at a time, so a repeated idle observes the row it just inserted.
 _status_gate = threading.RLock()
@@ -137,11 +141,12 @@ def _bind_store(chat_store: ChatStore) -> None:
 
 
 def _mentions_agent(body: str) -> bool:
-    """Whether the body addresses the project agent handle."""
-    return any(
-        token.kind == "omnigent_agent" and token.target_id == _HANDLE
-        for token in parse_mentions(body)
-    )
+    """Whether the body addresses an Omnigent agent.
+
+    The project agent is still the one that starts. The token may name that
+    agent (``agent``) or the agent's display handle (for example ``coder``).
+    """
+    return any(token.kind == "omnigent_agent" for token in parse_mentions(body))
 
 
 def _display_in(session: Session, principal_id: str) -> str:
@@ -165,7 +170,8 @@ def _record(
     *,
     channel_id: str,
     message_id: str,
-    caller: str,
+    account_id: str,
+    owner_id: str,
     session_id: str | None,
 ) -> None:
     """Count one start outcome. The row names the class, never the message."""
@@ -174,8 +180,10 @@ def _record(
         action="agent_thread_start",
         channel_id=channel_id,
         message_id=message_id,
-        account_id=caller,
+        account_id=account_id,
+        owner_id=owner_id,
         result=reason,
+        outcome=reason,
     )
     _logger.info(
         "agent thread start result=%s count=%s",
@@ -184,7 +192,7 @@ def _record(
         extra=debug_event(
             "agent_thread_start",
             session_id=session_id,
-            user_id=caller,
+            user_id=owner_id,
             result=reason,
             channel_id=channel_id,
             message_id=message_id,
@@ -193,7 +201,13 @@ def _record(
     )
 
 
-def _claim(chat_store: ChatStore, channel_id: str, root_id: str, caller: str) -> bool:
+def _claim(
+    chat_store: ChatStore,
+    channel_id: str,
+    root_id: str,
+    caller: str,
+    started_by: str | None = None,
+) -> bool:
     """Move a thread with no agent from ``none`` to ``starting``, once."""
 
     def write(session: Session) -> bool:
@@ -211,6 +225,7 @@ def _claim(chat_store: ChatStore, channel_id: str, root_id: str, caller: str) ->
                     agent_state="starting",
                     agent_handle=_HANDLE,
                     caller_id=caller,
+                    started_by_agent_account_id=started_by,
                     start_requested_at=now,
                     updated_at=now,
                 )
@@ -236,6 +251,7 @@ def _claim(chat_store: ChatStore, channel_id: str, root_id: str, caller: str) ->
                 agent_state="starting",
                 agent_handle=_HANDLE,
                 caller_id=caller,
+                started_by_agent_account_id=started_by,
                 start_requested_at=now,
                 updated_at=now,
             )
@@ -373,10 +389,15 @@ def _fail(
     channel_id: str,
     root_id: str,
     message_id: str,
-    caller: str,
+    account_id: str,
+    owner_id: str,
     reason: str,
 ) -> None:
-    """Mark a still-starting thread failed and post one classed system line."""
+    """Mark a still-starting thread failed and post one classed system line.
+
+    *account_id* is the bot account when a bot started the thread, otherwise
+    the author's principal. *owner_id* is the human who would own the session.
+    """
     reason = reason if reason in _REASON_CLASSES else "internal"
     body = _FAILURE_TEXT[reason]
 
@@ -410,7 +431,14 @@ def _fail(
     if notice is None:
         return
     _emit(chat_store, notice)
-    _record(reason, channel_id=channel_id, message_id=message_id, caller=caller, session_id=None)
+    _record(
+        reason,
+        channel_id=channel_id,
+        message_id=message_id,
+        account_id=account_id,
+        owner_id=owner_id,
+        session_id=None,
+    )
 
 
 def _mark_active(
@@ -662,17 +690,23 @@ def _stores(request: Any, chat_store: ChatStore) -> tuple[Any, Any, Any, Any, An
 
 async def _post_first_message(request: Any, session_id: str, text: str) -> None:
     """Send the thread context through the existing session-event handler."""
+    from omnigent.server.mcp_chat import untrusted_text
     from omnigent.server.schemas import SessionEventInput
 
     endpoint = _find_post_event(request.app)
     if endpoint is None:
         raise _StartFailure("internal")
+    # Chat text is data. The same wrapper chat_read uses stops a body from
+    # closing the marker or being read as instructions (FR-095).
     result = await endpoint(
         request,
         session_id,
         SessionEventInput(
             type="message",
-            data={"role": "user", "content": [{"type": "input_text", "text": text}]},
+            data={
+                "role": "user",
+                "content": [{"type": "input_text", "text": untrusted_text({"text": text})}],
+            },
         ),
     )
     if isinstance(result, dict) and result.get("denied"):
@@ -681,18 +715,43 @@ async def _post_first_message(request: Any, session_id: str, text: str) -> None:
         raise _StartFailure("internal")
 
 
+def _request_as_owner(request: Any) -> Any:
+    """Clone the request so in-process auth acts as the bot's owner.
+
+    The flag is set on this scope copy only. The original request, and any
+    client header, stay unchanged. Accounts mode caches the authenticated
+    principal on the scope; leaving the bot's entry there makes
+    ``get_user_id`` return ``agent:<id>`` and the session edit check fails.
+    """
+    from starlette.requests import Request
+
+    from omnigent.server.auth import _CONNECTION_IDENTITY_KEY
+
+    scope = dict(request.scope)
+    scope["mcp_inprocess"] = True
+    scope.pop(_CONNECTION_IDENTITY_KEY, None)
+    return Request(scope)
+
+
 async def _start_impl(
     request: Any,
     chat_store: ChatStore,
     channel: ChatChannel,
     message: ChatMessage,
     root_id: str,
+    caller: str | None = None,
+    started_by: str | None = None,
 ) -> None:
-    """Create the caller's session, grant access, and send the thread context."""
+    """Create the caller's session, grant access, and send the thread context.
+
+    A bot mention passes the owner as *caller* and the account id as
+    *started_by*. The session owner is that human.
+    """
     from omnigent.server.routes._sessions.orchestration import _create_session_from_existing_agent
     from omnigent.server.schemas import ProjectSessionCreateRequest
 
-    caller = message.author_id
+    caller = caller or message.author_id
+    acting = _request_as_owner(request) if caller != message.author_id else request
     (
         conversation_store,
         agent_store,
@@ -721,9 +780,9 @@ async def _start_impl(
     response, conversation = await _create_session_from_existing_agent(
         conversation_store,
         agent_store,
-        getattr(request.app.state, "runner_router", None),
+        getattr(acting.app.state, "runner_router", None),
         body,
-        request,
+        acting,
         user_id=caller,
         permission_store=permission_store,
         project_store=project_store,
@@ -749,7 +808,7 @@ async def _start_impl(
             session_id,
         )
     text = await asyncio.to_thread(_context_text, chat_store, channel.id, root_id, message)
-    await _post_first_message(request, session_id, text)
+    await _post_first_message(acting, session_id, text)
     notice = await asyncio.to_thread(
         _mark_active,
         chat_store,
@@ -761,11 +820,16 @@ async def _start_impl(
     if notice is None:
         return
     _emit(chat_store, notice)
+    if started_by:
+        await asyncio.to_thread(
+            _post_started_by, chat_store, channel.id, root_id, started_by, caller
+        )
     _record(
         "active",
         channel_id=channel.id,
         message_id=message.id,
-        caller=caller,
+        account_id=started_by or caller,
+        owner_id=caller,
         session_id=session_id,
     )
 
@@ -776,10 +840,20 @@ async def _run_start(
     channel: ChatChannel,
     message: ChatMessage,
     root_id: str,
+    caller: str | None = None,
+    started_by: str | None = None,
 ) -> None:
     """Run one claimed start and collapse every failure into a system line."""
     try:
-        await _start_impl(request, chat_store, channel, message, root_id)
+        await _start_impl(
+            request,
+            chat_store,
+            channel,
+            message,
+            root_id,
+            caller,
+            started_by,
+        )
     except _StartFailure as exc:
         await asyncio.to_thread(
             _fail,
@@ -787,7 +861,8 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=message.author_id,
+            account_id=started_by or message.author_id,
+            owner_id=caller or message.author_id,
             reason=exc.reason,
         )
     except OmnigentError as exc:
@@ -805,7 +880,8 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=message.author_id,
+            account_id=started_by or message.author_id,
+            owner_id=caller or message.author_id,
             reason=reason,
         )
     except Exception:
@@ -820,9 +896,138 @@ async def _run_start(
             channel_id=channel.id,
             root_id=root_id,
             message_id=message.id,
-            caller=message.author_id,
+            account_id=started_by or message.author_id,
+            owner_id=caller or message.author_id,
             reason="internal",
         )
+
+
+def _post_started_by(
+    chat_store: ChatStore,
+    channel_id: str,
+    root_id: str,
+    account_id: str,
+    owner_id: str,
+) -> None:
+    """System line naming the bot and the owner who owns the session."""
+
+    def write(session: Session) -> _Notice:
+        account = session.get(SqlChatAgentAccount, (current_workspace_id(), account_id))
+        bot_name = account.display_name.strip() if account is not None else "Bot"
+        owner_name = _display_in(session, owner_id)
+        return _insert_reply(
+            session,
+            channel_id=channel_id,
+            root_id=root_id,
+            author_id=_AUTHOR_SYSTEM,
+            author_kind="system",
+            body=f"gestartet von {bot_name} ({owner_name})",
+            system_code="started_by_agent",
+        )
+
+    _emit(chat_store, _write(chat_store, "insert_started_by_notice", write))
+
+
+def _quota_blocks(chat_store: ChatStore, account_id: str) -> bool:
+    """Whether this account is at its configured 24 h session cap."""
+    from omnigent.server.chat_rate_limit import bot_session_quota_exceeded, quota_window_start_us
+
+    now = now_epoch_us()
+    persisted = chat_store.count_sessions_started_by(account_id, quota_window_start_us(now))
+    return bot_session_quota_exceeded(account_id, persisted, now_us=now)
+
+
+def _post_quota_notice(chat_store: ChatStore, channel: ChatChannel, message: ChatMessage) -> None:
+    """Tell the thread the bot's session quota is exhausted. No session starts."""
+    account = chat_store.get_agent_account_by_principal(message.author_id)
+    if account is not None:
+        _record(
+            "refused/quota",
+            channel_id=channel.id,
+            message_id=message.id,
+            account_id=account.id,
+            owner_id=account.owner_id,
+            session_id=None,
+        )
+    result = chat_store.post_message(
+        channel.id,
+        _AUTHOR_SYSTEM,
+        "Bot-Kontingent erschöpft",
+        author_kind="system",
+        thread_root_id=message.thread_root_id or message.id,
+    )
+    if result.status is PostStatus.CREATED and result.message is not None:
+        publish_message_created(chat_store, channel, result.message)
+
+
+def _set_forward_state(chat_store: ChatStore, message_id: str, state: str) -> None:
+    """Remember whether a bot reply was copied into the session."""
+
+    def write(session: Session) -> None:
+        session.execute(
+            update(SqlChatMessage)
+            .where(
+                SqlChatMessage.workspace_id == current_workspace_id(),
+                SqlChatMessage.id == message_id,
+            )
+            .values(forward_state=state)
+        )
+
+    _write(chat_store, "set_chat_forward_state", write)
+
+
+def _active_session_id(chat_store: ChatStore, root_id: str) -> str | None:
+    """Session linked to an active thread, if any."""
+
+    def read(session: Session) -> str | None:
+        row = session.get(SqlChatThread, (current_workspace_id(), root_id))
+        if row is None or row.agent_state != "active" or not row.session_id:
+            return None
+        return row.session_id
+
+    session_id = _read(chat_store, "select_active_agent_session", read)
+    return session_id if isinstance(session_id, str) else None
+
+
+async def _maybe_forward_bot_reply(
+    request: Any,
+    chat_store: ChatStore,
+    message: ChatMessage,
+) -> None:
+    """Copy a bot reply into the session when the owner may edit it."""
+    if message.thread_root_id is None:
+        return
+    account = await asyncio.to_thread(chat_store.get_agent_account_by_principal, message.author_id)
+    if account is None:
+        return
+    session_id = await asyncio.to_thread(_active_session_id, chat_store, message.thread_root_id)
+    if session_id is None:
+        return
+    from omnigent.server.auth import LEVEL_EDIT
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    level = await asyncio.to_thread(
+        SqlAlchemyPermissionStore(chat_store.storage_location).get_permission_level,
+        account.owner_id,
+        session_id,
+    )
+    if not isinstance(level, int) or level < LEVEL_EDIT:
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return
+    owner_name = await asyncio.to_thread(
+        _read,
+        chat_store,
+        "select_owner_display",
+        lambda session: _display_in(session, account.owner_id),
+    )
+    text = f"[{account.display_name} ({owner_name})] {message.body}"
+    try:
+        await _post_first_message(_request_as_owner(request), session_id, text)
+    except Exception:
+        _logger.exception("bot reply forward failed session=%s", session_id)
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return
+    await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
 
 
 async def schedule_after_human_post(
@@ -831,24 +1036,47 @@ async def schedule_after_human_post(
     channel: ChatChannel,
     message: ChatMessage,
 ) -> None:
-    """Claim and start an agent thread after a newly stored human message.
+    """Claim and start an agent thread after a mention, as the human owner.
 
-    A replayed post, a non-human author, any handle other than ``agent``,
-    and a thread that is already starting or active do not create a session.
+    A human mention starts as that human. An agent-account mention starts as
+    the account's owner and records the account as initiator. A bot reply in
+    an active thread is forwarded when the owner has edit access. A thread
+    that is already starting or active is left alone.
     """
     try:
         _bind_store(chat_store)
         _ensure_timeout_loop(chat_store)
-        if principal_kind(message.author_id) != "user" or not _mentions_agent(message.body):
+        if not _mentions_agent(message.body):
+            if principal_kind(message.author_id) == "agent_account":
+                await _maybe_forward_bot_reply(request, chat_store, message)
+            return
+        kind = principal_kind(message.author_id)
+        started_by: str | None = None
+        if kind == "user":
+            caller = message.author_id
+        elif kind == "agent_account":
+            account = await asyncio.to_thread(
+                chat_store.get_agent_account_by_principal, message.author_id
+            )
+            if account is None:
+                return
+            if await asyncio.to_thread(_quota_blocks, chat_store, account.id):
+                await asyncio.to_thread(_post_quota_notice, chat_store, channel, message)
+                return
+            caller = account.owner_id
+            started_by = account.id
+        else:
             return
         root_id = message.thread_root_id or message.id
         claimed = await asyncio.to_thread(
-            _claim, chat_store, channel.id, root_id, message.author_id
+            _claim, chat_store, channel.id, root_id, caller, started_by
         )
         if not claimed:
             return
         await asyncio.to_thread(_publish_thread, chat_store, channel.id, root_id)
-        task = asyncio.create_task(_run_start(request, chat_store, channel, message, root_id))
+        task = asyncio.create_task(
+            _run_start(request, chat_store, channel, message, root_id, caller, started_by)
+        )
         _pending.add(task)
         task.add_done_callback(_pending.discard)
     except Exception:
@@ -876,6 +1104,7 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
                 SqlChatThread.root_message_id,
                 SqlChatThread.channel_id,
                 SqlChatThread.caller_id,
+                SqlChatThread.started_by_agent_account_id,
             ).where(
                 SqlChatThread.workspace_id == current_workspace_id(),
                 SqlChatThread.agent_state == "starting",
@@ -884,7 +1113,7 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
             )
         ).all()
         notices: list[_Notice] = []
-        for root_id, channel_id, caller_id in rows:
+        for root_id, channel_id, caller_id, started_by in rows:
             now = now_epoch_us()
             changed = cast(
                 CursorResult[Any],
@@ -912,11 +1141,13 @@ def _fail_stale_starts(chat_store: ChatStore) -> None:
                     system_code="timeout",
                 )
             )
+            owner = caller_id or _AUTHOR_SYSTEM
             _record(
                 "timeout",
                 channel_id=channel_id,
                 message_id=root_id,
-                caller=caller_id or _AUTHOR_SYSTEM,
+                account_id=started_by or owner,
+                owner_id=owner,
                 session_id=None,
             )
         return notices

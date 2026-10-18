@@ -775,8 +775,10 @@ def test_real_seatbelt_worker_reads_only_public_signer_state_and_relay_network(
     relay_probe.close()
 
     codex = tmp_path / "codex"
+    # /usr/bin/python3 on macOS is an xcrun shim. Seatbelt cannot open
+    # Xcode's libxcrun, so the probe uses the granted install interpreter.
     codex.write_text(
-        "#!/usr/bin/python3\n"
+        f"#!{sys.executable}\n"
         "import os, pathlib, socket, sys\n"
         f"for path in ({str(private_marker)!r}, {str(host_marker)!r}):\n"
         "    try:\n"

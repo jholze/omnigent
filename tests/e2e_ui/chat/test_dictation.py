@@ -28,6 +28,7 @@ A failure here means one of:
 from __future__ import annotations
 
 import re
+import sys
 from typing import Any
 
 from playwright.sync_api import Browser, BrowserContext, Page, expect
@@ -109,12 +110,12 @@ def test_hotkey_toggles_dictation(
     browser_context_args: dict[str, Any],
     seeded_session: tuple[str, str],
 ) -> None:
-    """⌘⌥V (Ctrl+Alt+V on CI's Linux) starts and stops dictation.
+    """⌘⌥V (Ctrl+Alt+V on Linux) starts and stops dictation.
 
     The chord is matched on the physical ``KeyV`` code, so this exercises
     the same window keydown path a real keyboard drives — not the mic
-    button's onClick. Mirrors the Ctrl+Alt chord coverage in
-    ``tests/e2e_ui/hotkeys/test_sidebar_hotkeys.py``.
+    button's onClick. The command modifier follows the platform, the same
+    way ``tests/e2e_ui/sessions/test_new_session_hotkey.py`` does.
     """
     base_url, session_id = seeded_session
     context, page = _open_server_dictation_page(
@@ -127,12 +128,13 @@ def test_hotkey_toggles_dictation(
         expect(mic).to_have_attribute("aria-pressed", "false")
 
         # Start via the hotkey — server handshake flips aria-pressed once
-        # audio flows.
-        page.keyboard.press("Control+Alt+KeyV")
+        # audio flows. macOS binds ⌘, other platforms bind Ctrl.
+        modifier = "Meta" if sys.platform == "darwin" else "Control"
+        page.keyboard.press(f"{modifier}+Alt+KeyV")
         expect(mic).to_have_attribute("aria-pressed", "true", timeout=_TRANSCRIPT_TIMEOUT_MS)
 
         # Stop via the hotkey.
-        page.keyboard.press("Control+Alt+KeyV")
+        page.keyboard.press(f"{modifier}+Alt+KeyV")
         expect(mic).to_have_attribute("aria-pressed", "false")
     finally:
         context.close()

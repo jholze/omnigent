@@ -49,10 +49,10 @@ class LoadSkillTool(Tool):
         try:
             discovery_root = agent_root or Path.cwd()
         except OSError:
-            # A runner can outlive its working directory; bundled skills still work.
-            host_skills = []
-        else:
-            host_skills = discover_host_skills(discovery_root, skills_filter)
+            # cwd is gone. Project walks need it; home skills do not.
+            # Root only adds /.claude and /.agents before the home scan.
+            discovery_root = Path("/")
+        host_skills = discover_host_skills(discovery_root, skills_filter)
 
         bundled_names = {s.name for s in skills}
         for hs in host_skills:

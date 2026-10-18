@@ -406,6 +406,16 @@ class _TitleRecordingOutput(DummyOutput):
         self.flush_count += 1
 
 
+def _patch_term_height(monkeypatch: pytest.MonkeyPatch, rows: int) -> None:
+    """Patch ``_term_height`` on the module ``TerminalHost`` methods call."""
+
+    def _rows() -> int:
+        return rows
+
+    monkeypatch.setattr("omnigent_ui_sdk.terminal._host._term_height", _rows)
+    monkeypatch.setitem(TerminalHost.output.__globals__, "_term_height", _rows)
+
+
 def _patch_create_output(monkeypatch: pytest.MonkeyPatch, output: object) -> None:
     """
     Replace the SDK's ``create_output`` factory so the next
@@ -424,10 +434,14 @@ def _patch_create_output(monkeypatch: pytest.MonkeyPatch, output: object) -> Non
     :param output: The replacement object — typically a
         :class:`_TitleRecordingOutput` or similar stub.
     """
-    monkeypatch.setattr(
-        "omnigent_ui_sdk.terminal._host.create_output",
-        lambda: output,
-    )
+
+    def factory() -> object:
+        return output
+
+    monkeypatch.setattr("omnigent_ui_sdk.terminal._host.create_output", factory)
+    # The class that runs may be a different module object than the one
+    # the string path imports. Its ``__init__`` reads this global.
+    monkeypatch.setitem(TerminalHost.__init__.__globals__, "create_output", factory)
 
 
 @pytest.mark.asyncio
@@ -602,7 +616,7 @@ def test_output_dispatches_stream_replace_to_replace_live_region(
     ``_live_line_count`` and ``_streamed_line_count`` must both be 0
     (committed), and the renderable content must appear in stdout.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamReplace
+    StreamReplace = TerminalHost.output.__globals__["StreamReplace"]
 
     host = TerminalHost(model_name="test")
 
@@ -820,7 +834,7 @@ def test_output_stream_live_replaces_live_region(
     each token re-renders the unstable tail via ``StreamLive``,
     erasing the previous tail and painting the updated one.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamLive
+    StreamLive = TerminalHost.output.__globals__["StreamLive"]
 
     host = TerminalHost(model_name="test")
 
@@ -869,7 +883,9 @@ def test_stream_live_then_replace_commits(
     boundary, it emits ``StreamReplace`` which clears the live
     region and commits the content permanently.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamLive, StreamReplace
+    _host_types = TerminalHost.output.__globals__
+    StreamLive = _host_types["StreamLive"]
+    StreamReplace = _host_types["StreamReplace"]
 
     host = TerminalHost(model_name="test")
 
@@ -905,7 +921,7 @@ def test_live_line_count_tracks_rendered_height(
     Uses a multi-line renderable to verify the count isn't hardcoded
     to 1.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamLive
+    StreamLive = TerminalHost.output.__globals__["StreamLive"]
 
     host = TerminalHost(model_name="test")
 
@@ -947,17 +963,14 @@ def test_live_region_capped_to_viewport_ceiling(
     reserved rows) and renders content taller than 5 lines. The cap
     must truncate to the ceiling.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamLive
+    StreamLive = TerminalHost.output.__globals__["StreamLive"]
 
     host = TerminalHost(model_name="test")
 
     monkeypatch.setattr(sys.stdout, "write", lambda data: len(data))
     monkeypatch.setattr(sys.stdout, "flush", lambda: None)
     # Fake a tiny terminal: 10 rows → ceiling = 10 - 5 = 5.
-    monkeypatch.setattr(
-        "omnigent_ui_sdk.terminal._host._term_height",
-        lambda: 10,
-    )
+    _patch_term_height(monkeypatch, 10)
 
     # Render 20 lines — well above the ceiling of 5.
     long_text = "\n".join(f"line {i}" for i in range(20))
@@ -998,7 +1011,7 @@ def test_growing_live_region_erase_count_matches_prior_render(
     Uses a fake 15-row terminal (ceiling=10) and grows the list
     from 2 to 20 lines across 10 steps.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamLive
+    StreamLive = TerminalHost.output.__globals__["StreamLive"]
 
     host = TerminalHost(model_name="test")
 
@@ -1011,10 +1024,7 @@ def test_growing_live_region_erase_count_matches_prior_render(
     monkeypatch.setattr(sys.stdout, "write", _capture_write)
     monkeypatch.setattr(sys.stdout, "flush", lambda: None)
     # Fake terminal: 15 rows → ceiling = 15 - 5 = 10.
-    monkeypatch.setattr(
-        "omnigent_ui_sdk.terminal._host._term_height",
-        lambda: 15,
-    )
+    _patch_term_height(monkeypatch, 15)
     ceiling = 10
 
     prev_live_count = 0
@@ -1065,7 +1075,9 @@ def test_stream_replace_after_overflowing_live_region(
     a commit: the erase count must match ``_live_line_count`` (which
     was capped), and after commit both counters reset to 0.
     """
-    from omnigent_ui_sdk.terminal._formatter import StreamLive, StreamReplace
+    _host_types = TerminalHost.output.__globals__
+    StreamLive = _host_types["StreamLive"]
+    StreamReplace = _host_types["StreamReplace"]
 
     host = TerminalHost(model_name="test")
 
@@ -1078,10 +1090,7 @@ def test_stream_replace_after_overflowing_live_region(
     monkeypatch.setattr(sys.stdout, "write", _capture_write)
     monkeypatch.setattr(sys.stdout, "flush", lambda: None)
     # Tiny viewport: ceiling = 8 - 5 = 3.
-    monkeypatch.setattr(
-        "omnigent_ui_sdk.terminal._host._term_height",
-        lambda: 8,
-    )
+    _patch_term_height(monkeypatch, 8)
     ceiling = 3
 
     # Plant a live region that overflows (15 lines > ceiling of 3).

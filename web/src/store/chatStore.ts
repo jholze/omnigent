@@ -60,7 +60,6 @@ import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import { isMessageItem, type ConversationItem, type MessageItem } from "@/lib/conversationItems";
 import { buildBubbles } from "@/lib/renderItems";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
-import { emitHumanChat } from "@/lib/humanChat";
 import {
   ApiError,
   approve as approveElicitation,
@@ -7176,15 +7175,6 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // get wrong. Guarded by conversation id so a late frame from a
       // switched-away stream can't paint another session's viewers.
       applyToNamedConversation(event.conversationId, { viewers: event.viewers });
-      return;
-    case "session_human_chat":
-      // No transcript write. The column loads the text itself; this
-      // signal carries only the id so a closed column can mark a dot.
-      emitHumanChat({
-        conversationId: event.conversationId,
-        id: event.id,
-        createdAt: event.createdAt,
-      });
       return;
     case "session_agent_changed":
       // The session's bound agent changed. Apply the binding the event itself carries immediately,

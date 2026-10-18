@@ -1444,6 +1444,9 @@ def test_host_reset_id_mints_fresh_id_when_no_daemon_runs(
     """
     import yaml
 
+    # An isolated OMNIGENT_CONFIG_HOME makes reset-id write there instead of
+    # the CONFIG_PATH this test plants.
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)

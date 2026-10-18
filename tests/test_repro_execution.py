@@ -418,7 +418,12 @@ def test_non_session_urls_do_not_trigger_snapshots(tmp_path):
     assert set(collector.sessions) == {("http://localhost", "s"), ("http://localhost", "other")}
 
 
-@pytest.mark.skipif(not hasattr(os, "WNOWAIT"), reason="requires waitid with WNOWAIT")
+def _waitid_available() -> bool:
+    # python-build-standalone's macOS CPython defines WNOWAIT but not waitid.
+    return hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+
+
+@pytest.mark.skipif(not _waitid_available(), reason="requires os.waitid with WNOWAIT")
 def test_cleanup_signals_only_while_child_identity_is_reserved(tmp_path, monkeypatch):
     from dev.repro_env import execution
 
@@ -439,7 +444,7 @@ def test_cleanup_signals_only_while_child_identity_is_reserved(tmp_path, monkeyp
     assert len(signaled) == 1
 
 
-@pytest.mark.skipif(not hasattr(os, "WNOWAIT"), reason="requires waitid with WNOWAIT")
+@pytest.mark.skipif(not _waitid_available(), reason="requires os.waitid with WNOWAIT")
 def test_repeated_signals_defer_journal_io(tmp_path, monkeypatch):
     import signal
     import time
@@ -795,7 +800,8 @@ def test_group_wait_failure_preserves_command_result(tmp_path, monkeypatch, erro
     def fail(*args):
         raise error("group wait unavailable")
 
-    monkeypatch.setattr(execution.os, "waitid", fail)
+    # python-build-standalone macOS builds omit os.waitid; the test injects it.
+    monkeypatch.setattr(execution.os, "waitid", fail, raising=False)
     monkeypatch.setattr(
         execution.os, "killpg", lambda *args: pytest.fail("unowned group signaled")
     )
@@ -1191,17 +1197,24 @@ for _ in range(4000):
 print('survived')
 sys.exit(7)
 """
-    assert run(tmp_path, [sys.executable, "-c", script, nested]) == 7
-    attempt = next((tmp_path / "execution").glob("*/attempt.json")).parent
-    saved = (attempt / "stdout.txt").read_text()
-    assert nested not in saved
-    assert saved.endswith("survived\n")
-    record = json.loads((attempt / "attempt.json").read_text())
-    assert record["command"] is None
-    assert not record["output_complete"]
-    assert {"command_redaction", "output_redaction"} <= {
-        e["operation"] for e in record["collection_errors"]
-    }
+    # celpy sets the process recursion limit to 2500 on import. xdist reuses
+    # that worker, and this payload then redacts instead of raising.
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        assert run(tmp_path, [sys.executable, "-c", script, nested]) == 7
+        attempt = next((tmp_path / "execution").glob("*/attempt.json")).parent
+        saved = (attempt / "stdout.txt").read_text()
+        assert nested not in saved
+        assert saved.endswith("survived\n")
+        record = json.loads((attempt / "attempt.json").read_text())
+        assert record["command"] is None
+        assert not record["output_complete"]
+        assert {"command_redaction", "output_redaction"} <= {
+            e["operation"] for e in record["collection_errors"]
+        }
+    finally:
+        sys.setrecursionlimit(limit)
 
 
 @pytest.mark.parametrize("sid", ["conv_custom-id", "ac82ef19", "name:child", "with space"])

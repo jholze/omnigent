@@ -204,6 +204,17 @@ class _ScriptedLookup:
         return None if self.calls <= self.misses else self.client
 
 
+def _install_lookup(monkeypatch: pytest.MonkeyPatch, lookup: _ScriptedLookup) -> None:
+    """Point both the facade and the helper that calls it at ``lookup``.
+
+    ``_resolve_connected_runner_client`` calls the helper module's
+    ``_get_runner_client``. Patching only the facade leaves that name
+    bound to the real resolver, so the scripted lookup records no calls.
+    """
+    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    monkeypatch.setattr(helpers, "_get_runner_client", lookup)
+
+
 def _wait_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     """Return the structured ``runner_client_wait`` records captured so far."""
     return [r for r in caplog.records if getattr(r, "event_name", None) == "runner_client_wait"]
@@ -222,7 +233,7 @@ async def test_wait_for_runner_client_retries_a_lookup_that_misses_after_connect
     """
     caplog.set_level(logging.INFO, logger="omnigent.server.routes.sessions")
     lookup = _ScriptedLookup(misses=1)
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x", None, _ConnectsRegistry(virtual_time), runner_id="runner_ok", timeout_s=30.0
@@ -245,7 +256,7 @@ async def test_wait_for_runner_client_first_lookup_hit_needs_no_retry(
     """The common case resolves on the first lookup without pausing."""
     caplog.set_level(logging.INFO, logger="omnigent.server.routes.sessions")
     lookup = _ScriptedLookup(misses=0)
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x",
@@ -271,7 +282,7 @@ async def test_wait_for_runner_client_gives_up_after_bounded_lookups(
     """A connected runner that never resolves is retried a fixed number of times."""
     caplog.set_level(logging.INFO, logger="omnigent.server.routes.sessions")
     lookup = _ScriptedLookup(misses=10**6)
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x", None, _ConnectsRegistry(virtual_time), runner_id="runner_x", timeout_s=30.0
@@ -311,7 +322,7 @@ async def test_wait_for_runner_client_lookup_retries_stay_inside_the_deadline(
 ) -> None:
     """Connect wait and lookup retries share one budget; nothing outlasts it."""
     lookup = _ScriptedLookup(misses=10**6)
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x",
@@ -338,7 +349,7 @@ async def test_wait_for_runner_client_rejects_a_hit_after_the_deadline(
         misses=0,
         on_call=lambda _n: setattr(virtual_time, "now", lookup_finishes_at),
     )
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x", None, _ConnectsRegistry(virtual_time), runner_id="runner_slow", timeout_s=5.0
@@ -359,7 +370,7 @@ async def test_wait_for_runner_client_rejects_a_hit_when_runner_reported_dead(
         misses=0,
         on_call=lambda _n: reports.record("runner_dead", "exited with code 1", owner=None),
     )
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x",
@@ -385,7 +396,7 @@ async def test_wait_for_runner_client_stops_retrying_when_runner_reported_dead(
         misses=10**6,
         on_call=lambda _n: reports.record("runner_dead", "exited with code 1", owner=None),
     )
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     result = await _wait_for_runner_client(
         "conv_x",
@@ -408,7 +419,7 @@ async def test_wait_for_runner_client_never_connected_makes_no_lookup(
     """A runner that never connects fails at the existing deadline, unresolved."""
     caplog.set_level(logging.INFO, logger="omnigent.server.routes.sessions")
     lookup = _ScriptedLookup(misses=0)
-    monkeypatch.setattr(sessions_facade, "_get_runner_client", lookup)
+    _install_lookup(monkeypatch, lookup)
 
     loop = asyncio.get_event_loop()
     start = loop.time()

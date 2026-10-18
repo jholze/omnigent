@@ -44,6 +44,8 @@ describe("useOnboardingRunnerHost", () => {
       initialProps: { hosts: [host("laptop", "offline"), host("box")] },
     });
     await waitFor(() => expect(bridge.takeOnboardingRunner).toHaveBeenCalled());
+    // React 19 does not flush the resolved shell promise into render until act.
+    await act(async () => {});
     expect(result.current).toMatchObject({ pending: true, hostId: null });
     rerender({ hosts: [host("laptop"), host("box")] });
     expect(result.current).toEqual({ pending: false, hostId: "laptop" });

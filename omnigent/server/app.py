@@ -114,7 +114,6 @@ from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
-from omnigent.server.routes.session_chat import create_session_chat_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
@@ -153,7 +152,6 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
-from omnigent.stores.session_chat_store import SessionChatStore
 
 _logger = logging.getLogger(__name__)
 _RECONNECT_BINDING_BATCH_SIZE = 128
@@ -1016,6 +1014,10 @@ def _build_native_bundle(provider: NativeHarnessProvider) -> bytes:
     so the produced bytes are byte-identical to the pre-loop builders (which all
     passed ``model=None`` where accepted).
 
+    Packaged native materializers already set ``spawn: true``, which is what
+    registers ``sys_session_create`` / ``sys_session_send`` / ``sys_session_close``.
+    This builder does not add or strip that flag.
+
     :param provider: The native harness provider row.
     :returns: Gzipped tarball bytes suitable for the artifact store.
     """
@@ -1098,6 +1100,11 @@ def _build_acp_bundle(*, harness: str, name: str) -> bytes:
     from the host's own ``acp:`` config (user agents) or PATH (builtin CLI rows)
     at spawn time, so nothing host-specific is baked into the bundle.
 
+    ``spawn: true`` is set so the picker agent is offered ``sys_session_create``,
+    ``sys_session_send``, and ``sys_session_close``. Without it the agent can
+    read sessions but cannot launch a child, and falls back to the REST
+    session API.
+
     :param harness: The harness id, e.g. ``"acp:devin"`` or ``"grok"``.
     :param name: The agent name / stable-id seed — a valid ``[a-zA-Z0-9_-]+``
         slug (e.g. ``"devin"``, ``"grok"``), never a display label with spaces.
@@ -1115,6 +1122,9 @@ def _build_acp_bundle(*, harness: str, name: str) -> bytes:
         "prompt": _ACP_AGENT_PROMPT,
         "executor": {"type": "omnigent", "config": {"harness": harness}},
         "os_env": {"type": "caller_process", "cwd": ".", "sandbox": {"type": "none"}},
+        # Advertises sys_session_create/send/close. The launch command itself
+        # is still resolved from the host at spawn time.
+        "spawn": True,
     }
     with tempfile.TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "src"
@@ -1403,7 +1413,6 @@ def create_app(
     feature_flags: FeatureFlags | None = None,
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
-    chat_store: SessionChatStore | None = None,
     team_chat_store: TeamChatStore | None = None,
 ) -> FastAPI:
     """
@@ -1543,8 +1552,6 @@ def create_app(
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal
         root deployment.
-    :param chat_store: Store for human lines beside a shared session.
-        ``None`` leaves ``/v1/sessions/{id}/chat`` unmounted.
     :param team_chat_store: Store for team chat (channels, DMs, messages).
         When omitted it is derived from ``conversation_store``'s storage
         location, so the ``/v1/chat`` routes mount on every real database
@@ -1747,6 +1754,12 @@ def create_app(
             runner_router,
             agent_store=agent_store,
         )
+        from omnigent.server.subagent_wake import configure_subagent_return_notifier
+
+        _uninstall_subagent_return_notifier = configure_subagent_return_notifier(
+            app_inst,
+            permission_store,
+        )
 
         from omnigent.runner.resource_registry import (
             SessionResourceRegistry,
@@ -1931,6 +1944,10 @@ def create_app(
             await cancel_managed_launch_tasks()
             await background_title_coordinator.shutdown()
             _uninstall_subagent_block_notifier()
+            _uninstall_subagent_return_notifier()
+            from omnigent.server.subagent_wake import uninstall_return_wake_delivery
+
+            uninstall_return_wake_delivery()
             set_resource_registry(None)
             set_runner_ws_factory(None)
             set_runner_direct_attach_resolver(None)
@@ -1975,6 +1992,8 @@ def create_app(
     app.state.sandbox_config = sandbox_config
     app.state.branding_snapshot = branding_snapshot
     app.state.feature_flags = resolved_feature_flags
+    # Agent-account token lookup reads this before workspace resolution.
+    app.state.team_chat_store = team_chat_store
     # Deployment base path (e.g. "/proxy/6767"), so route handlers that build
     # a full-page redirect (not covered by BasePathMiddleware's inbound-only
     # strip) can prefix it themselves. "" for a root deployment.
@@ -2282,6 +2301,9 @@ def create_app(
             # (not an attribute). Other reserved keys are dropped so a handler can
             # never shadow an envelope field or collide with an _emit_audit_event
             # argument (session_id / phase would raise TypeError).
+            from omnigent.server.agent_action_audit import record_agent_action
+
+            record_agent_action(request, status_code)
             _bag = current_request_audit_attrs()
             if operation == "create_session":
                 creation_failed = failed or status_code is None or status_code >= 400
@@ -2430,9 +2452,18 @@ def create_app(
                     error_phase=exc.phase.value,
                 ),
             )
+        content: dict[str, object] = {"error": {"code": exc.code, "message": exc.message}}
+        headers = None
+        if exc.retry_after_seconds is not None:
+            retry_after = max(1, int(exc.retry_after_seconds))
+            error_body = content["error"]
+            if isinstance(error_body, dict):
+                error_body["retry_after_seconds"] = retry_after
+            headers = {"Retry-After": str(retry_after)}
         return JSONResponse(
             status_code=exc.http_status,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content=content,
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -3446,17 +3477,6 @@ def create_app(
             ),
             prefix="/v1",
             tags=["comments"],
-        )
-    if chat_store is not None:
-        app.include_router(
-            create_session_chat_router(
-                chat_store,
-                conversation_store,
-                auth_provider=auth_provider,
-                permission_store=permission_store,
-            ),
-            prefix="/v1",
-            tags=["session_chat"],
         )
     if team_chat_store is not None:
         from omnigent.server.routes.chat import create_chat_router
@@ -4511,7 +4531,7 @@ class _SPAStaticFiles(StaticFiles):
         if path == "login" and self._index_html is not None:
             from omnigent.server.google_accounts import inject_login_shell
 
-            return inject_login_shell(self._shell_response(scope), scope)
+            return inject_login_shell(self._shell_response(scope), dict(scope))
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:

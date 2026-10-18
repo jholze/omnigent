@@ -1,0 +1,391 @@
+name: Fork CI
+
+# Fork-only PR CI for jholze/omnigent. Kept in its own file so upstream syncs of
+# ci.yml / lint.yml / web-tests.yml / e2e-ui.yml never conflict with it.
+#
+# Runs on the owner's Apple Silicon Mac (self-hosted label omnigent-ci).
+# Two runners share those labels, so jobs in one run spread across both.
+# They also share one machine's memory, so the Playwright job waits until
+# pytest has finished. Concurrency is per pull request (or per ref, for a
+# manual dispatch): a push cancels only that ref's in-progress run. The
+# inner tree runs as its own process so its sys.path edits and worker
+# watchdog cannot leak into the rest of the suite. The runner disk persists:
+# uv and pnpm caches live in the runner user's home. Playwright browsers
+# live in each runner's tool cache so the two runners do not share one
+# install lock. Neither uses actions/cache (the token is contents:read only).
+#
+# The repo is public. Every job is gated so only jholze's same-repo pull
+# requests and his manual dispatches are queued. A cloud-agent push keeps the
+# pull request author (jholze) even when github.actor is the bot, so that
+# author is accepted too. pull_request_target is not used. A fork pull
+# request skips before the Mac picks up work. DB-server, databricks, slack,
+# and codex-parity lanes stay out; pytest runs on SQLite.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+concurrency:
+  # Per PR, or per ref for workflow_dispatch. A newer push cancels that
+  # ref's older run and leaves every other PR's run alone.
+  group: fork-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-lint:
+    name: Python lint (ruff, pyrefly)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          uv --version
+      - name: Install dependencies (same extras as upstream lint.yml)
+        run: |
+          uv sync --locked --group lint \
+            --extra hindsight \
+            --extra nimble \
+            --extra s3 \
+            --extra tracing
+      - name: ruff check
+        run: .venv/bin/python -m ruff check --force-exclude .
+      - name: ruff format --check
+        run: .venv/bin/python -m ruff format --check --force-exclude .
+      - name: pyrefly check
+        run: .venv/bin/pyrefly check
+
+  pytest:
+    name: Pytest (SQLite)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        # Node is required by the local relay tests that used to be the misc shard.
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          command -v node
+          uv --version
+          node --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          test "$node_major" = "26"
+          command -v rg >/dev/null || echo "::warning::ripgrep (rg) is not on PATH; Grep-tool tests may fail."
+          command -v tmux >/dev/null || echo "::warning::tmux is not on PATH; terminal tests may fail."
+      - name: Install dependencies
+        run: uv sync --locked --extra all --extra postgres --group test
+      - name: Run pytest (SQLite, not databricks)
+        shell: bash
+        env:
+          PYTHONFAULTHANDLER: "1"
+          OMNIGENT_TEST_TIMEOUT_SCALE: "4"
+          # /tmp is a symlink on macOS, which the signer rejects. /private/tmp
+          # is the real sticky directory and stays under the sun_path limit
+          # when pytest's basetemp is the short path below.
+          TMPDIR: /private/tmp
+        run: |
+          mkdir -p artifacts artifacts/progress
+          unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
+          unset OMNIGENT_OIDC_ALLOWED_DOMAINS
+          # OIDC tests still read ~/.omnigent unless the admin credentials path
+          # is an empty data dir. Leave the config home unset: one shared empty
+          # directory is visible to every worker, and the app writes a host id.
+          export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
+          mkdir -p "$OMNIGENT_DATA_DIR"
+          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
+          : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
+          export PYTEST_PROGRESS_LOG_DIR="${GITHUB_WORKSPACE}/artifacts/progress"
+
+          run_suite() {
+            local name="$1"
+            shift
+            # sun_path allows 103 chars. oa-<letter>-<last 6 run-id digits>
+            # keeps the tmux socket near 99 and isolates concurrent PRs.
+            # main=m, inner=i, integration=n (both suites start with i).
+            # Positive slice: macOS bash 3.2 rejects ${var: -6}.
+            local rid="${GITHUB_RUN_ID:-local}"
+            if [ "${#rid}" -gt 6 ]; then
+              rid="${rid:$((${#rid}-6))}"
+            fi
+            local letter="${name:0:1}"
+            if [ "$name" = "integration" ]; then
+              letter=n
+            fi
+            local base="/private/tmp/oa-${letter}-${rid}"
+            rm -rf "$base"
+            uv run pytest "$@" \
+              --basetemp="$base" \
+              -m "not databricks" \
+              --timeout=300 \
+              --junitxml="artifacts/pytest-${name}.xml" \
+              -v --tb=short -r a \
+              || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in ${name}; treating as a pass." || exit "$rc"; }
+          }
+
+          # tests/inner prepends the tests directory to sys.path at import and
+          # loads a worker watchdog from its conftest. Upstream gives that
+          # tree its own job. A second process on this same runner keeps those
+          # mutations off deploy/scripts imports in the main suite.
+          # Integration stays serial: its session fixtures share one mock server.
+          # -n 4, not -n auto: this Mac also runs the other jobs, and auto
+          # spawned enough workers that xdist reported them "not properly
+          # terminated" for the rest of the suite.
+          run_suite main tests \
+            --ignore=tests/e2e \
+            --ignore=tests/e2e_ui \
+            --ignore=tests/codex_parity \
+            --ignore=tests/integration \
+            --ignore=tests/inner \
+            -n 4 \
+            --dist=worksteal
+          run_suite inner tests/inner -n 4 --dist=worksteal
+          run_suite integration tests/integration
+      - name: Upload pytest artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-pytest-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  web:
+    name: Web (lint, typecheck, vitest, build)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use Node and pnpm on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v node
+          command -v pnpm
+          node --version
+          pnpm --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          pnpm_major="$(pnpm --version | cut -d. -f1)"
+          test "$node_major" = "26"
+          test "$pnpm_major" = "11"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter web
+      - name: Format check (prettier)
+        run: pnpm --filter web run format:check
+      - name: Lint (oxlint)
+        run: pnpm --filter web run lint
+      - name: Typecheck (tsc -b)
+        run: pnpm --filter web run type-check
+      - name: Unit tests (vitest run)
+        env:
+          # Node 26 turns on a global localStorage that stays undefined unless
+          # --localstorage-file is set, and that getter shadows jsdom. Upstream
+          # web CI is Node 22 and does not do this. Disable it so tests call
+          # jsdom's Storage.
+          NODE_OPTIONS: --no-experimental-webstorage
+        run: pnpm --filter web run test
+      - name: Build
+        run: pnpm --filter web run build
+
+  e2e-ui:
+    # NON-BLOCKING: many Playwright UI tests already fail on main.
+    # continue-on-error keeps a red run from failing the workflow.
+    # Waits for pytest so Chromium and the xdist workers do not share the
+    # Mac at the same time. !cancelled() still runs this job when pytest fails.
+    name: E2E UI (Playwright, non-blocking)
+    needs: [pytest]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    continue-on-error: true
+    runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
+    timeout-minutes: 180
+    env:
+      ANTHROPIC_API_KEY: ""
+      DATABRICKS_TOKEN: ""
+      TERM: xterm-256color
+      # /tmp is a symlink on macOS. The real sticky directory is /private/tmp.
+      TMPDIR: /private/tmp
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use the Mac toolchain on PATH
+        run: |
+          {
+            echo "$HOME/.local/bin"
+            echo "/opt/homebrew/bin"
+            echo "/usr/local/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v uv
+          command -v node
+          command -v pnpm
+          uv --version
+          node --version
+          pnpm --version
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          pnpm_major="$(pnpm --version | cut -d. -f1)"
+          test "$node_major" = "26"
+          test "$pnpm_major" = "11"
+      - name: Install project + test dependencies
+        run: uv sync --locked --extra all --group test
+      - name: Use a per-runner Playwright cache
+        # The default browser directory is one lock in the shared home.
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TOOL_CACHE}/ms-playwright" >> "$GITHUB_ENV"
+      - name: Install Playwright Chromium
+        # No --with-deps: that path is apt-based and does not apply on macOS.
+        # Browsers are in this runner's tool cache. Cap the step so a wedged
+        # install cannot hold the Mac for the whole job timeout.
+        timeout-minutes: 20
+        run: uv run playwright install chromium
+      - name: Build web SPA
+        run: |
+          pnpm install --frozen-lockfile --filter web
+          pnpm --filter web run build
+      - name: Run UI e2e tests (not visual, not nightly)
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          mkdir -p artifacts
+          # pytest 9 holds tracebacks for the session summary. The job
+          # timeout cancels the suite before that summary, so write each
+          # failure as soon as the call phase ends.
+          cat > "${RUNNER_TEMP}/e2e_tb.py" << 'PY'
+          from pathlib import Path
+
+          def _log_tails() -> str:
+              found: dict[str, Path] = {}
+              for root in ("/private/tmp", "/tmp"):
+                  base = Path(root)
+                  if not base.is_dir():
+                      continue
+                  for child in base.glob("pytest-of-*"):
+                      for path in child.rglob("*.log"):
+                          if path.name not in {"server.log", "runner.log", "mock_llm.log"}:
+                              continue
+                          prev = found.get(path.name)
+                          try:
+                              mtime = path.stat().st_mtime
+                          except OSError:
+                              continue
+                          if prev is None or mtime > prev.stat().st_mtime:
+                              found[path.name] = path
+              chunks: list[str] = []
+              for name, path in sorted(found.items()):
+                  try:
+                      tail = path.read_text(errors="replace").splitlines()[-80:]
+                  except OSError as exc:
+                      tail = [str(exc)]
+                  chunks.append(f"\n----- tail {path} -----\n" + "\n".join(tail))
+              return "\n".join(chunks)
+
+          def pytest_runtest_logreport(report):
+              if report.when != "call" or report.outcome not in {"failed", "rerun"}:
+                  return
+              text = str(getattr(report, "longrepr", "") or "")
+              if not text:
+                  return
+              extra = _log_tails() if report.outcome == "failed" else ""
+              block = f"\n===== {report.outcome} {report.nodeid} =====\n{text}\n{extra}\n"
+              print(block, flush=True)
+              path = Path("artifacts/e2e-failures.txt")
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open("a", encoding="utf-8") as handle:
+                  handle.write(block)
+          PY
+          # The Mac user's ~/.omnigent/config.yaml selects a local provider.
+          # This suite expects the mock at OPENAI_BASE_URL, which is what
+          # upstream CI does when that file is absent.
+          config_home="${RUNNER_TEMP}/omnigent-config"
+          data_dir="${RUNNER_TEMP}/omnigent-data"
+          mkdir -p "$config_home" "$data_dir"
+          export OMNIGENT_CONFIG_HOME="$config_home"
+          export OMNIGENT_DATA_DIR="$data_dir"
+          # The Mac user's Claude login answers from Keychain and blocks on
+          # a TUI prompt. A fresh config dir is what a clean CI image has.
+          export CLAUDE_CONFIG_DIR="${RUNNER_TEMP}/claude-config"
+          mkdir -p "$CLAUDE_CONFIG_DIR"
+          printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "${CLAUDE_CONFIG_DIR}/.claude.json"
+          export CODEX_HOME="${RUNNER_TEMP}/codex-home"
+          mkdir -p "$CODEX_HOME"
+          # Allowed domains live next to the admin credentials path, which
+          # on this Mac is the user's ~/.omnigent list. An empty file means
+          # no domain restriction, matching a fresh deploy.
+          unset OMNIGENT_OIDC_ALLOWED_DOMAINS
+          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${data_dir}/admin-credentials"
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${data_dir}/allowed_domains"
+          : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
+          # A Keychain login makes Claude ignore a loopback mock URL. When a
+          # test sets that URL, hand the CLI an API key so it uses the mock.
+          real_claude="$(command -v claude || true)"
+          if [ -n "$real_claude" ]; then
+            mkdir -p "${RUNNER_TEMP}/bin"
+            # The ${...} below belong to the wrapper, not this step.
+            # shellcheck disable=SC2016
+            {
+              echo '#!/bin/sh'
+              echo 'case "${ANTHROPIC_BASE_URL:-}" in'
+              echo '  http://127.0.0.1:*|http://localhost:*)'
+              echo '    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then'
+              echo '      ANTHROPIC_API_KEY=mock-key'
+              echo '      export ANTHROPIC_API_KEY'
+              echo '    fi'
+              echo '    ;;'
+              echo 'esac'
+              printf 'exec %q "$@"\n' "$real_claude"
+            } > "${RUNNER_TEMP}/bin/claude"
+            chmod +x "${RUNNER_TEMP}/bin/claude"
+            export PATH="${RUNNER_TEMP}/bin:${PATH}"
+            export OMNIGENT_CLAUDE_PATH="${RUNNER_TEMP}/bin/claude"
+          fi
+          # Stop after a few failures. Each one waits out a timeout and a
+          # rerun, and the serial suite otherwise hits the job limit
+          # before pytest writes the summary.
+          PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
+            uv run pytest tests/e2e_ui \
+            -v --tb=short -r a \
+            -p e2e_tb \
+            --maxfail=4 \
+            --reruns=1 --reruns-delay=5 --rerun-show-tracebacks \
+            --ui-skip-build \
+            --junitxml=artifacts/e2e-ui.xml \
+            -m "not visual and not nightly" \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected; treating as a pass." || exit "$rc"; }
+      - name: Upload e2e artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-e2e-ui-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore

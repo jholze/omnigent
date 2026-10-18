@@ -1300,6 +1300,10 @@ class SessionEventInput(BaseModel):
         tools are fixed at start time.
     :param created_by: Optional internal attribution actor for runner-
         originated events that are triggered by a prior human turn.
+    :param subagent_wake_key: Dedupe id for a parent wake notice. Set by
+        the runner and by the server's returned-event wake so a
+        tool-registered child produces one notice. Stripped before the
+        message is persisted.
     """
 
     type: str
@@ -1310,6 +1314,7 @@ class SessionEventInput(BaseModel):
     model_override: str | None = None
     tools: list[dict[str, Any]] | None = None
     created_by: str | None = None
+    subagent_wake_key: str | None = None
 
     @field_validator("data")
     @classmethod
@@ -2262,6 +2267,27 @@ class SessionResponse(BaseModel):
     project_id: str | None = None
 
 
+_WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]")
+
+
+def is_absolute_workspace_path(path: str) -> bool:
+    """Whether ``path`` is absolute on the host (POSIX, Windows drive, or UNC).
+
+    A leading or trailing space, a NUL, an empty string, and a tilde prefix
+    are not absolute. The host expands ``~`` itself; this check only accepts
+    a path that is already absolute.
+
+    :param path: Candidate workspace, e.g. ``"/Users/corey/app"`` or
+        ``"C:/Users/corey/app"``.
+    :returns: ``True`` when the path may be stored as a session workspace.
+    """
+    if not path or path != path.strip() or "\x00" in path or path.startswith("~"):
+        return False
+    if path.startswith(("/", "\\\\")):
+        return True
+    return bool(_WINDOWS_ABS_PATH_RE.match(path))
+
+
 class UpdateSessionRequest(BaseModel):
     """
     Request body for ``PATCH /v1/sessions/{id}``.
@@ -2376,6 +2402,22 @@ class UpdateSessionRequest(BaseModel):
         owner-private, only the session owner may file it, and only into a
         project they own — the server verifies both. Independent of the
         legacy ``omni_project`` label, which is set via ``labels``.
+    :param workspace: Absolute workspace path on the session's host, e.g.
+        ``"/Users/corey/projects/myapp"`` or ``"C:/Users/corey/projects"``.
+        Rebinds an idle session: the metadata column, the composer-context
+        label, and (with ``host_id``) the host binding are updated, and a
+        stale ``runner_id`` is cleared so the next message launches on the
+        new path. Omitting the field leaves the path unchanged. An explicit
+        JSON ``null`` is rejected with 422. A relative path is 422. A path
+        the host rejects (missing, not a directory, outside the agent's
+        ``os_env.cwd``) is 400. Owner-only, including an administrator who
+        is not the session owner; the host must still belong to the caller.
+    :param host_id: Host that should launch the session's runner, e.g. a
+        32-char hex id. The caller must own the host. Omitting the field
+        leaves the host unchanged. An explicit JSON ``null`` is rejected
+        with 422 and does not unbind. Owner-only. A host requires a
+        workspace, either already stored or in this request, and the host
+        must be connected to this replica.
     """
 
     runner_id: str | None = None
@@ -2394,9 +2436,32 @@ class UpdateSessionRequest(BaseModel):
     archived: bool | None = None
     delete_worktree: bool = False
     project_id: str | None = None
+    workspace: str | None = Field(default=None, max_length=2048)
+    host_id: str | None = Field(default=None, max_length=128)
     silent: bool = False
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("workspace")
+    @classmethod
+    def _workspace_is_absolute(cls, value: str | None) -> str | None:
+        """Reject a workspace that is not an absolute path on the host."""
+        if value is None or is_absolute_workspace_path(value):
+            return value
+        raise ValueError("workspace must be an absolute path")
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_binding(self) -> Self:
+        """Explicit JSON null is not an unbind. Omit the field instead.
+
+        FastAPI reports this as 422, before the route's ``invalid_input``
+        checks. A missing key still leaves the stored value alone.
+        """
+        if "workspace" in self.model_fields_set and self.workspace is None:
+            raise ValueError("workspace must be an absolute path")
+        if "host_id" in self.model_fields_set and self.host_id is None:
+            raise ValueError("host_id must be a non-empty host id")
+        return self
 
 
 class AutomaticSessionRenameRequest(BaseModel):
@@ -4059,27 +4124,6 @@ class SessionPresenceEvent(_SSEEventBase):
     viewers: list[PresenceViewer]
 
 
-class SessionHumanChatEvent(_SSEEventBase):
-    """A person in this session sent a line to the other people.
-
-    The event does not carry the text. A client that may read the chat
-    loads it with ``GET /v1/sessions/{id}/chat``. The stream route only
-    requires read access, which a public-link visitor has, so the
-    generator drops this event for a caller who fails the chat rule.
-
-    :param type: Always ``"session.human_chat"``.
-    :param conversation_id: The stream that received this event, the root
-        or a sub-agent, e.g. ``"conv_abc123"``.
-    :param id: Stored line id, bare uuid hex.
-    :param created_at: Unix epoch microseconds of the stored line.
-    """
-
-    type: Literal["session.human_chat"]
-    conversation_id: str
-    id: str
-    created_at: int
-
-
 class ElicitationRequestParams(BaseModel):
     """
     Inner ``params`` block of a :class:`ElicitationRequestEvent`.
@@ -4779,7 +4823,6 @@ ServerStreamEvent = Annotated[
     | SessionSupersededEvent
     | SessionBtwSidechatEvent
     | SessionPresenceEvent
-    | SessionHumanChatEvent
     # ── Transient (SSE-only) — session resource lifecycle ─────
     | SessionResourceCreatedEvent
     | SessionResourceDeletedEvent
