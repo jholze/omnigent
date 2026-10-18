@@ -158,9 +158,10 @@ def extension_tool_definitions() -> list[dict[str, Any]]:
         ),
         _tool(
             "manage_session",
-            "Rename, archive, set labels or model_override, fork, delete, list children, "
-            "read the agent, read labels, or compare-and-clear a model override. "
-            "Replacing the agent bundle is a tar.gz upload, not this tool. "
+            "Rename, archive, set labels, model_override, workspace, or host_id, fork, "
+            "delete, list children, read the agent, read labels, or compare-and-clear a "
+            "model override. workspace and host_id rebind an idle session and clear its "
+            "runner. Replacing the agent bundle is a tar.gz upload, not this tool. "
             "reset_model clears only while expected_model_override is current. "
             "update, fork, delete, and reset_model need confirm. delete names what is removed.",
             {
@@ -179,6 +180,14 @@ def extension_tool_definitions() -> list[dict[str, Any]]:
                 "model_override": {
                     "type": "string",
                     "description": "Set, or default/off/reset to clear.",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Absolute workspace path. Rebinds an idle session.",
+                },
+                "host_id": {
+                    "type": "string",
+                    "description": "Host id owned by the caller. Rebinds an idle session.",
                 },
                 "expected_model_override": {
                     "type": "string",
@@ -820,14 +829,24 @@ async def _manage_session(api: _Api, args: dict[str, Any]) -> Any:
         return await _write(api, args, "DELETE", path, {}, loss=loss)
     body = _session_patch(args)
     if not body:
-        raise ToolFailure("update needs title, archived, project_id, labels, or model_override")
+        raise ToolFailure(
+            "update needs title, archived, project_id, labels, model_override, "
+            "workspace, or host_id"
+        )
     return await _write(
         api,
         args,
         "PATCH",
         _session_path(session_id),
         body,
-        extra={"effect": "Patches this session. labels merge; omitted fields stay as they are."},
+        extra={
+            "effect": (
+                "Patches this session. labels merge; omitted fields stay as they are. "
+                "workspace and host_id rebind an idle session, update its composer "
+                "working directory, and clear a stale runner so the next message "
+                "launches on the new host and path."
+            )
+        },
     )
 
 
@@ -846,6 +865,10 @@ def _session_patch(args: Mapping[str, Any]) -> dict[str, Any]:
         body["labels"] = _string_map(args.get("labels"), "labels")
     if "model_override" in args and args.get("model_override") is not None:
         body["model_override"] = _nonempty(args, "model_override")
+    if "workspace" in args and args.get("workspace") is not None:
+        body["workspace"] = _nonempty(args, "workspace")
+    if "host_id" in args and args.get("host_id") is not None:
+        body["host_id"] = _nonempty(args, "host_id")
     return body
 
 

@@ -101,6 +101,11 @@ from omnigent.server.routes._errors import (
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._origin import require_trusted_origin
+from omnigent.server.routes._session_bind import (
+    apply_session_bind,
+    prepare_session_bind,
+    record_session_rebind,
+)
 from omnigent.server.routes._sessions.common import (
     _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
     _CLAUDE_NATIVE_PERMISSION_MODES,
@@ -2326,7 +2331,13 @@ def register_core_routes(
             fields, and transcripts are served by
             ``GET /sessions/{id}/items``.
         :raises OmnigentError: 400 if the runner is not
-            registered; 404 if no session exists.
+            registered, or a workspace fails the session-create checks
+            (missing, not a directory, outside the agent boundary);
+            404 if no session or host exists; 409 if a workspace or
+            host change targets a running session, a running session
+            that shares its runner, an archived session, or an offline
+            host. A foreign host is 403. An explicit JSON null for
+            ``workspace`` or ``host_id`` is 422.
         """
         # A live effort/model change must read the settings its predecessor confirmed
         # or restored; otherwise a refusal can restore a value Codex never applied.
@@ -2352,7 +2363,7 @@ def register_core_routes(
                 code=ErrorCode.INVALID_INPUT,
             )
         # This PATCH gates at the least level the request actually needs, in
-        # three tiers matching the if/elif/else below:
+        # four tiers matching the if/elif/else below:
         #
         # * READ — a pin-only PATCH. Pinning is a personal, per-viewer
         #   preference (stored as the caller's own ``omnigent.pinned.<user>``
@@ -2360,12 +2371,12 @@ def register_core_routes(
         #   session may pin it — including a read-only collaborator on a session
         #   shared with them. Only when the pinned label is the request's ONLY
         #   mutation.
-        # * OWNER — archiving/unarchiving or filing into a project. Both are
-        #   owner-only: projects are owner-private (an editor must not move a
-        #   session between them), and archive pairs with a client-driven,
-        #   owner-gated stop (an editor must not hide/stop a session they can't
-        #   issue that stop for). Presence is the signal for project (``""``
-        #   unfiles), so gate on model_fields_set, not a non-None value.
+        # * OWNER — archiving/unarchiving, filing into a project, or rebinding
+        #   the workspace/host. Projects are owner-private (an editor must not
+        #   move a session between them), archive pairs with a client-driven,
+        #   owner-gated stop, and a workspace rebind decides where the next
+        #   runner launches. Presence is the signal for project (``""``
+        #   unfiles) and for workspace/host, so gate on model_fields_set.
         # * MANAGE — exposing the workspace to view-level collaborators
         #   (``share_workspace_files``). It is a sharing decision, so it sits
         #   with the same tier that already controls who is granted access
@@ -2378,12 +2389,13 @@ def register_core_routes(
         # second permission-store read.
         set_project = "project_id" in body.model_fields_set
         set_share_workspace = "share_workspace_files" in body.model_fields_set
+        set_binding = "workspace" in body.model_fields_set or "host_id" in body.model_fields_set
         pin_only = body.model_fields_set == {"labels"} and set(body.labels or {}) == {
             PINNED_LABEL_KEY
         }
         if pin_only:
             required_level = LEVEL_READ
-        elif body.archived is not None or set_project:
+        elif body.archived is not None or set_project or set_binding:
             required_level = LEVEL_OWNER
         elif set_share_workspace:
             required_level = LEVEL_MANAGE
@@ -2632,6 +2644,27 @@ def register_core_routes(
         if conv is None:
             raise _session_not_found()
         previous_runner_id = conv.runner_id
+        # Validate before any write so a rejected rebind leaves title, labels,
+        # and the runner untouched. The host stat can take seconds; the store
+        # compare-and-set, not this snapshot, decides whether the runner is
+        # cleared. Persist only after the other fields.
+        actor = request.scope.get("mcp_actor")
+        actor_owner = request.scope.get("mcp_owner_id")
+        bind_plan = await prepare_session_bind(
+            user_id=user_id,
+            session_id=session_id,
+            conv=conv,
+            fields_set=set(body.model_fields_set),
+            workspace=body.workspace,
+            host_id=body.host_id,
+            host_store=getattr(request.app.state, "host_store", None),
+            host_registry=getattr(request.app.state, "host_registry", None),
+            agent_store=agent_store,
+            agent_cache=agent_cache,
+            actor=actor if isinstance(actor, str) else None,
+            actor_owner_id=actor_owner if isinstance(actor_owner, str) else None,
+        )
+        bind_expected_runner = conv.runner_id
         if body.runner_id is not None:
             # Empty string is the clear sentinel (None = leave unchanged);
             # used by /clear and /switch to move the runner between sessions.
@@ -2640,6 +2673,7 @@ def register_core_routes(
                     await asyncio.to_thread(conversation_store.clear_runner_id, session_id)
                 except ConversationNotFoundError as exc:
                     raise _session_not_found() from exc
+                bind_expected_runner = None
                 _logger.info(
                     "Session unbound from runner",
                     extra=debug_event("session_runner_unbound", session_id=session_id),
@@ -2675,6 +2709,7 @@ def register_core_routes(
                     )
                 except ConversationNotFoundError as exc:
                     raise _session_not_found() from exc
+                bind_expected_runner = runner_id
                 set_current_runner_id(runner_id)
                 _logger.info(
                     "Session bound to runner",
@@ -3206,6 +3241,63 @@ def register_core_routes(
                 )
                 if not filed:
                     raise _session_not_found()
+        if bind_plan is not None:
+            try:
+                bind_result = await asyncio.to_thread(
+                    apply_session_bind,
+                    conversation_store,
+                    session_id,
+                    bind_plan,
+                    bind_expected_runner,
+                )
+            except ConversationNotFoundError as exc:
+                raise _session_not_found() from exc
+            if bind_result.binding_changed:
+                from omnigent.server.routes._auth_helpers import get_session_owner_id
+
+                owner_id = await asyncio.to_thread(
+                    get_session_owner_id, session_id, permission_store
+                )
+                new_host_id = (
+                    bind_plan.host_id if bind_plan.host_id is not None else bind_plan.old_host_id
+                )
+                record_session_rebind(
+                    session_id=session_id,
+                    actor=actor if isinstance(actor, str) else None,
+                    owner_id=owner_id,
+                    old_host_id=bind_plan.old_host_id,
+                    new_host_id=new_host_id,
+                    old_workspace=bind_plan.old_workspace,
+                    new_workspace=bind_plan.workspace,
+                )
+                # Stop the host process only when this session was the sole
+                # holder of the runner. Children that copied the runner id
+                # keep it, and the tunnel stays up for them. Never
+                # deregister the tunnel here: that aborts a live turn.
+                if (
+                    bind_result.cleared_runner_id
+                    and not bind_result.runner_still_shared
+                    and bind_plan.old_host_id
+                ):
+                    from omnigent.server.routes._sessions.orchestration import (
+                        _stop_host_runner_intentionally,
+                    )
+
+                    try:
+                        await _stop_host_runner_intentionally(
+                            session_id,
+                            bind_plan.old_host_id,
+                            bind_result.cleared_runner_id,
+                            getattr(request.app.state, "host_registry", None),
+                            conversation_store,
+                        )
+                    except Exception:  # bind already committed; stop failure must not fail PATCH
+                        _logger.warning(
+                            "Rebind stopped the runner id but host stop failed for %s",
+                            session_id,
+                            exc_info=True,
+                            extra={"session_id": session_id},
+                        )
         level = await _get_permission_level(user_id, session_id, permission_store)
         # PATCH callers consume only the snapshot's scalar fields (clients
         # hydrate transcripts via GET /sessions/{id}/items), so skip the
