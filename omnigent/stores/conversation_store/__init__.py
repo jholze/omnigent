@@ -1724,6 +1724,40 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def bind_session_workspace(
+        self,
+        conversation_id: str,
+        *,
+        host_id: str | None,
+        workspace: str,
+    ) -> str | None:
+        """
+        Point an existing session at a workspace and, optionally, a host.
+
+        ``host_id`` of ``None`` leaves the current host unchanged and never
+        unbinds it. When the host or the workspace actually changes, clear
+        ``git_branch`` and ``runner_id`` in the same transaction so the next
+        message launches on the new binding. A same-value write leaves the
+        runner in place.
+
+        Runner/host binding is live state, not conversation activity, so
+        this must NOT bump ``updated_at``.
+
+        :param conversation_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        :param host_id: Host to bind, e.g. a 32-char hex id, or ``None``
+            to leave the host unchanged.
+        :param workspace: Absolute workspace path to store, e.g.
+            ``"/Users/corey/projects/myapp"``. Required even when the host
+            is unchanged, so a host row never loses its workspace.
+        :returns: The runner id that was cleared, or ``None`` when the
+            binding did not change or no runner was set.
+        :raises ConversationNotFoundError: If no conversation row
+            with ``conversation_id`` exists.
+        """
+        ...
+
+    @abstractmethod
     def set_external_session_id(
         self,
         conversation_id: str,

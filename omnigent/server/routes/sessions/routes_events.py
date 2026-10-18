@@ -2792,6 +2792,13 @@ def register_events_routes(
                     launch_message,
                     code=ErrorCode.RUNNER_UNAVAILABLE,
                 )
+            if conv.host_id is not None:
+                # A host is bound, so the next launch can use it. This is not
+                # the unbound-session failure the client retries by binding.
+                raise OmnigentError(
+                    f"Host {conv.host_id} did not launch a runner for this session",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
             raise OmnigentError(
                 "No runner bound for session",
                 code=ErrorCode.RUNNER_UNAVAILABLE,

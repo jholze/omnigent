@@ -817,7 +817,9 @@ Content-Type: application/json
   "reasoning_effort": "high",
   "model_override": "claude-opus-4-7",
   "collaboration_mode": "plan",
-  "external_session_id": "a1b2c3d4-1234-5678-9abc-def012345678"
+  "external_session_id": "a1b2c3d4-1234-5678-9abc-def012345678",
+  "workspace": "/Users/corey/projects/myapp",
+  "host_id": "0123456789abcdef0123456789abcdef"
 }
 ```
 
@@ -878,13 +880,39 @@ Request body:
     400 `invalid_input`. Wrapper bridges should write the value once
     when they first observe it from the underlying runtime.
 
+  workspace (string, optional)
+    Absolute workspace path on the host. Owner-only. Rebinds an idle
+    session: updates `omnigent_conversation_metadata.workspace`, the
+    `omnigent.composer_context.v1.0` composer label (chunked when the
+    document is long), and clears `runner_id` and `git_branch` when the
+    path or host actually changes. The next message then launches the
+    runner on the new path. Omitting the field leaves the path unchanged.
+    An explicit `null` does not unbind. A relative path, or a path that
+    an online host reports as missing or not a directory, is rejected.
+    An offline host skips the existence check.
+
+  host_id (string, optional)
+    Host that should launch this session's runner. Owner-only, and the
+    host must belong to the caller (a bot acts as its owner). Omitting
+    the field leaves the host unchanged; an explicit `null` does not
+    unbind. Binding a host onto a session with no stored workspace
+    requires `workspace` in the same request. A never-connected fork
+    (`host_id` and `runner_id` both null) can be bound this way.
+
 200 OK - body matches the `SessionResponse` shape above, with
 `runner_id` set to the newly bound value when `runner_id` was present.
+A workspace or host change that differs from the stored binding clears
+`runner_id` instead.
 
 400 Bad Request - runner is not currently registered; `collaboration_mode`
 is used on a non-Codex-native session; or `external_session_id` would
 overwrite a different existing value
-404 Not Found - no session with that id
+403 Forbidden - `host_id` belongs to another user
+404 Not Found - no session with that id, or `host_id` is unknown
+409 Conflict - the session is running, so its workspace or host cannot change
+422 Unprocessable Entity - `workspace` is not an absolute path, the path
+does not exist (or is not a directory) on an online host, or a host is
+bound without a workspace
 
 This is the mutable affinity primitive for Alpha. The same endpoint
 serves create-bind, resume-bind, and recover-bind: the client starts a

@@ -4173,6 +4173,48 @@ class SqlAlchemyConversationStore(ConversationStore):
             labels = _fetch_labels(ap_sess, conversation_id)
         return _to_conversation(ap_row, meta, labels)
 
+    def bind_session_workspace(
+        self,
+        conversation_id: str,
+        *,
+        host_id: str | None,
+        workspace: str,
+    ) -> str | None:
+        """
+        Set ``workspace`` and, when ``host_id`` is not ``None``, the host.
+
+        See :meth:`ConversationStore.bind_session_workspace`. A same-value
+        write does not clear ``runner_id`` or ``git_branch``.
+
+        :param conversation_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        :param host_id: Host to bind, or ``None`` to leave it unchanged.
+        :param workspace: Absolute workspace path to store.
+        :returns: The runner id cleared because the binding changed, or
+            ``None``.
+        :raises ConversationNotFoundError: If no conversation row
+            exists for ``conversation_id``.
+        """
+
+        def write(session: Session) -> str | None:
+            meta = session.get(SqlConversationMetadata, (current_workspace_id(), conversation_id))
+            if meta is None:
+                raise ConversationNotFoundError(
+                    f"conversation {conversation_id!r} does not exist",
+                )
+            host_changed = host_id is not None and meta.host_id != host_id
+            binding_changed = host_changed or meta.workspace != workspace
+            cleared = meta.runner_id if binding_changed and meta.runner_id else None
+            if host_id is not None:
+                meta.host_id = host_id
+            meta.workspace = workspace
+            if binding_changed:
+                meta.git_branch = None
+                meta.runner_id = None
+            return cleared
+
+        return run_write_transaction(self._session_immediate, "bind_session_workspace", write)
+
     def set_external_session_id(
         self,
         conversation_id: str,
