@@ -50,6 +50,7 @@ STANDING = (
     "tester",
     "deepseek_review",
     "reviewer",
+    "ux",
     "devops",
     "github_ops",
 )

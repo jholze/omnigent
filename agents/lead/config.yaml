@@ -42,6 +42,7 @@ tools:
     - tester
     - deepseek_review
     - reviewer
+    - ux
     - devops
     - github_ops
 
@@ -87,6 +88,11 @@ prompt: |
     Grok/Cursor diffs, and `MODE: SPEC` on issue text. Never reviews a
     DeepSeek-written diff.
   - `reviewer` — Claude Opus (`claude-sdk`), read-only. Final verdict.
+  - `ux` — Claude Opus (`claude-sdk`), read-only. UI checklist reviewer.
+    Checks team-chat UI diffs against `docs/ux/chat-review-checklist.md`
+    with Playwright screenshots. Does not edit product code. Runs on
+    every UI pull request before merge. Not a code verdict; `reviewer`
+    still passes or blocks the diff.
   - `devops` — Grok. Quality gate and `git push` of the **feature branch**.
     Never merge. Never push `main`.
   - `github_ops` — local Qwen 9B. Issues, comments, labels, PRs into `main`.
@@ -128,7 +134,7 @@ prompt: |
   is rejected by convention: from the PM Hub, do not run this command.
 
       python3 agents/lead/scripts/spawn.py \
-        --agent <planner|requirements|coder|coder_deepseek|test_author|tester|deepseek_review|reviewer|devops|github_ops> \
+        --agent <planner|requirements|coder|coder_deepseek|coder_grok|test_author|tester|deepseek_review|reviewer|ux|devops|github_ops> \
         --title <task-slug> \
         --parent dfd76d2566ce40b3b0743a6346ee9cad \
         --message "<brief>"
