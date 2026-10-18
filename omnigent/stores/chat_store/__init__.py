@@ -77,10 +77,11 @@ class ChatThread:
 
 @dataclass(frozen=True)
 class ChatAgentAccount:
-    """An active agent account surfaced in the chat directory.
+    """An agent account surfaced in the chat directory.
 
     :param principal_id: The account's principal id (``agent:<uuid>``).
     :param owner_id: The owning human principal.
+    :param token_prefix: Eight-character display hint. Never the raw token.
     """
 
     id: str
@@ -88,6 +89,21 @@ class ChatAgentAccount:
     owner_id: str
     display_name: str
     handle: str
+    token_prefix: str = ""
+    secret_version: int = 1
+    last_seen_at: int | None = None
+    revoked_at: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentTokenIssue:
+    """A raw ``ogc_`` token returned once, plus the stored account.
+
+    The raw token is not persisted. Callers show it to the owner and drop it.
+    """
+
+    account: ChatAgentAccount
+    token: str
 
 
 class PostStatus(StrEnum):
@@ -98,6 +114,7 @@ class PostStatus(StrEnum):
     BODY_CONFLICT = "body_conflict"
     NESTED_THREAD = "nested_thread"
     THREAD_ROOT_NOT_FOUND = "thread_root_not_found"
+    BOT_STREAK_LIMIT = "bot_streak_limit"
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,7 @@ class PostMessageResult:
 
     status: PostStatus
     message: ChatMessage | None = None
+    notice: ChatMessage | None = None
 
 
 class DmStatus(StrEnum):
@@ -140,6 +158,68 @@ class MessagePage:
     has_more: bool
     next_after: tuple[int, str] | None
     next_before: tuple[int, str] | None
+
+
+class AccountStatus(StrEnum):
+    """Outcome of creating, rotating, or revoking an agent account."""
+
+    CREATED = "created"
+    ROTATED = "rotated"
+    REVOKED = "revoked"
+    HANDLE_TAKEN = "handle_taken"
+    NOT_FOUND = "not_found"
+    REVOKED_ACCOUNT = "revoked_account"
+    LIMIT = "limit"
+
+
+@dataclass(frozen=True)
+class AccountWriteResult:
+    """Typed result of an agent-account write.
+
+    :param issue: Present when a new raw token was minted.
+    """
+
+    status: AccountStatus
+    issue: AgentTokenIssue | None = None
+
+
+class ReadStatus(StrEnum):
+    """Outcome of advancing a read cursor."""
+
+    ADVANCED = "advanced"
+    UNCHANGED = "unchanged"
+    NOT_FOUND = "not_found"
+    WRONG_SCOPE = "wrong_scope"
+
+
+@dataclass(frozen=True)
+class ReadCursor:
+    """The stored cursor after a mark-read attempt."""
+
+    channel_id: str
+    principal_id: str
+    thread_root_id: str
+    last_read_at: int | None
+    last_read_id: str | None
+
+
+@dataclass(frozen=True)
+class MarkReadResult:
+    """Typed result of a mark-read attempt."""
+
+    status: ReadStatus
+    cursor: ReadCursor | None = None
+
+
+@dataclass(frozen=True)
+class UnreadMessage:
+    """One unread message and why it woke the caller.
+
+    :param reason: ``mention``, ``dm``, or ``thread_reply``.
+    """
+
+    message: ChatMessage
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -316,4 +396,124 @@ class ChatStore(ABC):
     @abstractmethod
     def get_thread(self, root_message_id: str) -> ChatThread | None:
         """Return the thread state for a top-level message, or ``None``."""
+        ...
+
+    @abstractmethod
+    def create_agent_account(
+        self,
+        owner_id: str,
+        display_name: str,
+        handle: str,
+        *,
+        webhook_url: str = "",
+    ) -> AccountWriteResult:
+        """Create an agent account and mint its first ``ogc_`` token.
+
+        The raw token is on :attr:`AccountWriteResult.issue` and is not stored.
+        A duplicate handle in the workspace is ``handle_taken``.
+        """
+        ...
+
+    @abstractmethod
+    def rotate_agent_token(self, account_id: str, owner_id: str) -> AccountWriteResult:
+        """Replace the stored token hash. The previous token stops authenticating.
+
+        A wrong owner or unknown id is ``not_found``. A revoked account is
+        ``revoked_account`` and keeps its old hash.
+        """
+        ...
+
+    @abstractmethod
+    def revoke_agent_account(self, account_id: str, owner_id: str) -> AccountWriteResult:
+        """Mark the account revoked. Its current token stops authenticating."""
+        ...
+
+    @abstractmethod
+    def principal_for_token_hash(self, token_hash: str) -> str | None:
+        """Return the principal id for a live token hash, or ``None``.
+
+        Revoked accounts and unknown hashes return ``None``. The lookup is by
+        the global unique hash and does not require a workspace id.
+        """
+        ...
+
+    @abstractmethod
+    def account_for_token_hash(self, token_hash: str) -> ChatAgentAccount | None:
+        """Return the live account for a token hash, or ``None``.
+
+        The lookup is not cached. A revoked account or unknown hash is ``None``.
+        """
+        ...
+
+    @abstractmethod
+    def owner_account_live(self, owner_id: str) -> bool:
+        """Whether *owner_id* may still act for an agent account.
+
+        A row whose ``deleted_at`` is set is inactive in every auth mode.
+        A missing row is inactive only for accounts and OIDC, where identity
+        remap deletes the old user. Header and single-user servers have no
+        users row, so a missing row stays live there.
+        """
+        ...
+
+    @abstractmethod
+    def count_sessions_started_by(self, account_id: str, since_us: int) -> int:
+        """Count sessions this agent account started at or after *since_us*."""
+        ...
+
+    @abstractmethod
+    def get_agent_account_by_principal(self, principal_id: str) -> ChatAgentAccount | None:
+        """Return the live account for *principal_id*, or ``None`` when revoked."""
+        ...
+
+    @abstractmethod
+    def touch_agent_last_seen(self, principal_id: str) -> None:
+        """Stamp ``last_seen_at`` at most once per 60 seconds.
+
+        A missing or revoked account is left unchanged.
+        """
+        ...
+
+    @abstractmethod
+    def mark_read(
+        self,
+        channel_id: str,
+        principal_id: str,
+        message_id: str,
+        *,
+        thread_root_id: str | None = None,
+        created_at: int | None = None,
+    ) -> MarkReadResult:
+        """Advance the caller's cursor to *message_id* if that moves it forward.
+
+        ``thread_root_id`` empty selects the channel cursor. A message older
+        than the current cursor leaves the cursor unchanged. When *created_at*
+        is set and does not match the message, the cursor is left unchanged.
+        """
+        ...
+
+    @abstractmethod
+    def channel_unread_counts(
+        self, principal_id: str, channel_ids: Collection[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Return ``(unread_count, mention_count)`` for each channel.
+
+        Counts are top-level messages after the caller's channel cursor,
+        excluding the caller's own. Mentions are those that name the caller.
+        """
+        ...
+
+    @abstractmethod
+    def list_unread(
+        self,
+        principal_id: str,
+        *,
+        limit: int = 50,
+        channel_ids: Collection[str] | None = None,
+    ) -> tuple[UnreadMessage, ...]:
+        """Return unread mentions, DM messages, and thread replies, oldest first.
+
+        Own messages are excluded. *limit* is capped at 50. *channel_ids*
+        restricts the scan to that set; ``None`` uses the caller's memberships.
+        """
         ...
