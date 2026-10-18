@@ -11588,6 +11588,7 @@ async def test_three_factor_chain_fix_disabled_reproduces_wedge(
     assert "defaulting to POLICY_ACTION_ALLOW" in text
     assert "tool callback fired with no active turn context (tool=" in text
     assert "returning error" in text
+    assert "out-of-turn callback" in text
     assert "forcing Tier-1 SDK reset" not in text
     assert adapter._orphan_callback_count >= n_orphans
 

@@ -667,7 +667,8 @@ class ExecutorAdapter(HarnessApp):
                     return
                 _logger.error(
                     "runner_turn_context_desync: %d consecutive orphan callbacks; "
-                    "forcing Tier-1 SDK reset for session %s",
+                    "forcing Tier-1 SDK reset for session %s. Out-of-turn "
+                    "callbacks are an expected rejection and are not dispatched",
                     self._orphan_callback_count,
                     self._session_key,
                 )
@@ -785,7 +786,8 @@ class ExecutorAdapter(HarnessApp):
             _logger.error(
                 "runner_turn_context_desync: tool callback fired with no active "
                 "turn context (tool=%s, host_tool=%s, consecutive_orphans=%d); "
-                "returning error",
+                "returning error. This is an expected rejection of an out-of-turn "
+                "callback (a background task after the turn ended) and is not dispatched",
                 tool_name,
                 host_tool,
                 self._orphan_callback_count,
