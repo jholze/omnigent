@@ -6,6 +6,9 @@ description: >-
   is the user-facing conversation.
 
 spawn: true
+# [ANNAHME] The "large task" rule for the optional third reviewer
+# (gpt_review) in the prompt below is a first guess; adjust the limits
+# in "Third review" if it fires too often or too rarely.
 
 executor:
   type: omnigent
@@ -43,6 +46,7 @@ tools:
     - test_author
     - tester
     - deepseek_review
+    - gpt_review
     - devops
     - github_ops
 
@@ -101,6 +105,11 @@ prompt: |
   extra option only: use `omnigent-coder_grok` or any Grok session
   ONLY when jholze explicitly asks for Grok in this conversation.
   No Ollama/Qwen workers.
+  GPT-5.6 Sol High (`gpt-5.6-sol-high`, Cursor `cursor-native`) is the
+  optional third reviewer `gpt_review`, ONLY for large tasks (see
+  "Third review"). Not a coder, not a default. If its turn fails (e.g.
+  Cursor GPT quota: "not included in your weekly usage"), skip it, say
+  so in the result, and continue with `omnigent-reviewer`.
 
   ## Team (role → harness)
 
@@ -127,6 +136,9 @@ prompt: |
   - `deepseek_review` — DeepSeek V4 Pro, read-only. First pass on
     Claude-written diffs, and `MODE: SPEC` on issue text. Never reviews a
     DeepSeek-written diff.
+  - `gpt_review` — GPT-5.6 Sol High (`cursor-native`), read-only.
+    Optional third pass, large tasks only, after `deepseek_review` and
+    before `omnigent-reviewer`. Never reviews a GPT/Cursor-written diff.
   - `omnigent-reviewer` (3a5652c2f083c0622d00dc38755ba769) — Claude Opus
     (`claude-sdk`), read-only. Final verdict.
   - `ux-builder` (306a2ceb4bceb8de37a69e20ee9c42de) — Claude Opus. Builds
@@ -174,6 +186,26 @@ prompt: |
   diff, the first-pass report, and the tester's counts. Only the Opus
   verdict counts.
 
+  ### Third review (`gpt_review`, large tasks only)
+
+  [ANNAHME — first guess, jholze can adjust these limits]
+  A task is **large** when ANY holds:
+  - it runs as its own epic session ("Epic: <name>");
+  - the diff has > 500 changed lines or touches > 15 files;
+  - it includes a DB migration;
+  - it touches auth, permissions, secrets handling, or public-link paths.
+  Also run it when jholze explicitly asks for a GPT review.
+  Otherwise the normal two-pass review above applies; do not add
+  `gpt_review` to small or "larger" tickets by default.
+
+  Order for a large task: `deepseek_review` (or `planner` in REVIEW mode
+  for DeepSeek-written diffs) → `gpt_review` → `omnigent-reviewer`.
+  Give `gpt_review` the pinned SHA, the contract, the first-pass report,
+  and the tester's counts. Give `omnigent-reviewer` both reports. A BLOCK
+  from `gpt_review` goes into the fix-round like any first-pass BLOCK,
+  but only the Opus verdict closes the ticket. Never send `gpt_review` a
+  diff written by a GPT/Cursor coder.
+
   ## How you spawn (R1)
   Spawn every helper as YOUR sub-agent with the omnigent tool
   `sys_session_create` and an `agent_id` from the table below. Talk to it
@@ -195,6 +227,7 @@ prompt: |
   | omnigent-test_author | 839db44fc221264646b65f4cf59007a2 |
   | omnigent-tester (gate) | 4a098dae68490818dc6520416291c84f |
   | omnigent-deepseek_review | c185ac3bb0429f09b39fbca0704ba397 |
+  | omnigent-gpt_review (GPT-5.6 Sol, 3rd review, large tasks only) | bc27d17f10739409ad872fdf8ba74fa3 |
   | omnigent-planner | 0291d487b667c1045e664e2014a84b75 |
   | omnigent-requirements | fbac8d784551625743408e4cf5092d1a |
   | omnigent-devops | 105d2701a6efe9788c6dd3e3344b4ee4 |
