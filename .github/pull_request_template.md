@@ -65,6 +65,17 @@ images. For non-visual changes, put reproducible evidence here or in Test Plan.
 - [ ] Existing tests cover this change
 - [ ] Not applicable
 
+## UX review
+
+<!--
+Required when the diff touches a team-chat surface (web/src/chat, the Chat
+entry, or tests/e2e_ui/team_chat). The note is the UX reviewer's report
+against docs/ux/chat-review-checklist.md. Leave the box unchecked for a
+change that does not touch that surface.
+-->
+
+- [ ] UX-Review-Notiz gegen docs/ux/chat-review-checklist.md
+
 ## Coverage notes
 
 <!--

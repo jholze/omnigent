@@ -200,6 +200,7 @@ describe("ChatHeader — pending session presentation", () => {
     expect(screen.getByRole("button", { name: "Conversation actions" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Share session" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Expand right panel" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Session chat" })).toBeNull();
   });
 
   it("collapses pending controls into one disabled mobile actions button", () => {
@@ -365,6 +366,7 @@ describe("ChatHeader — conversation breadcrumb", () => {
     expect(screen.queryByLabelText(/^Project:/)).toBeNull();
     // No sub-agent segment.
     expect(screen.queryByText("Sub-agent")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Session chat" })).toBeNull();
   });
 
   it("prefixes a folder with the project name in its tooltip when filed", () => {

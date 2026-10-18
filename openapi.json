@@ -6210,7 +6210,6 @@
             "session.collaboration_mode": "#/components/schemas/SessionCollaborationModeEvent",
             "session.created": "#/components/schemas/SessionCreatedEvent",
             "session.heartbeat": "#/components/schemas/SessionHeartbeatEvent",
-            "session.human_chat": "#/components/schemas/SessionHumanChatEvent",
             "session.input.consumed": "#/components/schemas/SessionInputConsumedEvent",
             "session.interrupted": "#/components/schemas/SessionInterruptedEvent",
             "session.mcp_startup": "#/components/schemas/SessionMcpStartupEvent",
@@ -6296,9 +6295,6 @@
           },
           {
             "$ref": "#/components/schemas/SessionPresenceEvent"
-          },
-          {
-            "$ref": "#/components/schemas/SessionHumanChatEvent"
           },
           {
             "$ref": "#/components/schemas/SessionResourceCreatedEvent"
@@ -6546,86 +6542,6 @@
           "session_id"
         ],
         "title": "SessionChangedFilesInvalidatedEvent",
-        "type": "object"
-      },
-      "SessionChatListResponse": {
-        "description": "`GET /v1/sessions/{id}/chat`.",
-        "properties": {
-          "items": {
-            "description": "Lines ordered by `(created_at, id)` ascending.",
-            "items": {
-              "$ref": "#/components/schemas/SessionChatMessageResponse"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "shared": {
-            "description": "True when another person has a direct grant on the root.",
-            "title": "Shared",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "items",
-          "shared"
-        ],
-        "title": "SessionChatListResponse",
-        "type": "object"
-      },
-      "SessionChatMessageResponse": {
-        "description": "One stored line.",
-        "properties": {
-          "body": {
-            "description": "The text.",
-            "title": "Body",
-            "type": "string"
-          },
-          "created_at": {
-            "description": "Unix epoch microseconds.",
-            "format": "int64",
-            "title": "Created At",
-            "type": "integer"
-          },
-          "created_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Author, or `None` in single-user mode.",
-            "title": "Created By"
-          },
-          "id": {
-            "description": "Line id.",
-            "title": "Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "created_by",
-          "created_at",
-          "body"
-        ],
-        "title": "SessionChatMessageResponse",
-        "type": "object"
-      },
-      "SessionChatPostBody": {
-        "description": "Request body for `POST /v1/sessions/{id}/chat`.",
-        "properties": {
-          "body": {
-            "description": "The line. Trimmed, required, at most 2000 characters.",
-            "title": "Body",
-            "type": "string"
-          }
-        },
-        "required": [
-          "body"
-        ],
-        "title": "SessionChatPostBody",
         "type": "object"
       },
       "SessionChildSessionUpdatedEvent": {
@@ -7033,54 +6949,6 @@
           "type"
         ],
         "title": "SessionHeartbeatEvent",
-        "type": "object"
-      },
-      "SessionHumanChatEvent": {
-        "description": "A person in this session sent a line to the other people.\n\nThe event does not carry the text. A client that may read the chat\nloads it with `GET /v1/sessions/{id}/chat`. The stream route only\nrequires read access, which a public-link visitor has, so the\ngenerator drops this event for a caller who fails the chat rule.",
-        "properties": {
-          "conversation_id": {
-            "description": "The stream that received this event, the root or a sub-agent, e.g. `\"conv_abc123\"`.",
-            "title": "Conversation Id",
-            "type": "string"
-          },
-          "created_at": {
-            "description": "Unix epoch microseconds of the stored line.",
-            "format": "int64",
-            "title": "Created At",
-            "type": "integer"
-          },
-          "id": {
-            "description": "Stored line id, bare uuid hex.",
-            "title": "Id",
-            "type": "string"
-          },
-          "sequence_number": {
-            "anyOf": [
-              {
-                "format": "int64",
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Sequence Number"
-          },
-          "type": {
-            "const": "session.human_chat",
-            "description": "Always `\"session.human_chat\"`.",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "conversation_id",
-          "id",
-          "created_at"
-        ],
-        "title": "SessionHumanChatEvent",
         "type": "object"
       },
       "SessionInputConsumedEvent": {
@@ -14671,119 +14539,6 @@
         "summary": "Automatically Rename Session",
         "tags": [
           "sessions"
-        ]
-      }
-    },
-    "/v1/sessions/{session_id}/chat": {
-      "get": {
-        "description": "Return the stored lines and whether the session is shared.\n\n**Returns:** `{ items, shared }`.",
-        "operationId": "list_session_chat_v1_sessions__session_id__chat_get",
-        "parameters": [
-          {
-            "description": "Root or child conversation id.",
-            "in": "path",
-            "name": "session_id",
-            "required": true,
-            "schema": {
-              "title": "Session Id",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Exclusive `created_at:id` cursor.",
-            "in": "query",
-            "name": "after",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "After"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionChatListResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Session Chat",
-        "tags": [
-          "session_chat"
-        ]
-      },
-      "post": {
-        "description": "Store one line and announce it. Does not talk to the agent.\n\n**Parameters**\n\n- `payload` \u2014 The trimmed line.\n\n**Returns:** The stored line.",
-        "operationId": "post_session_chat_v1_sessions__session_id__chat_post",
-        "parameters": [
-          {
-            "description": "Root or child conversation id.",
-            "in": "path",
-            "name": "session_id",
-            "required": true,
-            "schema": {
-              "title": "Session Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionChatPostBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionChatMessageResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Post Session Chat",
-        "tags": [
-          "session_chat"
         ]
       }
     },

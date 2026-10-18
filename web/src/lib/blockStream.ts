@@ -997,7 +997,6 @@ function* processEvent(state: ReducerState, event: StreamEvent): Generator<AnyBl
     case "session_mcp_startup":
     case "session_input_consumed":
     case "session_created":
-    case "session_human_chat":
       return;
 
     // Mutates an existing block in the chat-store; see
