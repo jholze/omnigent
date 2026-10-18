@@ -105,9 +105,10 @@ jobs:
         env:
           PYTHONFAULTHANDLER: "1"
           OMNIGENT_TEST_TIMEOUT_SCALE: "4"
-          # macOS AF_UNIX sun_path is ~104 bytes. The default per-user TMPDIR
-          # is already long enough that pytest's tmp_path overflows it.
-          TMPDIR: /tmp
+          # /tmp is a symlink on macOS, which the signer rejects. /private/tmp
+          # is the real sticky directory and stays under the sun_path limit
+          # when pytest's basetemp is the short path below.
+          TMPDIR: /private/tmp
         run: |
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
@@ -125,7 +126,12 @@ jobs:
           run_suite() {
             local name="$1"
             shift
+            # Default basetemp plus the test name overflows macOS sun_path
+            # for a tmux socket created inside tmp_path.
+            local base="/private/tmp/oa-${name}"
+            rm -rf "$base"
             uv run pytest "$@" \
+              --basetemp="$base" \
               -m "not databricks" \
               --timeout=300 \
               --junitxml="artifacts/pytest-${name}.xml" \
@@ -258,6 +264,7 @@ jobs:
           mkdir -p artifacts
           uv run pytest tests/e2e_ui \
             -v --tb=short -r a \
+            --override-ini console_output_style=classic \
             --reruns=1 --reruns-delay=5 \
             --ui-skip-build \
             --junitxml=artifacts/e2e-ui.xml \
