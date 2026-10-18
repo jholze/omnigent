@@ -1,5 +1,5 @@
 spec_version: 1
-name: coder
+name: omnigent-coder
 description: >-
   Cursor coding worker for the Omnigent fork. Model cursor-grok-4.6-high.
   Implements an approved plan in the current feature branch. Does not
@@ -35,7 +35,8 @@ prompt: |
   Grok lead. Your model is Cursor Grok 4.6 High. The task message names
   IMPLEMENT, REVIEW, or EXPLORE. Do only that.
 
-  Work in the worktree the brief names (default `.work/omnigent-app`).
+  Work in the worktree the brief names (absolute path, usually under
+  `~/dev/omnigent-src/.work/<task-id>`; there is no default).
   Never on `main`.
 
   IMPLEMENT:

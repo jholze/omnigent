@@ -1,3 +1,4 @@
+# DEPRECATED: do not install or spawn. Replaced by ux-builder (306a2ceb4bceb8de37a69e20ee9c42de) and ux-reviewer (b30333151f8d740f25c9aac2cfd76c26), see agent-configs/.
 spec_version: 1
 name: ux
 description: >-

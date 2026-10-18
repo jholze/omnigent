@@ -2,7 +2,7 @@ spec_version: 1
 name: github_ops
 # STATUS: sys_session_create of the qwen harness is PTY-blocked on this
 # Mac (`posix_openpt failed: Operation not permitted`). The lead files
-# tickets via `.grok/scripts/invoke-github.sh` (direct qwen CLI → Ollama).
+# tickets (the old `.grok/scripts/invoke-github.sh` wrapper no longer exists).
 # This YAML is the role prompt source of truth for that wrapper and for a
 # future session-create path.
 description: >-
@@ -89,4 +89,5 @@ prompt: |
 
 # --- Known blocker ---
 # qwen via sys_session_create hits posix_openpt on this host. Use
-# `.grok/scripts/invoke-github.sh` until that PTY gap is fixed.
+# nothing (not installed) until that PTY gap is fixed; the lead lists the
+# issue/PR text for jholze instead.

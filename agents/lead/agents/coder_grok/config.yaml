@@ -1,5 +1,5 @@
 spec_version: 1
-name: coder_grok
+name: omnigent-coder_grok
 description: Grok CLI coder. Label coder:grok.
 
 executor:
@@ -30,7 +30,8 @@ prompt: |
   Grok lead. Your model is grok-4.7. Label coder:grok. The task message
   names IMPLEMENT, REVIEW, or EXPLORE. Do only that.
 
-  Work in the worktree the brief names (default `.work/omnigent-app`).
+  Work in the worktree the brief names (absolute path, usually under
+  `~/dev/omnigent-src/.work/<task-id>`; there is no default).
   Never on `main`.
 
   IMPLEMENT:

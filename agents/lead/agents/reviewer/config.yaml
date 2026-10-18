@@ -1,3 +1,4 @@
+# DEPRECATED: do not install or spawn. Replaced by omnigent-reviewer (agent-configs/omnigent-reviewer.yaml, agent_id 3a5652c2f083c0622d00dc38755ba769).
 spec_version: 1
 name: reviewer
 description: >-
@@ -41,7 +42,8 @@ prompt: |
   You CANNOT write or edit source. Write tools are policy-denied.
   Read files and run read-only git/grep/pytest freely.
 
-  Work in the worktree the brief names (default `.work/omnigent-app`).
+  Work in the worktree the brief names (absolute path, usually under
+  `~/dev/omnigent-src/.work/<task-id>`; there is no default).
   You get a diff (or work branch vs `origin/main`) plus the acceptance
   contract. On a double review you also get the first-pass report and
   the tester's gate. Confirm or strike each first-pass finding with

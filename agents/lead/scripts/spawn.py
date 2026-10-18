@@ -200,6 +200,7 @@ def _discover_parent() -> str:
 
 
 def main() -> int:
+    raise SystemExit("deprecated: use sys_session_create with agent_id (see agents/lead/config.yaml)")
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--agent", choices=STANDING, help="Standing ProductOS worker")
     p.add_argument("--config", help="Path to a YAML or agent directory")
