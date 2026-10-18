@@ -320,6 +320,36 @@ jobs:
           mkdir -p "$config_home" "$data_dir"
           export OMNIGENT_CONFIG_HOME="$config_home"
           export OMNIGENT_DATA_DIR="$data_dir"
+          # Allowed domains live next to the admin credentials path, which
+          # on this Mac is the user's ~/.omnigent list. An empty file means
+          # no domain restriction, matching a fresh deploy.
+          unset OMNIGENT_OIDC_ALLOWED_DOMAINS
+          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${data_dir}/admin-credentials"
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${data_dir}/allowed_domains"
+          : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
+          # A Keychain login makes Claude ignore a loopback mock URL. When a
+          # test sets that URL, hand the CLI an API key so it uses the mock.
+          real_claude="$(command -v claude || true)"
+          if [ -n "$real_claude" ]; then
+            mkdir -p "${RUNNER_TEMP}/bin"
+            # The ${...} below belong to the wrapper, not this step.
+            # shellcheck disable=SC2016
+            {
+              echo '#!/bin/sh'
+              echo 'case "${ANTHROPIC_BASE_URL:-}" in'
+              echo '  http://127.0.0.1:*|http://localhost:*)'
+              echo '    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then'
+              echo '      ANTHROPIC_API_KEY=mock-key'
+              echo '      export ANTHROPIC_API_KEY'
+              echo '    fi'
+              echo '    ;;'
+              echo 'esac'
+              printf 'exec %q "$@"\n' "$real_claude"
+            } > "${RUNNER_TEMP}/bin/claude"
+            chmod +x "${RUNNER_TEMP}/bin/claude"
+            export PATH="${RUNNER_TEMP}/bin:${PATH}"
+            export OMNIGENT_CLAUDE_PATH="${RUNNER_TEMP}/bin/claude"
+          fi
           # Stop after a few failures. Each one waits out a timeout and a
           # rerun, and the serial suite otherwise hits the job limit
           # before pytest writes the summary.
