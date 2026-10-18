@@ -1143,6 +1143,9 @@ def test_scrollbar_thumb_drags_by_touch(
     open_live(page, chat, {"width": 800, "height": 1280})
     tag_scroller(page)
     expect(page.get_by_test_id("transcript-scrollbar-thumb")).to_be_visible()
+    park_at_bottom(page)
+    # The first drag measures estimated rows and shrinks scrollHeight; warm up first.
+    drag_thumb_with_mouse(page, -200)
     bottom = park_at_bottom(page)
     drag_thumb_with_mouse(page, -200)
     mouse_delta = bottom["scrollTop"] - scroll_state(page)["scrollTop"]

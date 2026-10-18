@@ -168,8 +168,8 @@ export function MainTerminalView({
     !AGENT_TERMINAL_IDS.has(activeTerminal.id);
   const setSurfaceElement = useCallback(
     (element: HTMLDivElement | null) => {
-      // xterm scrollbars can override inherited visibility. React 18 drops
-      // the boolean inert prop, so set the attribute directly.
+      // xterm scrollbars can override inherited visibility. The inert
+      // workaround stays because the embed host is React 18.
       element?.toggleAttribute("inert", !visible);
       onSurfaceElement?.(element);
     },
