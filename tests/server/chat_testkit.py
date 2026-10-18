@@ -147,9 +147,10 @@ async def create_account(
     *,
     display_name: str = "Grok",
     webhook_url: str = WEBHOOK_OK,
+    ensure_owner: bool = True,
 ) -> httpx.Response:
     db_uri = _client_db_uri(client)
-    if db_uri is not None:
+    if ensure_owner and db_uri is not None:
         ensure_live_user(db_uri, owner)
     return await client.post(
         "/v1/chat/agent-accounts",

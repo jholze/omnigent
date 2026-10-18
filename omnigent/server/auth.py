@@ -876,11 +876,16 @@ class AccountAuthorityMiddleware:
         self._checks_enabled = (
             isinstance(auth_provider, UnifiedAuthProvider) and auth_provider._source == "accounts"
         )
+        source = getattr(auth_provider, "_source", None)
+        self._missing_owner_inactive = source in ("accounts", "oidc")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        from omnigent.db.account_authority import account_checks_scope
+        from omnigent.db.account_authority import account_checks_scope, missing_owner_scope
 
-        with account_checks_scope(self._checks_enabled):
+        with (
+            account_checks_scope(self._checks_enabled),
+            missing_owner_scope(self._missing_owner_inactive),
+        ):
             await self._app(scope, receive, send)
 
 

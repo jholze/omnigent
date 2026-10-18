@@ -382,18 +382,18 @@ async def test_ac_102a_deleted_owner_rejects_the_token(chat_client, db_uri: str)
     assert channels.status_code == 401, channels.text
 
 
-async def test_missing_owner_row_rejects_the_token(chat_client, db_uri: str) -> None:
-    """A bot whose owner row was deleted does not authenticate."""
-    created = await create_account(chat_client, JENS, "grok-jens")
+async def test_header_mode_bot_token_works_without_user_row(chat_client, db_uri: str) -> None:
+    """Header mode has no users row. The bot token still authenticates."""
+    created = await create_account(chat_client, JENS, "grok-jens", ensure_owner=False)
+    assert created.status_code == 201, created.text
     token = created.json()["token"]
     with Session(get_or_create_engine(db_uri)) as session:
-        user = session.execute(select(SqlUser).where(SqlUser.id == JENS)).scalar_one()
-        session.delete(user)
-        session.commit()
+        row = session.execute(select(SqlUser).where(SqlUser.id == JENS)).scalar_one_or_none()
+    assert row is None
     listed = await rpc(chat_client, "tools/list", token=token)
     channels = await chat_client.get("/v1/chat/channels", headers=headers_for(token=token))
-    assert listed.status_code == 401, listed.text
-    assert channels.status_code == 401, channels.text
+    assert listed.status_code == 200, listed.text
+    assert channels.status_code == 200, channels.text
 
 
 async def test_ac_103a_chat_post_audits_bot_and_owner_without_the_body(
@@ -505,53 +505,78 @@ async def test_ac_104a_configured_quota_blocks_the_next_start(
 
 
 async def test_quota_refusal_audits_the_owner(chat_client, db_uri: str, monkeypatch) -> None:
-    """A quota refusal writes agent_thread_start with outcome refused/quota."""
-    from omnigent.server import chat_agent_threads
+    """A quota refusal stays on the persisted audit row as refused/quota."""
+    import logging
+    import threading
+
+    from omnigent.debug_logging import DebugLogHandler, attach_debug_log_sink
+    from omnigent.server.chat_agent_threads import drain_pending
 
     monkeypatch.setenv("OMNIGENT_BOT_SESSION_QUOTA", "1")
-    created = await create_account(chat_client, JENS, "grok-jens")
-    account = created.json()["account"]
-    token = created.json()["token"]
-    general = await channel_id(chat_client, JENS, "general")
-    add_member(db_uri, general, account["principal_id"])
-    now = now_epoch_us()
-    with Session(get_or_create_engine(db_uri)) as session:
-        session.add(
-            SqlChatThread(
-                root_message_id=uuid.uuid4().hex,
-                channel_id=general,
-                reply_count=0,
-                participants="[]",
-                bot_streak=0,
-                agent_state="active",
-                session_id=uuid.uuid4().hex,
-                caller_id=JENS,
-                started_by_agent_account_id=account["id"],
-                start_requested_at=now,
-                updated_at=now,
+    monkeypatch.setattr(DebugLogHandler, "_FLUSH_WAIT", 0.01)
+    monkeypatch.setattr(debug_logging, "_active_sink", None)
+    rows: list[dict] = []
+    got_end = threading.Event()
+
+    def send(batch: list) -> None:
+        rows.extend(batch)
+        for row in batch:
+            attrs = row.get("attributes") or {}
+            if attrs.get("phase") in ("ok", "error") and attrs.get("outcome") == "refused/quota":
+                got_end.set()
+
+    attach_debug_log_sink([], source="server", level=logging.INFO, send=send)
+    sink = debug_logging._active_sink
+    assert sink is not None
+    try:
+        created = await create_account(chat_client, JENS, "grok-jens")
+        account = created.json()["account"]
+        token = created.json()["token"]
+        general = await channel_id(chat_client, JENS, "general")
+        add_member(db_uri, general, account["principal_id"])
+        now = now_epoch_us()
+        with Session(get_or_create_engine(db_uri)) as session:
+            session.add(
+                SqlChatThread(
+                    root_message_id=uuid.uuid4().hex,
+                    channel_id=general,
+                    reply_count=0,
+                    participants="[]",
+                    bot_streak=0,
+                    agent_state="active",
+                    session_id=uuid.uuid4().hex,
+                    caller_id=JENS,
+                    started_by_agent_account_id=account["id"],
+                    start_requested_at=now,
+                    updated_at=now,
+                )
             )
+            session.commit()
+        posted = await chat_client.post(
+            f"/v1/chat/channels/{general}/messages",
+            json={"body": "<@omnigent_agent:coder> weiter MARKER-quota"},
+            headers=headers_for(token=token),
         )
-        session.commit()
-    seen: list[dict] = []
-    real = chat_agent_threads.add_audit_attrs
-
-    def spy(**attrs: object) -> None:
-        if attrs.get("action") == "agent_thread_start":
-            seen.append(dict(attrs))
-        real(**attrs)
-
-    monkeypatch.setattr(chat_agent_threads, "add_audit_attrs", spy)
-    posted = await chat_client.post(
-        f"/v1/chat/channels/{general}/messages",
-        json={"body": "<@omnigent_agent:coder> weiter MARKER-quota"},
-        headers=headers_for(token=token),
-    )
-    assert posted.status_code == 201, posted.text
-    assert seen
-    assert seen[-1]["account_id"] == account["id"]
-    assert seen[-1]["owner_id"] == JENS
-    assert seen[-1]["outcome"] == "refused/quota"
-    assert "MARKER-quota" not in str(seen[-1])
+        assert posted.status_code == 201, posted.text
+        await drain_pending()
+        assert got_end.wait(timeout=2.0), rows
+        persisted = [
+            row
+            for row in rows
+            if (row.get("attributes") or {}).get("outcome") == "refused/quota"
+            and (row.get("attributes") or {}).get("phase") in ("ok", "error")
+        ]
+        assert len(persisted) == 1
+        attrs = persisted[0]["attributes"]
+        assert attrs["action"] == "agent_thread_start"
+        assert attrs["account_id"] == account["id"]
+        assert attrs["owner_id"] == JENS
+        assert "MARKER-quota" not in str(attrs)
+    finally:
+        debug_logging.audit_event_logger().removeHandler(sink)
+        debug_logging.sse_event_logger().removeHandler(sink)
+        sink.close()
+        monkeypatch.setattr(debug_logging, "_active_sink", None)
     called = await tools_call(
         chat_client,
         "create_session",

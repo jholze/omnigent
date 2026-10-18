@@ -782,7 +782,7 @@ class SqlAlchemyChatStore(ChatStore):
             return _to_agent_account(row) if row is not None else None
 
     def owner_account_live(self, owner_id: str) -> bool:
-        """Whether the owner still has a live accounts row. See the base class."""
+        """Whether the owner may still act. See the base class."""
         with self._session("check_chat_agent_owner") as session:
             row = session.execute(
                 select(SqlUser.deleted_at).where(
@@ -790,9 +790,11 @@ class SqlAlchemyChatStore(ChatStore):
                     SqlUser.id == owner_id,
                 )
             ).first()
-        if row is None:
-            return False
-        return row[0] is None
+        if row is not None:
+            return row[0] is None
+        from omnigent.db.account_authority import missing_owner_is_inactive
+
+        return not missing_owner_is_inactive()
 
     def count_sessions_started_by(self, account_id: str, since_us: int) -> int:
         """Count bot-started sessions since *since_us*. See the base class."""

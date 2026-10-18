@@ -140,7 +140,7 @@ def _session(db_uri: str) -> Session:
 
 
 def _ensure_live_user(db_uri: str, user_id: str) -> None:
-    """A missing owner row rejects the bot token, including in header-mode tests."""
+    """Insert a live owner when a test deactivates or deletes that row."""
     with _session(db_uri) as session:
         existing = session.execute(
             select(SqlUser).where(SqlUser.id == user_id)
@@ -975,6 +975,45 @@ async def accounts_chat_client(
             yield client
     finally:
         set_principal_resolver(None)
+
+
+async def test_missing_owner_row_rejects_the_token_in_accounts_mode(
+    accounts_chat_client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Accounts mode treats a deleted users row as an inactive owner."""
+    login = await accounts_chat_client.post(
+        "/auth/login",
+        json={"username": "admin", "password": "admin-pw-12345"},
+    )
+    assert login.status_code == 200, login.text
+    owner_headers = {"authorization": f"Bearer {login.json()['token']}"}
+    created = await accounts_chat_client.post(
+        "/v1/chat/agent-accounts",
+        json={
+            "display_name": "Grok",
+            "handle": "grok-admin",
+            "webhook_url": "https://bot.example.com/hook",
+        },
+        headers=owner_headers,
+    )
+    assert created.status_code == 201, created.text
+    token = created.json()["token"]
+    with _session(db_uri) as session:
+        user = session.execute(select(SqlUser).where(SqlUser.id == "admin")).scalar_one()
+        session.delete(user)
+        session.commit()
+    channels = await accounts_chat_client.get(
+        "/v1/chat/channels",
+        headers={"authorization": f"Bearer {token}"},
+    )
+    listed = await accounts_chat_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"authorization": f"Bearer {token}"},
+    )
+    assert channels.status_code == 401, channels.text
+    assert listed.status_code == 401, listed.text
 
 
 async def test_accounts_mode_bot_mention_starts_and_reply_forwards(

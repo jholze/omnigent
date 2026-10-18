@@ -128,12 +128,17 @@ jobs:
             shift
             # sun_path allows 103 chars. oa-<letter>-<last 6 run-id digits>
             # keeps the tmux socket near 99 and isolates concurrent PRs.
+            # main=m, inner=i, integration=n (both suites start with i).
             # Positive slice: macOS bash 3.2 rejects ${var: -6}.
             local rid="${GITHUB_RUN_ID:-local}"
             if [ "${#rid}" -gt 6 ]; then
               rid="${rid:$((${#rid}-6))}"
             fi
-            local base="/private/tmp/oa-${name:0:1}-${rid}"
+            local letter="${name:0:1}"
+            if [ "$name" = "integration" ]; then
+              letter=n
+            fi
+            local base="/private/tmp/oa-${letter}-${rid}"
             rm -rf "$base"
             uv run pytest "$@" \
               --basetemp="$base" \
