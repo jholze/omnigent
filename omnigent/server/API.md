@@ -881,23 +881,32 @@ Request body:
     when they first observe it from the underlying runtime.
 
   workspace (string, optional)
-    Absolute workspace path on the host. Owner-only. Rebinds an idle
-    session: updates `omnigent_conversation_metadata.workspace`, the
+    Absolute workspace path on the host. Owner-only (an administrator
+    who is not the owner may also rebind; the host must still belong to
+    the caller). Rebinds an idle session: updates
+    `omnigent_conversation_metadata.workspace`, the
     `omnigent.composer_context.v1.0` composer label (chunked when the
-    document is long), and clears `runner_id` and `git_branch` when the
-    path or host actually changes. The next message then launches the
-    runner on the new path. Omitting the field leaves the path unchanged.
-    An explicit `null` does not unbind. A relative path, or a path that
-    an online host reports as missing or not a directory, is rejected.
-    An offline host skips the existence check.
+    document is long), and clears this session's `runner_id` and
+    `git_branch` when the path or host actually changes. Sub-agent
+    sessions that copied that runner id keep it. The next message then
+    launches the runner on the new path. Omitting the field leaves the
+    path unchanged. An explicit `null` is rejected with 422 and does not
+    unbind. A relative path is 422. With a host, the path is checked the
+    same way as session create: the host must be online, the path must
+    exist and be a directory, and it must fall inside the session
+    agent's `os_env.cwd` (including a `./subdir` requirement). The stored
+    value is the host's canonical path.
 
   host_id (string, optional)
     Host that should launch this session's runner. Owner-only, and the
     host must belong to the caller (a bot acts as its owner). Omitting
-    the field leaves the host unchanged; an explicit `null` does not
-    unbind. Binding a host onto a session with no stored workspace
-    requires `workspace` in the same request. A never-connected fork
-    (`host_id` and `runner_id` both null) can be bound this way.
+    the field leaves the host unchanged. An explicit `null` is rejected
+    with 422 and does not unbind. Binding a host onto a session with no
+    stored workspace requires `workspace` in the same request. The host
+    must be connected to this server; an offline host is 409, and a host
+    that is live on another replica is `wrong_replica`. A
+    never-connected fork (`host_id` and `runner_id` both null) can be
+    bound this way once that host is online.
 
 200 OK - body matches the `SessionResponse` shape above, with
 `runner_id` set to the newly bound value when `runner_id` was present.
@@ -905,14 +914,21 @@ A workspace or host change that differs from the stored binding clears
 `runner_id` instead.
 
 400 Bad Request - runner is not currently registered; `collaboration_mode`
-is used on a non-Codex-native session; or `external_session_id` would
-overwrite a different existing value
-403 Forbidden - `host_id` belongs to another user
+is used on a non-Codex-native session; `external_session_id` would
+overwrite a different existing value; or a workspace/host rebind fails
+the session-create path checks (`invalid_input`: missing, not a
+directory, outside the agent boundary, `./subdir` missing, or workspace
+required when binding a host). A host that is live on another replica
+is `wrong_replica` (also 400).
+403 Forbidden - `host_id` belongs to another user, the caller is not
+the session owner (administrators pass the owner gate), or
+`bot_may_rebind` refuses an agent-account caller
 404 Not Found - no session with that id, or `host_id` is unknown
-409 Conflict - the session is running, so its workspace or host cannot change
-422 Unprocessable Entity - `workspace` is not an absolute path, the path
-does not exist (or is not a directory) on an online host, or a host is
-bound without a workspace
+409 Conflict - the session is running or waiting, a descendant (or any
+other session) sharing its `runner_id` is running or waiting, the
+session is archived, or the host is offline
+422 Unprocessable Entity - `workspace` or `host_id` is explicit JSON
+`null`, or `workspace` is not an absolute path
 
 This is the mutable affinity primitive for Alpha. The same endpoint
 serves create-bind, resume-bind, and recover-bind: the client starts a

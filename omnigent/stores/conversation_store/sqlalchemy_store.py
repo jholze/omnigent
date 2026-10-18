@@ -106,6 +106,8 @@ from omnigent.stores.conversation_store import (
     ConversationUpdateResult,
     CreatedSession,
     DailyCostState,
+    SessionBindLabelPlan,
+    SessionBindResult,
     SessionConnectivity,
     pinned_label_key,
 )
@@ -119,6 +121,30 @@ from omnigent.stores.conversation_store.overrides import (
 _logger = logging.getLogger(__name__)
 
 _SESSION_TODOS_STATE_KEY = "_omnigent_native_plan_snapshot_v1"
+_BUSY_LIVE_STATUS = (
+    encode_session_live_status("running"),
+    encode_session_live_status("waiting"),
+)
+
+
+def _apply_bind_labels(
+    session: Session,
+    conversation_id: str,
+    label_plan: SessionBindLabelPlan,
+) -> None:
+    """Rewrite composer labels from the rows visible to this transaction."""
+    labels = _fetch_labels(session, conversation_id)
+    upserts, stale = label_plan(labels)
+    if stale:
+        session.execute(
+            delete(SqlConversationLabel).where(
+                SqlConversationLabel.workspace_id == current_workspace_id(),
+                SqlConversationLabel.conversation_id == conversation_id,
+                SqlConversationLabel.key.in_(stale),
+            )
+        )
+    if upserts:
+        _upsert_labels(session, conversation_id, upserts, now_epoch())
 
 
 def _decode_session_state(
@@ -4179,41 +4205,117 @@ class SqlAlchemyConversationStore(ConversationStore):
         *,
         host_id: str | None,
         workspace: str,
-    ) -> str | None:
+        expected_runner_id: str | None,
+        label_plan: SessionBindLabelPlan | None = None,
+    ) -> SessionBindResult:
         """
         Set ``workspace`` and, when ``host_id`` is not ``None``, the host.
 
-        See :meth:`ConversationStore.bind_session_workspace`. A same-value
-        write does not clear ``runner_id`` or ``git_branch``.
+        See :meth:`ConversationStore.bind_session_workspace`. The live-status
+        and runner compare-and-set run in this ``IMMEDIATE`` transaction, so
+        a turn that starts while the caller is stating the host cannot lose
+        its runner id.
 
         :param conversation_id: Session/conversation identifier,
             e.g. ``"conv_abc123"``.
         :param host_id: Host to bind, or ``None`` to leave it unchanged.
         :param workspace: Absolute workspace path to store.
-        :returns: The runner id cleared because the binding changed, or
-            ``None``.
+        :param expected_runner_id: Runner id the caller observed. A real
+            binding change is refused when the locked row differs.
+        :param label_plan: Composer-label rewrite, applied in this
+            transaction when both tables share the engine.
+        :returns: The compare-and-set outcome, including whether another
+            session still holds a cleared runner id.
         :raises ConversationNotFoundError: If no conversation row
             exists for ``conversation_id``.
+        :raises OmnigentError: ``conflict`` when the locked row cannot
+            be rebound. See the abstract method.
         """
+        same_engine = self._conv_engine is self._engine
 
-        def write(session: Session) -> str | None:
-            meta = session.get(SqlConversationMetadata, (current_workspace_id(), conversation_id))
+        def write(session: Session) -> tuple[SessionBindResult, bool]:
+            meta_query = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                meta_query = meta_query.with_for_update()
+            meta = session.scalars(meta_query).first()
             if meta is None:
                 raise ConversationNotFoundError(
                     f"conversation {conversation_id!r} does not exist",
                 )
+            if same_engine:
+                ap_row = session.get(SqlConversation, (current_workspace_id(), conversation_id))
+                if ap_row is not None and ap_row.archived:
+                    raise OmnigentError(
+                        "Cannot change the workspace or host of an archived session",
+                        code=ErrorCode.CONFLICT,
+                    )
+            if meta.live_status in _BUSY_LIVE_STATUS:
+                raise OmnigentError(
+                    "Cannot change the workspace or host while the session is running",
+                    code=ErrorCode.CONFLICT,
+                )
             host_changed = host_id is not None and meta.host_id != host_id
             binding_changed = host_changed or meta.workspace != workspace
-            cleared = meta.runner_id if binding_changed and meta.runner_id else None
-            if host_id is not None:
-                meta.host_id = host_id
-            meta.workspace = workspace
+            cleared: str | None = None
+            shared = False
             if binding_changed:
+                if meta.runner_id != expected_runner_id:
+                    raise OmnigentError(
+                        "Cannot change the workspace or host while the session is running",
+                        code=ErrorCode.CONFLICT,
+                    )
+                if meta.runner_id:
+                    others_query = select(SqlConversationMetadata).where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id(),
+                        SqlConversationMetadata.runner_id == meta.runner_id,
+                        SqlConversationMetadata.id != conversation_id,
+                    )
+                    if self._meta_supports_for_update:
+                        others_query = others_query.with_for_update()
+                    others = session.scalars(others_query).all()
+                    if any(row.live_status in _BUSY_LIVE_STATUS for row in others):
+                        raise OmnigentError(
+                            "Cannot change the workspace or host while a session "
+                            "sharing its runner is running",
+                            code=ErrorCode.CONFLICT,
+                        )
+                    shared = bool(others)
+                    cleared = meta.runner_id
+                if host_id is not None:
+                    meta.host_id = host_id
+                meta.workspace = workspace
                 meta.git_branch = None
                 meta.runner_id = None
-            return cleared
+            labels_written = False
+            if same_engine and label_plan is not None:
+                _apply_bind_labels(session, conversation_id, label_plan)
+                labels_written = True
+            return (
+                SessionBindResult(
+                    binding_changed=binding_changed,
+                    cleared_runner_id=cleared,
+                    runner_still_shared=shared,
+                ),
+                labels_written,
+            )
 
-        return run_write_transaction(self._session_immediate, "bind_session_workspace", write)
+        result, labels_written = run_write_transaction(
+            self._session_immediate, "bind_session_workspace", write
+        )
+        if label_plan is not None and not labels_written:
+
+            def write_labels(session: Session) -> None:
+                _apply_bind_labels(session, conversation_id, label_plan)
+
+            run_write_transaction(
+                self._conv_session_immediate,
+                "bind_session_workspace_labels",
+                write_labels,
+            )
+        return result
 
     def set_external_session_id(
         self,

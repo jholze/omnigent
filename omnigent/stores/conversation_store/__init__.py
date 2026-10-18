@@ -4,7 +4,7 @@ import hashlib
 import math
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -398,6 +398,29 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
                     bucket[sub_key] = bucket.get(sub_key, 0) + sub_value
         elif _is_addable_usage_increment(value):
             current[key] = current.get(key, 0) + value
+
+
+# Rewrites composer labels from the labels read inside the bind transaction.
+SessionBindLabelPlan = Callable[[Mapping[str, str]], tuple[dict[str, str], list[str]]]
+
+
+@dataclass(frozen=True)
+class SessionBindResult:
+    """Outcome of a compare-and-set workspace bind.
+
+    :param binding_changed: Whether the locked row's host or workspace
+        differed from the request. Callers use this, not a snapshot taken
+        before a host stat, to decide whether a runner was cleared.
+    :param cleared_runner_id: Runner id removed from this session, or
+        ``None`` when the binding did not change or no runner was set.
+    :param runner_still_shared: Whether another session still has
+        ``cleared_runner_id``. Those rows keep their runner id. The caller
+        must not stop or deregister that runner.
+    """
+
+    binding_changed: bool
+    cleared_runner_id: str | None
+    runner_still_shared: bool
 
 
 class ConversationStore(ABC):
@@ -1730,15 +1753,29 @@ class ConversationStore(ABC):
         *,
         host_id: str | None,
         workspace: str,
-    ) -> str | None:
+        expected_runner_id: str | None,
+        label_plan: SessionBindLabelPlan | None = None,
+    ) -> SessionBindResult:
         """
         Point an existing session at a workspace and, optionally, a host.
 
+        The write is a compare-and-set on the locked metadata row. It
+        refuses when that row is archived, ``live_status`` is ``running``
+        or ``waiting``, ``runner_id`` is not ``expected_runner_id`` on a
+        real change, or another session that still has this runner id is
+        in a turn. A refusal writes nothing.
+
         ``host_id`` of ``None`` leaves the current host unchanged and never
         unbinds it. When the host or the workspace actually changes, clear
-        ``git_branch`` and ``runner_id`` in the same transaction so the next
-        message launches on the new binding. A same-value write leaves the
-        runner in place.
+        this session's ``git_branch`` and ``runner_id`` in the same
+        transaction. Other sessions that share the runner id — sub-agent
+        children copy it at spawn — keep theirs. A same-value write leaves
+        the runner in place.
+
+        When the conversation tables share this database, ``label_plan``
+        runs in that same transaction against the labels read under the
+        lock. A split database applies the labels in a following
+        transaction after the metadata commit.
 
         Runner/host binding is live state, not conversation activity, so
         this must NOT bump ``updated_at``.
@@ -1750,10 +1787,20 @@ class ConversationStore(ABC):
         :param workspace: Absolute workspace path to store, e.g.
             ``"/Users/corey/projects/myapp"``. Required even when the host
             is unchanged, so a host row never loses its workspace.
-        :returns: The runner id that was cleared, or ``None`` when the
-            binding did not change or no runner was set.
+        :param expected_runner_id: Runner id the caller observed for this
+            session. A binding change is refused when the locked row has
+            a different value.
+        :param label_plan: Builds composer-label upserts and deletes from
+            the labels visible in the bind transaction. ``None`` leaves
+            labels untouched.
+        :returns: Whether the binding changed, which runner id this session
+            dropped, and whether another session still holds that runner.
         :raises ConversationNotFoundError: If no conversation row
             with ``conversation_id`` exists.
+        :raises OmnigentError: ``conflict`` when the locked row is
+            archived, in a turn, bound to a different runner than
+            ``expected_runner_id``, or shares its runner with a session
+            that is in a turn.
         """
         ...
 

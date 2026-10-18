@@ -2407,13 +2407,17 @@ class UpdateSessionRequest(BaseModel):
         Rebinds an idle session: the metadata column, the composer-context
         label, and (with ``host_id``) the host binding are updated, and a
         stale ``runner_id`` is cleared so the next message launches on the
-        new path. ``None`` leaves the path unchanged; an explicit JSON
-        ``null``, a relative path, or a path that is missing on an online
-        host is rejected. Owner-only.
+        new path. Omitting the field leaves the path unchanged. An explicit
+        JSON ``null`` is rejected with 422. A relative path is 422. A path
+        the host rejects (missing, not a directory, outside the agent's
+        ``os_env.cwd``) is 400. Owner-only, including an administrator who
+        is not the session owner; the host must still belong to the caller.
     :param host_id: Host that should launch the session's runner, e.g. a
-        32-char hex id. The caller must own the host. ``None`` leaves the
-        host unchanged; an explicit JSON ``null`` does not unbind. Owner-only.
-        A host requires a workspace, either already stored or in this request.
+        32-char hex id. The caller must own the host. Omitting the field
+        leaves the host unchanged. An explicit JSON ``null`` is rejected
+        with 422 and does not unbind. Owner-only. A host requires a
+        workspace, either already stored or in this request, and the host
+        must be connected to this replica.
     """
 
     runner_id: str | None = None
@@ -2445,6 +2449,19 @@ class UpdateSessionRequest(BaseModel):
         if value is None or is_absolute_workspace_path(value):
             return value
         raise ValueError("workspace must be an absolute path")
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_binding(self) -> Self:
+        """Explicit JSON null is not an unbind. Omit the field instead.
+
+        FastAPI reports this as 422, before the route's ``invalid_input``
+        checks. A missing key still leaves the stored value alone.
+        """
+        if "workspace" in self.model_fields_set and self.workspace is None:
+            raise ValueError("workspace must be an absolute path")
+        if "host_id" in self.model_fields_set and self.host_id is None:
+            raise ValueError("host_id must be a non-empty host id")
+        return self
 
 
 class AutomaticSessionRenameRequest(BaseModel):
