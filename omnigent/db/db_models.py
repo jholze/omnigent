@@ -2078,8 +2078,10 @@ class SqlChatThread(OmnigentBase):
 
     ``participants`` is a JSON array of up to 5 principal ids (the latest
     repliers). ``agent_state`` is one of ``none``/``starting``/``active``/
-    ``dismissed``/``start_failed``/``closed``. ``start_requested_at`` drives
-    the agent start timeout (FR-087). Times are epoch microseconds.
+    ``dismissed``/``start_failed``/``closed``.     ``start_requested_at`` drives
+    the agent start timeout (FR-087). ``started_by_agent_account_id`` is the
+    bot that started the thread; the session itself belongs to ``caller_id``.
+    Times are epoch microseconds.
     """
 
     __tablename__ = "chat_threads"
@@ -2103,6 +2105,7 @@ class SqlChatThread(OmnigentBase):
     agent_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     agent_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="none")
     caller_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    started_by_agent_account_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     start_requested_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -2185,10 +2188,10 @@ class SqlChatRead(OmnigentBase):
 class SqlChatAgentAccount(OmnigentBase):
     """An agent account (webhook bot) owned by a human principal.
 
-    ``token_hash`` is the HMAC-SHA256 hex of the bearer token and is unique
-    globally (the auth lookup happens before workspace resolution).
+    ``token_hash`` is the HMAC-SHA256 hex of the ``ogc_`` bearer token and is
+    unique globally (the auth lookup happens before workspace resolution).
     ``token_prefix`` is an 8-character display hint. Times are epoch
-    microseconds.
+    microseconds. A rotate replaces the hash; a revoke sets ``revoked_at``.
     """
 
     __tablename__ = "chat_agent_accounts"

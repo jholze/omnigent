@@ -48,6 +48,127 @@
         "title": "AddCommentRequest",
         "type": "object"
       },
+      "AgentAccountBody": {
+        "description": "`POST /v1/chat/agent-accounts`.",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "handle": {
+            "title": "Handle",
+            "type": "string"
+          },
+          "webhook_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Url"
+          }
+        },
+        "required": [
+          "display_name",
+          "handle"
+        ],
+        "title": "AgentAccountBody",
+        "type": "object"
+      },
+      "AgentAccountCreatedResponse": {
+        "description": "`POST /v1/chat/agent-accounts`. Token and webhook secret are shown once.",
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/AgentAccountResponse"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "webhook_secret": {
+            "title": "Webhook Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "token",
+          "webhook_secret"
+        ],
+        "title": "AgentAccountCreatedResponse",
+        "type": "object"
+      },
+      "AgentAccountResponse": {
+        "description": "An agent account. The raw token is not repeated on this object.",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "handle": {
+            "title": "Handle",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "secret_version": {
+            "format": "int64",
+            "title": "Secret Version",
+            "type": "integer"
+          },
+          "token_prefix": {
+            "title": "Token Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "principal_id",
+          "owner_id",
+          "display_name",
+          "handle",
+          "token_prefix",
+          "secret_version"
+        ],
+        "title": "AgentAccountResponse",
+        "type": "object"
+      },
+      "AgentAccountRotatedResponse": {
+        "description": "`POST /v1/chat/agent-accounts/{id}/rotate`. The previous token is dead.",
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/AgentAccountResponse"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "webhook_secret": {
+            "title": "Webhook Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "token",
+          "webhook_secret"
+        ],
+        "title": "AgentAccountRotatedResponse",
+        "type": "object"
+      },
       "AgentDetailObject": {
         "description": "Agent summary with caller ownership for management actions.",
         "properties": {
@@ -281,6 +402,30 @@
           "created_at"
         ],
         "title": "AgentObject",
+        "type": "object"
+      },
+      "AuthorResponse": {
+        "description": "Author of an unread item. `kind` includes `system` (FR-095).",
+        "properties": {
+          "display": {
+            "title": "Display",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "display"
+        ],
+        "title": "AuthorResponse",
         "type": "object"
       },
       "AutomaticSessionRenameRequest": {
@@ -786,6 +931,12 @@
             "title": "Kind",
             "type": "string"
           },
+          "mention_count": {
+            "default": 0,
+            "format": "int64",
+            "title": "Mention Count",
+            "type": "integer"
+          },
           "name": {
             "anyOf": [
               {
@@ -818,6 +969,12 @@
               }
             ],
             "title": "Topic"
+          },
+          "unread_count": {
+            "default": 0,
+            "format": "int64",
+            "title": "Unread Count",
+            "type": "integer"
           },
           "visibility": {
             "title": "Visibility",
@@ -3980,6 +4137,57 @@
         "title": "McpToolsResponse",
         "type": "object"
       },
+      "MemberResponse": {
+        "description": "One channel member, including the principal id bots mention.",
+        "properties": {
+          "display": {
+            "title": "Display",
+            "type": "string"
+          },
+          "joined_at": {
+            "format": "int64",
+            "title": "Joined At",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "principal_type": {
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "principal_id",
+          "principal_type",
+          "role",
+          "joined_at",
+          "kind",
+          "display"
+        ],
+        "title": "MemberResponse",
+        "type": "object"
+      },
       "MessageData": {
         "description": "Data for a message item (user or assistant).\n\n**Parameters**\n\n- `agent` \u2014 Agent name (required for assistant messages, absent for user). Serialized as `\"model\"` in JSON.",
         "properties": {
@@ -5031,6 +5239,58 @@
           "response"
         ],
         "title": "QueuedEvent",
+        "type": "object"
+      },
+      "ReadBody": {
+        "description": "`POST /v1/chat/channels/{id}/read`.\n\n`id` is the message id. `message_id` is accepted as the same field.\n`created_at` must match that message when it is sent.",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "thread_root_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Root Id"
+          }
+        },
+        "title": "ReadBody",
         "type": "object"
       },
       "ReadStatePutRequest": {
@@ -9384,6 +9644,90 @@
         "title": "TurnStartedEvent",
         "type": "object"
       },
+      "UnreadItemResponse": {
+        "description": "One unread mention or DM message for an agent account (FR-088).",
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/AuthorResponse"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "content_trust": {
+            "default": "untrusted",
+            "title": "Content Trust",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "thread_root_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Root Id"
+          }
+        },
+        "required": [
+          "channel_id",
+          "thread_root_id",
+          "message_id",
+          "author",
+          "body",
+          "created_at",
+          "reason"
+        ],
+        "title": "UnreadItemResponse",
+        "type": "object"
+      },
+      "UnreadResponse": {
+        "description": "`GET /v1/chat/unread`.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UnreadItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "UnreadResponse",
+        "type": "object"
+      },
       "UpdateCodexGoalStatusRequest": {
         "additionalProperties": false,
         "description": "Request body for `PATCH /v1/sessions/{id}/codex_goal/status`.\n\nCodex app-server represents pause/resume as `thread/goal/set` status\nupdates. Omnigent exposes the two user-driven transitions explicitly:\n`\"paused\"` pauses an active goal, and `\"active\"` resumes a paused,\nblocked, or usage-limited goal.",
@@ -10479,6 +10823,163 @@
         "summary": "Branding Logo"
       }
     },
+    "/v1/chat/agent-accounts": {
+      "post": {
+        "description": "Mint an agent account. The raw `ogc_` token is returned once.",
+        "operationId": "create_agent_account_v1_chat_agent_accounts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAccountBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountCreatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Agent Account",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/agent-accounts/{account_id}": {
+      "delete": {
+        "description": "Revoke the account (FR-064). A non-owner receives 404.",
+        "operationId": "delete_agent_account_v1_chat_agent_accounts__account_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Agent Account",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/agent-accounts/{account_id}/revoke": {
+      "post": {
+        "description": "Revoke the account. Its current token returns 401.",
+        "operationId": "revoke_agent_account_v1_chat_agent_accounts__account_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Agent Account",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/agent-accounts/{account_id}/rotate": {
+      "post": {
+        "description": "Rotate the token. The previous `ogc_` value returns 401.",
+        "operationId": "rotate_agent_account_v1_chat_agent_accounts__account_id__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountRotatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotate Agent Account",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
     "/v1/chat/bootstrap": {
       "get": {
         "description": "Ensure `general` exists, add the human caller, and return the sidebar.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 when the flag is off.",
@@ -10552,8 +11053,32 @@
       }
     },
     "/v1/chat/channels": {
+      "get": {
+        "description": "Joined channels the caller may see, with unread counts (FR-008, FR-066).",
+        "operationId": "list_channels_v1_chat_channels_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChannelResponse"
+                  },
+                  "title": "Response List Channels V1 Chat Channels Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Channels",
+        "tags": [
+          "chat"
+        ]
+      },
       "post": {
-        "description": "Create a public channel and make the caller a member (FR-005).",
+        "description": "Create a public channel and make the caller a member (FR-005).\n\nAn agent account also adds its owner, and may create a channel only\nbecause its owner may.",
         "operationId": "create_channel_v1_chat_channels_post",
         "requestBody": {
           "content": {
@@ -10660,6 +11185,53 @@
           }
         },
         "summary": "Leave Channel",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/channels/{channel_id}/members": {
+      "get": {
+        "description": "List members and their principal ids.",
+        "operationId": "list_members_v1_chat_channels__channel_id__members_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemberResponse"
+                  },
+                  "title": "Response List Members V1 Chat Channels  Channel Id  Members Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Members",
         "tags": [
           "chat"
         ]
@@ -10833,6 +11405,57 @@
         ]
       }
     },
+    "/v1/chat/channels/{channel_id}/read": {
+      "post": {
+        "description": "Advance the caller's read cursor. Older cursors stay put (FR-007).\n\nUnknown ids and a `created_at` that does not match the message are\n422 and leave the cursor unchanged. A forward move notifies only the\ncaller (FR-009). The body is returned with status 204 so MCP can read\nthe cursor.",
+        "operationId": "mark_read_v1_chat_channels__channel_id__read_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mark Read",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
     "/v1/chat/dms": {
       "post": {
         "description": "Return or create the DM for the caller plus 1\u20138 others (FR-021, FR-022).",
@@ -10870,6 +11493,28 @@
           }
         },
         "summary": "Open Dm",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/unread": {
+      "get": {
+        "description": "Return an agent account's unread mentions and DM messages (FR-088).\n\nHumans receive 403 and use bootstrap counts instead.",
+        "operationId": "unread_v1_chat_unread_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnreadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Unread",
         "tags": [
           "chat"
         ]

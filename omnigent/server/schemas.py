@@ -1300,6 +1300,10 @@ class SessionEventInput(BaseModel):
         tools are fixed at start time.
     :param created_by: Optional internal attribution actor for runner-
         originated events that are triggered by a prior human turn.
+    :param subagent_wake_key: Dedupe id for a parent wake notice. Set by
+        the runner and by the server's returned-event wake so a
+        tool-registered child produces one notice. Stripped before the
+        message is persisted.
     """
 
     type: str
@@ -1310,6 +1314,7 @@ class SessionEventInput(BaseModel):
     model_override: str | None = None
     tools: list[dict[str, Any]] | None = None
     created_by: str | None = None
+    subagent_wake_key: str | None = None
 
     @field_validator("data")
     @classmethod

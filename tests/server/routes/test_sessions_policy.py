@@ -212,6 +212,10 @@ def _make_spec_no_guardrails() -> AgentSpec:
 
 _CACHE_PATCH = "omnigent.server.routes.sessions.get_agent_cache"
 _ENGINE_PATCH = "omnigent.server.routes.sessions.build_policy_engine"
+# ``runtime.init`` installs a process-global store and xdist keeps it.
+# The no-guardrails skip reads these bindings, not the fakes this test builds.
+_POLICY_STORE_PATCH = "omnigent.server.routes._sessions.orchestration.get_policy_store"
+_CAPS_PATCH = "omnigent.server.routes.sessions.get_caps"
 _HOLD_GATE_PATCH = "omnigent.server.routes.sessions._hold_native_ask_gate"
 _STREAM_PATCH = "omnigent.server.routes.sessions.session_stream"
 
@@ -670,8 +674,11 @@ async def test_input_no_guardrails_skips_policy():
 
     with (
         patch(_CACHE_PATCH) as mock_cache,
+        patch(_POLICY_STORE_PATCH, return_value=None),
+        patch(_CAPS_PATCH) as mock_caps,
     ):
         mock_cache.return_value.load.return_value = loaded
+        mock_caps.return_value.default_policies = None
         result = await _evaluate_input_policy(
             _FakeRequest(),
             "sess_1",

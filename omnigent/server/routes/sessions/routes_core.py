@@ -945,7 +945,9 @@ def register_core_routes(
                 workspace=conv.workspace if conv is not None else None,
                 host_id=launch_host_id,
             )
-        add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
+        import omnigent.debug_logging as debug_logging
+
+        debug_logging.add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
         return resp
 
     async def _create_bundled_session_from_multipart(

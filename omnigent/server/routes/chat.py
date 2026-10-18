@@ -12,21 +12,38 @@ import asyncio
 import re
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from omnigent.db.utils import now_epoch_us
+from omnigent.debug_logging import add_audit_attrs
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server.agent_account_tokens import (
+    agent_account_secret,
+    derive_webhook_secret,
+    webhook_url_rejected,
+)
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
-from omnigent.server.chat_access import principal_kind, require_post, require_read
-from omnigent.server.chat_realtime import publish_message_created
+from omnigent.server.chat_access import (
+    author_principal_type,
+    principal_kind,
+    require_owner_membership,
+    require_post,
+    require_read,
+)
+from omnigent.server.chat_rate_limit import consume_agent_request, consume_channel_post
+from omnigent.server.chat_realtime import publish_message_created, publish_read_updated
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.stores.chat_store import (
+    AccountStatus,
+    ChatAgentAccount,
     ChatChannel,
     ChatMessage,
     ChatStore,
     DmStatus,
     PostStatus,
+    ReadStatus,
 )
 
 _GENERAL_CHANNEL = "general"
@@ -37,7 +54,10 @@ _DEFAULT_MESSAGES_LIMIT = 50
 _MAX_MESSAGES_LIMIT = 200
 _CHANGES_LIMIT = 1000
 _CHANNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_UNREAD_LIMIT = 50
+_ACTIVE_WINDOW_US = 10 * 60 * 1_000_000
 
 
 class ChannelResponse(BaseModel):
@@ -51,6 +71,8 @@ class ChannelResponse(BaseModel):
     visibility: str
     created_by: str | None
     created_at: int
+    unread_count: int = 0
+    mention_count: int = 0
 
 
 class MessageResponse(BaseModel):
@@ -139,12 +161,108 @@ class DmCreateBody(BaseModel):
     principals: list[str]
 
 
+class MemberResponse(BaseModel):
+    """One channel member, including the principal id bots mention."""
+
+    principal_id: str
+    principal_type: str
+    role: str
+    joined_at: int
+    kind: str
+    display: str
+    status: str | None = None
+
+
+class AuthorResponse(BaseModel):
+    """Author of an unread item. ``kind`` includes ``system`` (FR-095)."""
+
+    id: str
+    kind: str
+    display: str
+
+
+class UnreadItemResponse(BaseModel):
+    """One unread mention or DM message for an agent account (FR-088)."""
+
+    channel_id: str
+    thread_root_id: str | None
+    message_id: str
+    author: AuthorResponse
+    body: str
+    created_at: int
+    reason: str
+    content_trust: str = "untrusted"
+
+
+class UnreadResponse(BaseModel):
+    """``GET /v1/chat/unread``."""
+
+    items: list[UnreadItemResponse]
+    next_cursor: str | None = None
+
+
+class ReadBody(BaseModel):
+    """``POST /v1/chat/channels/{id}/read``.
+
+    ``id`` is the message id. ``message_id`` is accepted as the same field.
+    ``created_at`` must match that message when it is sent.
+    """
+
+    id: str | None = None
+    message_id: str | None = None
+    created_at: int | None = None
+    thread_root_id: str | None = None
+
+
+class AgentAccountBody(BaseModel):
+    """``POST /v1/chat/agent-accounts``."""
+
+    display_name: str
+    handle: str
+    webhook_url: str | None = None
+
+
+class AgentAccountResponse(BaseModel):
+    """An agent account. The raw token is not repeated on this object."""
+
+    id: str
+    principal_id: str
+    owner_id: str
+    display_name: str
+    handle: str
+    token_prefix: str
+    secret_version: int
+
+
+class AgentAccountCreatedResponse(BaseModel):
+    """``POST /v1/chat/agent-accounts``. Token and webhook secret are shown once."""
+
+    account: AgentAccountResponse
+    token: str
+    webhook_secret: str
+
+
+class AgentAccountRotatedResponse(BaseModel):
+    """``POST /v1/chat/agent-accounts/{id}/rotate``. The previous token is dead."""
+
+    account: AgentAccountResponse
+    token: str
+    webhook_secret: str
+
+
 def _resolve_caller(request: Request, auth_provider: AuthProvider | None) -> str:
     """Resolve the caller principal, falling back to the local user.
+
+    An in-process call from ``/mcp`` authenticates as the owner. Chat
+    authorship, membership, and the streak still use the agent account,
+    which the auth branch stored on the scope as ``mcp_actor``.
 
     :raises OmnigentError: 401 when multi-user auth is active but the
         request carries no identity.
     """
+    actor = request.scope.get("mcp_actor")
+    if request.scope.get("mcp_inprocess") is True and isinstance(actor, str) and actor:
+        return actor
     user_id = require_user(request, auth_provider)
     return user_id if user_id is not None else RESERVED_USER_LOCAL
 
@@ -163,7 +281,9 @@ def _parse_cursor(raw: str | None) -> tuple[int, str] | None:
     return int(created_raw), message_id
 
 
-def _channel_response(channel: ChatChannel) -> ChannelResponse:
+def _channel_response(
+    channel: ChatChannel, *, unread_count: int = 0, mention_count: int = 0
+) -> ChannelResponse:
     """Map a stored channel onto its wire shape."""
     return ChannelResponse(
         id=channel.id,
@@ -174,6 +294,8 @@ def _channel_response(channel: ChatChannel) -> ChannelResponse:
         visibility=channel.visibility,
         created_by=channel.created_by,
         created_at=channel.created_at,
+        unread_count=unread_count,
+        mention_count=mention_count,
     )
 
 
@@ -217,6 +339,132 @@ def _validate_body(body: str) -> str:
     return trimmed
 
 
+def _require_human(caller: str) -> None:
+    """Refuse agent accounts on routes that mint or rotate credentials."""
+    if principal_kind(caller) == "agent_account":
+        raise OmnigentError(
+            "agent accounts cannot manage agent accounts",
+            code=ErrorCode.FORBIDDEN,
+        )
+
+
+def _audit_bot(
+    request: Request,
+    caller: str,
+    chat_store: ChatStore,
+    *,
+    action: str,
+    outcome: str,
+    **extra: object,
+) -> None:
+    """Record a bot chat action with account and owner, never the body."""
+    if principal_kind(caller) != "agent_account":
+        return
+    account = chat_store.get_agent_account_by_principal(caller)
+    owner_id = account.owner_id if account is not None else request.scope.get("mcp_owner_id")
+    account_id = account.id if account is not None else caller.removeprefix("agent:")
+    # Attribute access so a request-scoped spy sees message ids. The name
+    # imported above is bound at import and would skip that spy.
+    import omnigent.debug_logging as debug_logging
+
+    debug_logging.add_audit_attrs(
+        actor_kind="agent_account",
+        action=action,
+        account_id=account_id,
+        owner_id=owner_id if isinstance(owner_id, str) else None,
+        outcome=outcome,
+        **extra,
+    )
+
+
+def _raise_rate_limited(retry_after: int) -> None:
+    """Raise the stable ``rate_limited`` error with a retry hint."""
+    raise OmnigentError(
+        "rate limit exceeded",
+        code=ErrorCode.RATE_LIMITED,
+        retry_after_seconds=retry_after,
+    )
+
+
+def _validate_display_name(value: str) -> str:
+    """Trim a display name to the 1–40 character rule (FR-061)."""
+    trimmed = value.strip()
+    if not trimmed or len(trimmed) > 40 or "\u0000" in trimmed:
+        raise OmnigentError("display_name must be 1-40 characters", code=ErrorCode.INVALID_INPUT)
+    return trimmed
+
+
+def _validate_handle(value: str) -> str:
+    """Require a lowercase handle of 2–40 characters (FR-061)."""
+    if not _HANDLE_RE.fullmatch(value):
+        raise OmnigentError(
+            "handle must match ^[a-z0-9][a-z0-9-]{1,39}$",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return value
+
+
+async def _channels_visible_to(
+    chat_store: ChatStore, caller: str
+) -> tuple[list[ChatChannel], list[ChatChannel]]:
+    """Joined channels and DMs the caller may actually see.
+
+    Agent accounts drop any conversation their owner is not a member of.
+    """
+    channels = list(await asyncio.to_thread(chat_store.list_joined_channels, caller))
+    dms = list(await asyncio.to_thread(chat_store.list_joined_dms, caller))
+    if principal_kind(caller) != "agent_account":
+        return channels, dms
+    account = await asyncio.to_thread(chat_store.get_agent_account_by_principal, caller)
+    if account is None:
+        return [], []
+    owner_channels = {
+        channel.id
+        for channel in await asyncio.to_thread(chat_store.list_joined_channels, account.owner_id)
+    }
+    owner_dms = {
+        channel.id
+        for channel in await asyncio.to_thread(chat_store.list_joined_dms, account.owner_id)
+    }
+    allowed = owner_channels | owner_dms
+    return (
+        [channel for channel in channels if channel.id in allowed],
+        [channel for channel in dms if channel.id in allowed],
+    )
+
+
+def _agent_account_response(account: ChatAgentAccount) -> AgentAccountResponse:
+    """Wire shape of an agent account. The raw token is never included."""
+    return AgentAccountResponse(
+        id=account.id,
+        principal_id=account.principal_id,
+        owner_id=account.owner_id,
+        display_name=account.display_name,
+        handle=account.handle,
+        token_prefix=account.token_prefix,
+        secret_version=account.secret_version,
+    )
+
+
+def _require_agent_secret() -> None:
+    """Refuse account minting when the HMAC secret is unset (FR-061)."""
+    if agent_account_secret() is None:
+        raise OmnigentError(
+            "agent accounts are not configured",
+            code=ErrorCode.AGENT_ACCOUNTS_UNCONFIGURED,
+        )
+
+
+def _audit_account(action: str, *, account_id: str | None, owner_id: str, outcome: str) -> None:
+    """Record an account change without the token, secret, or webhook URL."""
+    add_audit_attrs(
+        action=action,
+        account_id=account_id,
+        owner_id=owner_id,
+        outcome=outcome,
+    )
+
+
 def create_chat_router(
     chat_store: ChatStore,
     *,
@@ -237,10 +485,35 @@ def create_chat_router(
     _bind_store(chat_store)
     flags = feature_flags or resolve_feature_flags()
 
-    def _require_team_chat() -> None:
-        """Refuse every chat route with 404 when the flag is off (FR-003)."""
+    async def _require_team_chat(request: Request) -> None:
+        """Refuse every chat route with 404 when the flag is off (FR-003).
+
+        Agent accounts also share the 120-request window with ``/mcp`` unless
+        this call was started in-process by a tool (FR-092). Presence is
+        stamped at most once per minute (FR-076).
+        """
         if not flags.enabled(Feature.TEAM_CHAT):
             raise OmnigentError("team chat is disabled", code=ErrorCode.NOT_FOUND)
+        if request.scope.get("mcp_inprocess"):
+            return
+        caller = _resolve_caller(request, auth_provider)
+        if principal_kind(caller) != "agent_account":
+            return
+        retry_after = consume_agent_request(caller)
+        if retry_after is not None:
+            _raise_rate_limited(retry_after)
+        await asyncio.to_thread(chat_store.touch_agent_last_seen, caller)
+
+    async def _channels_with_counts(caller: str, rows: list[ChatChannel]) -> list[ChannelResponse]:
+        """Attach unread and mention counts for *rows* (FR-008)."""
+        counts = await asyncio.to_thread(
+            chat_store.channel_unread_counts, caller, [row.id for row in rows]
+        )
+        rendered: list[ChannelResponse] = []
+        for row in rows:
+            unread, mentions = counts.get(row.id, (0, 0))
+            rendered.append(_channel_response(row, unread_count=unread, mention_count=mentions))
+        return rendered
 
     # The gate lives on the router, not on each handler: FastAPI validates
     # request bodies/query params before a handler runs, so a per-handler
@@ -260,8 +533,7 @@ def create_chat_router(
         general = await asyncio.to_thread(
             chat_store.bootstrap_channel, _GENERAL_CHANNEL, human_caller
         )
-        channels = await asyncio.to_thread(chat_store.list_joined_channels, caller)
-        dms = await asyncio.to_thread(chat_store.list_joined_dms, caller)
+        channels, dms = await _channels_visible_to(chat_store, caller)
         members = await asyncio.to_thread(chat_store.list_members, general.id)
         accounts = await asyncio.to_thread(chat_store.list_active_agent_accounts)
 
@@ -281,18 +553,29 @@ def create_chat_router(
         )
         return BootstrapResponse(
             me=caller,
-            channels=[_channel_response(channel) for channel in channels],
-            dms=[_channel_response(dm) for dm in dms],
+            channels=await _channels_with_counts(caller, channels),
+            dms=await _channels_with_counts(caller, dms),
             directory=directory,
             changes_cursor=f"{now_epoch_us()}:{'0' * 32}",
         )
+
+    @router.get("/chat/channels", response_model=list[ChannelResponse])
+    async def list_channels(request: Request) -> list[ChannelResponse]:
+        """Joined channels the caller may see, with unread counts (FR-008, FR-066)."""
+        caller = _resolve_caller(request, auth_provider)
+        channels, _dms = await _channels_visible_to(chat_store, caller)
+        return await _channels_with_counts(caller, channels)
 
     @router.post("/chat/channels", response_model=ChannelResponse, status_code=201)
     async def create_channel(
         request: Request,
         body: ChannelCreateBody,
     ) -> ChannelResponse:
-        """Create a public channel and make the caller a member (FR-005)."""
+        """Create a public channel and make the caller a member (FR-005).
+
+        An agent account also adds its owner, and may create a channel only
+        because its owner may.
+        """
         caller = _resolve_caller(request, auth_provider)
         if not _CHANNEL_NAME_RE.fullmatch(body.name):
             raise OmnigentError(
@@ -303,6 +586,18 @@ def create_chat_router(
         if existing is not None:
             raise OmnigentError("channel name already exists", code=ErrorCode.CONFLICT)
         channel = await asyncio.to_thread(chat_store.bootstrap_channel, body.name, caller)
+        if principal_kind(caller) == "agent_account":
+            account = await asyncio.to_thread(chat_store.get_agent_account_by_principal, caller)
+            if account is not None and account.owner_id != caller:
+                await asyncio.to_thread(chat_store.add_member, channel.id, account.owner_id)
+        _audit_bot(
+            request,
+            caller,
+            chat_store,
+            action="chat.channel_create",
+            outcome="ok",
+            channel_id=channel.id,
+        )
         return _channel_response(channel)
 
     @router.post("/chat/channels/{channel_id}/join", status_code=204)
@@ -312,6 +607,7 @@ def create_chat_router(
         channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
         if channel is None or channel.kind != "channel":
             raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_owner_membership, chat_store, channel, caller)
         await asyncio.to_thread(chat_store.add_member, channel.id, caller)
 
     @router.post("/chat/channels/{channel_id}/leave", status_code=204)
@@ -405,6 +701,9 @@ def create_chat_router(
                 "client_id must match ^[A-Za-z0-9_-]{1,64}$",
                 code=ErrorCode.INVALID_CLIENT_ID,
             )
+        retry_after = consume_channel_post(caller, channel.id)
+        if retry_after is not None:
+            _raise_rate_limited(retry_after)
 
         result = await asyncio.to_thread(
             chat_store.post_message,
@@ -421,6 +720,15 @@ def create_chat_router(
             from omnigent.server.chat_agent_threads import schedule_after_human_post
 
             await schedule_after_human_post(request, chat_store, channel, result.message)
+            _audit_bot(
+                request,
+                caller,
+                chat_store,
+                action="chat.post",
+                outcome="ok",
+                message_id=result.message.id,
+                channel_id=channel.id,
+            )
             return _message_response(result.message)
         if result.status is PostStatus.REPLAYED and result.message is not None:
             response.status_code = 200
@@ -436,6 +744,15 @@ def create_chat_router(
             raise OmnigentError(
                 "thread_root_id does not name a message in this channel",
                 code=ErrorCode.THREAD_ROOT_NOT_FOUND,
+            )
+        if result.status is PostStatus.BOT_STREAK_LIMIT:
+            if result.notice is not None:
+                await asyncio.to_thread(
+                    publish_message_created, chat_store, channel, result.notice
+                )
+            raise OmnigentError(
+                "bot streak limit reached; a human message is required",
+                code=ErrorCode.BOT_STREAK_LIMIT,
             )
         raise OmnigentError(
             "message could not be stored",
@@ -471,6 +788,249 @@ def create_chat_router(
             "DM could not be opened",
             code=ErrorCode.INTERNAL_ERROR,
         )
+
+    @router.get("/chat/channels/{channel_id}/members", response_model=list[MemberResponse])
+    async def list_members(request: Request, channel_id: str) -> list[MemberResponse]:
+        """List members and their principal ids."""
+        caller = _resolve_caller(request, auth_provider)
+        channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
+        if channel is None:
+            raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_read, chat_store, channel, caller)
+        members = await asyncio.to_thread(chat_store.list_members, channel.id)
+        accounts = {
+            account.principal_id: account
+            for account in await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        }
+        now = now_epoch_us()
+        rendered: list[MemberResponse] = []
+        for member in members:
+            kind = (
+                "agent_account"
+                if principal_kind(member.principal_id) == "agent_account"
+                else "human"
+            )
+            account = accounts.get(member.principal_id)
+            display = account.display_name if account is not None else member.principal_id
+            status = None
+            if kind == "agent_account":
+                seen = account.last_seen_at if account is not None else None
+                status = (
+                    "aktiv" if seen is not None and now - seen <= _ACTIVE_WINDOW_US else "inaktiv"
+                )
+            rendered.append(
+                MemberResponse(
+                    principal_id=member.principal_id,
+                    principal_type=kind,
+                    role=member.role,
+                    joined_at=member.joined_at,
+                    kind=kind,
+                    display=display,
+                    status=status,
+                )
+            )
+        return rendered
+
+    @router.get("/chat/unread", response_model=UnreadResponse)
+    async def unread(request: Request) -> UnreadResponse:
+        """Return an agent account's unread mentions and DM messages (FR-088).
+
+        Humans receive 403 and use bootstrap counts instead.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        if principal_kind(caller) != "agent_account":
+            raise OmnigentError(
+                "humans read unread counts from bootstrap",
+                code=ErrorCode.FORBIDDEN,
+            )
+        items = await asyncio.to_thread(chat_store.list_unread, caller, limit=_UNREAD_LIMIT)
+        accounts = {
+            account.principal_id: account.display_name
+            for account in await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        }
+        rendered: list[UnreadItemResponse] = []
+        for item in items:
+            kind = author_principal_type(item.message.author_kind)
+            display = accounts.get(item.message.author_id) or (
+                "system" if kind == "system" else item.message.author_id
+            )
+            rendered.append(
+                UnreadItemResponse(
+                    channel_id=item.message.channel_id,
+                    thread_root_id=item.message.thread_root_id,
+                    message_id=item.message.id,
+                    author=AuthorResponse(
+                        id=item.message.author_id,
+                        kind=kind,
+                        display=display,
+                    ),
+                    body=item.message.body,
+                    created_at=item.message.created_at,
+                    reason=item.reason,
+                )
+            )
+        return UnreadResponse(items=rendered, next_cursor=None)
+
+    @router.post("/chat/channels/{channel_id}/read")
+    async def mark_read(request: Request, channel_id: str, body: ReadBody) -> JSONResponse:
+        """Advance the caller's read cursor. Older cursors stay put (FR-007).
+
+        Unknown ids and a ``created_at`` that does not match the message are
+        422 and leave the cursor unchanged. A forward move notifies only the
+        caller (FR-009). The body is returned with status 204 so MCP can read
+        the cursor.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        message_id = body.id or body.message_id
+        if not message_id or (body.id and body.message_id and body.id != body.message_id):
+            raise OmnigentError("id is required", code=ErrorCode.INVALID_CURSOR)
+        channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
+        if channel is None:
+            raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_read, chat_store, channel, caller)
+        result = await asyncio.to_thread(
+            chat_store.mark_read,
+            channel.id,
+            caller,
+            message_id,
+            thread_root_id=body.thread_root_id,
+            created_at=body.created_at,
+        )
+        if result.status is ReadStatus.NOT_FOUND:
+            raise OmnigentError("message not found", code=ErrorCode.INVALID_CURSOR)
+        if result.status is ReadStatus.WRONG_SCOPE:
+            raise OmnigentError(
+                "message is not in the requested thread scope",
+                code=ErrorCode.INVALID_CURSOR,
+            )
+        cursor = result.cursor
+        if cursor is None or cursor.last_read_at is None or cursor.last_read_id is None:
+            raise OmnigentError("read cursor was not stored", code=ErrorCode.INTERNAL_ERROR)
+        if result.status is ReadStatus.ADVANCED:
+            publish_read_updated(
+                caller,
+                channel_id=cursor.channel_id,
+                thread_root_id=cursor.thread_root_id,
+                created_at=cursor.last_read_at,
+                message_id=cursor.last_read_id,
+            )
+        return JSONResponse(
+            status_code=204,
+            content={
+                "channel_id": cursor.channel_id,
+                "thread_root_id": cursor.thread_root_id,
+                "cursor": {"created_at": cursor.last_read_at, "id": cursor.last_read_id},
+                "advanced": result.status is ReadStatus.ADVANCED,
+            },
+        )
+
+    @router.post(
+        "/chat/agent-accounts", response_model=AgentAccountCreatedResponse, status_code=201
+    )
+    async def create_agent_account(
+        request: Request, body: AgentAccountBody
+    ) -> AgentAccountCreatedResponse:
+        """Mint an agent account. The raw ``ogc_`` token is returned once."""
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        _require_agent_secret()
+        display_name = _validate_display_name(body.display_name)
+        handle = _validate_handle(body.handle)
+        webhook = body.webhook_url or ""
+        if await asyncio.to_thread(webhook_url_rejected, webhook):
+            raise OmnigentError("webhook_url is invalid", code=ErrorCode.INVALID_WEBHOOK)
+        result = await asyncio.to_thread(
+            chat_store.create_agent_account,
+            caller,
+            display_name,
+            handle,
+            webhook_url=webhook,
+        )
+        if result.status is AccountStatus.HANDLE_TAKEN:
+            raise OmnigentError("handle already exists", code=ErrorCode.CONFLICT)
+        if result.status is AccountStatus.LIMIT:
+            _audit_account(
+                "chat.agent_account.create",
+                account_id=None,
+                owner_id=caller,
+                outcome="agent_account_limit",
+            )
+            raise OmnigentError(
+                "agent account limit reached",
+                code=ErrorCode.AGENT_ACCOUNT_LIMIT,
+            )
+        if result.issue is None:
+            raise OmnigentError("agent account was not created", code=ErrorCode.INTERNAL_ERROR)
+        account = result.issue.account
+        _audit_account(
+            "chat.agent_account.create",
+            account_id=account.id,
+            owner_id=caller,
+            outcome="created",
+        )
+        return AgentAccountCreatedResponse(
+            account=_agent_account_response(account),
+            token=result.issue.token,
+            webhook_secret=derive_webhook_secret(account.id, account.secret_version),
+        )
+
+    @router.post(
+        "/chat/agent-accounts/{account_id}/rotate",
+        response_model=AgentAccountRotatedResponse,
+    )
+    async def rotate_agent_account(
+        request: Request, account_id: str
+    ) -> AgentAccountRotatedResponse:
+        """Rotate the token. The previous ``ogc_`` value returns 401."""
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        _require_agent_secret()
+        result = await asyncio.to_thread(chat_store.rotate_agent_token, account_id, caller)
+        if result.status is AccountStatus.NOT_FOUND:
+            raise OmnigentError("agent account not found", code=ErrorCode.NOT_FOUND)
+        if result.status is AccountStatus.REVOKED_ACCOUNT:
+            raise OmnigentError("agent account is revoked", code=ErrorCode.CONFLICT)
+        if result.issue is None:
+            raise OmnigentError("agent token was not issued", code=ErrorCode.INTERNAL_ERROR)
+        account = result.issue.account
+        _audit_account(
+            "chat.agent_account.rotate",
+            account_id=account.id,
+            owner_id=caller,
+            outcome="rotated",
+        )
+        return AgentAccountRotatedResponse(
+            account=_agent_account_response(account),
+            token=result.issue.token,
+            webhook_secret=derive_webhook_secret(account.id, account.secret_version),
+        )
+
+    async def _revoke(caller: str, account_id: str) -> None:
+        result = await asyncio.to_thread(chat_store.revoke_agent_account, account_id, caller)
+        if result.status is AccountStatus.NOT_FOUND:
+            raise OmnigentError("agent account not found", code=ErrorCode.NOT_FOUND)
+        if result.status is not AccountStatus.REVOKED:
+            raise OmnigentError("agent account was not revoked", code=ErrorCode.INTERNAL_ERROR)
+        _audit_account(
+            "chat.agent_account.revoke",
+            account_id=account_id,
+            owner_id=caller,
+            outcome="revoked",
+        )
+
+    @router.post("/chat/agent-accounts/{account_id}/revoke", status_code=204)
+    async def revoke_agent_account(request: Request, account_id: str) -> None:
+        """Revoke the account. Its current token returns 401."""
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        await _revoke(caller, account_id)
+
+    @router.delete("/chat/agent-accounts/{account_id}", status_code=204)
+    async def delete_agent_account(request: Request, account_id: str) -> None:
+        """Revoke the account (FR-064). A non-owner receives 404."""
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        await _revoke(caller, account_id)
 
     @router.get("/chat/changes", response_model=ChangesResponse)
     async def changes(

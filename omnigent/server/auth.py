@@ -587,6 +587,9 @@ class UnifiedAuthProvider(AuthProvider):
             if identity.user_id is not None and identity.generation is not None:
                 bind_account_authority(identity.user_id, identity.generation)
             return identity.user_id
+        agent_principal = _agent_account_principal(request)
+        if agent_principal is not _NOT_AN_AGENT_TOKEN:
+            return agent_principal if isinstance(agent_principal, str) else None
         if self._source in ("oidc", "accounts"):
             return self._check_cookie(request)
         return self._check_header(request)
@@ -772,6 +775,67 @@ class UnifiedAuthProvider(AuthProvider):
         return None
 
 
+_NOT_AN_AGENT_TOKEN = object()
+
+
+def _bearer_token(request: HTTPConnection) -> str | None:
+    """Return the ``Authorization: Bearer`` value, or ``None`` when absent."""
+    header = request.headers.get("authorization", "")
+    scheme, _, rest = header.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = rest.strip()
+    return token or None
+
+
+def _agent_account_principal(request: HTTPConnection) -> str | None | object:
+    """Resolve an ``ogc_`` bearer, or :data:`_NOT_AN_AGENT_TOKEN` when it isn't one.
+
+    An ``ogc_`` token never falls through to a user cookie or proxy header.
+    From outside the process it authenticates only on ``/mcp`` and
+    ``/v1/chat/*``. An in-process call marked on the ASGI scope (never via a
+    header) authenticates on any path and returns the owner as the effective
+    principal. The actor and owner are re-read from the account row on every
+    call. A deactivated or deleted owner, or an unknown or revoked token,
+    is ``None`` (401).
+    """
+    from omnigent.server.agent_account_tokens import (
+        agent_token_path_allowed,
+        hash_agent_token,
+        is_agent_token,
+    )
+
+    token = _bearer_token(request)
+    if token is None or not is_agent_token(token):
+        return _NOT_AN_AGENT_TOKEN
+    inprocess = request.scope.get("mcp_inprocess") is True
+    if not inprocess and not agent_token_path_allowed(request.url.path):
+        return None
+    app = request.scope.get("app")
+    store = getattr(getattr(app, "state", None), "team_chat_store", None)
+    lookup = getattr(store, "account_for_token_hash", None)
+    if lookup is None:
+        return None
+    digest = hash_agent_token(token)
+    # An unset HMAC secret must fail closed. Passing ``None`` into the lookup
+    # would not match a stored digest, but it must not raise either.
+    if not isinstance(digest, str):
+        return None
+    account = lookup(digest)
+    if account is None:
+        return None
+    owner_live = getattr(store, "owner_account_live", None)
+    if callable(owner_live) and owner_live(account.owner_id) is False:
+        return None
+    request.scope["mcp_actor"] = account.principal_id
+    request.scope["mcp_owner_id"] = account.owner_id
+    request.scope["mcp_account_id"] = account.id
+    if inprocess:
+        request.scope["mcp_effective_principal"] = account.owner_id
+        return account.owner_id
+    return account.principal_id
+
+
 def authentication_requires_identity(provider: AuthProvider | None) -> bool:
     """Whether missing credentials are denied rather than mapped to the local user."""
     return provider is not None and not (
@@ -812,11 +876,16 @@ class AccountAuthorityMiddleware:
         self._checks_enabled = (
             isinstance(auth_provider, UnifiedAuthProvider) and auth_provider._source == "accounts"
         )
+        source = getattr(auth_provider, "_source", None)
+        self._missing_owner_inactive = source in ("accounts", "oidc")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        from omnigent.db.account_authority import account_checks_scope
+        from omnigent.db.account_authority import account_checks_scope, missing_owner_scope
 
-        with account_checks_scope(self._checks_enabled):
+        with (
+            account_checks_scope(self._checks_enabled),
+            missing_owner_scope(self._missing_owner_inactive),
+        ):
             await self._app(scope, receive, send)
 
 

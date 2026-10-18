@@ -268,6 +268,15 @@ class ErrorCode:
     NOT_A_MEMBER = "not_a_member"
     AGENT_OWNER_REQUIRED = "agent_owner_required"
     CLIENT_ID_CONFLICT = "client_id_conflict"
+    # Agent-account bot path. ``rate_limited`` is the stable code for both the
+    # MCP request cap and the chat-post cap. ``bot_streak_limit`` stops a run
+    # of bot messages that has not been interrupted by a human.
+    RATE_LIMITED = "rate_limited"
+    BOT_STREAK_LIMIT = "bot_streak_limit"
+    AGENT_ACCOUNT_LIMIT = "agent_account_limit"
+    AGENT_ACCOUNTS_UNCONFIGURED = "agent_accounts_unconfigured"
+    INVALID_WEBHOOK = "invalid_webhook"
+    BOT_SESSION_QUOTA = "bot_session_quota"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -333,6 +342,12 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     ErrorCode.NOT_A_MEMBER: 403,
     ErrorCode.AGENT_OWNER_REQUIRED: 403,
     ErrorCode.CLIENT_ID_CONFLICT: 409,
+    ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.BOT_STREAK_LIMIT: 409,
+    ErrorCode.AGENT_ACCOUNT_LIMIT: 409,
+    ErrorCode.AGENT_ACCOUNTS_UNCONFIGURED: 503,
+    ErrorCode.INVALID_WEBHOOK: 422,
+    ErrorCode.BOT_SESSION_QUOTA: 409,
 }
 
 
@@ -387,6 +402,12 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     ErrorCode.NOT_A_MEMBER: ErrorCategory.USER,
     ErrorCode.AGENT_OWNER_REQUIRED: ErrorCategory.USER,
     ErrorCode.CLIENT_ID_CONFLICT: ErrorCategory.USER,
+    ErrorCode.RATE_LIMITED: ErrorCategory.USER,
+    ErrorCode.BOT_STREAK_LIMIT: ErrorCategory.USER,
+    ErrorCode.AGENT_ACCOUNT_LIMIT: ErrorCategory.USER,
+    ErrorCode.AGENT_ACCOUNTS_UNCONFIGURED: ErrorCategory.CONFIG,
+    ErrorCode.INVALID_WEBHOOK: ErrorCategory.USER,
+    ErrorCode.BOT_SESSION_QUOTA: ErrorCategory.USER,
 }
 
 
@@ -444,6 +465,13 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.NOT_A_MEMBER: ErrorImpact.BENIGN,
     ErrorCode.AGENT_OWNER_REQUIRED: ErrorImpact.BENIGN,
     ErrorCode.CLIENT_ID_CONFLICT: ErrorImpact.BENIGN,
+    # The caller waits and retries; nothing in the conversation is lost.
+    ErrorCode.RATE_LIMITED: ErrorImpact.TRANSIENT,
+    ErrorCode.BOT_STREAK_LIMIT: ErrorImpact.BENIGN,
+    ErrorCode.AGENT_ACCOUNT_LIMIT: ErrorImpact.BENIGN,
+    ErrorCode.AGENT_ACCOUNTS_UNCONFIGURED: ErrorImpact.BLOCKING,
+    ErrorCode.INVALID_WEBHOOK: ErrorImpact.BENIGN,
+    ErrorCode.BOT_SESSION_QUOTA: ErrorImpact.BENIGN,
 }
 
 
@@ -497,6 +525,12 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.NOT_A_MEMBER: ErrorPhase.REQUEST,
     ErrorCode.AGENT_OWNER_REQUIRED: ErrorPhase.REQUEST,
     ErrorCode.CLIENT_ID_CONFLICT: ErrorPhase.REQUEST,
+    ErrorCode.RATE_LIMITED: ErrorPhase.REQUEST,
+    ErrorCode.BOT_STREAK_LIMIT: ErrorPhase.REQUEST,
+    ErrorCode.AGENT_ACCOUNT_LIMIT: ErrorPhase.REQUEST,
+    ErrorCode.AGENT_ACCOUNTS_UNCONFIGURED: ErrorPhase.REQUEST,
+    ErrorCode.INVALID_WEBHOOK: ErrorPhase.REQUEST,
+    ErrorCode.BOT_SESSION_QUOTA: ErrorPhase.REQUEST,
 }
 
 
@@ -526,6 +560,7 @@ class OmnigentError(Exception):
         category: ErrorCategory | None = None,
         impact: ErrorImpact | None = None,
         phase: ErrorPhase | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         """
         Create a new application error.
@@ -544,10 +579,13 @@ class OmnigentError(Exception):
         :param phase: Lifecycle-phase override. Defaults to the mapping for
             ``code`` (see :func:`phase_for_code`); pass it where the raise site
             knows the stage better than the code does.
+        :param retry_after_seconds: When set, the HTTP handler adds a
+            ``Retry-After`` header and repeats the hint in the error body.
         """
         super().__init__(message)
         self.code = code
         self.message = message
+        self.retry_after_seconds = retry_after_seconds
         self._category_override = category
         self._impact_override = impact
         self._phase_override = phase

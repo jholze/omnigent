@@ -1,4 +1,4 @@
-"""Tests for the team-chat migration (tc1a2b3c4d5e).
+"""Tests for the team-chat migration chain (head td1a2b3c4d5e).
 
 Uniqueness uses plain unique indexes rather than partial ones so every
 dialect, MySQL included, behaves the same: rows with a NULL key never collide.
@@ -16,7 +16,7 @@ from alembic.script import ScriptDirectory
 
 from omnigent.db.utils import _build_alembic_config, clear_engine_cache
 
-_REVISION = "tc1a2b3c4d5e"
+_REVISION = "td1a2b3c4d5e"
 _DOWN_REVISION = "wh1a2b3c4d5e"
 _CHAT_TABLES = {
     "chat_channels",
