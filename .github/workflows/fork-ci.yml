@@ -283,10 +283,14 @@ jobs:
               with path.open("a", encoding="utf-8") as handle:
                   handle.write(block)
           PY
+          # Stop after a few failures. Each one waits out a timeout and a
+          # rerun, and the serial suite otherwise hits the job limit
+          # before pytest writes the summary.
           PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
             uv run pytest tests/e2e_ui \
             -v --tb=short -r a \
             -p e2e_tb \
+            --maxfail=4 \
             --reruns=1 --reruns-delay=5 --rerun-show-tracebacks \
             --ui-skip-build \
             --junitxml=artifacts/e2e-ui.xml \
