@@ -1334,6 +1334,50 @@ def test_build_acp_bundle_carries_the_harness_id(tmp_path: Path) -> None:
     spec = load(dest)
     assert spec.name == "devin"
     assert spec.executor.config["harness"] == "acp:devin"
+    assert spec.spawn is True
+
+
+def test_seeded_acp_picker_agents_can_spawn_sessions(
+    seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grok and a configured Devin picker row advertise the session spawn tools.
+
+    ``ToolManager`` registers ``sys_session_create`` only when ``spec.spawn``
+    is true, and send/close with it. A picker agent built without that flag
+    can read sessions but cannot launch a child. Reseeding keeps the agent
+    id so existing sessions stay bound to the same row.
+    """
+    from omnigent.onboarding.acp_auth import AcpAgentEntry
+    from omnigent.tools.manager import ToolManager
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.acp_auth.acp_agents",
+        lambda: [AcpAgentEntry(slug="devin", name="Devin", command="devin")],
+    )
+    monkeypatch.setattr(
+        "omnigent.onboarding.acp_auth.shadowed_builtin_acp_rows",
+        lambda _configured: frozenset(),
+    )
+    server_app._ensure_default_acp_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+    )
+    first_ids: dict[str, str] = {}
+    for name in ("grok", "devin"):
+        row = seed_stores.agent_store.get_by_name(name)
+        assert row is not None, name
+        first_ids[name] = row.id
+        loaded = seed_stores.agent_cache.load(row.id, row.bundle_location, expand_env=False)
+        assert loaded.spec.spawn is True
+        schemas = ToolManager(loaded.spec).get_tool_schemas()
+        names = {schema["function"]["name"] for schema in schemas}
+        assert {"sys_session_create", "sys_session_send", "sys_session_close"} <= names
+    server_app._ensure_default_acp_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+    )
+    for name, agent_id in first_ids.items():
+        again = seed_stores.agent_store.get_by_name(name)
+        assert again is not None
+        assert again.id == agent_id
 
 
 def test_ensure_default_native_agents_raises_when_provider_missing(
@@ -1436,6 +1480,7 @@ def test_ensure_default_antigravity_agent_seeds_card(seed_stores: _SeedStores) -
     # server's _native_terminal_runtime + runner auto-create key off.
     loaded = seed_stores.agent_cache.load(seeded.id, seeded.bundle_location, expand_env=False)
     assert loaded.spec.executor.config.get("harness") == "antigravity-native"
+    assert loaded.spec.spawn is True
 
 
 def test_ensure_default_agents_includes_antigravity(seed_stores: _SeedStores) -> None:

@@ -269,6 +269,11 @@ from omnigent.server.subagent_activity import (
     native_subagent_terminal_status,
     record_subagent_activity,
 )
+from omnigent.server.subagent_wake import (
+    OwnerWakeContext,
+    install_return_wake_delivery,
+    post_deduped_subagent_wake,
+)
 from omnigent.session_event_batch import (
     MAX_SESSION_EVENT_BATCH_EVENTS,
     MAX_SESSION_EVENT_REQUEST_BYTES,
@@ -699,7 +704,7 @@ def register_events_routes(
     event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
 
     def _has_runner_created_by_authority(
-        request: Request | _RunnerEventContext, conv: Any
+        request: Request | _RunnerEventContext | OwnerWakeContext, conv: Any
     ) -> bool:
         if isinstance(request, _RunnerEventContext):
             return conv.runner_id == request.runner_id
@@ -712,12 +717,12 @@ def register_events_routes(
         return isinstance(runner_id, str) and token_bound_runner_id(token) == runner_id
 
     async def _authorized_conversation(
-        request: Request | _RunnerEventContext, session_id: str
+        request: Request | _RunnerEventContext | OwnerWakeContext, session_id: str
     ) -> tuple[str | None, Any]:
         """Require EDIT on the session and return the caller and its conversation."""
         user_id = (
             request.user_id
-            if isinstance(request, _RunnerEventContext)
+            if isinstance(request, (_RunnerEventContext, OwnerWakeContext))
             else _get_user_id(request, auth_provider)
         )
         access = await _require_access_and_level(
@@ -879,7 +884,7 @@ def register_events_routes(
         register_runner_ingest(ingest_runner_batch)
 
     async def _post_event_impl(
-        request: Request | _RunnerEventContext,
+        request: Request | _RunnerEventContext | OwnerWakeContext,
         session_id: str,
         body: SessionEventInput,
         in_flight: contextlib.ExitStack | None = None,
@@ -973,6 +978,15 @@ def register_events_routes(
             control and internal transient events.
         :raises OmnigentError: 404 if no session exists.
         """
+        if body.subagent_wake_key:
+            # Runner and server both post this notice for one child turn.
+            # Hold the key across the forward so the second post is a no-op.
+            return await post_deduped_subagent_wake(
+                session_id,
+                body,
+                lambda stripped: _post_event_impl(request, session_id, stripped, in_flight),
+                conversation_store,
+            )
         user_id, conv = await _authorized_conversation(request, session_id)
         if in_flight is not None:
             # Marked only after authorization, so an unauthorized caller
@@ -2949,6 +2963,25 @@ def register_events_routes(
         if dispatch.pending_id is not None:
             response["pending_id"] = dispatch.pending_id
         return response
+
+    async def _deliver_owner_return_wake(
+        parent_id: str,
+        body: SessionEventInput,
+        user_id: str | None,
+    ) -> dict[str, bool | str]:
+        """Post a child-return notice as the parent owner, relaunching if needed."""
+        from omnigent.server import subagent_wake as _subagent_wake
+
+        app = _subagent_wake._app
+        if app is None:
+            return {"queued": False}
+        return await _post_event_impl(
+            OwnerWakeContext(app=app, user_id=user_id),
+            parent_id,
+            body,
+        )
+
+    install_return_wake_delivery(_deliver_owner_return_wake)
 
     # ── GET /sessions/{session_id}/stream ────────────────────────
 
