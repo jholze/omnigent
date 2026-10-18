@@ -234,10 +234,7 @@ async def test_post_does_not_write_a_conversation_item(
     after = store.list_items(session_id, limit=100).data
     assert [item.id for item in after] == before
     rendered = json.dumps(
-        [
-            item.model_dump() if hasattr(item, "model_dump") else item.__dict__
-            for item in after
-        ]
+        [item.model_dump() if hasattr(item, "model_dump") else item.__dict__ for item in after]
     )
     assert "not for the agent" not in rendered
 

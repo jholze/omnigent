@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+import omnigent.server.routes._sessions.common as session_common
 import omnigent.server.routes.sessions as sessions_routes
 from omnigent.server.auth import LEVEL_OWNER, UnifiedAuthProvider
 from omnigent.server.routes.sessions import SessionLiveness, create_sessions_router
@@ -443,6 +444,9 @@ def test_watch_set_truncated_at_cap(
     truncation rather than silently shrinking the set."""
     # Shrink the cap to 2 so three seeded sessions exceed it without
     # seeding the production 500.
+    # The socket reads the cap from the facade at call time. Also pin the
+    # defining module so a re-export that still points there stays at 2.
+    monkeypatch.setattr(session_common, "_SESSION_UPDATES_MAX_WATCHED", 2)
     monkeypatch.setattr(sessions_routes, "_SESSION_UPDATES_MAX_WATCHED", 2)
     s1 = _seed_session(stores, owner=ALICE, title="one")
     s2 = _seed_session(stores, owner=ALICE, title="two")

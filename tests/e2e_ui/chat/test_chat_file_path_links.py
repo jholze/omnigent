@@ -52,6 +52,19 @@ _README_CONTENT = "# Readme\n\nWorkspace-root file for the e2e link test.\n"
 _AGENT_NAME = "filepath_links_demo"
 
 
+def _hosts_file_marker() -> str:
+    """First content line of ``/etc/hosts``.
+
+    macOS leads with ``##`` comments, so ``localhost`` is not the line the
+    viewer renders first.
+    """
+    for line in Path("/etc/hosts").read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:32]
+    return "hosts"
+
+
 def _agent_bundle(cwd: str) -> bytes:
     """Gzip-tar an agent YAML pinning ``os_env.cwd`` to ``cwd``.
 
@@ -222,7 +235,9 @@ def test_chat_linkifies_workspace_paths_including_home_relative(
     # form end to end, not a workspace-relative mangling of it.
     hosts_link.click()
     page.wait_for_url(re.compile(r"[?&]file=%2Fetc%2Fhosts(?:&|$)"), timeout=15_000)
-    expect(page.get_by_test_id("file-viewer").last).to_contain_text("localhost", timeout=15_000)
+    expect(page.get_by_test_id("file-viewer").last).to_contain_text(
+        _hosts_file_marker(), timeout=15_000
+    )
 
 
 def test_chat_link_opens_file_beyond_first_large_directory_page(
@@ -300,7 +315,7 @@ def test_chat_file_link_opens_on_mobile_tap(
         hosts_link.first.tap()
         page.wait_for_url(re.compile(r"[?&]file=%2Fetc%2Fhosts(?:&|$)"), timeout=15_000)
         expect(page.get_by_test_id("file-viewer").last).to_contain_text(
-            "localhost", timeout=15_000
+            _hosts_file_marker(), timeout=15_000
         )
     finally:
         ctx.close()

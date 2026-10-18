@@ -567,7 +567,9 @@ async def _bind_local_runner(
 
 
 async def test_confirmed_create_and_send(
-    mcp_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    mcp_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A confirmed create and send are dispatched to a co-located runner.
 
@@ -600,6 +602,13 @@ async def test_confirmed_create_and_send(
     server, server_task, runner_http, process_manager, short_parent = await _bind_local_runner(
         app, session_id
     )
+    # A Keychain-logged-in Claude CLI on this Mac starts a real turn and
+    # holds the wait until timeout. A CLI that exits still proves the send
+    # was dispatched; the test accepts a failed start.
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text("#!/bin/sh\nexit 1\n")
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("OMNIGENT_CLAUDE_PATH", str(fake_claude))
 
     try:
         sent = await mcp_client.post(

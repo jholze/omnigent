@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 
 _lock = threading.Lock()
+# custom-lint: disable-next=workspace-scoped-cache -- shared login-failure counter
 _failures: dict[str, int] = {}
 
 

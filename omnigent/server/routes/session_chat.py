@@ -142,9 +142,7 @@ def create_session_chat_router(
         root_id = conversation.root_conversation_id
         if permission_store is None:
             return root_id, user_id
-        allowed = await asyncio.to_thread(
-            may_read_human_chat, user_id, root_id, permission_store
-        )
+        allowed = await asyncio.to_thread(may_read_human_chat, user_id, root_id, permission_store)
         if allowed:
             return root_id, user_id
         can_see_session = await asyncio.to_thread(
@@ -178,9 +176,7 @@ def create_session_chat_router(
         root_id, user_id = await _root_for_chat(request, session_id)
         cursor = _parse_after(after)
         items = await asyncio.to_thread(store.list_for_root, root_id, after=cursor)
-        shared = await asyncio.to_thread(
-            human_chat_is_shared, user_id, root_id, permission_store
-        )
+        shared = await asyncio.to_thread(human_chat_is_shared, user_id, root_id, permission_store)
         return SessionChatListResponse(
             items=[_message_response(item) for item in items],
             shared=shared,

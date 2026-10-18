@@ -31,7 +31,10 @@ def test_resolve_qwen_executable_honors_path_override() -> None:
     assert resolved == "/opt/qwen"
 
 
-def test_resolve_qwen_executable_missing_raises_with_hint() -> None:
+def test_resolve_qwen_executable_missing_raises_with_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The which hook covers PATH only. The fallback ladder still probes the
+    # real install dirs, which on a dev machine contain qwen.
+    monkeypatch.setattr("omnigent._platform._cli_fallback_dirs", lambda: ())
     with pytest.raises(click.ClickException) as exc:
         qn.resolve_qwen_executable(env={}, which=lambda _cmd: None)
     msg = str(exc.value)

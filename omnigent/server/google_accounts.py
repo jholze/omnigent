@@ -15,7 +15,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -23,6 +23,7 @@ import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.responses import Response
+from starlette.types import Scope
 
 from omnigent.db.account_authority import bind_account_authority
 from omnigent.server.accounts_config import AccountsConfig
@@ -149,9 +150,7 @@ def decode_id_token(id_token: str, *, client_id: str) -> dict[str, Any]:
 def login_page_html(*, bind_email: str | None) -> str:
     """Password form, and the Google button when the four variables are set."""
     configured = google_accounts_config() is not None
-    button = (
-        '<p><a href="/auth/google/start">Continue with Google</a></p>' if configured else ""
-    )
+    button = '<p><a href="/auth/google/start">Continue with Google</a></p>' if configured else ""
     bind = ""
     if bind_email:
         safe = html.escape(bind_email, quote=True)
@@ -198,7 +197,7 @@ def bind_email_for_display(request: Request, cookie_secret: bytes) -> str | None
     return None
 
 
-def inject_login_shell(response: Response, scope: dict[str, Any]) -> Response:
+def inject_login_shell(response: Response, scope: Scope) -> Response:
     """Append the accounts login fragment to the SPA shell for ``/login``."""
     body = getattr(response, "body", None)
     if not isinstance(body, (bytes, bytearray)) or b"</body>" not in body:
@@ -208,8 +207,15 @@ def inject_login_shell(response: Response, scope: dict[str, Any]) -> Response:
     fragment = login_page_html(bind_email=email or None)
     hidden = f'<div hidden id="accounts-google-shell">{fragment}</div>'.encode()
     html_body = bytes(body).replace(b"</body>", hidden + b"</body>", 1)
-    headers = {key: value for key, value in response.headers.items() if key.lower() != "content-length"}
-    return Response(html_body, status_code=response.status_code, media_type="text/html", headers=headers)
+    headers = {
+        key: value for key, value in response.headers.items() if key.lower() != "content-length"
+    }
+    return Response(
+        html_body,
+        status_code=response.status_code,
+        media_type="text/html",
+        headers=headers,
+    )
 
 
 def register_google_routes(
@@ -410,7 +416,7 @@ def register_google_routes(
                 redirect_uri=cfg.redirect_uri,
             )
             claims = decode_id_token(id_token, client_id=cfg.client_id)
-        except (GoogleExchangeError, jwt.InvalidTokenError, Exception):
+        except Exception:  # noqa: BLE001 — any exchange failure is a rejected login
             _logger.info("auth/google: pkce or token rejected")
             return _reject(400, secure)
         if claims.get("nonce") != expected_nonce or claims.get("iss") != GOOGLE_ISSUER:
@@ -540,7 +546,13 @@ def _reject(status: int, secure: bool) -> JSONResponse:
     return response
 
 
-def _clear_named(response: Response, key: str, path: str, secure: bool, samesite: str) -> None:
+def _clear_named(
+    response: Response,
+    key: str,
+    path: str,
+    secure: bool,
+    samesite: Literal["lax", "none", "strict"],
+) -> None:
     response.delete_cookie(key=key, path=path, secure=secure, httponly=True, samesite=samesite)
 
 
@@ -620,7 +632,12 @@ def _verified_identity(
         return None
     email = claims.get("email")
     subject = claims.get("sub")
-    if not isinstance(email, str) or "@" not in email or not isinstance(subject, str) or not subject:
+    if (
+        not isinstance(email, str)
+        or "@" not in email
+        or not isinstance(subject, str)
+        or not subject
+    ):
         return None
     email = email.strip().lower()
     domain = email.split("@", 1)[1]
@@ -648,7 +665,10 @@ async def _credentials(request: Request) -> tuple[str, str]:
             return "", ""
         username = body.get("username", "")
         password = body.get("password", "")
-        return (username if isinstance(username, str) else "", password if isinstance(password, str) else "")
+        return (
+            username if isinstance(username, str) else "",
+            password if isinstance(password, str) else "",
+        )
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
