@@ -126,10 +126,14 @@ jobs:
           run_suite() {
             local name="$1"
             shift
-            # Default basetemp plus the test name overflows macOS sun_path
-            # for a tmux socket created inside tmp_path. The run id keeps two
-            # PRs on this Mac from deleting each other's worker databases.
-            local base="/private/tmp/oa-${name}-${GITHUB_RUN_ID:-local}"
+            # sun_path allows 103 chars. oa-<letter>-<last 6 run-id digits>
+            # keeps the tmux socket near 99 and isolates concurrent PRs.
+            # Positive slice: macOS bash 3.2 rejects ${var: -6}.
+            local rid="${GITHUB_RUN_ID:-local}"
+            if [ "${#rid}" -gt 6 ]; then
+              rid="${rid:$((${#rid}-6))}"
+            fi
+            local base="/private/tmp/oa-${name:0:1}-${rid}"
             rm -rf "$base"
             uv run pytest "$@" \
               --basetemp="$base" \
