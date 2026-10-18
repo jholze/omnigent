@@ -262,6 +262,8 @@ jobs:
       - name: Run UI e2e tests (not visual, not nightly)
         run: |
           mkdir -p artifacts
+          # Classic style prints each failure as it happens, so a timeout
+          # still leaves the traceback in the log.
           uv run pytest tests/e2e_ui \
             -v --tb=short -r a \
             --override-ini console_output_style=classic \
