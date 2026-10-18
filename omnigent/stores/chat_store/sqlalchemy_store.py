@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,9 @@ from omnigent.db.db_models import (
     SqlChatMember,
     SqlChatMention,
     SqlChatMessage,
+    SqlChatRead,
     SqlChatThread,
+    SqlUser,
     current_workspace_id,
 )
 from omnigent.db.utils import (
@@ -26,8 +28,13 @@ from omnigent.db.utils import (
     now_epoch_us,
     run_write_transaction,
 )
+from omnigent.server.agent_account_tokens import mint_agent_token
+from omnigent.server.chat_access import principal_kind
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.stores.chat_store import (
+    AccountStatus,
+    AccountWriteResult,
+    AgentTokenIssue,
     ChangesPage,
     ChatAgentAccount,
     ChatChannel,
@@ -37,12 +44,26 @@ from omnigent.stores.chat_store import (
     ChatThread,
     DmResult,
     DmStatus,
+    MarkReadResult,
     MessagePage,
     PostMessageResult,
     PostStatus,
+    ReadCursor,
+    ReadStatus,
+    UnreadMessage,
 )
 
 _MAX_PARTICIPANTS = 5
+_BOT_STREAK_LIMIT = 5
+_AGENT_ACCOUNT_LIMIT = 5
+_LAST_SEEN_INTERVAL_US = 60_000_000
+_BRAKE_BODY = "Bots warten auf einen Menschen"
+_BRAKE_CODE = "bot_streak_limit"
+_BOT_AUTHOR_KINDS = frozenset({"agent_account", "agent", "omnigent_agent"})
+_HUMAN_AUTHOR_KINDS = frozenset({"user", "human"})
+_UNREAD_LIMIT = 50
+_THREAD_SCAN = 30
+_REASON_RANK = {"mention": 0, "dm": 1, "thread_reply": 2}
 
 
 def _to_channel(row: SqlChatChannel) -> ChatChannel:
@@ -98,13 +119,17 @@ def _to_thread(row: SqlChatThread) -> ChatThread:
 
 
 def _to_agent_account(row: SqlChatAgentAccount) -> ChatAgentAccount:
-    """Copy an agent-account row into a detached value."""
+    """Copy an agent-account row into a detached value. The raw token is omitted."""
     return ChatAgentAccount(
         id=row.id,
         principal_id=row.principal_id,
         owner_id=row.owner_id,
         display_name=row.display_name,
         handle=row.handle,
+        token_prefix=row.token_prefix,
+        secret_version=row.secret_version,
+        last_seen_at=row.last_seen_at,
+        revoked_at=row.revoked_at,
     )
 
 
@@ -476,6 +501,11 @@ class SqlAlchemyChatStore(ChatStore):
             else:
                 root = None
 
+            streak = _bot_streak(session, channel_id, thread_root_id)
+            if _is_bot_author(author_kind) and streak >= _BOT_STREAK_LIMIT:
+                notice = _post_brake_notice_once(session, channel_id, thread_root_id)
+                return PostMessageResult(PostStatus.BOT_STREAK_LIMIT, notice=notice)
+
             message_id = uuid.uuid4().hex
             created_at = now_epoch_us()
             row = SqlChatMessage(
@@ -495,7 +525,7 @@ class SqlAlchemyChatStore(ChatStore):
             session.flush()
 
             if root is not None:
-                _update_thread(session, channel_id, root.id, author_id, created_at)
+                _update_thread(session, channel_id, root.id, author_id, author_kind, created_at)
 
             _write_mentions(session, channel_id, message_id, created_at, body, handles)
 
@@ -636,6 +666,323 @@ class SqlAlchemyChatStore(ChatStore):
             row = session.get(SqlChatThread, (current_workspace_id(), root_message_id))
             return _to_thread(row) if row is not None else None
 
+    # ── Agent accounts ──────────────────────────────────────────
+
+    def create_agent_account(
+        self,
+        owner_id: str,
+        display_name: str,
+        handle: str,
+        *,
+        webhook_url: str = "",
+    ) -> AccountWriteResult:
+        """Mint an agent account. See the base class."""
+        raw, token_hash, token_prefix = mint_agent_token()
+        account_id = uuid.uuid4().hex
+        principal_id = f"agent:{account_id}"
+        created_at = now_epoch_us()
+
+        def _write(session: Session) -> AccountWriteResult:
+            active = session.scalar(
+                select(func.count())
+                .select_from(SqlChatAgentAccount)
+                .where(
+                    SqlChatAgentAccount.workspace_id == current_workspace_id(),
+                    SqlChatAgentAccount.owner_id == owner_id,
+                    SqlChatAgentAccount.revoked_at.is_(None),
+                )
+            )
+            if active is not None and int(active) >= _AGENT_ACCOUNT_LIMIT:
+                return AccountWriteResult(AccountStatus.LIMIT)
+            row = SqlChatAgentAccount(
+                id=account_id,
+                principal_id=principal_id,
+                owner_id=owner_id,
+                display_name=display_name,
+                handle=handle,
+                token_hash=token_hash,
+                token_prefix=token_prefix,
+                secret_version=1,
+                webhook_url=webhook_url,
+                created_at=created_at,
+            )
+            session.add(row)
+            session.flush()
+            return AccountWriteResult(
+                AccountStatus.CREATED,
+                AgentTokenIssue(_to_agent_account(row), raw),
+            )
+
+        try:
+            return run_write_transaction(
+                self._session_immediate, "create_chat_agent_account", _write
+            )
+        except IntegrityError:
+            return AccountWriteResult(AccountStatus.HANDLE_TAKEN)
+
+    def rotate_agent_token(self, account_id: str, owner_id: str) -> AccountWriteResult:
+        """Replace the token hash. See the base class."""
+        raw, token_hash, token_prefix = mint_agent_token()
+
+        def _write(session: Session) -> AccountWriteResult:
+            row = _owned_account(session, account_id, owner_id)
+            if row is None:
+                return AccountWriteResult(AccountStatus.NOT_FOUND)
+            if row.revoked_at is not None:
+                return AccountWriteResult(AccountStatus.REVOKED_ACCOUNT)
+            row.token_hash = token_hash
+            row.token_prefix = token_prefix
+            row.secret_version = row.secret_version + 1
+            session.flush()
+            return AccountWriteResult(
+                AccountStatus.ROTATED,
+                AgentTokenIssue(_to_agent_account(row), raw),
+            )
+
+        try:
+            return run_write_transaction(
+                self._session_immediate, "rotate_chat_agent_token", _write
+            )
+        except IntegrityError:
+            return AccountWriteResult(AccountStatus.NOT_FOUND)
+
+    def revoke_agent_account(self, account_id: str, owner_id: str) -> AccountWriteResult:
+        """Revoke an agent account. See the base class."""
+
+        def _write(session: Session) -> AccountWriteResult:
+            row = _owned_account(session, account_id, owner_id)
+            if row is None:
+                return AccountWriteResult(AccountStatus.NOT_FOUND)
+            if row.revoked_at is None:
+                row.revoked_at = now_epoch_us()
+            session.execute(
+                delete(SqlChatMember).where(
+                    SqlChatMember.workspace_id == current_workspace_id(),
+                    SqlChatMember.principal_id == row.principal_id,
+                )
+            )
+            return AccountWriteResult(AccountStatus.REVOKED, None)
+
+        return run_write_transaction(self._session_immediate, "revoke_chat_agent_account", _write)
+
+    def principal_for_token_hash(self, token_hash: str) -> str | None:
+        """Resolve a live token hash. See the base class."""
+        account = self.account_for_token_hash(token_hash)
+        return account.principal_id if account is not None else None
+
+    def account_for_token_hash(self, token_hash: str) -> ChatAgentAccount | None:
+        """Resolve a live token hash to the account. See the base class."""
+        with self._session("lookup_chat_agent_token") as session:
+            row = session.execute(
+                select(SqlChatAgentAccount).where(
+                    SqlChatAgentAccount.token_hash == token_hash,
+                    SqlChatAgentAccount.revoked_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            return _to_agent_account(row) if row is not None else None
+
+    def owner_account_live(self, owner_id: str) -> bool:
+        """Whether the owner may still act. See the base class."""
+        with self._session("check_chat_agent_owner") as session:
+            row = session.execute(
+                select(SqlUser.deleted_at).where(
+                    SqlUser.workspace_id == current_workspace_id(),
+                    SqlUser.id == owner_id,
+                )
+            ).first()
+        if row is not None:
+            return row[0] is None
+        from omnigent.db.account_authority import missing_owner_is_inactive
+
+        return not missing_owner_is_inactive()
+
+    def count_sessions_started_by(self, account_id: str, since_us: int) -> int:
+        """Count bot-started sessions since *since_us*. See the base class."""
+        with self._session("count_bot_started_sessions") as session:
+            count = session.scalar(
+                select(func.count())
+                .select_from(SqlChatThread)
+                .where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.started_by_agent_account_id == account_id,
+                    SqlChatThread.session_id.is_not(None),
+                    SqlChatThread.start_requested_at >= since_us,
+                )
+            )
+        return int(count or 0)
+
+    def get_agent_account_by_principal(self, principal_id: str) -> ChatAgentAccount | None:
+        """Return a live account. See the base class."""
+        with self._session("get_chat_agent_account") as session:
+            row = session.execute(
+                select(SqlChatAgentAccount).where(
+                    SqlChatAgentAccount.workspace_id == current_workspace_id(),
+                    SqlChatAgentAccount.principal_id == principal_id,
+                    SqlChatAgentAccount.revoked_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            return _to_agent_account(row) if row is not None else None
+
+    def touch_agent_last_seen(self, principal_id: str) -> None:
+        """Stamp presence at most once per 60 seconds. See the base class."""
+        seen_at = now_epoch_us()
+        cutoff = seen_at - _LAST_SEEN_INTERVAL_US
+
+        def _write(session: Session) -> None:
+            session.execute(
+                update(SqlChatAgentAccount)
+                .where(
+                    SqlChatAgentAccount.workspace_id == current_workspace_id(),
+                    SqlChatAgentAccount.principal_id == principal_id,
+                    SqlChatAgentAccount.revoked_at.is_(None),
+                    or_(
+                        SqlChatAgentAccount.last_seen_at.is_(None),
+                        SqlChatAgentAccount.last_seen_at < cutoff,
+                    ),
+                )
+                .values(last_seen_at=seen_at)
+            )
+
+        run_write_transaction(self._session_immediate, "touch_chat_agent_last_seen", _write)
+
+    # ── Read cursors ────────────────────────────────────────────
+
+    def mark_read(
+        self,
+        channel_id: str,
+        principal_id: str,
+        message_id: str,
+        *,
+        thread_root_id: str | None = None,
+        created_at: int | None = None,
+    ) -> MarkReadResult:
+        """Advance a cursor forward. See the base class."""
+        scope = thread_root_id or ""
+
+        def _write(session: Session) -> MarkReadResult:
+            message = session.get(SqlChatMessage, (current_workspace_id(), message_id))
+            if message is None or message.channel_id != channel_id:
+                return MarkReadResult(ReadStatus.NOT_FOUND)
+            if created_at is not None and message.created_at != created_at:
+                return MarkReadResult(ReadStatus.NOT_FOUND)
+            if scope == "":
+                if message.thread_root_id is not None:
+                    return MarkReadResult(ReadStatus.WRONG_SCOPE)
+            elif message.id != scope and message.thread_root_id != scope:
+                return MarkReadResult(ReadStatus.WRONG_SCOPE)
+            row = session.get(
+                SqlChatRead,
+                (current_workspace_id(), channel_id, principal_id, scope),
+            )
+            if row is not None and _cursor_covers(row, message):
+                return MarkReadResult(ReadStatus.UNCHANGED, _to_cursor(row))
+            now = now_epoch_us()
+            if row is None:
+                row = SqlChatRead(
+                    channel_id=channel_id,
+                    principal_id=principal_id,
+                    thread_root_id=scope,
+                    last_read_at=message.created_at,
+                    last_read_id=message.id,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.last_read_at = message.created_at
+                row.last_read_id = message.id
+                row.updated_at = now
+            return MarkReadResult(ReadStatus.ADVANCED, _to_cursor(row))
+
+        return run_write_transaction(self._session_immediate, "mark_chat_read", _write)
+
+    def list_unread(
+        self,
+        principal_id: str,
+        *,
+        limit: int = 50,
+        channel_ids: Collection[str] | None = None,
+    ) -> tuple[UnreadMessage, ...]:
+        """Return the caller's unread wake items. See the base class."""
+        capped = min(max(limit, 1), _UNREAD_LIMIT)
+        with self._session("list_chat_unread") as session:
+            member_ids = set(
+                session.execute(
+                    select(SqlChatMember.channel_id).where(
+                        SqlChatMember.workspace_id == current_workspace_id(),
+                        SqlChatMember.principal_id == principal_id,
+                    )
+                ).scalars()
+            )
+            if channel_ids is not None:
+                member_ids &= set(channel_ids)
+            if principal_kind(principal_id) == "agent_account":
+                member_ids &= _owner_channel_ids(session, principal_id)
+            if not member_ids:
+                return ()
+            cursors = _load_cursors(session, principal_id)
+            found: dict[str, tuple[ChatMessage, str]] = {}
+
+            def consider(row: SqlChatMessage, reason: str) -> None:
+                if row.author_id == principal_id or row.channel_id not in member_ids:
+                    return
+                if not _message_is_unread(row, cursors):
+                    return
+                current = found.get(row.id)
+                if current is None or _REASON_RANK[reason] < _REASON_RANK[current[1]]:
+                    found[row.id] = (_to_message(row), reason)
+
+            for channel_id in member_ids:
+                _collect_channel_unread(session, principal_id, channel_id, cursors, consider)
+            ordered = sorted(found.values(), key=lambda item: (item[0].created_at, item[0].id))
+            return tuple(
+                UnreadMessage(message=message, reason=reason)
+                for message, reason in ordered[:capped]
+            )
+
+    def channel_unread_counts(
+        self, principal_id: str, channel_ids: Collection[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Count unread top-level messages and mentions. See the base class."""
+        ids = list(channel_ids)
+        if not ids:
+            return {}
+        with self._session("count_chat_unread") as session:
+            cursors = _load_cursors(session, principal_id)
+            counts: dict[str, tuple[int, int]] = {}
+            for channel_id in ids:
+                cursor = cursors.get((channel_id, ""))
+                base = (
+                    SqlChatMessage.workspace_id == current_workspace_id(),
+                    SqlChatMessage.channel_id == channel_id,
+                    SqlChatMessage.thread_root_id.is_(None),
+                    SqlChatMessage.author_id != principal_id,
+                )
+                unread_query = select(func.count()).select_from(SqlChatMessage).where(*base)
+                after = _after_cursor(cursor)
+                if after is not None:
+                    unread_query = unread_query.where(after)
+                unread = int(session.scalar(unread_query) or 0)
+                mention_query = (
+                    select(func.count())
+                    .select_from(SqlChatMessage)
+                    .join(
+                        SqlChatMention,
+                        and_(
+                            SqlChatMention.workspace_id == SqlChatMessage.workspace_id,
+                            SqlChatMention.message_id == SqlChatMessage.id,
+                        ),
+                    )
+                    .where(
+                        *base,
+                        SqlChatMention.target_id == principal_id,
+                    )
+                )
+                if after is not None:
+                    mention_query = mention_query.where(after)
+                mentions = int(session.scalar(mention_query) or 0)
+                counts[channel_id] = (unread, mentions)
+            return counts
+
 
 def _ensure_member(
     session: Session, channel_id: str, principal_id: str | None, role: str = "member"
@@ -684,6 +1031,7 @@ def _update_thread(
     channel_id: str,
     root_message_id: str,
     author_id: str,
+    author_kind: str,
     created_at: int,
 ) -> None:
     """Bump a root message's reply counter and latest participants.
@@ -704,6 +1052,11 @@ def _update_thread(
         thread.reply_count = thread.reply_count + 1
         thread.last_reply_at = created_at
         thread.updated_at = created_at
+        if author_kind in _BOT_AUTHOR_KINDS:
+            thread.bot_streak = (thread.bot_streak or 0) + 1
+        elif author_kind in _HUMAN_AUTHOR_KINDS:
+            thread.bot_streak = 0
+            thread.brake_notice_at = None
 
     thread = session.execute(
         select(SqlChatThread)
@@ -724,6 +1077,7 @@ def _update_thread(
         reply_count=0,
         last_reply_at=None,
         participants="[]",
+        bot_streak=0,
         agent_state="none",
         updated_at=created_at,
     )
@@ -839,3 +1193,320 @@ def _has_after(
     """Whether any message follows *last* within *filtered*."""
     stmt = filtered.where(_after_predicate((last.created_at, last.id))).limit(1)
     return session.execute(stmt).first() is not None
+
+
+def _is_bot_author(author_kind: str) -> bool:
+    """Whether *author_kind* continues a bot streak."""
+    return author_kind in _BOT_AUTHOR_KINDS
+
+
+def _insert_system_message(
+    session: Session,
+    channel_id: str,
+    thread_root_id: str | None,
+    body: str,
+    system_code: str,
+) -> ChatMessage:
+    """Insert one system row. It does not continue a bot streak."""
+    created_at = now_epoch_us()
+    row = SqlChatMessage(
+        id=uuid.uuid4().hex,
+        channel_id=channel_id,
+        thread_root_id=thread_root_id,
+        author_id="system",
+        author_kind="system",
+        created_at=created_at,
+        body=body,
+        system_code=system_code,
+    )
+    session.add(row)
+    session.flush()
+    return _to_message(row)
+
+
+def _channel_brake_posted(session: Session, channel_id: str) -> bool:
+    """Whether the current top-level bot run already has the brake line."""
+    rows = session.execute(
+        select(SqlChatMessage.author_kind, SqlChatMessage.system_code)
+        .where(
+            SqlChatMessage.workspace_id == current_workspace_id(),
+            SqlChatMessage.channel_id == channel_id,
+            SqlChatMessage.thread_root_id.is_(None),
+        )
+        .order_by(SqlChatMessage.created_at.desc(), SqlChatMessage.id.desc())
+        .limit(20)
+    ).all()
+    for kind, code in rows:
+        if kind in _HUMAN_AUTHOR_KINDS:
+            return False
+        if code == _BRAKE_CODE:
+            return True
+    return False
+
+
+def _post_brake_notice_once(
+    session: Session, channel_id: str, thread_root_id: str | None
+) -> ChatMessage | None:
+    """Post ``Bots warten auf einen Menschen`` once for the current streak."""
+    if thread_root_id is not None:
+        thread = session.execute(
+            select(SqlChatThread)
+            .where(
+                SqlChatThread.workspace_id == current_workspace_id(),
+                SqlChatThread.root_message_id == thread_root_id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if thread is not None and thread.brake_notice_at is not None:
+            return None
+        message = _insert_system_message(
+            session, channel_id, thread_root_id, _BRAKE_BODY, _BRAKE_CODE
+        )
+        if thread is not None:
+            thread.brake_notice_at = message.created_at
+            thread.reply_count = thread.reply_count + 1
+            thread.last_reply_at = message.created_at
+            thread.updated_at = message.created_at
+        return message
+    if _channel_brake_posted(session, channel_id):
+        return None
+    return _insert_system_message(session, channel_id, None, _BRAKE_BODY, _BRAKE_CODE)
+
+
+def _bot_streak(session: Session, channel_id: str, thread_root_id: str | None) -> int:
+    """Count consecutive trailing bot messages in one channel timeline or thread.
+
+    System rows are skipped. A human author resets the count. The scan looks
+    at the newest twenty rows, which is enough to see five bots plus notices.
+    """
+    query = select(SqlChatMessage.author_kind).where(
+        SqlChatMessage.workspace_id == current_workspace_id(),
+        SqlChatMessage.channel_id == channel_id,
+    )
+    if thread_root_id is None:
+        query = query.where(SqlChatMessage.thread_root_id.is_(None))
+    else:
+        query = query.where(SqlChatMessage.thread_root_id == thread_root_id)
+    kinds = session.execute(
+        query.order_by(SqlChatMessage.created_at.desc(), SqlChatMessage.id.desc()).limit(20)
+    ).scalars()
+    streak = 0
+    for kind in kinds:
+        if kind in _BOT_AUTHOR_KINDS:
+            streak += 1
+        elif kind in _HUMAN_AUTHOR_KINDS:
+            break
+    return streak
+
+
+def _owned_account(session: Session, account_id: str, owner_id: str) -> SqlChatAgentAccount | None:
+    """Return the account when *owner_id* owns it. A wrong owner looks missing."""
+    return session.execute(
+        select(SqlChatAgentAccount).where(
+            SqlChatAgentAccount.workspace_id == current_workspace_id(),
+            SqlChatAgentAccount.id == account_id,
+            SqlChatAgentAccount.owner_id == owner_id,
+        )
+    ).scalar_one_or_none()
+
+
+def _to_cursor(row: SqlChatRead) -> ReadCursor:
+    """Copy a read-cursor row into a detached value."""
+    return ReadCursor(
+        channel_id=row.channel_id,
+        principal_id=row.principal_id,
+        thread_root_id=row.thread_root_id,
+        last_read_at=row.last_read_at,
+        last_read_id=row.last_read_id,
+    )
+
+
+def _cursor_covers(row: SqlChatRead, message: SqlChatMessage) -> bool:
+    """Whether *row* already names *message* or a newer one."""
+    if row.last_read_at is None or row.last_read_id is None:
+        return False
+    return (message.created_at, message.id) <= (row.last_read_at, row.last_read_id)
+
+
+def _load_cursors(session: Session, principal_id: str) -> dict[tuple[str, str], tuple[int, str]]:
+    """Map ``(channel_id, thread_root_id)`` to the newest read ``(created_at, id)``."""
+    rows = session.execute(
+        select(SqlChatRead).where(
+            SqlChatRead.workspace_id == current_workspace_id(),
+            SqlChatRead.principal_id == principal_id,
+            SqlChatRead.last_read_at.is_not(None),
+            SqlChatRead.last_read_id.is_not(None),
+        )
+    ).scalars()
+    cursors: dict[tuple[str, str], tuple[int, str]] = {}
+    for row in rows:
+        if row.last_read_at is None or row.last_read_id is None:
+            continue
+        cursors[(row.channel_id, row.thread_root_id)] = (row.last_read_at, row.last_read_id)
+    return cursors
+
+
+def _message_scope(row: SqlChatMessage) -> str:
+    """Read-cursor key for *row*. Top-level messages use an empty thread id."""
+    return row.thread_root_id or ""
+
+
+def _message_is_unread(
+    row: SqlChatMessage, cursors: dict[tuple[str, str], tuple[int, str]]
+) -> bool:
+    """Whether *row* is strictly after the cursor for its channel or thread."""
+    cursor = cursors.get((row.channel_id, _message_scope(row)))
+    if cursor is None:
+        return True
+    return (row.created_at, row.id) > cursor
+
+
+def _owner_channel_ids(session: Session, principal_id: str) -> set[str]:
+    """Channel ids where the agent account's owner is also a member.
+
+    An unknown or revoked account contributes no channels.
+    """
+    owner_id = session.execute(
+        select(SqlChatAgentAccount.owner_id).where(
+            SqlChatAgentAccount.workspace_id == current_workspace_id(),
+            SqlChatAgentAccount.principal_id == principal_id,
+            SqlChatAgentAccount.revoked_at.is_(None),
+        )
+    ).scalar_one_or_none()
+    if not isinstance(owner_id, str):
+        return set()
+    return set(
+        session.execute(
+            select(SqlChatMember.channel_id).where(
+                SqlChatMember.workspace_id == current_workspace_id(),
+                SqlChatMember.principal_id == owner_id,
+            )
+        ).scalars()
+    )
+
+
+def _after_cursor(cursor: tuple[int, str] | None):
+    """SQL predicate for messages strictly after *cursor*. ``None`` matches all."""
+    if cursor is None:
+        return None
+    return _after_predicate(cursor)
+
+
+def _collect_channel_unread(
+    session: Session,
+    principal_id: str,
+    channel_id: str,
+    cursors: dict[tuple[str, str], tuple[int, str]],
+    consider: Callable[[SqlChatMessage, str], None],
+) -> None:
+    """Add this channel's unread mentions, DM rows, and thread replies.
+
+    Each query starts at that scope's cursor, so already-read history is not
+    scanned. Thread replies are limited to the thirty most recently updated
+    threads the caller authored, joined, or was mentioned in.
+    """
+    channel_cursor = cursors.get((channel_id, ""))
+    mention_query = (
+        select(SqlChatMessage)
+        .join(
+            SqlChatMention,
+            and_(
+                SqlChatMention.workspace_id == SqlChatMessage.workspace_id,
+                SqlChatMention.message_id == SqlChatMessage.id,
+            ),
+        )
+        .where(
+            SqlChatMention.workspace_id == current_workspace_id(),
+            SqlChatMention.target_id == principal_id,
+            SqlChatMessage.channel_id == channel_id,
+        )
+    )
+    after = _after_cursor(channel_cursor)
+    if after is not None:
+        mention_query = mention_query.where(or_(SqlChatMessage.thread_root_id.is_not(None), after))
+    for row in session.execute(
+        mention_query.order_by(SqlChatMessage.created_at.asc(), SqlChatMessage.id.asc()).limit(
+            _UNREAD_LIMIT
+        )
+    ).scalars():
+        consider(row, "mention")
+
+    kind = session.execute(
+        select(SqlChatChannel.kind).where(
+            SqlChatChannel.workspace_id == current_workspace_id(),
+            SqlChatChannel.id == channel_id,
+        )
+    ).scalar_one_or_none()
+    if kind == "dm":
+        dm_query = select(SqlChatMessage).where(
+            SqlChatMessage.workspace_id == current_workspace_id(),
+            SqlChatMessage.channel_id == channel_id,
+            SqlChatMessage.author_id != principal_id,
+            SqlChatMessage.thread_root_id.is_(None),
+        )
+        if after is not None:
+            dm_query = dm_query.where(after)
+        for row in session.execute(
+            dm_query.order_by(SqlChatMessage.created_at.asc(), SqlChatMessage.id.asc()).limit(
+                _UNREAD_LIMIT
+            )
+        ).scalars():
+            consider(row, "dm")
+        dm_threads = session.execute(
+            select(SqlChatThread.root_message_id)
+            .where(
+                SqlChatThread.workspace_id == current_workspace_id(),
+                SqlChatThread.channel_id == channel_id,
+            )
+            .order_by(SqlChatThread.updated_at.desc())
+            .limit(_THREAD_SCAN)
+        ).scalars()
+        for thread_id in dm_threads:
+            _consider_replies(
+                session, principal_id, channel_id, thread_id, cursors, consider, "dm"
+            )
+
+    # Agent wake is mentions plus DM rows. A thread reply wakes the account
+    # only when it mentions that account (covered by the mention query).
+
+
+def _consider_replies(
+    session: Session,
+    principal_id: str,
+    channel_id: str,
+    thread_id: str,
+    cursors: dict[tuple[str, str], tuple[int, str]],
+    consider: Callable[[SqlChatMessage, str], None],
+    default_reason: str,
+) -> None:
+    """Add unread replies in one thread. A mention outranks *default_reason*."""
+    reply_query = select(SqlChatMessage).where(
+        SqlChatMessage.workspace_id == current_workspace_id(),
+        SqlChatMessage.channel_id == channel_id,
+        SqlChatMessage.thread_root_id == thread_id,
+        SqlChatMessage.author_id != principal_id,
+    )
+    reply_after = _after_cursor(cursors.get((channel_id, thread_id)))
+    if reply_after is not None:
+        reply_query = reply_query.where(reply_after)
+    for row in session.execute(
+        reply_query.order_by(SqlChatMessage.created_at.asc(), SqlChatMessage.id.asc()).limit(
+            _UNREAD_LIMIT
+        )
+    ).scalars():
+        reason = (
+            "mention" if _mentions_principal(session, row.id, principal_id) else default_reason
+        )
+        consider(row, reason)
+
+
+def _mentions_principal(session: Session, message_id: str, principal_id: str) -> bool:
+    """Whether *message_id* has a validated mention of *principal_id*."""
+    found = session.execute(
+        select(SqlChatMention.message_id).where(
+            SqlChatMention.workspace_id == current_workspace_id(),
+            SqlChatMention.message_id == message_id,
+            SqlChatMention.target_id == principal_id,
+        )
+    ).first()
+    return found is not None

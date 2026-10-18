@@ -31,6 +31,8 @@ class AccountAuthority:
 _authority: ContextVar[AccountAuthority | None] = ContextVar("account_authority", default=None)
 _targets: ContextVar[tuple[AccountAuthority, ...]] = ContextVar("account_targets", default=())
 _account_checks_enabled: ContextVar[bool] = ContextVar("account_checks_enabled", default=True)
+# Fail closed outside a request. Header and single-user apps opt out.
+_missing_owner_inactive: ContextVar[bool] = ContextVar("missing_owner_inactive", default=True)
 
 
 @contextmanager
@@ -45,6 +47,25 @@ def account_checks_scope(enabled: bool) -> Iterator[None]:
         yield
     finally:
         _account_checks_enabled.reset(token)
+
+
+@contextmanager
+def missing_owner_scope(inactive_when_missing: bool) -> Iterator[None]:
+    """Whether a users row must exist for an agent-account owner.
+
+    Accounts and OIDC delete the old user on identity remap, so a missing
+    row is inactive. Header and single-user servers never insert that row.
+    """
+    token = _missing_owner_inactive.set(inactive_when_missing)
+    try:
+        yield
+    finally:
+        _missing_owner_inactive.reset(token)
+
+
+def missing_owner_is_inactive() -> bool:
+    """Whether a missing users row rejects the owner's agent tokens."""
+    return _missing_owner_inactive.get()
 
 
 def bind_account_authority(user_id: str, generation: str) -> None:

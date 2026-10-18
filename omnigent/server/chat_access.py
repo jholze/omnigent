@@ -7,9 +7,9 @@ only. A non-member of a public channel is refused with 403
 channel's existence is not leaked (FR-016, FR-022).
 
 The store is the only source of membership; these helpers map its rows
-onto the HTTP outcome the routes raise. Agent-account ownership rules
-(FR-067) and session-chat grants are later work and deliberately absent
-here.
+onto the HTTP outcome the routes raise. An agent account may read or
+post in a channel or DM only where its owner is also a member. On a
+session chat the account has the same access as its owner.
 """
 
 from __future__ import annotations
@@ -32,6 +32,20 @@ def principal_kind(principal_id: str | None) -> str:
     return "user"
 
 
+def author_principal_type(author_kind: str) -> str:
+    """Map a stored author kind onto the MCP principal type.
+
+    :returns: ``human``, ``agent_account``, ``omnigent_agent``, or ``system``.
+    """
+    if author_kind == "system":
+        return "system"
+    if author_kind in {"agent", "omnigent_agent"}:
+        return "omnigent_agent"
+    if author_kind == "agent_account":
+        return "agent_account"
+    return "human"
+
+
 def can_read(store: ChatStore, channel: ChatChannel, principal_id: str) -> bool:
     """Whether *principal_id* may read *channel*.
 
@@ -50,13 +64,27 @@ def can_post(store: ChatStore, channel: ChatChannel, principal_id: str) -> bool:
     return store.is_member(channel.id, principal_id)
 
 
+def _session_owner_allows(store: ChatStore, channel: ChatChannel, principal_id: str) -> bool:
+    """Whether an agent account may use a session chat its owner can use."""
+    if channel.kind != "session" or principal_kind(principal_id) != "agent_account":
+        return False
+    account = store.get_agent_account_by_principal(principal_id)
+    if account is None:
+        return False
+    return store.is_member(channel.id, account.owner_id)
+
+
 def require_read(store: ChatStore, channel: ChatChannel, principal_id: str) -> None:
     """Raise when *principal_id* may not read *channel*.
 
     :raises OmnigentError: 403 ``not_a_member`` for a public channel, or
-        404 for a DM, when the caller is not a member.
+        404 for a DM or session chat, when the caller is not a member. An
+        agent account whose owner is not a member is refused the same way.
+        On a session chat the account follows its owner's membership.
     """
-    if can_read(store, channel, principal_id):
+    if _session_owner_allows(store, channel, principal_id):
+        return
+    if can_read(store, channel, principal_id) and _owner_allows(store, channel, principal_id):
         return
     if channel.kind == "channel":
         raise _not_a_member()
@@ -67,13 +95,43 @@ def require_post(store: ChatStore, channel: ChatChannel, principal_id: str) -> N
     """Raise when *principal_id* may not post in *channel*.
 
     :raises OmnigentError: 403 ``not_a_member`` for a public channel, or
-        404 for a DM, when the caller is not a member.
+        404 for a DM or session chat, when the caller is not a member. An
+        agent account whose owner is not a member is refused the same way.
+        On a session chat the account follows its owner's membership.
     """
-    if can_post(store, channel, principal_id):
+    if _session_owner_allows(store, channel, principal_id):
+        return
+    if can_post(store, channel, principal_id) and _owner_allows(store, channel, principal_id):
         return
     if channel.kind == "channel":
         raise _not_a_member()
     raise _not_found()
+
+
+def require_owner_membership(store: ChatStore, channel: ChatChannel, principal_id: str) -> None:
+    """Raise when an agent account's owner is not a member of *channel*.
+
+    Human callers pass. A missing or revoked agent account is refused.
+    """
+    if _owner_allows(store, channel, principal_id):
+        return
+    if channel.kind == "channel":
+        raise _not_a_member()
+    raise _not_found()
+
+
+def _owner_allows(store: ChatStore, channel: ChatChannel, principal_id: str) -> bool:
+    """Whether *principal_id* stays inside its owner's membership.
+
+    Human principals have no owner constraint. An agent account must still
+    have a live row, and that row's owner must be a member of *channel*.
+    """
+    if principal_kind(principal_id) != "agent_account":
+        return True
+    account = store.get_agent_account_by_principal(principal_id)
+    if account is None:
+        return False
+    return store.is_member(channel.id, account.owner_id)
 
 
 def _not_a_member() -> OmnigentError:
