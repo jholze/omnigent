@@ -224,6 +224,8 @@ jobs:
       ANTHROPIC_API_KEY: ""
       DATABRICKS_TOKEN: ""
       TERM: xterm-256color
+      # /tmp is a symlink on macOS. The real sticky directory is /private/tmp.
+      TMPDIR: /private/tmp
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Use the Mac toolchain on PATH
@@ -270,19 +272,54 @@ jobs:
           cat > "${RUNNER_TEMP}/e2e_tb.py" << 'PY'
           from pathlib import Path
 
+          def _log_tails() -> str:
+              found: dict[str, Path] = {}
+              for root in ("/private/tmp", "/tmp"):
+                  base = Path(root)
+                  if not base.is_dir():
+                      continue
+                  for child in base.glob("pytest-of-*"):
+                      for path in child.rglob("*.log"):
+                          if path.name not in {"server.log", "runner.log", "mock_llm.log"}:
+                              continue
+                          prev = found.get(path.name)
+                          try:
+                              mtime = path.stat().st_mtime
+                          except OSError:
+                              continue
+                          if prev is None or mtime > prev.stat().st_mtime:
+                              found[path.name] = path
+              chunks: list[str] = []
+              for name, path in sorted(found.items()):
+                  try:
+                      tail = path.read_text(errors="replace").splitlines()[-80:]
+                  except OSError as exc:
+                      tail = [str(exc)]
+                  chunks.append(f"\n----- tail {path} -----\n" + "\n".join(tail))
+              return "\n".join(chunks)
+
           def pytest_runtest_logreport(report):
               if report.when != "call" or report.outcome not in {"failed", "rerun"}:
                   return
               text = str(getattr(report, "longrepr", "") or "")
               if not text:
                   return
-              block = f"\n===== {report.outcome} {report.nodeid} =====\n{text}\n"
+              extra = _log_tails() if report.outcome == "failed" else ""
+              block = f"\n===== {report.outcome} {report.nodeid} =====\n{text}\n{extra}\n"
               print(block, flush=True)
               path = Path("artifacts/e2e-failures.txt")
               path.parent.mkdir(parents=True, exist_ok=True)
               with path.open("a", encoding="utf-8") as handle:
                   handle.write(block)
           PY
+          # The Mac user's ~/.omnigent/config.yaml selects a local provider.
+          # This suite expects the mock at OPENAI_BASE_URL, which is what
+          # upstream CI does when that file is absent.
+          config_home="${RUNNER_TEMP}/omnigent-config"
+          data_dir="${RUNNER_TEMP}/omnigent-data"
+          mkdir -p "$config_home" "$data_dir"
+          export OMNIGENT_CONFIG_HOME="$config_home"
+          export OMNIGENT_DATA_DIR="$data_dir"
           # Stop after a few failures. Each one waits out a timeout and a
           # rerun, and the serial suite otherwise hits the job limit
           # before pytest writes the summary.
