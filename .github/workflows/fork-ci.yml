@@ -127,8 +127,9 @@ jobs:
             local name="$1"
             shift
             # Default basetemp plus the test name overflows macOS sun_path
-            # for a tmux socket created inside tmp_path.
-            local base="/private/tmp/oa-${name}"
+            # for a tmux socket created inside tmp_path. The run id keeps two
+            # PRs on this Mac from deleting each other's worker databases.
+            local base="/private/tmp/oa-${name}-${GITHUB_RUN_ID:-local}"
             rm -rf "$base"
             uv run pytest "$@" \
               --basetemp="$base" \

@@ -804,7 +804,7 @@ async def test_projects_usage_and_order(mcp_client: httpx.AsyncClient) -> None:
     )
     assert removed["deleted"] is True
     missing = await _call(mcp_client, "project", {"action": "get", "project_id": project_id})
-    assert "404" in _error(missing)
+    assert "Project not found" in _error(missing)
 
 
 async def test_policies_global_and_session(mcp_client: httpx.AsyncClient) -> None:

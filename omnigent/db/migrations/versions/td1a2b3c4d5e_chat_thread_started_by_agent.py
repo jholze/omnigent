@@ -33,4 +33,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop the bot initiator column."""
-    op.drop_column("chat_threads", "started_by_agent_account_id")
+    with op.batch_alter_table("chat_threads") as batch_op:
+        batch_op.drop_column("started_by_agent_account_id")
