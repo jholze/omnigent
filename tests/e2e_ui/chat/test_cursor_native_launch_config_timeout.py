@@ -167,7 +167,7 @@ def _suffix_prefix_len(buf: bytes, pat: bytes) -> int:
 class _SnapshotDelayProxy:
     """Loopback TCP proxy (runner -> server) injecting a transient slow read.
 
-    While armed, the exact request line ``GET /v1/sessions/<sid> HTTP/`` (the
+    While armed, a snapshot ``GET /v1/sessions/<sid>?<params>`` (the
     launch-config / snapshot fetch, and only that -- sub-paths like
     ``/v1/sessions/<sid>/agent`` do not match) is held :data:`_STALL_S`
     seconds instead of being forwarded, so its response never arrives inside
@@ -213,7 +213,10 @@ class _SnapshotDelayProxy:
             precede the launch-config fetch and must not be stalled.
         """
         self._stall_after = stall_after
-        self._pattern = f"GET /v1/sessions/{session_id} HTTP/".encode()
+        # Snapshot reads pass include_* query params, so the request line is
+        # ``GET /v1/sessions/<id>?<params> HTTP/``. A space before HTTP never
+        # matches. ``?`` still excludes subpaths such as ``/<id>/agent``.
+        self._pattern = f"GET /v1/sessions/{session_id}?".encode()
 
     def stop(self) -> None:
         if self._loop is not None:
