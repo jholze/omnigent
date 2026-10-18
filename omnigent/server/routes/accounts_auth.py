@@ -9,6 +9,8 @@ projects with built-in accounts (Immich / Gitea / n8n / Coolify /
 Plausible — see ``designs/oss-cuj/01-research-summary.md`` §2.2.1):
 
 - Login / logout via username + password (one cookie set on success).
+  ``GET /auth/login`` also starts the desktop native handoff, and
+  ``POST /auth/native-token`` exchanges its one-time code.
 - Invite-only signup — an admin mints a single-use copyable URL.
 - No SMTP required — invite + admin-initiated reset cover the
   "I forgot my password" path.
@@ -39,7 +41,22 @@ from omnigent.db.account_authority import bind_account_authority, target_account
 from omnigent.server.accounts_store import SqlAlchemyAccountStore
 from omnigent.server.admin_list import AdminList, promote_if_listed
 from omnigent.server.auth import _RESERVED_USERS, RESERVED_USER_LOCAL, UnifiedAuthProvider
+from omnigent.server.google_accounts import google_accounts_config, mint_accounts_session_jwt
 from omnigent.server.login_lockout import record_failure
+from omnigent.server.native_signin import (
+    NativeCode,
+    apply_native_cookie,
+    clear_native_cookie,
+    consume_native_code,
+    encode_native_cookie,
+    native_cookie_secure,
+    origin_of,
+    origins_match,
+    parse_native_sign_in,
+    public_redirect,
+    request_public_origin,
+    take_native_redirect,
+)
 from omnigent.server.oidc import mint_session_cookie
 from omnigent.server.passwords import (
     InvalidPasswordError,
@@ -266,11 +283,51 @@ def create_accounts_auth_router(
     _secure = config.secure_cookies
     _session_cookie = config.session_cookie_name
     _session_max_age = config.session_ttl_hours * 3600
+    # One-time native codes, shared with the Google callback and bind JSON.
+    _native_codes: dict[str, NativeCode] = {}
 
     # ── Login / logout / me ───────────────────────────────────────
 
+    @router.get("/login")
+    async def login_get(request: Request) -> Response:
+        """Start a browser login, including the desktop native handoff.
+
+        With no native parameters this redirects to the SPA ``/login``
+        page. With ``native_redirect_uri``, ``native_state``, and an S256
+        ``code_challenge`` (the same checks as OIDC), a short-lived
+        ``ap_native`` cookie is set and the browser is sent to
+        ``/login?native=1``.
+
+        When Continue with Google is configured and this request's public
+        origin is not the Google redirect origin, the browser is bounced
+        there first so the cookie lands on the host Google returns to.
+        """
+        try:
+            native = parse_native_sign_in(request.query_params)
+        except ValueError:
+            return JSONResponse(
+                status_code=400, content={"error": "Invalid native sign-in parameters"}
+            )
+        if native is not None:
+            cfg = google_accounts_config()
+            if cfg is not None:
+                redirect_origin = origin_of(cfg.redirect_uri)
+                if not origins_match(request_public_origin(request), redirect_origin):
+                    return RedirectResponse(
+                        public_redirect(redirect_origin, "/auth/login", request.url.query),
+                        status_code=302,
+                    )
+            response = RedirectResponse("/login?native=1", status_code=302)
+            apply_native_cookie(
+                response,
+                encode_native_cookie(config.cookie_secret, native),
+                secure=native_cookie_secure(request, config_secure=_secure),
+            )
+            return response
+        return RedirectResponse("/login", status_code=302)
+
     @router.post("/login")
-    async def login(body: LoginRequest) -> Response:
+    async def login(request: Request, body: LoginRequest) -> Response:
         """Verify password and mint a session cookie.
 
         Returns 401 on any failure (unknown user, wrong password,
@@ -361,6 +418,16 @@ def create_accounts_auth_router(
                 )
         if generation is None or not account_store.accepts_generation(username, generation):
             return JSONResponse(status_code=401, content={"error": "invalid username or password"})
+        # The session cookie is still set. The SPA follows native_redirect
+        # when a desktop handoff is in progress; the tab stays signed in.
+        native_url = take_native_redirect(
+            request,
+            secret=config.cookie_secret,
+            user_id=username,
+            codes=_native_codes,
+        )
+        if native_url is not None:
+            body_payload["native_redirect"] = native_url
         resp = JSONResponse(status_code=200, content=body_payload)
         _set_session_cookie(
             resp,
@@ -369,8 +436,62 @@ def create_accounts_auth_router(
             secure=_secure,
             max_age_seconds=_session_max_age,
         )
+        if native_url is not None:
+            clear_native_cookie(resp, secure=native_cookie_secure(request, config_secure=_secure))
         _logger.info("auth/login: success for %s", _redact_for_log(username))
         return resp
+
+    @router.post("/native-token")
+    async def native_token(request: Request) -> Response:
+        """Exchange a native sign-in code for an accounts session token.
+
+        Same contract as the OIDC handler: form ``code``, ``code_verifier``,
+        and ``redirect_uri``. The code is consumed on the first attempt.
+        The token matches the accounts session cookie (including
+        ``account_generation``), so it works as ``ap_session`` and as
+        ``Authorization: Bearer``.
+        """
+        from omnigent.server.routes._oauth import NO_STORE_HEADERS, oauth_error
+        from omnigent.server.routes.device_auth import issue_login_grant
+
+        form = await request.form()
+        code = form.get("code")
+        verifier = form.get("code_verifier")
+        redirect_uri = form.get("redirect_uri")
+        if not isinstance(code, str) or not code:
+            return oauth_error("invalid_request")
+        pending, error = consume_native_code(
+            _native_codes,
+            code=code,
+            verifier=verifier,
+            redirect_uri=redirect_uri,
+        )
+        if error is not None or pending is None:
+            return oauth_error(error or "invalid_grant")
+        generation = account_store.ensure_account_generation(pending.user_id)
+        if not isinstance(generation, str):
+            return oauth_error("invalid_grant")
+        bind_account_authority(pending.user_id, generation)
+        content: dict[str, object] = {
+            "token": mint_accounts_session_jwt(
+                user_id=pending.user_id,
+                cookie_secret=config.cookie_secret,
+                ttl_seconds=_session_max_age,
+                account_generation=generation,
+            ),
+            "user_id": pending.user_id,
+            "expires_in": _session_max_age,
+        }
+        if device_grant_store is not None:
+            try:
+                content["refresh_token"] = issue_login_grant(
+                    device_grant_store,
+                    user_id=pending.user_id,
+                    cookie_secret=config.cookie_secret,
+                )
+            except Exception:
+                _logger.exception("native sign-in: refresh grant issuance failed")
+        return JSONResponse(status_code=200, content=content, headers=NO_STORE_HEADERS)
 
     @router.post("/logout")
     async def logout() -> Response:
@@ -838,7 +959,7 @@ def create_accounts_auth_router(
 
     from omnigent.server.google_accounts import register_google_routes
 
-    register_google_routes(router, auth_provider, account_store, config)
+    register_google_routes(router, auth_provider, account_store, config, _native_codes)
     return router
 
 

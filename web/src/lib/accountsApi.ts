@@ -30,6 +30,11 @@ export interface LoginSuccess {
   user: { id: string; is_admin: boolean };
   token: string;
   expires_in: number;
+  /**
+   * Absolute URL of a desktop native handoff. When present the login page
+   * navigates here instead of ``return_to``.
+   */
+  nativeRedirect?: string;
 }
 
 /** Login failure — kept opaque on purpose (don't leak which check failed). */
@@ -42,6 +47,10 @@ export interface LoginFailure {
 }
 
 export type LoginResult = LoginSuccess | LoginFailure;
+
+function nativeRedirectFrom(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 /** Shape of GET /auth/me when authenticated. */
 export interface CurrentAccount {
@@ -78,8 +87,16 @@ export async function login(body: LoginRequest): Promise<LoginResult> {
   }
 
   if (res.ok) {
-    const data = (await res.json()) as Omit<LoginSuccess, "ok">;
-    return { ok: true, ...data };
+    const data = (await res.json()) as Omit<LoginSuccess, "ok" | "nativeRedirect"> & {
+      native_redirect?: unknown;
+    };
+    return {
+      ok: true,
+      user: data.user,
+      token: data.token,
+      expires_in: data.expires_in,
+      nativeRedirect: nativeRedirectFrom(data.native_redirect),
+    };
   }
 
   // The route returns 401 for both unknown-user and wrong-password.
@@ -195,12 +212,14 @@ async function postSession(path: string, body: unknown): Promise<LoginResult> {
       user: { id: string; is_admin: boolean };
       expires_in: number;
       token?: string;
+      native_redirect?: unknown;
     };
     return {
       ok: true,
       user: data.user,
       token: typeof data.token === "string" ? data.token : "",
       expires_in: data.expires_in,
+      nativeRedirect: nativeRedirectFrom(data.native_redirect),
     };
   }
   let message = "Login failed.";

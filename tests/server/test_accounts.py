@@ -956,6 +956,8 @@ def _build_accounts_app(
     monkeypatch: pytest.MonkeyPatch,
     *,
     init_admin_password: str | None,
+    base_url: str = "http://testserver",
+    headers: dict[str, str] | None = None,
 ) -> Iterator[TestClient]:
     """Build a production-shaped accounts-mode app + TestClient.
 
@@ -1047,7 +1049,7 @@ def _build_accounts_app(
         auth_provider=auth_provider,
         account_store=account_store,
     )
-    with TestClient(app) as client:
+    with TestClient(app, base_url=base_url, headers=headers) as client:
         yield client
 
 

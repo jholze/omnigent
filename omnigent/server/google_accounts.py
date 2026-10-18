@@ -16,7 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode
 
 import httpx
 import jwt
@@ -30,6 +30,16 @@ from omnigent.server.accounts_config import AccountsConfig
 from omnigent.server.accounts_store import SqlAlchemyAccountStore
 from omnigent.server.auth import UnifiedAuthProvider
 from omnigent.server.login_lockout import record_failure
+from omnigent.server.native_signin import (
+    NativeCode,
+    clear_native_cookie,
+    native_cookie_secure,
+    origin_of,
+    origins_match,
+    public_redirect,
+    request_public_origin,
+    take_native_redirect,
+)
 from omnigent.server.oidc import derive_code_challenge, generate_code_verifier
 
 _logger = logging.getLogger(__name__)
@@ -218,22 +228,70 @@ def inject_login_shell(response: Response, scope: Scope) -> Response:
     )
 
 
+def mint_accounts_session_jwt(
+    *,
+    user_id: str,
+    cookie_secret: bytes,
+    ttl_seconds: int,
+    account_generation: str,
+) -> str:
+    """Mint the accounts session JWT ``_set_session`` puts in the cookie.
+
+    ``sub``, ``iat``, ``exp``, ``provider``, ``sid``, and
+    ``account_generation`` are the claims ``get_user_id`` accepts as the
+    ``ap_session`` cookie and as ``Authorization: Bearer``.
+
+    :param user_id: The accounts username.
+    :param cookie_secret: HMAC key for HS256.
+    :param ttl_seconds: Lifetime in seconds.
+    :param account_generation: The user's current generation. Callers
+        bind it with :func:`bind_account_authority` before writing grants.
+    :returns: The signed JWT.
+    """
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "sub": user_id,
+            "iat": now,
+            "exp": now + ttl_seconds,
+            "provider": "accounts",
+            "sid": uuid.uuid4().hex,
+            "account_generation": account_generation,
+        },
+        cookie_secret,
+        algorithm="HS256",
+    )
+    return token if isinstance(token, str) else token.decode("ascii")
+
+
 def register_google_routes(
     router: APIRouter,
     auth_provider: UnifiedAuthProvider,
     account_store: SqlAlchemyAccountStore,
     accounts: AccountsConfig,
+    native_codes: dict[str, NativeCode],
 ) -> None:
-    """Mount ``/google/*`` on the accounts router."""
+    """Mount ``/google/*`` on the accounts router.
+
+    :param native_codes: One-time codes shared with ``POST /auth/native-token``.
+    """
     secure = accounts.secure_cookies
     session_cookie = accounts.session_cookie_name
     session_max_age = accounts.session_ttl_hours * 3600
     secret = accounts.cookie_secret
 
     def _origin_ok(request: Request) -> bool:
+        # The public host (OMNIGENT_OIDC_REDIRECT_URI) is a different origin
+        # from the loopback accounts base URL. Bind, create, and cancel are
+        # posted from whichever host the login page loaded on.
         origin = request.headers.get("origin")
-        parts = urlsplit(accounts.base_url)
-        return origin == f"{parts.scheme}://{parts.netloc}"
+        if not origin:
+            return False
+        allowed = {origin_of(accounts.base_url)}
+        cfg = google_accounts_config()
+        if cfg is not None:
+            allowed.add(origin_of(cfg.redirect_uri))
+        return any(origins_match(origin, item) for item in allowed)
 
     def _clear_state(response: Response) -> None:
         response.delete_cookie(
@@ -259,17 +317,11 @@ def register_google_routes(
             return False
         bind_account_authority(user_id, generation)
         now = int(time.time())
-        token = jwt.encode(
-            {
-                "sub": user_id,
-                "iat": now,
-                "exp": now + session_max_age,
-                "provider": "accounts",
-                "sid": uuid.uuid4().hex,
-                "account_generation": generation,
-            },
-            secret,
-            algorithm="HS256",
+        token = mint_accounts_session_jwt(
+            user_id=user_id,
+            cookie_secret=secret,
+            ttl_seconds=session_max_age,
+            account_generation=generation,
         )
         account_store.mark_logged_in(user_id, now)
         response.set_cookie(
@@ -283,31 +335,55 @@ def register_google_routes(
         )
         return True
 
-    def _logged_in(user_id: str) -> Response:
-        response = RedirectResponse("/", status_code=302)
+    def _native_url(request: Request, user_id: str) -> str | None:
+        return take_native_redirect(
+            request,
+            secret=secret,
+            user_id=user_id,
+            codes=native_codes,
+        )
+
+    def _logged_in(request: Request, user_id: str) -> Response:
+        # The session cookie is still set. The desktop exchanges the one-time
+        # code; a person who finishes in this tab stays signed in too.
+        native_url = _native_url(request, user_id)
+        if native_url is not None:
+            response: Response = RedirectResponse(native_url, status_code=302)
+        else:
+            response = RedirectResponse("/", status_code=302)
         if not _set_session(response, user_id):
             failed = JSONResponse(status_code=401, content=_INVALID_LOGIN)
             _clear_state(failed)
             return failed
         _clear_state(response)
         _clear_bind(response)
+        if native_url is not None:
+            clear_native_cookie(
+                response, secure=native_cookie_secure(request, config_secure=secure)
+            )
         return response
 
-    def _json_session(user_id: str) -> Response:
+    def _json_session(request: Request, user_id: str) -> Response:
         generation = account_store.ensure_account_generation(user_id)
         user = account_store.get_user(user_id)
         if user is None or not isinstance(generation, str):
             return JSONResponse(status_code=401, content=_INVALID_LOGIN)
-        response = JSONResponse(
-            status_code=200,
-            content={
-                "user": {"id": user.id, "is_admin": user.is_admin},
-                "expires_in": session_max_age,
-            },
-        )
+        content: dict[str, object] = {
+            "user": {"id": user.id, "is_admin": user.is_admin},
+            "expires_in": session_max_age,
+        }
+        # Same cookie choice as _logged_in: the SPA also follows native_redirect.
+        native_url = _native_url(request, user_id)
+        if native_url is not None:
+            content["native_redirect"] = native_url
+        response = JSONResponse(status_code=200, content=content)
         if not _set_session(response, user_id):
             return JSONResponse(status_code=401, content=_INVALID_LOGIN)
         _clear_bind(response)
+        if native_url is not None:
+            clear_native_cookie(
+                response, secure=native_cookie_secure(request, config_secure=secure)
+            )
         return response
 
     def _actor(request: Request) -> dict[str, str]:
@@ -342,6 +418,15 @@ def register_google_routes(
         cfg = google_accounts_config()
         if cfg is None:
             return JSONResponse(status_code=404, content={"error": "not configured"})
+        # Google returns to cfg.redirect_uri. A start on another host (the
+        # loopback daemon) would set the state cookie where the callback
+        # never sees it. Bounce first, and do not set the cookie here.
+        redirect_origin = origin_of(cfg.redirect_uri)
+        if not origins_match(request_public_origin(request), redirect_origin):
+            return RedirectResponse(
+                public_redirect(redirect_origin, "/auth/google/start", request.url.query),
+                status_code=302,
+            )
         verifier = generate_code_verifier()
         challenge = derive_code_challenge(verifier)
         state = uuid.uuid4().hex
@@ -436,7 +521,7 @@ def register_google_routes(
 
         linked = account_store.google_user_for_subject(GOOGLE_ISSUER, google_sub)
         if linked is not None:
-            return _logged_in(linked)
+            return _logged_in(request, linked)
 
         password_hash = account_store.get_password_hash(email)
         email_user = account_store.get_user(email)
@@ -446,7 +531,7 @@ def register_google_routes(
                 failed = JSONResponse(status_code=409, content={"error": "already linked"})
                 _clear_named(failed, _STATE_COOKIE, "/", secure, "lax")
                 return failed
-            return _logged_in(email)
+            return _logged_in(request, email)
 
         if account_store.google_user_for_email(email) is not None:
             failed = JSONResponse(status_code=409, content={"error": "already linked"})
@@ -460,7 +545,7 @@ def register_google_routes(
                 failed = JSONResponse(status_code=409, content={"error": "already linked"})
                 _clear_named(failed, _STATE_COOKIE, "/", secure, "lax")
                 return failed
-            return _logged_in(current)
+            return _logged_in(request, current)
 
         return _issue_bind(email, google_sub, secure, secret, account_store)
 
@@ -492,7 +577,7 @@ def register_google_routes(
             return failed
         if result != "ok":
             return JSONResponse(status_code=409, content={"error": "already linked"})
-        return _json_session(username)
+        return _json_session(request, username)
 
     @router.post("/google/create")
     async def google_create(request: Request) -> Response:
@@ -514,7 +599,7 @@ def register_google_routes(
             return failed
         if result != "ok":
             return JSONResponse(status_code=409, content={"error": "already linked"})
-        return _json_session(str(payload["email"]))
+        return _json_session(request, str(payload["email"]))
 
     @router.post("/google/cancel")
     async def google_cancel(request: Request) -> Response:
