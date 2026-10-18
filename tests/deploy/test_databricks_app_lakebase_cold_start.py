@@ -60,7 +60,6 @@ _BOOT_STORE_CLASSES = (
     "omnigent.stores.policy_store.sqlalchemy_store.SqlAlchemyPolicyStore",
     "omnigent.stores.project_store.sqlalchemy_store.SqlAlchemyProjectStore",
     "omnigent.stores.scheduled_task_store.sqlalchemy_store.SqlAlchemyScheduledTaskStore",
-    "omnigent.stores.session_chat_store.sqlalchemy_store.SqlAlchemySessionChatStore",
 )
 
 

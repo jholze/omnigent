@@ -383,9 +383,6 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
         SqlAlchemyScheduledTaskStore,
     )
-    from omnigent.stores.session_chat_store.sqlalchemy_store import (
-        SqlAlchemySessionChatStore,
-    )
 
     telemetry.init()
 
@@ -393,7 +390,6 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     file_store = SqlAlchemyFileStore(database_url)
     conversation_store = SqlAlchemyConversationStore(database_url)
     comment_store = SqlAlchemyCommentStore(database_url)
-    chat_store = SqlAlchemySessionChatStore(database_url)
     permission_store = SqlAlchemyPermissionStore(database_url)
     host_store = HostStore(database_url)
     policy_store = SqlAlchemyPolicyStore(database_url)
@@ -498,7 +494,6 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
         artifact_store=artifact_store,
         agent_cache=agent_cache,
         comment_store=comment_store,
-        chat_store=chat_store,
         permission_store=permission_store,
         policy_store=policy_store,
         host_store=host_store,

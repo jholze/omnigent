@@ -114,7 +114,6 @@ from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
-from omnigent.server.routes.session_chat import create_session_chat_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
@@ -153,7 +152,6 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
-from omnigent.stores.session_chat_store import SessionChatStore
 
 _logger = logging.getLogger(__name__)
 _RECONNECT_BINDING_BATCH_SIZE = 128
@@ -1404,7 +1402,6 @@ def create_app(
     feature_flags: FeatureFlags | None = None,
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
-    chat_store: SessionChatStore | None = None,
     team_chat_store: TeamChatStore | None = None,
 ) -> FastAPI:
     """
@@ -1544,8 +1541,6 @@ def create_app(
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal
         root deployment.
-    :param chat_store: Store for human lines beside a shared session.
-        ``None`` leaves ``/v1/sessions/{id}/chat`` unmounted.
     :param team_chat_store: Store for team chat (channels, DMs, messages).
         When omitted it is derived from ``conversation_store``'s storage
         location, so the ``/v1/chat`` routes mount on every real database
@@ -3471,17 +3466,6 @@ def create_app(
             ),
             prefix="/v1",
             tags=["comments"],
-        )
-    if chat_store is not None:
-        app.include_router(
-            create_session_chat_router(
-                chat_store,
-                conversation_store,
-                auth_provider=auth_provider,
-                permission_store=permission_store,
-            ),
-            prefix="/v1",
-            tags=["session_chat"],
         )
     if team_chat_store is not None:
         from omnigent.server.routes.chat import create_chat_router
