@@ -2067,6 +2067,10 @@ def register_events_routes(
                     )
                 )
             forward_body = body.model_dump()
+            # An ordinary status forward leaves the wake dedupe key unset.
+            # Dropping the null keeps the runner payload the same shape.
+            if forward_body.get("subagent_wake_key") is None:
+                forward_body.pop("subagent_wake_key", None)
             forward_body["data"] = data
             runner_result = await _forward_session_change_to_runner(
                 session_id,

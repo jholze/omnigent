@@ -16,9 +16,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import cachetools
 from starlette.datastructures import Headers
 
 from omnigent._wrapper_labels import CODEX_NATIVE_WRAPPER_VALUE
+from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.entities.conversation import Conversation
 from omnigent.runner.subagent_work import (
     SUBAGENT_DISPATCH_ID_LABEL_KEY,
@@ -42,9 +44,17 @@ _app: Any = None
 _permission_store: Any = None
 _delivery: Delivery | None = None
 _delivery_uninstall: Callable[[], None] | None = None
+# custom-lint: disable-next=workspace-scoped-cache -- set of Task objects
 _tasks: set[asyncio.Task[None]] = set()
-_delivered: set[tuple[str, str]] = set()
-_locks: dict[tuple[str, str], asyncio.Lock] = {}
+# Parent session ids collide across imported workspaces. The conversation
+# label is the durable record; these bounds are the in-process fast path.
+_WAKE_MEMORY_MAX = 4096
+_delivered: WorkspaceScopedCache[tuple[str, str], bool] = WorkspaceScopedCache(
+    lambda: cachetools.LRUCache(maxsize=_WAKE_MEMORY_MAX)
+)
+_locks: WorkspaceScopedCache[tuple[str, str], asyncio.Lock] = WorkspaceScopedCache(
+    lambda: cachetools.LRUCache(maxsize=_WAKE_MEMORY_MAX)
+)
 
 
 @dataclass(frozen=True)
@@ -248,7 +258,7 @@ async def _already_delivered(store: ConversationStore, parent_id: str, wake_key:
 
 
 async def _mark_delivered(store: ConversationStore, parent_id: str, wake_key: str) -> None:
-    _delivered.add((parent_id, wake_key))
+    _delivered[(parent_id, wake_key)] = True
     try:
         await asyncio.to_thread(store.set_labels, parent_id, {_label_key(wake_key): "1"})
     except Exception:  # noqa: BLE001 — marker write must not fail a delivered wake
