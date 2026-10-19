@@ -58,6 +58,7 @@ import {
   MailOpenIcon,
   MessageCircleDashedIcon,
   MessageCirclePlusIcon,
+  MessagesSquareIcon,
   Maximize2Icon,
   Minimize2Icon,
   MoreHorizontalIcon,
@@ -230,6 +231,8 @@ import {
   type SidebarViewPreferences,
 } from "@/lib/sidebarViewPreferences";
 import { ExtensionPrimaryNavigation } from "@/extensions/ExtensionPrimaryNavigation";
+import { isTeamChatPathname } from "@/chat/ChatSidebar";
+import { CHAT_TEST_IDS } from "@/chat/testids";
 import { PrimaryNavLink } from "@/shell/PrimaryNavLink";
 import { useViewerId } from "@/hooks/useViewerId";
 import { useExtensions } from "@/extensions/ExtensionProvider";
@@ -490,6 +493,7 @@ function useActiveNavItem(): {
   isNewChatPage: boolean;
   isInboxPage: boolean;
   isCanvasPage: boolean;
+  isTeamChatPage: boolean;
   isTasksPage: boolean;
   isUsagePage: boolean;
   activeExtensionPageId: string | null;
@@ -506,12 +510,14 @@ function useActiveNavItem(): {
     !isExtensionRoute && isCanvasPathname(location.pathname, rebasePath("/canvas"));
   const isTasksPage = !isExtensionRoute && leaf === "tasks";
   const isUsagePage = !isExtensionRoute && leaf === "usage";
+  const isTeamChatPage = isTeamChatPathname(location.pathname, rebasePath("/chat"));
   const activeExtensionPageId =
     resolveExtensionPageFromPath(extensions, location.pathname)?.page.id ?? null;
   const isNewSessionRoute =
     activeConversationId == null &&
     !isInboxPage &&
     !isCanvasPage &&
+    !isTeamChatPage &&
     !isTasksPage &&
     !isUsagePage &&
     !isExtensionRoute;
@@ -527,6 +533,7 @@ function useActiveNavItem(): {
     isNewChatPage,
     isInboxPage,
     isCanvasPage,
+    isTeamChatPage,
     isTasksPage,
     isUsagePage,
     activeExtensionPageId,
@@ -679,6 +686,7 @@ function SidebarImpl({
   const serverInfo = useServerInfo();
   const usagePageEnabled = isFeatureEnabled(serverInfo, "usage_page");
   const canvasEnabled = isFeatureEnabled(serverInfo, "canvas");
+  const teamChatEnabled = isFeatureEnabled(serverInfo, "team_chat");
   const [searchParams] = useSearchParams();
   const canvasDestination = canvasLocation(searchParams.get(CANVAS_QUERY_PARAM) ?? MAIN_CANVAS_ID);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -805,6 +813,7 @@ function SidebarImpl({
     isNewChatPage,
     isInboxPage,
     isCanvasPage,
+    isTeamChatPage,
     isTasksPage,
     isUsagePage,
     activeExtensionPageId,
@@ -1276,6 +1285,18 @@ function SidebarImpl({
                   onClick={onNavClick}
                   componentId="sidebar.canvas"
                   testId="canvas-nav"
+                />
+              )}
+              {teamChatEnabled && (
+                <PrimaryNavLink
+                  to="/chat"
+                  label="Chat"
+                  icon={MessagesSquareIcon}
+                  active={isTeamChatPage}
+                  onClick={onNavClick}
+                  componentId="sidebar.chat"
+                  testId={CHAT_TEST_IDS.navEntry}
+                  className="min-h-11 md:min-h-0"
                 />
               )}
               <ExtensionPrimaryNavigation
