@@ -94,6 +94,15 @@ async def mcp_client(mcp_app: FastAPI, mock_llm: Any, tmp_path: Path) -> httpx.A
         yield client
 
 
+def test_manage_session_schema_includes_workspace() -> None:
+    """tools/list offers an optional absolute workspace on manage_session update."""
+    tool = next(item for item in tool_definitions() if item["name"] == "manage_session")
+    workspace = tool["inputSchema"]["properties"]["workspace"]
+    assert workspace["type"] == "string"
+    assert "Absolute" in workspace["description"]
+    assert "workspace" not in tool["inputSchema"]["required"]
+
+
 def _write_names() -> set[str]:
     return {
         tool["name"]

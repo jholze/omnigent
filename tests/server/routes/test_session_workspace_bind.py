@@ -548,6 +548,28 @@ async def test_editor_cannot_rebind(
     assert stored.workspace == "/work/app"
 
 
+async def test_mcp_editor_cannot_rebind(
+    auth_app: FastAPI, auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """manage_session update uses the PATCH owner gate for workspace."""
+    hosts = _install_hosts(auth_app, db_uri)
+    host_id = _host(hosts, JENS)
+    session_id = _seed(
+        db_uri, host_id=host_id, workspace="/work/app", level=LEVEL_EDIT, runner_id=None
+    )
+    denied = _tool_text(
+        await _manage(
+            auth_client,
+            session_id,
+            {"workspace": "/work/elsewhere", "confirm": True},
+        )
+    )
+    assert "owner permission" in denied
+    stored = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+    assert stored is not None
+    assert stored.workspace == "/work/app"
+
+
 async def test_fork_without_runner_can_be_bound(
     auth_app: FastAPI,
     auth_client: httpx.AsyncClient,

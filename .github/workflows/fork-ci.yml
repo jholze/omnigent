@@ -113,13 +113,18 @@ jobs:
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          # OIDC tests still read ~/.omnigent unless the admin credentials path
-          # is an empty data dir. Leave the config home unset: one shared empty
-          # directory is visible to every worker, and the app writes a host id.
-          export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
-          mkdir -p "$OMNIGENT_DATA_DIR"
-          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
-          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
+          # This job runs as the Mac user. HOME is a per-job temp so
+          # import-time Path.home() is not that account. Each worker and
+          # each CLI test then gets its own config home; do not export
+          # OMNIGENT_CONFIG_HOME or OMNIGENT_DATA_DIR (conftest owns those).
+          if [ -z "${UV_CACHE_DIR:-}" ]; then
+            export UV_CACHE_DIR="$(uv cache dir)"
+          fi
+          export HOME="${RUNNER_TEMP}/omnigent-home"
+          data_dir="${RUNNER_TEMP}/omnigent-data"
+          mkdir -p "$HOME" "$data_dir"
+          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${data_dir}/admin-credentials"
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${data_dir}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
           export PYTEST_PROGRESS_LOG_DIR="${GITHUB_WORKSPACE}/artifacts/progress"
 

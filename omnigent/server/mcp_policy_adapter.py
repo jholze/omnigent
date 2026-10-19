@@ -76,7 +76,10 @@ class McpPolicyAdapter:
         if registry is None:
             raise HTTPException(404, "MCP gateway is not configured")
         try:
-            user = registry_user(_build_actor(caller))
+            user = registry_user(
+                _build_actor(caller),
+                getattr(request.app.state, "mcp_registry_auth", None),
+            )
             service = registry.service(service_id, user)
         except ConnectionError as exc:
             raise HTTPException(403, str(exc)) from None

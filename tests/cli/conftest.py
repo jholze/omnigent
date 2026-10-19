@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_ambient_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Isolate the machine's own host identity and runner slice-key env var.
 
     ``databricks_request_headers`` (reached via ``_remote_headers``,
@@ -28,3 +30,6 @@ def _no_ambient_host(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.delenv("OMNIGENT_RUNNER_SLICE_KEY", raising=False)
     monkeypatch.delenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", raising=False)
+    # Clearing OMNIGENT_CONFIG_HOME falls back to $HOME/.omnigent/config.yaml.
+    # Fork CI shares that HOME across xdist workers, so each test gets its own.
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))

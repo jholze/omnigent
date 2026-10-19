@@ -601,3 +601,152 @@ async def test_source_name_conflict_can_be_resolved_by_removing_selection(client
     assert (await client.delete(f"{url}/tracker")).status_code == 204
     servers = (await client.get(url)).json()["data"]
     assert [(s["name"], s["transport"]) for s in servers] == [("tracker", "http")]
+
+
+async def test_accounts_registry_gateway_does_not_fall_back_to_local(
+    runtime_init, db_uri, tmp_path, mock_llm, monkeypatch
+):
+    """A signed-in accounts user stays that user when env says local header auth.
+
+    The local spawn sets ``OMNIGENT_LOCAL_SINGLE_USER`` in accounts mode too.
+    Discovery must use the app provider, the same one ``/v1/info`` reports,
+    and must not serve a service that only the reserved local user may call.
+    """
+    import os
+    import secrets
+
+    from omnigent.runtime import get_agent_cache, get_agent_store, get_conversation_store
+    from omnigent.server.accounts_config import AccountsConfig
+    from omnigent.server.accounts_store import SqlAlchemyAccountStore
+    from omnigent.server.app import create_app
+    from omnigent.server.auth import UnifiedAuthProvider, auth_mode
+    from omnigent.server.registry_gateway import registry_user
+    from omnigent.server.routes.connections_base import ConnectionError
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
+    from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+    from tests.server.conftest import _app_client
+
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    monkeypatch.setenv("OMNIGENT_ACCOUNTS_INIT_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("OMNIGENT_ACCOUNTS_AUTO_OPEN", "0")
+    provider = UnifiedAuthProvider(
+        source="accounts",
+        accounts_config=AccountsConfig(
+            cookie_secret=secrets.token_bytes(32),
+            session_ttl_hours=8,
+            base_url="http://testserver",
+            init_admin_password="admin-pw-12345",
+            invite_ttl_seconds=72 * 3600,
+            magic_ttl_seconds=10 * 60,
+        ),
+    )
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    accounts_app = create_app(
+        agent_store=get_agent_store(),
+        conversation_store=get_conversation_store(),
+        agent_cache=get_agent_cache(),
+        artifact_store=artifact_store,
+        file_store=SqlAlchemyFileStore(db_uri),
+        permission_store=SqlAlchemyPermissionStore(db_uri),
+        account_store=SqlAlchemyAccountStore(db_uri),
+        auth_provider=provider,
+    )
+    assert os.environ["OMNIGENT_AUTH_PROVIDER"] == "header"
+    assert auth_mode(accounts_app.state.mcp_registry_auth) == "accounts"
+    with pytest.raises(ConnectionError, match="authenticated user"):
+        registry_user(None, accounts_app.state.mcp_registry_auth)
+
+    registry = McpRegistry(
+        McpRegistryConfig(
+            services=[
+                McpService(
+                    id="admin_only",
+                    title="Admin only",
+                    url="https://example.test/mcp",
+                    auth="none",
+                    tools=["read_ticket"],
+                    allowed_users=["admin"],
+                ),
+                McpService(
+                    id="local_only",
+                    title="Local only",
+                    url="https://example.test/mcp",
+                    auth="none",
+                    tools=["read_ticket"],
+                    allowed_users=["local"],
+                ),
+            ]
+        ),
+        None,
+    )
+    accounts_app.state.mcp_registry = registry
+    seen: list[str] = []
+
+    async def execute(service_id: str, user_id: str, app_state: object, **kwargs: object) -> list:
+        seen.append(user_id)
+        return [
+            Tool(
+                name="read_ticket",
+                inputSchema={"type": "object", "properties": {"ticket_id": {"type": "string"}}},
+            )
+        ]
+
+    monkeypatch.setattr(registry, "execute", execute)
+
+    def rpc(method: str) -> dict[str, object]:
+        return {"jsonrpc": "2.0", "id": 1, "method": method}
+
+    async with _app_client(accounts_app, mock_llm, tmp_path) as http:
+        info = await http.get("/v1/info")
+        assert info.status_code == 200, info.text
+        assert info.json()["single_user"] is False
+
+        anonymous = await http.post(
+            "/v1/mcp/local_only",
+            headers={"X-Omnigent-Session-Id": "missing-session"},
+            json=rpc("tools/list"),
+        )
+        assert anonymous.status_code == 401, anonymous.text
+        assert seen == []
+
+        logged_in = await http.post(
+            "/auth/login",
+            json={"username": "admin", "password": "admin-pw-12345"},
+        )
+        assert logged_in.status_code == 200, logged_in.text
+        me = await http.get("/auth/me")
+        assert me.status_code == 200, me.text
+        assert me.json()["id"] == "admin"
+
+        session = await create_test_session(http, name="accounts-registry")
+        attached = await http.post(
+            f"/v1/sessions/{session['id']}/agent/mcp-servers",
+            json={"name": "admin_only", "transport": "registry"},
+        )
+        assert attached.status_code == 200, attached.text
+        # A local-only catalog entry must stay closed. Falling back to the
+        # reserved local user would accept this selection.
+        rejected = await http.post(
+            f"/v1/sessions/{session['id']}/agent/mcp-servers",
+            json={"name": "local_only", "transport": "registry"},
+        )
+        assert rejected.status_code == 403, rejected.text
+
+        listed = await http.post(
+            "/v1/mcp/admin_only",
+            headers={"X-Omnigent-Session-Id": session["id"]},
+            json=rpc("tools/list"),
+        )
+        assert listed.status_code == 200, listed.text
+        assert "read_ticket" in [tool["name"] for tool in listed.json()["result"]["tools"]]
+        assert seen == ["admin"]
+
+        denied = await http.post(
+            "/v1/mcp/local_only",
+            headers={"X-Omnigent-Session-Id": session["id"]},
+            json=rpc("tools/list"),
+        )
+        assert denied.status_code == 403, denied.text
+        assert seen == ["admin"]

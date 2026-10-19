@@ -5759,8 +5759,11 @@ def test_config_list_dedups_when_cwd_is_config_home(
     """
     # Global config lives at ``<home>/.omnigent/config.yaml``; chdir to
     # that same home dir so the local loader reads the identical file.
+    # The CLI fixture points OMNIGENT_CONFIG_HOME at tmp_path, which would
+    # split this file from the project path. Point it at the same dir.
     config_dir = tmp_path / ".omnigent"
     config_dir.mkdir()
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_dir))
     monkeypatch.setattr("omnigent.cli._GLOBAL_CONFIG_PATH", config_dir / "config.yaml")
     monkeypatch.chdir(tmp_path)  # cwd == home → local path resolves to global
     monkeypatch.setattr("omnigent.cli._print_credentials_by_harness", lambda: None)
