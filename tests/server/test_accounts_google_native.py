@@ -372,7 +372,10 @@ def test_oidc_manifest_and_login_are_unchanged(
         assert auth == {
             "mode": "oidc",
             "session_cookie": "ap_session",
-            "native_redirect_uris": ["ai.omnigent.ios:/oauth/callback"],
+            "native_redirect_uris": [
+                "ai.omnigent.android:/oauth/callback",
+                "ai.omnigent.ios:/oauth/callback",
+            ],
         }
         login = client.get("/auth/login", follow_redirects=False)
         assert login.status_code == 302

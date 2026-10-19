@@ -388,6 +388,8 @@ def _to_agent_object(
     *,
     mcp_servers_editable: bool,
     terminals_override: list[str] | None = None,
+    mcp_selection: dict[str, str] | None = None,
+    mcp_registry_editable: bool = False,
 ) -> AgentObject:
     """
     Convert a runtime :class:`Agent` entity to an API-layer
@@ -404,6 +406,8 @@ def _to_agent_object(
     :param cache: Agent cache, or ``None`` in test setups.
     :param terminals_override: Selected host's shell inventory. Applied only
         when the loaded spec is a recognized native wrapper.
+    :param mcp_selection: Session MCP selection labels, when called for a session.
+    :param mcp_registry_editable: Whether the caller can change session MCP selections.
     :param mcp_servers_editable: Whether the authenticated caller may mutate
         MCP configuration for the session serving this object.
     :returns: An :class:`AgentObject` for the API response.
@@ -442,6 +446,8 @@ def _to_agent_object(
                 for s in loaded.spec.skills
                 if s.user_invocable
             ]
+            from omnigent.mcp_selection import selected_mcp_spec
+
             mcp_servers = [
                 MCPServerSummary(
                     name=srv.name,
@@ -452,7 +458,7 @@ def _to_agent_object(
                     command=srv.command,
                     args=srv.args,
                 )
-                for srv in loaded.spec.mcp_servers
+                for srv in selected_mcp_spec(loaded.spec, mcp_selection or {}).mcp_servers
             ]
             if loaded.spec.guardrails and loaded.spec.guardrails.policies:
                 policies = [
@@ -484,6 +490,7 @@ def _to_agent_object(
         updated_at=agent.updated_at,
         harness=harness,
         mcp_servers=mcp_servers,
+        mcp_registry_editable=mcp_registry_editable,
         mcp_servers_editable=(
             mcp_servers_editable
             and agent.session_id is not None

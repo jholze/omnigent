@@ -147,10 +147,10 @@ async def _online_host(
 
     async def _drain() -> None:
         while True:
-            frame_text = await conn.outbound_queue.get()
-            if frame_text is None:
+            outbound = await conn.outbound_queue.get()
+            if outbound is None:
                 return
-            frame = decode_host_frame(frame_text)
+            frame = decode_host_frame(outbound.data)
             if isinstance(frame, HostStopRunnerFrame):
                 future = conn.pending_stops.pop(frame.request_id, None)
                 if future is not None and not future.done():
