@@ -115,7 +115,7 @@ includes `will_lose`, a sentence naming what that call removes.
 | `session_files` | `list`, `get`, `content`, `delete` on `.../resources/files`. `delete` needs confirm |
 | `session_workspace` | `list`, `read`, `search`, `changes`, `diff`, `write`, `edit`, `delete`, `shell` on `.../resources/environments/{environment_id}`. `environment_id` defaults to `default`. `write`, `edit`, `delete`, and `shell` need confirm. `shell` is owner-only and has no approval gate |
 | `session_github` | `info`, `changes`, `diff`, `attach_pr`, `preferences` on `.../resources/github`. `attach_pr` and `preferences` need confirm |
-| `manage_session` | `update` (title, archived, project, labels, model_override), `fork`, `delete`, `children`, `agent`, `labels`, `reset_model`. `update`, `fork`, `delete`, and `reset_model` need confirm. `delete_branch` also removes a server-created worktree branch |
+| `manage_session` | `update` (title, archived, project, labels, model_override, workspace, host_id), `fork`, `delete`, `children`, `agent`, `labels`, `reset_model`. `workspace` is an absolute path on the session's host. `update`, `fork`, `delete`, and `reset_model` need confirm. `delete_branch` also removes a server-created worktree branch |
 | `session_comments` | `list`, `add`, `update`, `delete`, `send`. `send` is `POST .../comments/send`: it marks comments addressed and returns `formatted_message`. It does not post a turn |
 | `host_fs` | `list` (`GET /v1/hosts/{id}/filesystem` and `.../filesystem/{path}`), `worktrees`, `mkdir`. `mkdir` needs confirm. These need a live host |
 | `project` | `get`, `create`, `update`, `delete`, `order`, `usage`. `order` with no `ordered_project_ids` reads `GET /v1/projects/order`; a list or `null` is `PUT`. `usage` is `GET /v1/usage`. `delete` leaves member sessions unfiled |
@@ -137,6 +137,7 @@ These were dropped or renamed after checking the routes and `openapi.json`:
 * Replacing a session agent is `PUT .../agent` with a `.tar.gz` bundle, not a JSON body. `manage_session` `agent` is the read. MCP servers on that agent are `session_mcp`.
 * `comments/send` does not deliver text to the agent. It marks the comments addressed and returns `formatted_message`. Post that text with `send_message`.
 * Labels are read with `manage_session` `labels` (`GET .../labels`). Writing them is `manage_session` `update`, which merges `labels` through `PATCH /v1/sessions/{id}`. There is no labels write route.
+* `manage_session` `update` accepts optional `workspace` (absolute path on the session's host) and `host_id`. Both are sent as `PATCH /v1/sessions/{id}` and use that route's checks: the caller must own the session (an editor is refused), and the session must be idle and not archived.
 * `reset_model` is `POST .../model-override/reset`. It clears `expected_model_override` only while that selection is still current. To clear unconditionally, `update` with `model_override` set to `default`, `off`, or `reset`.
 * There is no global policy evaluate route. `policy` `evaluate` is per session. Global `create` accepts `type=python` and a handler from `policy` `registry`; a URL handler is rejected by the route.
 * `session_workspace` `diff` and `session_github` `diff` call routes that are mounted with `include_in_schema=false`. They are real, and they are absent from `openapi.json`.
