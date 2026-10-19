@@ -351,3 +351,77 @@ def test_announce_conversation_url_defaults_to_stderr(
     out, err = capsys.readouterr()
     assert out == ""
     assert err.strip() == f"{browser.SESSION_URL_ANNOUNCE_PREFIX}http://127.0.0.1:6767/c/x"
+
+
+def _stub_local_server_with_base_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record a local managed server on :6767 serving under ``/proxy/6767``."""
+    from omnigent.host import local_server
+
+    monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: (4242, 6767))
+    monkeypatch.setenv("OMNIGENT_WEB_BASE_PATH", "/proxy/6767")
+
+
+def test_conversation_url_without_public_base_keeps_local_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no public base URL, a loopback link is exactly the local server link."""
+    monkeypatch.delenv("OMNIGENT_PUBLIC_BASE_URL", raising=False)
+
+    assert (
+        browser.conversation_url("http://127.0.0.1:6767", "conv_abc")
+        == "http://127.0.0.1:6767/c/conv_abc"
+    )
+
+
+def test_conversation_url_without_public_base_keeps_local_base_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no public base URL, the local server's base path is still prefixed."""
+    _stub_local_server_with_base_path(monkeypatch)
+    monkeypatch.delenv("OMNIGENT_PUBLIC_BASE_URL", raising=False)
+
+    assert (
+        browser.conversation_url("http://127.0.0.1:6767", "conv_abc")
+        == "http://127.0.0.1:6767/proxy/6767/c/conv_abc"
+    )
+
+
+def test_conversation_url_public_base_replaces_loopback_and_base_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured public base replaces the loopback origin and its base path."""
+    _stub_local_server_with_base_path(monkeypatch)
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://omnigent.example.com/")
+
+    assert (
+        browser.conversation_url("http://127.0.0.1:6767", "conv with/slash")
+        == "https://omnigent.example.com/c/conv%20with%2Fslash"
+    )
+
+
+def test_conversation_url_public_base_keeps_remote_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote --server link is unchanged even when a public base is set."""
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://omnigent.example.com")
+
+    assert (
+        browser.conversation_url("https://remote.example.org", "conv_abc")
+        == "https://remote.example.org/c/conv_abc"
+    )
+
+
+def test_conversation_url_public_base_keeps_workspace_link(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace-hosted link keeps its SPA mount when a public base is set."""
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path",
+        lambda: tmp_path / "auth_tokens.json",
+    )
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://omnigent.example.com")
+
+    assert (
+        browser.conversation_url("https://workspace.example.com/api/2.0/omnigent", "conv_abc")
+        == "https://workspace.example.com/omnigent/c/conv_abc"
+    )

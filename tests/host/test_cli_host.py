@@ -1449,6 +1449,102 @@ def test_host_remote_web_ui_open_preference(
     )
 
 
+@pytest.mark.parametrize(
+    ("config_content", "web_base_path", "expected_opened"),
+    [
+        pytest.param(
+            "public_base_url: https://omnigent.example.com/\n",
+            None,
+            ["https://omnigent.example.com"],
+            id="public-base-replaces-loopback",
+        ),
+        pytest.param(
+            "public_base_url: https://omnigent.example.com/\n",
+            "/proxy/8123",
+            ["https://omnigent.example.com"],
+            id="public-base-drops-local-base-path",
+        ),
+        pytest.param(
+            "",
+            "/proxy/8123",
+            ["http://127.0.0.1:8123/proxy/8123"],
+            id="unset-keeps-local-base-path",
+        ),
+    ],
+)
+def test_host_web_ui_opens_public_base_url_for_local_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_content: str,
+    web_base_path: str | None,
+    expected_opened: list[str],
+) -> None:
+    """The configured public base URL replaces the loopback web UI link and its
+    local --base-path; unset keeps the local link with the base path."""
+    (tmp_path / "config.yaml").write_text(config_content)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr("omnigent.cli._stdin_is_tty", lambda: True)
+    monkeypatch.setattr(
+        "omnigent.host.local_server._read_local_server_pid_file", lambda: (4242, 8123)
+    )
+    opened: list[str] = []
+
+    with (
+        patch(
+            "omnigent.cli.ensure_local_omnigent_server",
+            lambda: LocalServerStartup(url="http://127.0.0.1:8123", spawned=False),
+        ),
+        patch("omnigent.host.connect.run_host_process", lambda server_url, **kwargs: None),
+        patch(
+            "omnigent.conversation_browser.open_conversation_url",
+            lambda url: opened.append(url) or True,
+        ),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["host"],
+            env={
+                "OMNIGENT_HOST_NO_OPEN": None,
+                "OMNIGENT_PUBLIC_BASE_URL": None,
+                "OMNIGENT_WEB_BASE_PATH": web_base_path,
+            },
+        )
+
+    assert result.exit_code == 0, result.output
+    assert opened == expected_opened
+
+
+def test_host_remote_web_ui_ignores_public_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote --server web UI link is unchanged when a public base is set."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr("omnigent.cli._stdin_is_tty", lambda: True)
+    opened: list[str] = []
+
+    with (
+        patch("omnigent.host.connect.run_host_process", lambda server_url, **kwargs: None),
+        patch(
+            "omnigent.conversation_browser.open_conversation_url",
+            lambda url: opened.append(url) or True,
+        ),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["host", "https://remote.example.org"],
+            env={
+                "OMNIGENT_HOST_NO_OPEN": None,
+                "OMNIGENT_PUBLIC_BASE_URL": "https://omnigent.example.com",
+            },
+        )
+
+    assert result.exit_code == 0, result.output
+    assert opened == ["https://remote.example.org"]
+
+
 @pytest.mark.parametrize("command", [["start"], ["host", "--background"]])
 @pytest.mark.parametrize(
     ("extra_args", "no_open_env", "expected_opened"),

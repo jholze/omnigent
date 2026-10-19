@@ -1737,3 +1737,47 @@ def test_local_server_base_path_empty_when_no_local_server(
     monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: None)
     monkeypatch.setenv("OMNIGENT_WEB_BASE_PATH", "/proxy/6767")
     assert local_server.local_server_base_path("http://127.0.0.1:6767") == ""
+
+
+@pytest.mark.parametrize(
+    ("pidfile", "server_url", "expected"),
+    [
+        pytest.param(None, "http://127.0.0.1:6767", True, id="no-pidfile-default-port"),
+        pytest.param(None, "http://localhost:6767/", True, id="no-pidfile-default-port-localhost"),
+        pytest.param(None, "http://127.0.0.1:54321", False, id="no-pidfile-random-port"),
+        pytest.param((4242, 8123), "http://localhost:8123", True, id="pidfile-port"),
+        pytest.param((4242, 8123), "http://127.0.0.1:6767", False, id="pidfile-overrides-default"),
+        pytest.param(None, "https://remote.example.org:6767", False, id="remote-host"),
+        pytest.param(None, "http://192.0.2.10:6767", False, id="non-loopback-ip"),
+    ],
+)
+def test_is_canonical_local_server_url(
+    monkeypatch: pytest.MonkeyPatch,
+    pidfile: tuple[int, int] | None,
+    server_url: str,
+    expected: bool,
+) -> None:
+    """Loopback on the pidfile port, or on 6767 when no pidfile exists, is the
+    canonical local server; random ports and non-loopback hosts never are."""
+    monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: pidfile)
+
+    assert local_server.is_canonical_local_server_url(server_url) is expected
+
+
+def test_is_managed_local_server_url_requires_pidfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a pidfile even the default port is not the managed server."""
+    monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: None)
+
+    assert local_server.is_managed_local_server_url("http://127.0.0.1:6767") is False
+
+
+def test_is_managed_local_server_url_matches_pidfile_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a pidfile, only loopback on the recorded port is the managed server."""
+    monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: (4242, 8123))
+
+    assert local_server.is_managed_local_server_url("http://localhost:8123") is True
+    assert local_server.is_managed_local_server_url("http://127.0.0.1:6767") is False

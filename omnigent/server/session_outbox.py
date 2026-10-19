@@ -32,8 +32,10 @@ from omnigent.server.server_config import (
     ManagerWebhookConfig,
     ManagerWebhookConfigError,
     manager_webhook_config,
+    webhook_public_base_url_or_none,
 )
 from omnigent.stores.session_lifecycle_store import SessionLifecycleStore
+from omnigent.util.public_base_url import configured_public_base_url
 
 _logger = logging.getLogger(__name__)
 
@@ -561,7 +563,11 @@ def record_elicitation_raised(
             request=request,
             created_at=now,
             context=context,
-            public_base_url=config.public_base_url,
+            public_base_url=config.public_base_url
+            or webhook_public_base_url_or_none(
+                configured_public_base_url(),
+                allow_insecure_localhost=config.allow_insecure_localhost,
+            ),
         )
         outbox_event_id = _event_id(workspace_id, session_id, transition_key)
         outbox_payload = json.dumps(data, separators=(",", ":"), default=str)

@@ -93,6 +93,36 @@ def test_conversation_link_for_id_uses_base_url_when_provided() -> None:
     )
 
 
+def test_conversation_link_for_id_uses_public_base_for_loopback_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The tmux status-bar link uses the public base URL for a loopback runner.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        "omnigent.host.local_server._read_local_server_pid_file", lambda: (4242, 6767)
+    )
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://omnigent.example.com/")
+    reg = TerminalRegistry(conversation_link_base_url="http://127.0.0.1:6767")
+
+    assert reg.conversation_link_for_id("conv_abc") == "https://omnigent.example.com/c/conv_abc"
+
+
+def test_conversation_link_for_id_stays_relative_without_base_when_public_base_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    No known server origin keeps the relative link even with a public base set.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://omnigent.example.com")
+
+    assert conversation_link_for_id("conv_abc") == "/c/conv_abc"
+
+
 def test_conversation_link_for_id_maps_workspace_hosted_server_to_ui_mount(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

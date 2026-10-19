@@ -27,6 +27,8 @@ os.environ["OMNIGENT_DATA_DIR"] = str(_TEST_OMNIGENT_DATA_DIR)
 # ~/.omnigent) lets one test rewrite config.yaml, including the server URL.
 _TEST_OMNIGENT_CONFIG_HOME = Path(tempfile.mkdtemp(prefix="omnigent-pytest-config-")).resolve()
 os.environ["OMNIGENT_CONFIG_HOME"] = str(_TEST_OMNIGENT_CONFIG_HOME)
+# An exported public base URL would rewrite every local session link.
+os.environ.pop("OMNIGENT_PUBLIC_BASE_URL", None)
 
 
 def _login_home() -> Path:

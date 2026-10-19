@@ -9075,13 +9075,15 @@ def _maybe_open_host_web_ui(
         return
     from omnigent.conversation_browser import open_conversation_url
     from omnigent.host.local_server import local_server_base_path
+    from omnigent.util.public_base_url import public_link_base
     from omnigent.util.server_url import display_server_url
 
-    web_url = display_server_url(server_url)
+    public_base = public_link_base(server_url)
+    web_url = public_base if public_base is not None else display_server_url(server_url)
     # A local server started with --base-path serves the UI under that prefix;
     # opening the bare root renders blank (BrowserRouter basename mismatch).
     # No-op for a remote --server or an unconfigured/root local server.
-    base_path = local_server_base_path(server_url)
+    base_path = "" if public_base is not None else local_server_base_path(server_url)
     if base_path:
         web_url = web_url.rstrip("/") + base_path
     try:

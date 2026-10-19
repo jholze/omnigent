@@ -902,6 +902,27 @@ def _validate_webhook_url(
     )
 
 
+def webhook_public_base_url_or_none(
+    url: str | None, *, allow_insecure_localhost: bool
+) -> str | None:
+    """Apply the ``manager_webhook.public_base_url`` rule to a fallback origin.
+
+    :param url: Candidate origin, e.g. ``"https://omnigent.example.com"``.
+    :param allow_insecure_localhost: The webhook's ``allow_insecure_localhost``.
+    :returns: The origin without a trailing slash, or ``None`` when unset or
+        rejected (HTTPS only; HTTP only for localhost when allowed).
+    """
+    if not url:
+        return None
+    try:
+        validated = _validate_webhook_url(
+            url, key="public_base_url", allow_insecure_localhost=allow_insecure_localhost
+        )
+    except ManagerWebhookConfigError:
+        return None
+    return validated.rstrip("/")
+
+
 def _bounded_int(value: Any, *, key: str, default: int, low: int, high: int) -> int:
     if value is None:
         return default
