@@ -48,7 +48,9 @@ from omnigent.runner._entry import (
     main,
 )
 from omnigent.runner.identity import (
+    OMNIGENT_SESSION_ENV_VAR,
     RUNNER_AUTH_REJECTED_EXIT_CODE,
+    RUNNER_ID_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
@@ -622,6 +624,10 @@ def test_create_app_reuses_a_resolved_no_credential_result(
         entry_mod, "_make_auth_token_factory", lambda: resolutions.append(1) or None
     )
     monkeypatch.setattr("omnigent.runner.identity.get_stable_runner_id", lambda: "runner-test-id")
+    # create_app assigns these in os.environ. setenv restores them afterwards
+    # so a later test in this worker does not inherit the runner id.
+    monkeypatch.setenv(RUNNER_ID_ENV_VAR, "runner-test-id")
+    monkeypatch.setenv(OMNIGENT_SESSION_ENV_VAR, "1")
 
     entry_mod.create_app(auth_token_factory=None, auth_resolved=auth_resolved)
 
@@ -2624,6 +2630,10 @@ async def test_runner_shutdown_closes_terminal_registry(
         "omnigent.runner.identity.get_stable_runner_id",
         lambda: "runner-test-id",
     )
+    # create_app assigns these in os.environ. setenv restores them afterwards
+    # so a later test in this worker does not inherit the runner id.
+    monkeypatch.setenv(RUNNER_ID_ENV_VAR, "runner-test-id")
+    monkeypatch.setenv(OMNIGENT_SESSION_ENV_VAR, "1")
 
     app = entry_mod.create_app()
     # starlette 1.x removed Router.startup/shutdown; drive the lifespan instead.

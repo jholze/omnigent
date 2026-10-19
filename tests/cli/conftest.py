@@ -28,3 +28,7 @@ def _no_ambient_host(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.delenv("OMNIGENT_RUNNER_SLICE_KEY", raising=False)
     monkeypatch.delenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", raising=False)
+    # CLI tests that patch ``_GLOBAL_CONFIG_PATH`` only reach that fallback
+    # when the config-home override is unset. Tests that need the override
+    # set it themselves. The root guard still fails a write to the real file.
+    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)

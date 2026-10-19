@@ -1857,10 +1857,13 @@ def test_cli_accounts_login_happy_path_stores_token(
     from click.testing import CliRunner
 
     from omnigent import cli_auth
-    from omnigent.cli import cli
+    from omnigent.cli import _load_global_config, cli
 
     # Redirect $HOME so cli_auth.store_token writes into tmp.
+    # Config is resolved from OMNIGENT_CONFIG_HOME, not the import-time
+    # home path, so login's server write stays in this temp dir.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
 
     # First call: /v1/me probe → 401 + login_url=/login so the CLI
     # picks the accounts branch.
@@ -1922,6 +1925,9 @@ def test_cli_accounts_login_happy_path_stores_token(
     # The refresh token from /auth/login must also be persisted when present.
     entry = cli_auth._load_entry("http://localhost:8000")
     assert entry is not None and entry.get("refresh_token") == "fake.refresh.token"
+    # Successful login records the server. It must land in the temp config
+    # home, not the login account's ~/.omnigent/config.yaml.
+    assert _load_global_config().get("server") == "http://localhost:8000"
 
 
 def test_cli_accounts_login_wrong_password_surfaces_clean_error(
@@ -1940,6 +1946,7 @@ def test_cli_accounts_login_wrong_password_surfaces_clean_error(
     from omnigent.cli import cli
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
 
     class _FakeResponse:
         def __init__(self, status_code: int, body: object) -> None:
@@ -1990,6 +1997,7 @@ def test_cli_accounts_login_network_failure_surfaces_clean_error(
     from omnigent.cli import cli
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
 
     class _FakeResponse:
         def __init__(self, status_code: int, body: object) -> None:

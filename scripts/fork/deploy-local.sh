@@ -189,7 +189,8 @@ verify_deploy() {
   local n head_rev db_rev after health fail host_n single_user info_json
   sleep "${VERIFY_SETTLE}"
   n="$(line_count "$(server_pids)")"
-  head_rev="$("${TOOL_PY}" -c "
+  # -P keeps this checkout off sys.path so the check imports the installed package.
+  head_rev="$("${TOOL_PY}" -P -c "
 import os, omnigent.db
 from alembic.config import Config
 from alembic.script import ScriptDirectory

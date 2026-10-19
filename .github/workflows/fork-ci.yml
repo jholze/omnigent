@@ -113,11 +113,22 @@ jobs:
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          # OIDC tests still read ~/.omnigent unless the admin credentials path
-          # is an empty data dir. Leave the config home unset: one shared empty
-          # directory is visible to every worker, and the app writes a host id.
+          # This job runs as the Mac user. Pytest must not rewrite that
+          # account's ~/.omnigent/config.yaml. HOME and the Omnigent dirs are
+          # per-job temps; each worker then gets its own config home in
+          # tests/conftest.py so host-id writes are not shared.
+          real_home="${HOME}"
+          if [ -z "${UV_CACHE_DIR:-}" ]; then
+            if [ -d "${real_home}/Library/Caches/uv" ]; then
+              export UV_CACHE_DIR="${real_home}/Library/Caches/uv"
+            else
+              export UV_CACHE_DIR="${real_home}/.cache/uv"
+            fi
+          fi
+          export HOME="${RUNNER_TEMP}/omnigent-home"
+          export OMNIGENT_CONFIG_HOME="${RUNNER_TEMP}/omnigent-config"
           export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
-          mkdir -p "$OMNIGENT_DATA_DIR"
+          mkdir -p "$HOME" "$OMNIGENT_CONFIG_HOME" "$OMNIGENT_DATA_DIR"
           export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
           export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"

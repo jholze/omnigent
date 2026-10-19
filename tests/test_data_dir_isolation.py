@@ -22,6 +22,20 @@ def test_pytest_uses_an_isolated_omnigent_data_dir() -> None:
     assert cli._daemon_registry_dir().resolve().is_relative_to(test_data_dir)
 
 
+def test_pytest_config_home_is_outside_the_login_account() -> None:
+    """Config writes must not land in the login account's ~/.omnigent."""
+    if os.name == "nt":
+        login_home = Path.home().resolve()
+    else:
+        import pwd
+
+        login_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    config_home = Path(os.environ["OMNIGENT_CONFIG_HOME"]).resolve()
+
+    assert config_home != (login_home / ".omnigent").resolve()
+    assert not config_home.is_relative_to(login_home / ".omnigent")
+
+
 def test_pytest_does_not_inherit_debug_log_delivery_credentials() -> None:
     """Pytest startup also isolates the log sink in processes spawned by tests."""
     env = {

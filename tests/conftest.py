@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sys
@@ -21,6 +22,39 @@ except ImportError:
 # deliberately replaces ambient state; subprocesses inherit the safe override.
 _TEST_OMNIGENT_DATA_DIR = Path(tempfile.mkdtemp(prefix="omnigent-pytest-")).resolve()
 os.environ["OMNIGENT_DATA_DIR"] = str(_TEST_OMNIGENT_DATA_DIR)
+# Per-worker config home. A shared directory (or the login account's
+# ~/.omnigent) lets one test rewrite config.yaml, including the server URL.
+_TEST_OMNIGENT_CONFIG_HOME = Path(tempfile.mkdtemp(prefix="omnigent-pytest-config-")).resolve()
+os.environ["OMNIGENT_CONFIG_HOME"] = str(_TEST_OMNIGENT_CONFIG_HOME)
+
+
+def _login_home() -> Path:
+    """Account home from the passwd database, ignoring a redirected ``HOME``."""
+    if os.name != "nt":
+        import pwd
+
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except KeyError:
+            pass
+    return Path.home()
+
+
+_LOGIN_HOME = _login_home()
+_REAL_OMNIGENT_CONFIG = _LOGIN_HOME / ".omnigent" / "config.yaml"
+
+
+def _config_fingerprint(path: Path) -> bytes | None:
+    """Hash *path* without retaining its bytes. ``None`` when it is absent."""
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return b"unreadable"
+    return hashlib.sha256(payload).digest()
+
+
 # Servers and runners booted by tests otherwise sweep the developer's live
 # harness root. Prefer /tmp for the AF_UNIX path-length limit; some sandboxes
 # only allow the default temp dir.
@@ -158,7 +192,25 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     for cmdline in survivors:
         print(f"\nUNREAPED omnigent process survived SIGKILL: {cmdline}", file=sys.stderr)
     shutil.rmtree(_TEST_OMNIGENT_DATA_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_OMNIGENT_CONFIG_HOME, ignore_errors=True)
     shutil.rmtree(_TEST_HARNESS_TMP_PARENT, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _real_home_config_is_untouched() -> Generator[None, None, None]:
+    """Fail when a test rewrites the login account's Omnigent config.
+
+    Fork CI runs as the real user. ``OMNIGENT_CONFIG_HOME`` points at a
+    per-worker temp dir; this still catches a test that clears that
+    override and writes ``~/.omnigent/config.yaml``.
+    """
+    before = _config_fingerprint(_REAL_OMNIGENT_CONFIG)
+    yield
+    if _config_fingerprint(_REAL_OMNIGENT_CONFIG) != before:
+        pytest.fail(
+            "this test changed the login account's ~/.omnigent/config.yaml; "
+            "keep OMNIGENT_CONFIG_HOME pointed at a temp directory"
+        )
 
 
 # Per-worker progress logger: fsync'd START/END lines so a

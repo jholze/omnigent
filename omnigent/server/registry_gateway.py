@@ -8,7 +8,11 @@ from typing import Any
 from fastapi import Request
 
 from omnigent.entities import Conversation
-from omnigent.server.auth import RESERVED_USER_LOCAL, local_single_user_enabled
+from omnigent.server.auth import (
+    RESERVED_USER_LOCAL,
+    local_single_user_enabled,
+    resolve_auth_source,
+)
 from omnigent.server.mcp_gateway import gateway_backend
 from omnigent.server.mcp_registry import McpRegistry, McpUpstreamError
 from omnigent.server.routes.connections_base import ConnectionError
@@ -21,7 +25,9 @@ def registry_user(actor: dict[str, str] | None) -> str:
     user_id = (actor or {}).get("run_as")
     if user_id:
         return user_id
-    if local_single_user_enabled():
+    # The local spawn sets the single-user marker in accounts mode too.
+    # Only header/local auth may fall back to the reserved local user.
+    if local_single_user_enabled() and resolve_auth_source() == "header":
         return RESERVED_USER_LOCAL
     raise ConnectionError("An authenticated user is required for registry MCP services")
 
