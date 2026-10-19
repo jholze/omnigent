@@ -351,6 +351,27 @@ Notes:
   public callback URL including the prefix (e.g.
   `https://<host>/proxy/6767/auth/callback`).
 
+## Public link origin (`OMNIGENT_PUBLIC_BASE_URL`)
+
+When the server is reached through a reverse proxy or tunnel but the CLI
+talks to it on loopback (`http://127.0.0.1:6767`), set the external base URL
+so user-facing links (`Web UI:` lines, `Omnigent session:` announcements,
+terminal status-bar links, the host web-UI link) use it:
+
+```bash
+OMNIGENT_PUBLIC_BASE_URL=https://omnigent.example.com
+# or in ~/.omnigent/config.yaml (or a project .omnigent/config.yaml):
+#   public_base_url: https://omnigent.example.com
+```
+
+- The env var wins over the config key. Must be `http`/`https`; a trailing
+  slash is stripped. Include any subpath prefix — it replaces the local
+  base and `--base-path` (e.g. `https://<host>/proxy/6767`).
+- Only links to a loopback server are rewritten; a remote `--server` URL is
+  kept. Internal runner/server traffic is unaffected.
+- It also fills `manager_webhook.public_base_url` when that key is unset.
+- Unset = links use the local server base (unchanged).
+
 ## Header-proxy mode (for deploys behind an existing SSO proxy)
 
 If you already have oauth2-proxy, Databricks Apps, AWS ALB OIDC,

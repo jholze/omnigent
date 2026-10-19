@@ -308,7 +308,8 @@ Schema property names are kept so the receiver can still render the form.
 `target_session_id` is the child session when the elicitation belongs to a
 sub-agent, and the session itself otherwise. The resolve path uses that
 id. `web_url` and `resolve.url` are present only when `public_base_url`
-is set. `web_url` opens the approval page
+is set (falling back to `OMNIGENT_PUBLIC_BASE_URL` / the `public_base_url`
+CLI config key when unset). `web_url` opens the approval page
 `{public_base_url}/approve/{session}/{elicitation_id}`.
 
 ### Answering

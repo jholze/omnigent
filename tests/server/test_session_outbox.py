@@ -21,14 +21,21 @@ def _sid() -> str:
     return uuid.uuid4().hex
 
 
-def _enable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, events: str | None = None) -> None:
+def _enable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    events: str | None = None,
+    public_base_url: str | None = "https://omnigent.example.com",
+) -> None:
     event_block = "" if events is None else f"\n  events: {events}"
+    public_block = "" if public_base_url is None else f"  public_base_url: {public_base_url}\n"
     path = tmp_path / "config.yaml"
     path.write_text(
         "manager_webhook:\n"
         "  enabled: true\n"
         "  endpoint: https://bot.example.com/hook\n"
-        "  public_base_url: https://omnigent.example.com\n"
+        f"{public_block}"
         "  summary_max_chars: 40\n"
         f"{event_block}\n",
         encoding="utf-8",
@@ -350,6 +357,53 @@ def test_two_failures_without_a_response_id_both_persist(
     assert all("response_id" not in payload for payload in payloads)
     keyed = [row for row in failed if row.transition_key == "turn:resp-same:failed"]
     assert len(keyed) == 1
+
+
+def _raise_elicitation(db_uri: str) -> tuple[str, str | None]:
+    """Record one elicitation; return its session id and ``web_url`` (if any)."""
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    session_id = _sid()
+    session_outbox.record_elicitation_raised(
+        session_id=session_id,
+        elicitation_id="elicit_link",
+        request={"mode": "form", "message": "Apply it?"},
+    )
+    payload = json.loads(store.list_deliveries(session_id)[0][0].payload)
+    return session_id, payload.get("web_url")
+
+
+def test_awaiting_decision_web_url_prefers_webhook_public_base_url(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, public_base_url="https://webhook.example.com")
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://global.example.com")
+
+    session_id, web_url = _raise_elicitation(db_uri)
+
+    assert web_url == f"https://webhook.example.com/approve/{session_id}/elicit_link"
+
+
+def test_awaiting_decision_web_url_falls_back_to_global_public_base_url(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, public_base_url=None)
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://global.example.com/")
+
+    session_id, web_url = _raise_elicitation(db_uri)
+
+    assert web_url == f"https://global.example.com/approve/{session_id}/elicit_link"
+
+
+def test_awaiting_decision_web_url_absent_when_no_public_base_url(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, public_base_url=None)
+    monkeypatch.delenv("OMNIGENT_PUBLIC_BASE_URL", raising=False)
+
+    _session_id, web_url = _raise_elicitation(db_uri)
+
+    assert web_url is None
 
 
 def test_awaiting_decision_and_verdict_redact_free_text(

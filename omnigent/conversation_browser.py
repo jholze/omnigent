@@ -60,7 +60,9 @@ def conversation_url(base_url: str, conversation_id: str) -> str:
 
     :param base_url: Omnigent server base URL, e.g. ``"http://127.0.0.1:6767"``.
     :param conversation_id: Conversation id, e.g. ``"conv_abc123"``.
-    :returns: Browser URL, e.g. ``"http://127.0.0.1:6767/c/conv_abc123"``.
+    :returns: Browser URL, e.g. ``"http://127.0.0.1:6767/c/conv_abc123"``, or
+        ``"https://omnigent.example.com/c/conv_abc123"`` when a public base
+        URL is configured for a loopback server.
     """
     encoded_id = urllib.parse.quote(conversation_id, safe="")
     server = ServerUrl.from_api_base(base_url)
@@ -75,6 +77,13 @@ def conversation_url(base_url: str, conversation_id: str) -> str:
                 "",
             )
         )
+    # A configured public base URL replaces the loopback base (and its
+    # --base-path); it already names the full browser-facing prefix.
+    from omnigent.util.public_base_url import public_link_base
+
+    public_base = public_link_base(base_url)
+    if public_base is not None:
+        return f"{public_base}/c/{encoded_id}"
     # A local server started with --base-path serves the SPA (and its
     # BrowserRouter basename) under that prefix, so a bare /c/<id> link would
     # load a shell whose router matches nothing and render blank. Prefix it for
