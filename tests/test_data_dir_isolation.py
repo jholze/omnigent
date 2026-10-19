@@ -7,6 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+from _pytest.outcomes import Failed
+
+import tests.conftest as suite_conftest
 from omnigent import cli
 from omnigent.host import local_server
 
@@ -34,6 +38,23 @@ def test_pytest_config_home_is_outside_the_login_account() -> None:
 
     assert config_home != (login_home / ".omnigent").resolve()
     assert not config_home.is_relative_to(login_home / ".omnigent")
+
+
+def test_login_config_guard_fails_when_the_file_changes(tmp_path: Path) -> None:
+    """The guard fails when a test rewrites the watched config file."""
+    target = tmp_path / "config.yaml"
+    target.write_text("server: http://127.0.0.1:6767\n", encoding="utf-8")
+    before = suite_conftest._config_fingerprint(target)
+    target.write_text("server: http://localhost:8000\n", encoding="utf-8")
+    with pytest.raises(Failed, match="login account"):
+        suite_conftest._assert_login_config_unchanged(target, before)
+
+
+def test_login_config_guard_allows_an_unchanged_file(tmp_path: Path) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("server: http://127.0.0.1:6767\n", encoding="utf-8")
+    before = suite_conftest._config_fingerprint(target)
+    suite_conftest._assert_login_config_unchanged(target, before)
 
 
 def test_pytest_does_not_inherit_debug_log_delivery_credentials() -> None:

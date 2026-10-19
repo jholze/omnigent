@@ -10,8 +10,9 @@ from fastapi import Request
 from omnigent.entities import Conversation
 from omnigent.server.auth import (
     RESERVED_USER_LOCAL,
+    AuthProvider,
+    auth_mode,
     local_single_user_enabled,
-    resolve_auth_source,
 )
 from omnigent.server.mcp_gateway import gateway_backend
 from omnigent.server.mcp_registry import McpRegistry, McpUpstreamError
@@ -21,13 +22,16 @@ from omnigent.spec.types import AgentSpec, MCPServerConfig
 _logger = logging.getLogger(__name__)
 
 
-def registry_user(actor: dict[str, str] | None) -> str:
+def registry_user(
+    actor: dict[str, str] | None,
+    auth_provider: AuthProvider | None,
+) -> str:
     user_id = (actor or {}).get("run_as")
     if user_id:
         return user_id
-    # The local spawn sets the single-user marker in accounts mode too.
-    # Only header/local auth may fall back to the reserved local user.
-    if local_single_user_enabled() and resolve_auth_source() == "header":
+    # Same predicate as /v1/info single_user: the app's provider, not the
+    # process environment. The local spawn sets the marker in accounts too.
+    if local_single_user_enabled() and auth_mode(auth_provider) not in ("accounts", "oidc"):
         return RESERVED_USER_LOCAL
     raise ConnectionError("An authenticated user is required for registry MCP services")
 
@@ -39,7 +43,10 @@ async def registry_tools(
     user_id: str | None,
 ) -> list[dict[str, Any]]:
     tools = []
-    user = registry_user({"run_as": user_id} if user_id else None)
+    user = registry_user(
+        {"run_as": user_id} if user_id else None,
+        getattr(request.app.state, "mcp_registry_auth", None),
+    )
     for config in spec.mcp_servers:
         if config.transport != "registry":
             continue
@@ -80,7 +87,10 @@ async def execute_registry_tool(
         tool = name[len(config.name) + 2 :]
         if config.tools is not None and tool not in config.tools:
             raise ConnectionError("Tool is not enabled for this session")
-        user = registry_user({"run_as": credential_user} if credential_user else None)
+        user = registry_user(
+            {"run_as": credential_user} if credential_user else None,
+            getattr(request.app.state, "mcp_registry_auth", None),
+        )
         service = registry.service(config.name, user)
         if tool not in service.tools:
             raise ConnectionError("Tool is not allowed by the MCP registry")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import os
 import shutil
@@ -55,6 +56,15 @@ def _config_fingerprint(path: Path) -> bytes | None:
     return hashlib.sha256(payload).digest()
 
 
+def _assert_login_config_unchanged(path: Path, before: bytes | None) -> None:
+    """Fail when *path* no longer matches the fingerprint taken at setup."""
+    if _config_fingerprint(path) != before:
+        pytest.fail(
+            "this test changed the login account's ~/.omnigent/config.yaml; "
+            "keep OMNIGENT_CONFIG_HOME pointed at a temp directory"
+        )
+
+
 # Servers and runners booted by tests otherwise sweep the developer's live
 # harness root. Prefer /tmp for the AF_UNIX path-length limit; some sandboxes
 # only allow the default temp dir.
@@ -63,6 +73,20 @@ try:
 except OSError:
     _TEST_HARNESS_TMP_PARENT = Path(tempfile.mkdtemp(prefix="omni-h-"))
 os.environ["OMNIGENT_HARNESS_TMP_PARENT"] = str(_TEST_HARNESS_TMP_PARENT)
+
+
+def _cleanup_test_dirs() -> None:
+    """Remove import-time temp dirs.
+
+    These exist before pytest's temp factory, so a worker abort skips
+    ``pytest_unconfigure``. ``atexit`` still runs on a normal shutdown.
+    """
+    shutil.rmtree(_TEST_OMNIGENT_DATA_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_OMNIGENT_CONFIG_HOME, ignore_errors=True)
+    shutil.rmtree(_TEST_HARNESS_TMP_PARENT, ignore_errors=True)
+
+
+atexit.register(_cleanup_test_dirs)
 
 # Tests and their subprocesses must not ship logs through the caller's sink.
 # Sink tests configure their own credentials or sender explicitly.
@@ -186,14 +210,14 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     """
     from omnigent.testing.process_reaper import reap_leaked_omnigent_processes
 
-    reaped, survivors = reap_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR)
-    for cmdline in reaped:
-        print(f"\nreaped leaked omnigent process: {cmdline}", file=sys.stderr)
-    for cmdline in survivors:
-        print(f"\nUNREAPED omnigent process survived SIGKILL: {cmdline}", file=sys.stderr)
-    shutil.rmtree(_TEST_OMNIGENT_DATA_DIR, ignore_errors=True)
-    shutil.rmtree(_TEST_OMNIGENT_CONFIG_HOME, ignore_errors=True)
-    shutil.rmtree(_TEST_HARNESS_TMP_PARENT, ignore_errors=True)
+    try:
+        reaped, survivors = reap_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR)
+        for cmdline in reaped:
+            print(f"\nreaped leaked omnigent process: {cmdline}", file=sys.stderr)
+        for cmdline in survivors:
+            print(f"\nUNREAPED omnigent process survived SIGKILL: {cmdline}", file=sys.stderr)
+    finally:
+        _cleanup_test_dirs()
 
 
 @pytest.fixture(autouse=True)
@@ -206,11 +230,7 @@ def _real_home_config_is_untouched() -> Generator[None, None, None]:
     """
     before = _config_fingerprint(_REAL_OMNIGENT_CONFIG)
     yield
-    if _config_fingerprint(_REAL_OMNIGENT_CONFIG) != before:
-        pytest.fail(
-            "this test changed the login account's ~/.omnigent/config.yaml; "
-            "keep OMNIGENT_CONFIG_HOME pointed at a temp directory"
-        )
+    _assert_login_config_unchanged(_REAL_OMNIGENT_CONFIG, before)
 
 
 # Per-worker progress logger: fsync'd START/END lines so a

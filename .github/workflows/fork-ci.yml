@@ -113,24 +113,18 @@ jobs:
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
           unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          # This job runs as the Mac user. Pytest must not rewrite that
-          # account's ~/.omnigent/config.yaml. HOME and the Omnigent dirs are
-          # per-job temps; each worker then gets its own config home in
-          # tests/conftest.py so host-id writes are not shared.
-          real_home="${HOME}"
+          # This job runs as the Mac user. HOME is a per-job temp so
+          # import-time Path.home() is not that account. Each worker and
+          # each CLI test then gets its own config home; do not export
+          # OMNIGENT_CONFIG_HOME or OMNIGENT_DATA_DIR (conftest owns those).
           if [ -z "${UV_CACHE_DIR:-}" ]; then
-            if [ -d "${real_home}/Library/Caches/uv" ]; then
-              export UV_CACHE_DIR="${real_home}/Library/Caches/uv"
-            else
-              export UV_CACHE_DIR="${real_home}/.cache/uv"
-            fi
+            export UV_CACHE_DIR="$(uv cache dir)"
           fi
           export HOME="${RUNNER_TEMP}/omnigent-home"
-          export OMNIGENT_CONFIG_HOME="${RUNNER_TEMP}/omnigent-config"
-          export OMNIGENT_DATA_DIR="${RUNNER_TEMP}/omnigent-data"
-          mkdir -p "$HOME" "$OMNIGENT_CONFIG_HOME" "$OMNIGENT_DATA_DIR"
-          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${OMNIGENT_DATA_DIR}/admin-credentials"
-          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${OMNIGENT_DATA_DIR}/allowed_domains"
+          data_dir="${RUNNER_TEMP}/omnigent-data"
+          mkdir -p "$HOME" "$data_dir"
+          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${data_dir}/admin-credentials"
+          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${data_dir}/allowed_domains"
           : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
           export PYTEST_PROGRESS_LOG_DIR="${GITHUB_WORKSPACE}/artifacts/progress"
 
