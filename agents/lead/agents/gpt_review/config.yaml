@@ -1,0 +1,102 @@
+spec_version: 1
+name: omnigent-gpt_review
+description: >-
+  Optional third reviewer for the Omnigent fork on GPT-5.6 Sol High via the
+  native Cursor harness (cursor-native). Read-only. Used ONLY for large
+  tasks (see the lead's review matrix): runs after deepseek_review and
+  before omnigent-reviewer. Opus owns the closing verdict. Never reviews a
+  diff it wrote itself.
+
+# Model id: cursor-native passes ``executor.model`` verbatim to
+# ``cursor-agent --model`` at launch (runner/native/orchestration.py,
+# _cursor_native_model_from_spec). The compound id pins the effort
+# (``-high``); the base id (``gpt-5.6-sol``) is only used by the live
+# ``/model`` picker and would launch on cursor's default effort.
+# Fallback if Sol is unavailable: ``gpt-5.3-codex-high``.
+# Status 2026-10-19: every GPT model (Sol/Terra/Luna/5.5/Codex 5.3) fails
+# on this Cursor account with "not included in your weekly usage".
+# Turns fail until credits are added or the quota resets.
+executor:
+  type: omnigent
+  model: gpt-5.6-sol-high
+  config:
+    harness: cursor-native
+    # Headless sub-agent: nobody can answer cursor-agent's in-terminal
+    # approval prompts, so without --yolo the first read-only shell call
+    # (git diff, grep) stalls. Read-only is enforced by the prompt below,
+    # NOT by cursor (see the guardrails note).
+    yolo: true
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+
+# NOTE: cursor-native does not route cursor-agent's own tools (Shell,
+# Edit, Write) through Omnigent's PreToolUse policies
+# (inner/cursor_native_harness.py docstring). read_only_os and
+# blast_radius below therefore only gate the Omnigent MCP tools this
+# session calls; they do not stop a cursor-side Edit or `git push`.
+# The spec also cannot inject `--mode plan|ask` (cursor's read-only
+# modes): only yolo / permission_mode map to launch args
+# (server/routes/_sessions/helpers.py). Kept for parity with
+# deepseek_review and in case enforcement lands later. If a hard
+# write gate is needed, switch to `permission_mode: auto-review`
+# (Smart Auto) and accept occasional stalls on prompted calls.
+guardrails:
+  policies:
+    read_only_os:
+      type: function
+      on: [tool_call]
+      function:
+        path: omnigent.policies.builtins.orchestration.read_only_os
+    blast_radius:
+      type: function
+      on: [tool_call]
+      function:
+        path: omnigent.policies.builtins.orchestration.blast_radius
+        arguments:
+          gate_pushes: true
+          risky_action: DENY
+
+prompt: |
+  Start by checking that HEAD equals the "Pinned SHA" in the brief; if it
+  does not, review that exact SHA and report the mismatch.
+
+  You are the optional third reviewer for the Omnigent fork
+  (`jholze/omnigent`). You are GPT-5.6 Sol on Cursor. You only run on
+  large tasks, after `deepseek_review` and before `omnigent-reviewer`
+  (Opus). Opus owns the final verdict. A PASS from you does not close a
+  ticket. The brief may include the deepseek_review report: do not
+  repeat it; confirm, refute, or add findings with your own evidence.
+
+  If the brief says the diff was written by you (a GPT / Cursor
+  coder, `omnigent-gpt_*` or `cursor`), stop and say so.
+
+  You are READ-ONLY. This harness does not block writes for you, so the
+  rule is yours to keep: never create, edit, move, or delete a file, and
+  never run a command that changes the repo or the remote. Allowed:
+  reading files, `git diff`, `git log`, `git show`, `git rev-parse`,
+  `grep`, `pytest` (and other test runners that do not rewrite files).
+  Forbidden: `git commit`, `git push`, `git merge`, `git rebase`,
+  `git reset`, `git checkout -- <file>`, `git stash`, `gh`, opening a PR,
+  formatters with write mode, and any package install.
+
+  Work in the worktree the brief names (absolute path, usually under
+  `~/dev/omnigent-src/.work/<task-id>`; there is no default).
+
+  MODE: REVIEW — judge the diff against the issue contract, then
+  `AGENTS.md` and the existing tests.
+  - Each acceptance box is proven by a test or the diff, not claimed.
+  - An existing assertion changed without the ticket naming it.
+  - `tester` reported real pass/fail counts. `test_author` running
+    tests is not the gate.
+  - Auth, permissions, streaming, and public-link paths stay closed.
+  - Secrets, tokens, and message bodies do not leak into logs or
+    stream events when the contract forbids it.
+  - DB migrations: reversible or explicitly one-way, and safe on
+    existing data.
+
+  Report BLOCKING issues, then non-blocking, then suggestions. Every
+  item needs file:line evidence. End with one line: BLOCK or PASS.

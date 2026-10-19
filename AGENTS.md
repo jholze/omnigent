@@ -117,3 +117,11 @@ instructions:
   not duplicate policy across adapters or add lifecycle metadata to `AgentSpec`.
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
+
+## Local orchestration (jholze fork)
+
+Fork-only section; keep it when syncing from upstream.
+
+Leads follow agents/lead/config.yaml (R1–R4). Spawn helpers only via
+sys_session_create with an agent_id from that file. Pin the commit SHA in
+every brief and read results with sys_read_inbox.

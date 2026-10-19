@@ -1,191 +1,143 @@
-# Chat UX review checklist
+# UX-Review-Checkliste Team Chat (`docs/ux/chat-review-checklist.md`)
 
-The UX reviewer uses this list on every team-chat UI pull request. The
-reviewer does not change product code. Findings go back to the task that
-owns the surface.
+T-000 Teil B · NFR-027 · gilt für jede UI-PR unter `web/src/chat/**` und angrenzende
+Chat-Oberflächen. Nur Doku: keine Plugin-Hooks, keine Plugin-Skripte außer dem kopierten
+`docs/ux/scripts/contrast.py`.
 
-Sources, documentation only. Do not install plugin hooks, do not run the
-plugin's `scripts/`, and do not copy interior.dev via the shadcn registry
-while the license question is open.
+Quellen (Details und Lizenzen: `docs/ux/NOTICES.md`): plugin87/ux-ui-agent-skills
+(`taste/motion-choreography.md`, `components/icon-system.md`, `accessibility/wcag-checklist.md`,
+`workflows/design-review.md`, `taste/design-taste.md`), Emil Kowalski (`review-animations`,
+`animation-performance`, `break-ui`), Vercel Web Interface Guidelines (`command.md`),
+OneRedOak design-review (Phasen, Viewports, Triage). Bindend sind die Spec-Werte
+(`specs/omnigent-chat/`, ADR-0008, NFR-006…011, NFR-030) und die Tokens in `docs/ux/system.md`.
 
-- plugin87/ux-ui-agent-skills `taste/motion-choreography.md`
-- plugin87/ux-ui-agent-skills `components/icon-system.md`
-- plugin87/ux-ui-agent-skills `.claude/skills/a11y-audit/SKILL.md` and
-  `.claude/rules/accessibility.md` (P0 and WCAG 2.2)
-- Omnigent chat spec on branch `docs/import-omnigent-specs`, folder
-  `specs/omnigent-chat/`: ADR-0008, NFR-006 through NFR-011, NFR-027,
-  NFR-030, FR-078, FR-089, FR-090
+## So wird geprüft
+- Jede Zeile bekommt einen Status: `ok`, `n/a`, `Befund <ID>` oder `nicht geprüft (<Grund>)`.
+- Schwere: **B** = Blocker (stoppt den Merge), **H** = High (vor Merge beheben), **M** = Medium,
+  **N** = Nit. Die Spalte nennt die Standard-Schwere; der Reviewer darf mit Begründung abweichen.
+- Belege: Screenshots unter `/tmp/omnigent-chat-ux/<task-id>/` (nie committen), Code als `file:line`.
+- Viewports: 1440×900, 768×1024, 375×812, Reflow 320. Zusätzlich `reducedMotion: "reduce"` und
+  Dark Mode, falls die App ihn bietet.
+- `MOT-*`-Zeilen sind `n/a`, solange `web/src/chat/motion.ts` nicht existiert (T-117).
+  Ausnahme MOT-00: Tasks mit „keine Animationen“ dürfen keine Motion einführen.
+- Eine Review ohne Screenshots für die im Diff berührten Oberflächen ist kein Pass.
 
-Product numbers below win when they are tighter than the plugin vocabulary.
-The plugin durations (fast 100 ms, base 200 ms, moderate 300 ms, slow 500 ms)
-are the grammar. Chat motion uses the tokens in the Motion section.
+## 0 Prozess
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| PRO-01 | Diff bleibt im Scope des Tasks (07-tasks.md „Scope“/„Out of scope“). | H |
+| PRO-02 | Spec-Texte wörtlich (z. B. Status-Labels FR-044, „nicht gesendet“/„erneut senden“ FR-084). | H |
+| PRO-03 | Neue Design-Entscheidungen stehen in `docs/ux/system.md` (Status `proposed`/`decided`). | M |
+| PRO-04 | Offene Pläne in `docs/ux/design-plans/` für diesen Task sind erledigt oder begründet abgelehnt. | H |
+| PRO-05 | Tests zur Änderung vorhanden und mit echten Zahlen gelaufen (Vitest; `tests/e2e_ui` bei Journeys; kein zweiter Playwright-Baum unter `web/e2e`). | H |
 
-## How to mark a row
+## 1 Interaktion & Ablauf (OneRedOak Phase 1, NFR-030)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| INT-01 | Primäre Journey des Tasks funktioniert ohne Erklärung im echten Browser. | B |
+| INT-02 | Jede Klick-Aktion zeigt ≤ 100 ms sichtbares Feedback (Pressed-State, Spinner oder optimistische Änderung). | H |
+| INT-03 | Alle interaktiven Elemente haben default, hover, active, focus-visible, disabled. | H |
+| INT-04 | Destruktive oder irreversible Aktionen: AlertDialog oder Undo-Fenster. | B |
+| INT-05 | Fehler erscheinen dort, wo die Aktion passierte (z. B. an der Nachricht), nicht nur als Toast. | H |
+| INT-06 | Composer: Kartenoptik und Sendetaste wie `ChatComposer.tsx`/`isComposerSendKey` (NFR-011); Paste nie blockiert; bleibt während Senden/Streaming bedienbar. | H |
+| INT-07 | Kein Überraschungs-Scroll: Anker unten nur, wenn der Nutzer unten war, sonst Pill „Neue Nachrichten“ (FR-080). Neue Agent-Ausgabe stiehlt nie den Fokus. | H |
+| INT-08 | URL spiegelt Channel/Thread (`/chat/:channelId/t/:threadRootId`, FR-001); Links unterstützen Cmd/Ctrl-Klick. | M |
 
-- `ok` — checked against the diff and a screenshot.
-- `n/a` — the pull request does not contain that surface yet. Say which
-  later task owns it. `n/a` is not a failure.
-- `finding` — severity `blocker`, `medium`, or `nit`, plus the screenshot
-  path and the file when one is known. An open `blocker` stops the merge.
+## 2 Responsive (OneRedOak Phase 2, plugin87 Reflow)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| RSP-01 | Screenshots 1440 / 768 / 375 ohne Überlappung oder abgeschnittene Aktionen. | H |
+| RSP-02 | Reflow bei 320 px ohne horizontalen Scroll (WCAG 1.4.10). | B |
+| RSP-03 | Touch-Ziele ≥ 24×24 px (WCAG 2.5.8), auf Touch 44 px empfohlen; keine überlappenden Trefferflächen. | H |
+| RSP-04 | `h-dvh` statt `h-screen`; feste Leisten respektieren `env(safe-area-inset-*)`. | M |
+| RSP-05 | 200 % Zoom: kein Inhaltsverlust (WCAG 1.4.4). | H |
 
-Motion rows stay `n/a` until `web/src/chat/motion.ts` exists. Step-list rows
-stay `n/a` until the thread shows steps. Composer rows stay `n/a` until the
-composer is in the diff.
+## 3 Visueller Feinschliff (OneRedOak Phase 3, plugin87 design-taste)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| VIS-01 | Ein klarer Fokuspunkt je Ansicht; Hierarchie über Größe, Gewicht, Kontrast, Raum (Squint-Test). | M |
+| VIS-02 | Alle Werte aus Theme-Tokens bzw. `docs/ux/system.md`; kein Roh-Hex, keine Magic Numbers. | H |
+| VIS-03 | Ein Akzent je Ansicht; Farbe kommuniziert Status/Aktion, nie Dekoration; keine Verläufe/Glow als Affordance (Ausnahme: bestehender Shimmer am aktiven Schritt). | M |
+| VIS-04 | Eine Tiefenstrategie (Hairlines/Borders); Schatten nur für schwebende Ebenen. | M |
+| VIS-05 | Anti-Defaults vermieden: Emoji als Icons, einseitig farbiger Rand an Alerts/Karten, identische Karten mit gleichem Grauschatten, ALL-CAPS-Eyebrows als Füller, `→` an jedem Button. | M |
+| VIS-06 | `tabular-nums` für Zähler, Zeiten, Dauern; `text-balance`/`text-pretty`. | N |
+| VIS-07 | Dark Mode (falls angeboten) gestaltet, nicht invertiert; Kontrast in beiden Modi. | M |
 
-## Screenshots
+## 4 Icons (plugin87 icon-system, NFR-010)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| ICO-01 | Nur `lucide-react`; keine Emoji, keine anderen Sets. | H |
+| ICO-02 | Größen 16 px inline / 20 px Toolbar; eine Strichstärke je Oberfläche; `currentColor`. | M |
+| ICO-03 | Icon-only-Controls haben `aria-label`; dekorative Icons `aria-hidden="true"`. | B |
+| ICO-04 | Status nie nur über Icon oder Farbe (immer mit Text, z. B. Status-Chip FR-044). | H |
+| ICO-05 | Icon-Zustände erben den Control-Zustand (hover/selected/disabled); Ladeicon mit `aria-busy`. | N |
 
-Save PNGs under `/tmp/omnigent-chat-ux/<task-id>/`. Do not commit them.
-Drive the page with Playwright in the named worktree. Turn `team_chat` on
-only inside that test process (`OMNIGENT_FEATURES=team_chat` on the fixture
-`team_chat_server`). Do not enable the flag on a server that is already
-running for someone else.
+## 5 Barrierefreiheit (plugin87 wcag-checklist P0, Vercel, NFR-009)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| A11Y-01 | Gesamte R0-Journey per Tastatur, logische Reihenfolge, kein Keyboard-Trap (2.1.1, 2.1.2, 2.4.3). | B |
+| A11Y-02 | Sichtbarer `focus-visible`-Ring überall; nie `outline-none` ohne Ersatz; Fokus nicht von Sticky-Leisten verdeckt (2.4.7, 2.4.11). | B |
+| A11Y-03 | Dialoge: Fokus rein, gefangen, beim Schließen zurück zum Auslöser; Escape schließt. | B |
+| A11Y-04 | Jedes Control mit zugänglichem Namen; sichtbares Label im Namen enthalten (4.1.2, 2.5.3). | B |
+| A11Y-05 | Kontrast Text ≥ 4,5:1, UI/Icons/Fokusring ≥ 3:1 in allen Zuständen (`python3 docs/ux/scripts/contrast.py FG BG`). | B |
+| A11Y-06 | Neue Nachrichten im offenen Channel über `aria-live="polite"`, gebündelt ≤ 1 Ansage / 2 s; Statuswechsel angesagt (4.1.3, NFR-009). | H |
+| A11Y-07 | Semantik: native Elemente vor ARIA, Listen als `ul/ol`, Landmarks (`main`, `nav`), Überschriften ohne Sprung. | H |
+| A11Y-08 | Aufklappbares mit `aria-expanded`/`aria-controls`; Laden mit `aria-busy` oder Statustext. | M |
+| A11Y-09 | axe auf `/chat`-Ansichten: 0 Verstöße „serious“/„critical“ (NFR-009), sobald der Test existiert. | B |
 
-For each surface the diff touches, capture one desktop shot at 1280×800:
+## 6 Motion (plugin87 motion-choreography, Emil review-animations, NFR-006…008)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| MOT-00 | Task verbietet Animationen → keine Motion im Diff. | H |
+| MOT-01 | Jede Animation hat einen Zweck (Feedback, räumlicher Zusammenhang, Zustand, harte Wechsel abfedern). | M |
+| MOT-02 | Keine Animation auf Tastatur-Aktionen oder 100+/Tag (Senden per Enter, Channel-Shortcut, Palette). | B |
+| MOT-03 | Easing und Dauer nur aus den Motion-Tokens; nie `ease-in` auf UI; Exits schneller als Enter. | H |
+| MOT-04 | Dauern: Mikro 120–200 ms, Enter 160–240 ms, Layout ≤ 300 ms, nichts > 400 ms außer Endlos-Indikatoren; Springs ohne Überschwingen > 4 px (NFR-007). | H |
+| MOT-05 | FR-078-Werte: Message-Enter 180 ms (opacity, y 8→0), Chip-Crossfade 200 ms, Karten-Spring ≤ 300 ms, Badge-Puls 150 ms, Thread-Pane 220 ms. Enter nicht beim Backfill/Zurückscrollen. | H |
+| MOT-06 | TaskSteps-Werte (NFR-007): Pop 640/22/0.7 ab scale 0.4, Zellwechsel 520/34/0.45, Bogen 0,8 s linear, Shimmer 1,6 s linear, Farbe/Meta 200 ms, Ansage entprellt 500 ms. | M |
+| MOT-07 | Nur `transform`/`opacity` (+`clip-path`); kein `transition: all`; keine Layout-Properties (Akkordeon-Höhe ausgenommen). | H |
+| MOT-08 | Popover/Menüs/Tooltips aus dem Auslöser (`--radix-*-transform-origin`), Dialoge zentriert; nie aus `scale(0)`. | M |
+| MOT-09 | Schnell wiederholte Auslöser (Toast, Badge, Toggle) unterbrechbar: Transitions/Springs statt Keyframes. | M |
+| MOT-10 | Reduced Motion: 0 Transform-Animationen, Opacity ≤ 120 ms (NFR-008, FR-079); Hover-Motion nur unter `(hover: hover) and (pointer: fine)`; Endlos-Loops stoppen. | B |
+| MOT-11 | Performance: 60 fps, < 5 % verworfene Frames bei 500 Nachrichten + Streaming, keine Long Task > 50 ms während Enter (NFR-006, `test_motion_perf.py`); kein `setState` pro Frame; beim Streaming `transform`-Strings statt Motion-`x/y`. | H |
+| MOT-12 | Zurückhaltung: eine Signatur-Bewegung je Ansicht; Stagger 30–80 ms, gesamt < 400 ms, blockiert nie Interaktion. | N |
 
-- `/chat` with the flag off
-- `/chat` with the flag on
-- a channel route, a thread route, and an agent thread when those routes
-  are in the diff
+## 7 Robustheit & Inhalte (OneRedOak Phase 5, Emil break-ui, Vercel content)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| ROB-01 | Zustände vorhanden: Laden (Skeleton passend zum Layout), leer (genau eine nächste Aktion, FR-081), Fehler (mit nächstem Schritt), offline/Reconnect (FR-082). | H |
+| ROB-02 | Worst Case hält: lange deutsche Namen, ungebrochene URL/E-Mail, 1-Zeichen-Text, Emoji, RTL, fehlendes Avatar. | H |
+| ROB-03 | Zähler mit `Intl.PluralRules`/`Intl.NumberFormat` („1 Nachricht“, „1.284“), Zeiten mit `Intl.DateTimeFormat`. | M |
+| ROB-04 | Lange Listen virtualisiert (500 Nachrichten), kein Ruckeln beim Scrollen. | H |
+| ROB-05 | Menschen-Text bleibt Textknoten (FR-020); Agent-Markdown nur über ai-elements + `streamdown-security.ts`. | B |
+| ROB-06 | Gekürzter Text ist lesbar (Tooltip/`title`/Detail); Zahlen und Zeiten nie gekürzt. | M |
+| ROB-07 | Freigabe-Karte: nur EDIT+ bedienbar, sonst Lesetext (FR-056); anderswo gelöst → Status binnen 2 s (FR-057); 403/schon gelöst → Server-Verdikt, kein Fehler-Toast (FR-058). | B |
 
-When the diff adds motion, capture the same view again with
-`reduced_motion="reduce"`. Name files `flag-off.png`, `flag-on.png`,
-`channel.png`, `thread.png`, `agent.png`, `reduced-motion.png`.
+## 8 Code & Konsole (OneRedOak Phase 6–7, Vercel)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| CODE-01 | Bestehende Primitives (`components/ui`, `ai-elements`) wiederverwendet; kein zweites Primitive-System; nichts von Hand nachgebaut, was Radix kann. | H |
+| CODE-02 | Statischer Pass ohne Anti-Patterns (`div onClick`, `outline-none` ohne Ersatz, `transition: all`, Bilder ohne Maße, `dangerouslySetInnerHTML` auf Nutzerinhalt). | H |
+| CODE-03 | `cn` für Klassenlogik; gleiche lange className mehrfach → Komponente extrahieren. | N |
+| CODE-04 | Browser-Konsole ohne neue Errors/Warnings. | H |
 
-A review without the shots for the surfaces in the diff is not a pass.
+## 9 Texte (plugin87 design-taste, Vercel copy)
+| ID | Prüfpunkt | Schwere |
+|---|---|---|
+| COPY-01 | Nutzersprache statt Systembegriffe; aktive, konkrete Verben („Freigeben“, „Erneut senden“). | M |
+| COPY-02 | Fehlermeldungen sagen, was passiert ist und was zu tun ist; keine Entschuldigungen, nichts Vages. | M |
+| COPY-03 | `…` statt `...`, Ladetexte enden mit `…`; keine Gedankenstrich-Füller, keine Marketingwörter. | N |
 
-## Shell and copy
-
-- [ ] With the flag on, the main sidebar shows one entry labelled `Chat`
-      (`data-testid="chat-nav-entry"`). The old control labelled
-      `Session chat` is not added again.
-- [ ] With the flag off, that entry is absent, `/chat` shows the sentence
-      `Chat ist auf diesem Server nicht aktiviert`, and the page does not
-      call `/v1/chat/*`.
-- [ ] The chat sidebar uses the headings `Channels` and `Direktnachrichten`.
-      A channel name is shown with a leading `#` when the name has none.
-      The direct-message heading stays visible when the list is empty.
-- [ ] Routes `/chat`, `/chat/:channelId`, and
-      `/chat/:channelId/t/:threadRootId` render inside the existing app
-      shell. The agent session page at `/` and `/c/:id` is unchanged.
-- [ ] Empty and error states use a sentence, not color alone.
-- [ ] Click or key activation shows visible feedback within 100 ms
-      (pressed state, spinner, or optimistic change). NFR-030.
-
-## Motion
-
-From `taste/motion-choreography.md`, bound to ADR-0008. Animate only
-`transform` and `opacity`. Motion has one job: guide attention, show where
-something came from, or confirm an action. One focal motion per view. No
-routine animation longer than 400 ms. Infinite indicators (spin, shimmer)
-are the exception. Entrances use ease-out and travel at most 8–16 px.
-Exits are faster than entrances. Springs are for the check, the cross, and
-the card, not for every row.
-
-Tokens, once `web/src/chat/motion.ts` exists. Durations are milliseconds.
-
-| Token | Value |
-| --- | --- |
-| micro | 150 |
-| enter | 180 |
-| chip | 200 |
-| pane | 220 |
-| layout | 280 |
-| easeOut | 0.2, 0, 0, 1 |
-| spring | stiffness 500, damping 40 |
-| pop | stiffness 640, damping 22, mass 0.7 |
-| cell | stiffness 520, damping 34, mass 0.45 |
-| spin | 0.8 s linear |
-| shimmer | 1.6 s linear |
-
-- [ ] Chat motion imports these tokens. No one-off duration or easing in a
-      component.
-- [ ] `LazyMotion` with `domAnimation`, and `MotionConfig reducedMotion="user"`.
-- [ ] Message enter is opacity 0 to 1 and y 8 to 0 over the enter token.
-- [ ] A status-chip change crossfades over the chip token.
-- [ ] A card mount uses the spring and settles within 300 ms, overshoot at
-      most 4 px.
-- [ ] An unread-badge change pulses over the micro token.
-- [ ] The thread pane opens with a slide over the pane token.
-- [ ] Under `prefers-reduced-motion: reduce` there is no translate, scale,
-      rotate, or shimmer. Opacity fades last at most 120 ms. NFR-008.
-- [ ] Loading uses a skeleton that matches the final layout, or the spin
-      token. The spinner does not rotate under reduced motion.
-
-## Icons
-
-From `components/icon-system.md` and NFR-010.
-
-- [ ] Chat icons come from `lucide-react` only. One stroke weight. No
-      mixed outline and solid styles except a solid icon for a selected
-      state.
-- [ ] Inline icons are 16 px. Toolbar icons are 20 px. Color is
-      `currentColor` or a theme token. No hard-coded hex on an icon.
-- [ ] A decorative icon next to a text label is `aria-hidden`.
-- [ ] An icon-only control has an accessible name and a target of at least
-      24×24 px.
-- [ ] Status is text plus icon. The chip reads `startet…`, `arbeitet`,
-      `braucht Antwort`, `fertig`, `Fehler`, or `entlassen`. Suggested
-      icons: `Loader2`, `CircleHelp` or `MessageCircleQuestion`,
-      `CheckCircle2`, `XCircle`, `MoonStar` or `LogOut`, and `Bot` for an
-      agent-account badge.
-
-## Accessibility
-
-P0 from the plugin rule, plus NFR-009. Do not claim a contrast ratio you
-did not measure. The plugin contrast scripts stay unused. When
-`axe-playwright-python` is available, run it on the `/chat` views in the
-diff and attach the summary. Until that dependency exists, say contrast
-was not measured and do not mark the contrast row `ok`.
-
-- [ ] Tab reaches every control in the journey. Enter or Space activates it.
-- [ ] Focus is visible and at least 3:1 against the adjacent surface. A
-      sticky bar does not cover the focused control (WCAG 2.4.11).
-- [ ] The accessible name, role, and state match the visible control.
-- [ ] Text contrast is at least 4.5:1. UI boundaries and icons that carry
-      meaning are at least 3:1.
-- [ ] Targets are at least 24×24 px (WCAG 2.5.8).
-- [ ] New messages in an open channel use `aria-live="polite"`, at most one
-      announcement per 2 seconds.
-- [ ] A status change is announced.
-- [ ] axe reports no `serious` or `critical` violation on the `/chat` views
-      in the diff, or the row says the runner is not installed yet.
-
-## Steps
-
-Only when the thread shows a step list. Reference is interior.dev TaskSteps
-(ADR-0008). Rebuild it. Do not vendor the registry JSON while the license
-is open. Icons are lucide `Check`, `X`, and `LoaderCircle`.
-
-- [ ] Statuses are pending (dot), active (arc plus shimmer on the label),
-      done (check with the pop spring and a mono duration), and error
-      (cross with the pop spring). Later steps stay pending after an error.
-- [ ] An sr-only `role="status"` region says `{Label}, Schritt {n} von {m}`
-      after at most 600 ms, debounced about 500 ms. The active row has
-      `aria-current="step"`. Completion says `Lauf abgeschlossen` or
-      `Lauf fehlgeschlagen bei {Label}`.
-- [ ] Reduced motion drops scale, rotation, and shimmer.
-
-## Composer
-
-Only when the composer is in the diff (NFR-011).
-
-- [ ] The composer uses the card treatment of
-      `web/src/components/composer/ChatComposer.tsx` and sends with
-      `isComposerSendKey`.
-
-## Report
-
-Write this into the session report. The lead pastes it into the pull
-request. Do not commit the note and do not edit the product files.
-
-```
-UX review against docs/ux/chat-review-checklist.md
-Task: <id>
+## Report-Block (in die PR-Notiz bzw. `docs/ux/reviews/…` übernehmen)
+```markdown
+### UX-Review <task-id> – <branch> @ <sha>
 Screenshots: /tmp/omnigent-chat-ux/<task-id>/
-
-| Row | Status | Evidence |
-| --- | --- | --- |
-| ... | ok / n/a / finding | path or reason |
-
-Blockers: none | <list>
+| Bereich | ok | n/a | Befunde | nicht geprüft |
+|---|---|---|---|---|
+| PRO / INT / RSP / VIS / ICO / A11Y / MOT / ROB / CODE / COPY | … | … | … | … |
+Offene Blocker: <IDs oder „keine“>
+Offene High: <IDs oder „keine“>
+Pläne: docs/ux/design-plans/<files>
+Verdikt: BLOCK | PASS
 ```
+Ein offener Blocker stoppt den Merge (NFR-027). Befunde werden nicht abgeschwächt.
