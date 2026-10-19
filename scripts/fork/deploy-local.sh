@@ -44,7 +44,9 @@ elif [ ! -f "${wheels}/omnigent-0.18.0.dev0-py3-none-any.whl" ] || [ "$(ls "${wh
   git -C "${BUILD}" fetch -q origin main "${sha}" 2>/dev/null || git -C "${BUILD}" fetch -q origin main
   git -C "${BUILD}" checkout -q --detach "${sha}"
   mkdir -p "${wheels}"
-  (cd "${BUILD}" && unset OMNIGENT_SKIP_WEB_UI && \
+  # setup.py skips the web build when a bundle from an earlier build is
+  # present; force it so the wheel carries this commit's UI.
+  (cd "${BUILD}" && unset OMNIGENT_SKIP_WEB_UI && export OMNIGENT_BUILD_WEB_UI=1 && \
     uv build -q --wheel -o "${wheels}" . && \
     uv build -q --wheel -o "${wheels}" sdks/python-client && \
     uv build -q --wheel -o "${wheels}" sdks/ui)

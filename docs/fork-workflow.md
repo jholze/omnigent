@@ -89,7 +89,8 @@ PM HUB and other important sessions are idle: the restart interrupts live
 turns.
 
 1. Builds the three wheels at SHA in `~/dev/omnigent-deploy` (detached) into
-   `~/omnigent-backups/wheels-<sha>`. These directories are also the rollback
+   `~/omnigent-backups/wheels-<sha>` with `OMNIGENT_BUILD_WEB_UI=1` (otherwise
+   setup.py reuses an old `static/web-ui` bundle). These directories are also the rollback
    set; keep at least the last two.
 2. Backs up the launchd plist to `plist-<ts>/` (contains secrets: copy,
    never print) and the DB with `sqlite3 .backup` to `db-<ts>/`.
