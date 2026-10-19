@@ -108,11 +108,13 @@ without `-k`, only if no server process came back within 180 s.
 
 Restart is one `launchctl kickstart -k gui/$(id -u)/ai.omnigent.server`, then
 a wait of at most 180 s until exactly one
-`omnigent.cli server --host 127.0.0.1 --port 6767` process is running and
+`omnigent.cli server --host 127.0.0.1 --port 6767` process is running, that
+process is not one that was already running before the kickstart, and
 `/health` is 200. Then one
 `launchctl kickstart -k gui/$(id -u)/ai.omnigent.host`, and a check that
-exactly one `omnigent.host.service_entry --server` is running. If the server
-is already coming up, the script does not kickstart it again.
+exactly one `omnigent.host.service_entry --server` is running and that the
+host pids from before that kickstart are gone. If a job is already coming
+up, the script does not kickstart it again.
 
 Steps, in both modes:
 
@@ -120,10 +122,12 @@ Steps, in both modes:
    `~/omnigent-backups/wheels-<sha>` with `OMNIGENT_BUILD_WEB_UI=1` (otherwise
    setup.py reuses an old `static/web-ui` bundle). These directories are also
    the build rollback set; keep at least the last two.
-2. Backs up launchd plists to `plist-<ts>/` (`chmod 700`; the files contain
-   secrets: copy, never print) and the DB with `sqlite3 .backup` to
-   `db-<ts>/`. Local mode backs up `ai.omnigent.host.plist`. Server mode
-   backs up that file and `ai.omnigent.server.plist`.
+2. Backs up launchd plists to `plist-<ts>/` and the DB with `sqlite3 .backup`
+   to `db-<ts>/`. Both directories are `chmod 700`. The plists contain
+   secrets: copy, never print. Local mode backs up `ai.omnigent.host.plist`.
+   Server mode backs up that file and `ai.omnigent.server.plist`. A plist
+   backup taken in server mode holds the `--server` host job and is not a
+   `--rollback-mode` source.
 3. `uv tool install --reinstall --find-links wheels-<sha> 'omnigent[dictation] @ …whl'`.
 4. Restarts the active mode as above.
 5. Verifies: exactly one `omnigent.cli server --port 6767` process, `/health`
@@ -149,13 +153,14 @@ read the new schema, stop the server and restore `db-<ts>/chat.db` first.
 Layout rollback (server mode back to local mode):
 `scripts/fork/deploy-local.sh --rollback-mode <backup-dir>`. The directory
 must already contain `ai.omnigent.host.plist` from before the switch (the
-`--local` host job) and the `local_server.*` files that were moved aside.
-The script checks for the host plist before it changes anything and does not
-open either plist. It copies the current plists into a new `plist-<ts>/`
-(`chmod 700`) first, so the server-mode layout can be put back by hand. That
-directory is the layout being left, not a `--local` backup; do not point
-`--rollback-mode` at it. It then `launchctl bootout`s both jobs, restores the
-backup host plist, moves `ai.omnigent.server.plist` out of
-`~/Library/LaunchAgents`, copies any `local_server.*` files from the backup
-back to `~/.omnigent/`, and `launchctl bootstrap`s only the host so the host
-spawns the server again.
+`--local` host job: `service_entry` and `--local`). `local_server.*` files
+are restored if present. Before it changes anything, the script checks that
+the backup host plist contains those two markers and does not print the
+file. Deploy backups taken in server mode are not suitable: they hold the
+`--server` host plist, and restoring one would leave no server running. The
+script then copies the current plists into a new `plist-<ts>/` (`chmod 700`),
+so the server-mode layout can be put back by hand. It `launchctl bootout`s
+both jobs, restores the backup host plist, copies `local_server.*` back to
+`~/.omnigent/` if present, moves `ai.omnigent.server.plist` out of
+`~/Library/LaunchAgents`, and `launchctl bootstrap`s only the host so the
+host spawns the server again.

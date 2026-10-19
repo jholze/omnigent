@@ -16,9 +16,10 @@
 # Server mode (ai.omnigent.server.plist exists): ai.omnigent.server runs
 # `omnigent.cli server` (KeepAlive) and ai.omnigent.host runs
 # `service_entry --server`. Restart with one `launchctl kickstart -k` of the
-# server, wait up to 180s for exactly one server process and /health 200,
-# then one `launchctl kickstart -k` of the host. Do not kickstart the server
-# a second time.
+# server, wait up to 180s for exactly one server process that is not a
+# pre-restart pid and /health 200, then one `launchctl kickstart -k` of the
+# host. The host wait also requires the pre-kickstart host pids to be gone.
+# Do not kickstart either job a second time.
 #
 # --rollback reinstalls ~/omnigent-backups/wheels-<sha> and restarts whichever
 # mode is active. --rollback-mode switches back to local mode from a backup
@@ -57,12 +58,13 @@ host_server_pids() { pgrep -f "${HOST_SERVER_PATTERN}" || true; }
 host_local_pids() { pgrep -f "${HOST_LOCAL_PATTERN}" || true; }
 count_sessions() { sqlite3 -readonly "${DB}" "select count(*) from conversations;"; }
 
-# old_pids is a space-separated list captured before the restart.
-alive_old() {
-  local p
-  [ -n "${old_pids:-}" ] || return 1
+# True when any pid in the space-separated list $1 is still running.
+pids_alive() {
+  local p list
+  list="${1:-}"
+  [ -n "${list}" ] || return 1
   # shellcheck disable=SC2086
-  for p in ${old_pids}; do
+  for p in ${list}; do
     [ -n "${p}" ] || continue
     if kill -0 "${p}" 2>/dev/null; then
       return 0
@@ -70,6 +72,9 @@ alive_old() {
   done
   return 1
 }
+
+# old_pids is a space-separated list of server pids captured before the restart.
+alive_old() { pids_alive "${old_pids:-}"; }
 
 line_count() {
   local blob="$1"
@@ -127,7 +132,9 @@ restart_local_mode() {
   done
   if [ "${ok}" != 1 ] && [ -z "$(server_pids)" ]; then
     log "launchd did not restart the host within 180s; one kickstart (no -k)"
-    launchctl kickstart "gui/$(id -u)/ai.omnigent.host"
+    if ! launchctl kickstart "gui/$(id -u)/ai.omnigent.host"; then
+      echo "kickstart of ai.omnigent.host failed" >&2
+    fi
     for _ in $(seq 1 "${LOCAL_KICKSTART_POLLS}"); do
       sleep "${POLL_SLEEP}"
       curl -fsS -m 3 "${URL}/health" >/dev/null 2>&1 && { ok=1; break; }
@@ -138,7 +145,7 @@ restart_local_mode() {
 # kickstart -k the dedicated server once, then the host once. A slow health
 # check is not a reason to kickstart the server again.
 restart_server_mode() {
-  local uid deadline n
+  local uid deadline n old_host_pids
   uid="$(id -u)"
   log "server mode: kickstart -k ai.omnigent.server"
   if ! launchctl kickstart -k "gui/${uid}/ai.omnigent.server"; then
@@ -148,7 +155,8 @@ restart_server_mode() {
   deadline=$((SECONDS + SERVER_HEALTH_WAIT))
   while true; do
     n="$(line_count "$(server_pids)")"
-    if [ "${n}" = 1 ] && curl -fsS -m 3 "${URL}/health" >/dev/null 2>&1; then
+    # A still-running pre-restart server is not the new process.
+    if [ "${n}" = 1 ] && ! alive_old && curl -fsS -m 3 "${URL}/health" >/dev/null 2>&1; then
       break
     fi
     if [ "${SECONDS}" -ge "${deadline}" ]; then
@@ -157,7 +165,8 @@ restart_server_mode() {
     fi
     sleep "${POLL_SLEEP}"
   done
-  log "server mode: kickstart -k ai.omnigent.host"
+  old_host_pids="$(host_server_pids | tr '\n' ' ')"
+  log "server mode: kickstart -k ai.omnigent.host (old pids: ${old_host_pids:-none})"
   if ! launchctl kickstart -k "gui/${uid}/ai.omnigent.host"; then
     echo "kickstart of ai.omnigent.host failed" >&2
     return 1
@@ -165,14 +174,14 @@ restart_server_mode() {
   deadline=$((SECONDS + HOST_PROCESS_WAIT))
   while true; do
     n="$(line_count "$(host_server_pids)")"
-    if [ "${n}" = 1 ]; then
+    if [ "${n}" = 1 ] && ! pids_alive "${old_host_pids}"; then
       return 0
     fi
     if [ "${SECONDS}" -ge "${deadline}" ]; then
       echo "expected exactly 1 omnigent.host.service_entry --server process" >&2
       return 1
     fi
-    sleep 1
+    sleep "${POLL_SLEEP}"
   done
 }
 
@@ -188,7 +197,7 @@ c = Config(); c.set_main_option('script_location', os.path.join(os.path.dirname(
 print(' '.join(ScriptDirectory.from_config(c).get_heads()))")"
   db_rev="$(sqlite3 -readonly "${DB}" 'select group_concat(version_num, " ") from alembic_version;')"
   after="$(count_sessions)"
-  health="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "${URL}/health")"
+  health="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "${URL}/health" || true)"
   log "server processes: ${n} | health: ${health} | alembic db=${db_rev} code=${head_rev} | sessions ${before} -> ${after}"
   "${HOME}/.local/bin/omnigent" --version
   fail=0
@@ -244,6 +253,14 @@ restore_local_mode() {
     echo "--rollback-mode: backup directory has no ai.omnigent.host.plist; refusing" >&2
     exit 1
   fi
+  # Quiet marker check only. A server-mode deploy backup holds the --server
+  # host plist; restoring it would leave no server job running. Do not print
+  # the file.
+  if ! { grep -q -- 'service_entry' "${host_backup}" && grep -q -- '--local' "${host_backup}"; }; then
+    echo "--rollback-mode: backup host plist is not the --local service_entry job; refusing" >&2
+    echo "Deploy backups taken in server mode hold the --server host plist and cannot be used with --rollback-mode." >&2
+    exit 1
+  fi
   if [ ! -d "${LAUNCH_AGENTS}" ]; then
     echo "--rollback-mode: ${LAUNCH_AGENTS} is not a directory" >&2
     exit 1
@@ -273,7 +290,7 @@ restore_local_mode() {
       gone=1
       break
     fi
-    sleep 1
+    sleep "${POLL_SLEEP}"
   done
   if [ "${gone}" != 1 ]; then
     echo "processes still running after bootout; host plist was not replaced" >&2
@@ -293,7 +310,10 @@ restore_local_mode() {
     mv "${SERVER_PLIST}" "${aside}/ai.omnigent.server.plist"
     log "moved ai.omnigent.server.plist out of LaunchAgents"
   fi
-  launchctl bootstrap "gui/${uid}" "${HOST_PLIST}"
+  if ! launchctl bootstrap "gui/${uid}" "${HOST_PLIST}"; then
+    echo "launchctl bootstrap of ai.omnigent.host failed. Current plists were saved in ${aside}" >&2
+    exit 1
+  fi
 
   log "waiting for the host to spawn the local server"
   ok=0
@@ -306,7 +326,9 @@ restore_local_mode() {
   done
   if [ "${ok}" != 1 ] && [ -z "$(server_pids)" ]; then
     log "host did not spawn the server within 180s; one kickstart (no -k)"
-    launchctl kickstart "gui/${uid}/ai.omnigent.host"
+    if ! launchctl kickstart "gui/${uid}/ai.omnigent.host"; then
+      echo "kickstart of ai.omnigent.host failed" >&2
+    fi
     for _ in $(seq 1 "${LOCAL_KICKSTART_POLLS}"); do
       sleep "${POLL_SLEEP}"
       curl -fsS -m 3 "${URL}/health" >/dev/null 2>&1 && { ok=1; break; }
@@ -427,12 +449,12 @@ main() {
 
   # 2. Backups. Plists hold secrets: copy them, never print them.
   mkdir -p "${BACKUPS}/plist-${ts}" "${BACKUPS}/db-${ts}"
-  chmod 700 "${BACKUPS}/plist-${ts}"
+  chmod 700 "${BACKUPS}/plist-${ts}" "${BACKUPS}/db-${ts}"
   cp -p "${HOST_PLIST}" "${BACKUPS}/plist-${ts}/"
   if [ "${server_mode}" = 1 ]; then
     cp -p "${SERVER_PLIST}" "${BACKUPS}/plist-${ts}/"
-    log "backed up host and server plists to ${BACKUPS}/plist-${ts} (contents not shown)"
   fi
+  log "backed up plists to ${BACKUPS}/plist-${ts} (contents not shown)"
   log "backing up DB to ${BACKUPS}/db-${ts}"
   sqlite3 "${DB}" ".backup '${BACKUPS}/db-${ts}/chat.db'"
   before="$(count_sessions)"
