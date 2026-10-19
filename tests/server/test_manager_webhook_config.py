@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -148,7 +149,11 @@ def test_https_rejects_private_link_local_and_metadata_hosts(
         "https://10.1.2.3/hook",
         "https://192.168.1.9/hook",
         "https://169.254.169.254/latest",
+        "https://2852039166/",
+        "https://0xa9fea9fe/",
+        "https://0251.0376.0251.0376/",
         "https://metadata.google.internal/computeMetadata/v1/",
+        "https://metadata.google.internal./",
         "https://metadata.google.com/",
         "https://[fc00::1]/hook",
         "https://[fe80::1]/hook",
@@ -177,6 +182,79 @@ manager_webhook:
         monkeypatch,
     )
     assert manager_webhook_config(refresh=True).endpoint == "https://127.0.0.1/hook"
+    _write(
+        tmp_path,
+        """
+manager_webhook:
+  enabled: true
+  endpoint: https://0x7f000001/hook
+""",
+        monkeypatch,
+    )
+    assert manager_webhook_config(refresh=True).endpoint == "https://0x7f000001/hook"
+
+
+def test_public_base_url_may_be_a_lan_origin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write(
+        tmp_path,
+        """
+manager_webhook:
+  enabled: true
+  endpoint: https://bot.example.com/hook
+  public_base_url: https://192.168.1.10:8443
+""",
+        monkeypatch,
+    )
+    config = manager_webhook_config(refresh=True)
+    assert config.endpoint == "https://bot.example.com/hook"
+    assert config.public_base_url == "https://192.168.1.10:8443"
+
+    _write(
+        tmp_path,
+        """
+manager_webhook:
+  enabled: true
+  endpoint: https://bot.example.com/hook
+  public_base_url: http://192.168.1.10:8443
+""",
+        monkeypatch,
+    )
+    with pytest.raises(ManagerWebhookConfigError, match="public_base_url"):
+        manager_webhook_config(refresh=True)
+
+
+def test_invalid_webhook_config_disables_the_feature_and_still_boots(
+    db_uri: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from omnigent.server.app import _wire_manager_webhook
+    from omnigent.server.server_config import reset_manager_webhook_config_cache
+
+    class _ConversationStore:
+        storage_location = db_uri
+
+    reset_manager_webhook_config_cache()
+    caplog.set_level(logging.ERROR, logger="omnigent.server.app")
+    store = _wire_manager_webhook(
+        conversation_store=_ConversationStore(),  # type: ignore[arg-type]
+        agent_store=None,  # type: ignore[arg-type]
+        project_store=None,
+        server_config={
+            "manager_webhook": {
+                "enabled": True,
+                "endpoint": "https://192.168.1.10/hook",
+                "public_base_url": "https://192.168.1.10:8443",
+            }
+        },
+    )
+    assert store is not None
+    disabled = manager_webhook_config()
+    assert disabled.enabled is False
+    assert any(
+        record.levelno >= logging.ERROR and "disabling the feature" in record.message
+        for record in caplog.records
+    )
 
 
 def test_rejects_bad_events_headers_bounds_and_credentials(

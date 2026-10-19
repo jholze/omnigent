@@ -33,6 +33,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import socket
 import time
 import warnings
 from collections.abc import Mapping
@@ -827,15 +828,32 @@ def _as_bool(value: Any, *, key: str) -> bool:
     raise ManagerWebhookConfigError(f"manager_webhook.{key} must be a boolean")
 
 
+def _canonical_webhook_host(host: str) -> str:
+    """Fold a trailing dot and integer IP spellings into one host string.
+
+    ``socket.inet_aton`` accepts the decimal, hex, and octal forms that
+    ``ipaddress`` rejects, such as ``2852039166`` and ``0xa9fea9fe``.
+    A name that is not an IPv4 literal is returned unchanged apart from
+    the trailing dot.
+    """
+    normalized = host.strip().rstrip(".").lower()
+    try:
+        packed = socket.inet_aton(normalized)
+    except OSError:
+        return normalized
+    return socket.inet_ntoa(packed)
+
+
 def _blocked_webhook_host(host: str) -> bool:
     """True for private, link-local, reserved, and cloud-metadata hosts.
 
     Loopback stays allowed. Hostnames are matched literally, not resolved.
     """
-    if host in _METADATA_WEBHOOK_HOSTS:
+    canonical = _canonical_webhook_host(host)
+    if canonical in _METADATA_WEBHOOK_HOSTS:
         return True
     try:
-        parsed: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(host)
+        parsed: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(canonical)
     except ValueError:
         return False
     mapped = parsed.ipv4_mapped if isinstance(parsed, ipaddress.IPv6Address) else None
@@ -852,7 +870,13 @@ def _blocked_webhook_host(host: str) -> bool:
     )
 
 
-def _validate_webhook_url(url: str, *, key: str, allow_insecure_localhost: bool) -> str:
+def _validate_webhook_url(
+    url: str,
+    *,
+    key: str,
+    allow_insecure_localhost: bool,
+    block_private_hosts: bool = False,
+) -> str:
     from urllib.parse import urlsplit
 
     stripped = url.strip()
@@ -860,7 +884,9 @@ def _validate_webhook_url(url: str, *, key: str, allow_insecure_localhost: bool)
     if parsed.username or parsed.password:
         raise ManagerWebhookConfigError(f"manager_webhook.{key} must not embed credentials")
     host = (parsed.hostname or "").lower()
-    if host and _blocked_webhook_host(host):
+    # The private-host block is for the delivery endpoint only. A LAN
+    # public_base_url is a browser origin, not a server-side fetch target.
+    if block_private_hosts and host and _blocked_webhook_host(host):
         raise ManagerWebhookConfigError(
             f"manager_webhook.{key} {stripped!r} must not target a private, "
             "link-local, or metadata address"
@@ -996,6 +1022,7 @@ def _parse_manager_webhook(root: Mapping[str, Any]) -> ManagerWebhookConfig:
             endpoint_raw,
             key="endpoint",
             allow_insecure_localhost=allow_insecure,
+            block_private_hosts=True,
         )
     elif enabled:
         raise ManagerWebhookConfigError(

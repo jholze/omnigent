@@ -65,12 +65,22 @@ happened while the feature was disabled are not backfilled.
 An endpoint is validated whether or not the block is enabled. A disabled
 block may omit the endpoint. A present endpoint that is not HTTPS, that
 uses `http://` for a non-local host (including `HTTP://example.com`), or
-that targets a private, link-local, or metadata address refuses to boot.
-`http://` is allowed only for `localhost`, `127.0.0.1`, or `::1`, and only
-when `allow_insecure_localhost` is true. Loopback HTTPS stays allowed.
-`metadata.google.internal` and `metadata.google.com` are rejected by name.
-An enabled block with a missing endpoint, or an unknown event name, also
-refuses to boot.
+that targets a private, link-local, or metadata address is invalid.
+Decimal, hex, and octal spellings of an address (`2852039166`,
+`0xa9fea9fe`) and a trailing dot (`metadata.google.internal.`) are the
+same host. `http://` is allowed only for `localhost`, `127.0.0.1`, or
+`::1`, and only when `allow_insecure_localhost` is true. Loopback HTTPS
+stays allowed.
+
+That private-host block applies to the delivery endpoint only.
+`public_base_url` still has to be HTTPS (or localhost HTTP with the flag)
+and must not embed credentials, but it may be a LAN origin such as
+`https://192.168.1.10:8443`.
+
+An invalid `manager_webhook` block does not stop the server. Boot logs
+the error and leaves the feature disabled until the file parses. An
+enabled block with a missing endpoint, or an unknown event name, is
+invalid in the same way.
 
 `extra_headers` cannot replace `Content-Type` or any `X-Omnigent-*` header.
 `omnigent manager-webhook test` applies the same URL check before it
@@ -348,7 +358,8 @@ Emitted once the in-process harness consumed the verdict, or the runner
 set `X-Omnigent-Pending-Approval-Resolved: 1` after
 `pending_approvals.resolve()` succeeded. A 2xx from the forwarded
 approval without that header is not consumption and does not emit this
-event.
+event. If the runner already consumed the approval and then has no live
+harness, it still sets that header on the 409, so the resume is recorded.
 
 ```json
 {
@@ -405,8 +416,12 @@ was recorded.
 
 A turn with a `response_id` uses one idempotent event
 (`turn:{response_id}:failed`). A failure with no response id gets its own
-event id, so a second failure of the same session is delivered too. `data`
-omits `response_id` when the turn id is unknown.
+event id. `data` omits `response_id` when the turn id is unknown.
+
+One failure episode emits one event. Publishing `failed` again while the
+session is already failed (the runner-offline sweep does this) does not
+emit a second event. After the session is `running` again, the next
+`failed` is a new episode and is delivered.
 
 ```json
 {

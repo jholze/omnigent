@@ -101,3 +101,33 @@ async def test_delivery_status_requires_manage_and_hides_errors_from_readers(
     managed = await auth_client.get(path, headers={"X-Forwarded-Email": "manager@example.com"})
     assert managed.status_code == 200
     assert managed.json()["deliveries"][0]["last_error_message"] == "receiver exploded"
+
+
+async def test_delivery_status_admin_bypass_needs_no_grant(
+    auth_client: httpx.AsyncClient, auth_app: FastAPI, db_uri: str
+) -> None:
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+    from tests.server.helpers import create_test_agent
+
+    owner = "owner@example.com"
+    agent = await create_test_agent(auth_client, name="webhook-admin", user=owner)
+    session_id = agent["_session_id"]
+    store = auth_app.state.session_lifecycle_store
+    assert store is not None
+    store.record_lifecycle_event(
+        event_id=uuid.uuid4().hex,
+        session_id=session_id,
+        event_type="session.failed",
+        transition_key="failure:admin-bypass",
+        payload="{}",
+        now=50,
+    )
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user("admin@example.com")
+    permissions.set_admin("admin@example.com", True)
+    response = await auth_client.get(
+        f"/v1/sessions/{session_id}/manager-webhook-deliveries",
+        headers={"X-Forwarded-Email": "admin@example.com"},
+    )
+    assert response.status_code == 200
+    assert response.json()["deliveries"][0]["event_type"] == "session.failed"

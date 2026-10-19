@@ -251,6 +251,16 @@ async def test_awaiting_decision_is_delivered_quickly_and_resolution_follows(
                 "content": {"confirm": True},
             },
         )
+        # The publish listener writes off the event loop. Resume is only
+        # recorded after that decision row is committed.
+        deadline = time.monotonic() + 1.0
+        decided = None
+        while time.monotonic() < deadline:
+            decided = store.get_elicitation(elicitation_id)
+            if decided is not None and decided.status == "decided":
+                break
+            await asyncio.sleep(0.01)
+        assert decided is not None and decided.status == "decided"
         session_outbox.record_elicitation_resumed(elicitation_id=elicitation_id)
         session_outbox.record_session_completed(
             session_id=session_id, response_id="resp-1", summary="Migration applied."

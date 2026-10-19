@@ -4870,41 +4870,55 @@ def _record_manager_webhook_status(
     response_id: str | None,
     error: ErrorDetail | None,
     background_task_count: int | None,
+    previous_status: str | None,
 ) -> None:
     """Write a completed/failed outbox row. Failures are logged, not raised.
 
     The session status cache and the live-status persist are not one SQL
     transaction with this outbox insert. A store error is logged at ERROR
     and the status edge still publishes; that delivery is not retried from
-    the status row. A failure with no response id is its own event, so a
-    later failure of the same session is not collapsed.
+    the status row. The write runs off the event loop when one is running.
+
+    ``session.failed`` is emitted once per transition into ``failed``.
+    A repeated publish while the session is already failed is the same
+    episode (the runner-offline sweep does this) and does not insert
+    another row. A later episode, after the session leaves ``failed``,
+    does. A failure with no response id still gets its own key.
     """
     if status not in ("idle", "failed"):
         return
-    try:
-        from omnigent.server import session_outbox
+    if status == "failed" and previous_status == "failed":
+        return
 
-        if status == "idle":
-            if response_id is None:
+    def _write() -> None:
+        try:
+            from omnigent.server import session_outbox
+
+            if status == "idle":
+                if response_id is None:
+                    return
+                session_outbox.record_session_completed(
+                    session_id=session_id,
+                    response_id=response_id,
+                    background_task_count=background_task_count,
+                )
                 return
-            session_outbox.record_session_completed(
+            session_outbox.record_session_failed(
                 session_id=session_id,
                 response_id=response_id,
-                background_task_count=background_task_count,
+                error_code=error.code if error is not None else "unknown",
+                error_message=error.message if error is not None else "",
             )
-            return
-        session_outbox.record_session_failed(
-            session_id=session_id,
-            response_id=response_id,
-            error_code=error.code if error is not None else "unknown",
-            error_message=error.message if error is not None else "",
-        )
-    except Exception:  # noqa: BLE001 — webhook failure must not swallow the status edge
-        _logger.exception(
-            "manager webhook status write failed for %s; the session status "
-            "was already published and this outbox row is not in that transaction",
-            session_id,
-        )
+        except Exception:  # noqa: BLE001 — webhook failure must not swallow the status edge
+            _logger.exception(
+                "manager webhook status write failed for %s; the session status "
+                "was already published and this outbox row is not in that transaction",
+                session_id,
+            )
+
+    from omnigent.server.session_outbox import schedule_outbox_write
+
+    schedule_outbox_write(_write)
 
 
 def _publish_status(
@@ -4973,8 +4987,8 @@ def _publish_status(
         _session_active_response_cache.pop(session_id, None)
         return
     # Captured before the terminal edge clears the in-flight id. A turn id
-    # dedupes the manager-webhook completed/failed row. With no id, each
-    # failure is recorded on its own so later failures are not dropped.
+    # dedupes one failure episode. A repeated failed publish is not a new
+    # episode; leaving failed and failing again is.
     tracked_response_id = response_id or _session_active_response_cache.get(session_id)
     previous_status = _session_status_cache.get(session_id)
     _session_status_cache[session_id] = status
@@ -5080,6 +5094,7 @@ def _publish_status(
         response_id=tracked_response_id,
         error=error,
         background_task_count=background_task_count,
+        previous_status=previous_status,
     )
     try:
         from omnigent.server.chat_agent_threads import on_session_status
