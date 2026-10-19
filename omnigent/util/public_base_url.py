@@ -67,7 +67,8 @@ def configured_public_base_url() -> str | None:
             raw = load_effective_config().get(PUBLIC_BASE_URL_CONFIG_KEY)
         # TypeError/AttributeError: the config file is not a mapping.
         except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError) as exc:
-            _log.debug("public_base_url: could not read config: %s", exc)
+            # Type only: YAML errors can echo config lines.
+            _log.debug("public_base_url: could not read config: %s", type(exc).__name__)
             return None
     try:
         return normalize_public_base_url(raw)
