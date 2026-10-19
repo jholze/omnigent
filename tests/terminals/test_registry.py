@@ -101,6 +101,9 @@ def test_conversation_link_for_id_uses_public_base_for_loopback_runner(
 
     :param monkeypatch: Pytest monkeypatch fixture.
     """
+    monkeypatch.setattr(
+        "omnigent.host.local_server._read_local_server_pid_file", lambda: (4242, 6767)
+    )
     monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "https://omnigent.example.com/")
     reg = TerminalRegistry(conversation_link_base_url="http://127.0.0.1:6767")
 

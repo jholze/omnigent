@@ -12,6 +12,7 @@ from omnigent.server.server_config import (
     ManagerWebhookConfigError,
     manager_webhook_config,
     reset_manager_webhook_config_cache,
+    webhook_public_base_url_or_none,
 )
 
 
@@ -336,3 +337,28 @@ manager_webhook:
         _write(tmp_path, body, monkeypatch)
         with pytest.raises(ManagerWebhookConfigError, match=match):
             manager_webhook_config(refresh=True)
+
+
+@pytest.mark.parametrize(
+    ("url", "allow_insecure_localhost", "expected"),
+    [
+        pytest.param(None, False, None, id="unset"),
+        pytest.param(
+            "https://omnigent.example.com/", False, "https://omnigent.example.com", id="https"
+        ),
+        pytest.param("http://lan.example.com", False, None, id="http-rejected"),
+        pytest.param("http://lan.example.com", True, None, id="http-non-loopback-rejected"),
+        pytest.param("http://localhost:6767", False, None, id="http-loopback-not-allowed"),
+        pytest.param(
+            "http://localhost:6767/", True, "http://localhost:6767", id="http-loopback-allowed"
+        ),
+    ],
+)
+def test_webhook_public_base_url_or_none_applies_public_base_url_rule(
+    url: str | None, allow_insecure_localhost: bool, expected: str | None
+) -> None:
+    """A fallback origin follows the ``manager_webhook.public_base_url`` rule."""
+    assert (
+        webhook_public_base_url_or_none(url, allow_insecure_localhost=allow_insecure_localhost)
+        == expected
+    )

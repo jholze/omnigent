@@ -18,7 +18,6 @@ _log = logging.getLogger(__name__)
 PUBLIC_BASE_URL_ENV_VAR = "OMNIGENT_PUBLIC_BASE_URL"
 PUBLIC_BASE_URL_CONFIG_KEY = "public_base_url"
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _warned_invalid: set[str] = set()
 
 
@@ -38,11 +37,12 @@ def normalize_public_base_url(raw: object) -> str | None:
     stripped = raw.strip().rstrip("/")
     if not stripped:
         return None
+    # Messages never echo the raw value: it may carry credentials.
     parsed = urllib.parse.urlsplit(stripped)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError(f"{PUBLIC_BASE_URL_CONFIG_KEY} must be an http(s) URL; got {stripped!r}")
     if parsed.username or parsed.password:
         raise ValueError(f"{PUBLIC_BASE_URL_CONFIG_KEY} must not embed credentials")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(f"{PUBLIC_BASE_URL_CONFIG_KEY} must be an http(s) URL with a host")
     if parsed.query or parsed.fragment:
         raise ValueError(f"{PUBLIC_BASE_URL_CONFIG_KEY} must not carry a query or fragment")
     return stripped
@@ -65,7 +65,8 @@ def configured_public_base_url() -> str | None:
 
         try:
             raw = load_effective_config().get(PUBLIC_BASE_URL_CONFIG_KEY)
-        except (OSError, ValueError, yaml.YAMLError) as exc:
+        # TypeError/AttributeError: the config file is not a mapping.
+        except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError) as exc:
             _log.debug("public_base_url: could not read config: %s", exc)
             return None
     try:
@@ -79,17 +80,21 @@ def configured_public_base_url() -> str | None:
 
 
 def public_link_base(local_base_url: str) -> str | None:
-    """Return the public origin to use instead of a loopback server base.
+    """Return the public origin to use instead of the canonical local server base.
 
-    Only a loopback base is replaced: a remote ``--server`` is already the
-    address the user reaches, and rewriting it would point at another server.
+    Only the canonical local server is replaced: loopback on the pidfile port,
+    or on the default port (6767) when no pidfile exists, e.g. a foreground
+    ``omnigent server``. A remote ``--server`` is already the address the user
+    reaches, and an ephemeral server on a random port is not what the public
+    origin proxies; rewriting either would point at the wrong server.
 
     :param local_base_url: Server base the caller would link to, e.g.
         ``"http://127.0.0.1:6767"``.
     :returns: The configured public base URL, or ``None`` to keep the
         caller's existing link unchanged.
     """
-    host = urllib.parse.urlsplit(local_base_url.strip()).hostname
-    if host not in _LOOPBACK_HOSTS:
+    from omnigent.host.local_server import is_canonical_local_server_url
+
+    if not is_canonical_local_server_url(local_base_url.strip()):
         return None
     return configured_public_base_url()

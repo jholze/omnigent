@@ -367,9 +367,22 @@ OMNIGENT_PUBLIC_BASE_URL=https://omnigent.example.com
 - The env var wins over the config key. Must be `http`/`https`; a trailing
   slash is stripped. Include any subpath prefix — it replaces the local
   base and `--base-path` (e.g. `https://<host>/proxy/6767`).
-- Only links to a loopback server are rewritten; a remote `--server` URL is
-  kept. Internal runner/server traffic is unaffected.
-- It also fills `manager_webhook.public_base_url` when that key is unset.
+- Only links to the canonical local server are rewritten: loopback on the
+  port in its pidfile, or on the default port `6767` when there is no pidfile
+  (e.g. a foreground `omnigent server`, launchd, or a deploy script). A
+  remote `--server` URL is kept, and so are links
+  to an ephemeral `omnigent run --no-session` server on a random port —
+  including its `Web UI: http://127.0.0.1:<port>` line, which is printed as-is.
+  Internal runner/server traffic is unaffected.
+- It also fills `manager_webhook.public_base_url` when that key is unset. The
+  server reads the fallback from its own environment (`OMNIGENT_PUBLIC_BASE_URL`)
+  or the effective CLI config (`$OMNIGENT_CONFIG_HOME/config.yaml` or
+  `~/.omnigent/config.yaml`, plus the project `.omnigent/config.yaml`) — not
+  from the server config (`OMNIGENT_CONFIG` or `<data_dir>/config.yaml`, e.g.
+  `/data/config.yaml` in Docker), unless that is the same file as on a laptop
+  where both are `~/.omnigent/config.yaml`. The fallback must pass the same
+  rule as the webhook key (HTTPS; HTTP only for localhost with
+  `allow_insecure_localhost`), otherwise it is ignored.
 - Unset = links use the local server base (unchanged).
 
 ## Header-proxy mode (for deploys behind an existing SSO proxy)

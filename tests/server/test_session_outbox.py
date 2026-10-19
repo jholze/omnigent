@@ -395,6 +395,17 @@ def test_awaiting_decision_web_url_falls_back_to_global_public_base_url(
     assert web_url == f"https://global.example.com/approve/{session_id}/elicit_link"
 
 
+def test_awaiting_decision_web_url_rejects_insecure_global_public_base_url(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _enable(tmp_path, monkeypatch, public_base_url=None)
+    monkeypatch.setenv("OMNIGENT_PUBLIC_BASE_URL", "http://lan.example.com")
+
+    _session_id, web_url = _raise_elicitation(db_uri)
+
+    assert web_url is None
+
+
 def test_awaiting_decision_web_url_absent_when_no_public_base_url(
     db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -106,6 +106,9 @@ def test_public_link_base_rewrites_loopback_bases(
     config_home: Path, monkeypatch: pytest.MonkeyPatch, local_base: str
 ) -> None:
     """Every loopback spelling is replaced by the configured public base."""
+    monkeypatch.setattr(
+        "omnigent.host.local_server._read_local_server_pid_file", lambda: (4242, 6767)
+    )
     monkeypatch.setenv(public_base_url.PUBLIC_BASE_URL_ENV_VAR, "https://omnigent.example.com")
 
     assert public_base_url.public_link_base(local_base) == "https://omnigent.example.com"
@@ -127,3 +130,74 @@ def test_public_link_base_keeps_non_loopback_bases(
 def test_public_link_base_unset_keeps_loopback_base(config_home: Path) -> None:
     """With nothing configured, loopback links are left to the caller."""
     assert public_base_url.public_link_base("http://127.0.0.1:6767") is None
+
+
+def test_normalize_credentials_error_does_not_echo_secret() -> None:
+    """A credential-bearing value is rejected without repeating the secret."""
+    with pytest.raises(ValueError) as excinfo:
+        public_base_url.normalize_public_base_url("ftp://user:secret@host.example.com")
+
+    assert "credentials" in str(excinfo.value)
+    assert "secret" not in str(excinfo.value)
+
+
+def test_normalize_scheme_error_does_not_echo_value() -> None:
+    """The scheme error names the rule, not the configured value."""
+    with pytest.raises(ValueError) as excinfo:
+        public_base_url.normalize_public_base_url("ftp://host.example.com/private-path")
+
+    assert "host.example.com" not in str(excinfo.value)
+    assert "private-path" not in str(excinfo.value)
+
+
+def test_configured_invalid_credentials_warning_does_not_echo_secret(
+    config_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ignored-value warning mentions credentials but never the secret."""
+    monkeypatch.setenv(
+        public_base_url.PUBLIC_BASE_URL_ENV_VAR, "ftp://user:secret@host.example.com"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=public_base_url.__name__):
+        assert public_base_url.configured_public_base_url() is None
+
+    assert "credentials" in caplog.text
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        pytest.param("- https://omnigent.example.com\n", id="yaml-list"),
+        pytest.param("https://omnigent.example.com\n", id="yaml-string"),
+    ],
+)
+def test_configured_ignores_non_mapping_config_file(config_home: Path, config_text: str) -> None:
+    """A config file that is not a mapping yields no public base URL."""
+    (config_home / "config.yaml").write_text(config_text)
+
+    assert public_base_url.configured_public_base_url() is None
+
+
+def test_public_link_base_rewrites_default_port_without_pidfile(
+    config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foreground server on 6767 (no pidfile) still gets the public link."""
+    monkeypatch.setattr("omnigent.host.local_server._read_local_server_pid_file", lambda: None)
+    monkeypatch.setenv(public_base_url.PUBLIC_BASE_URL_ENV_VAR, "https://omnigent.example.com")
+
+    assert public_base_url.public_link_base("http://127.0.0.1:6767") == (
+        "https://omnigent.example.com"
+    )
+
+
+def test_public_link_base_keeps_ephemeral_loopback_port(
+    config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ephemeral loopback server on a random port is not rewritten."""
+    monkeypatch.setattr("omnigent.host.local_server._read_local_server_pid_file", lambda: None)
+    monkeypatch.setenv(public_base_url.PUBLIC_BASE_URL_ENV_VAR, "https://omnigent.example.com")
+
+    assert public_base_url.public_link_base("http://127.0.0.1:54321") is None

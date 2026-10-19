@@ -127,6 +127,8 @@ _LOCAL_SERVER_LOG_REF_PATH = _local_data_dir() / "local_server.logpath"
 # this value rather than defaulting to root (see `_resolve_effective_base_path`).
 _LOCAL_SERVER_BASE_PATH_PATH = _local_data_dir() / "local_server.base_path"
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 
 def _read_local_server_base_path() -> str:
     """Last resolved base path the running local server was spawned with.
@@ -328,16 +330,47 @@ def local_server_base_path(server_url: str) -> str:
         ``"http://127.0.0.1:6767"`` or a remote ``--server`` URL.
     :returns: The prefix to append to a browser URL, or ``""``.
     """
+    if is_managed_local_server_url(server_url):
+        return _resolve_effective_base_path()
+    return ""
+
+
+def is_managed_local_server_url(server_url: str) -> bool:
+    """Whether *server_url* is this machine's managed local server.
+
+    True only for a loopback host on the port recorded in the pidfile, so a
+    remote ``--server`` or an ephemeral server on another port never matches.
+    Probe-free (reads only the pidfile).
+
+    :param server_url: e.g. ``"http://127.0.0.1:6767"``.
+    :returns: ``True`` when the URL targets the managed local server.
+    """
     from urllib.parse import urlsplit
 
     existing = _read_local_server_pid_file()
     if existing is None:
-        return ""
+        return False
     _pid, port = existing
     parsed = urlsplit(server_url)
-    if parsed.hostname in ("127.0.0.1", "localhost", "::1") and parsed.port == port:
-        return _resolve_effective_base_path()
-    return ""
+    return parsed.hostname in _LOOPBACK_HOSTS and parsed.port == port
+
+
+def is_canonical_local_server_url(server_url: str) -> bool:
+    """Whether *server_url* is the canonical local server, pidfile or not.
+
+    Loopback host on the pidfile port, or on the default port when no pidfile
+    exists (a foreground ``omnigent server``, launchd, or a process with
+    another data dir). An ephemeral server on a random port never matches.
+
+    :param server_url: e.g. ``"http://127.0.0.1:6767"``.
+    :returns: ``True`` when the URL targets the canonical local server.
+    """
+    from urllib.parse import urlsplit
+
+    existing = _read_local_server_pid_file()
+    port = existing[1] if existing is not None else _DEFAULT_LOCAL_PORT
+    parsed = urlsplit(server_url)
+    return parsed.hostname in _LOOPBACK_HOSTS and parsed.port == port
 
 
 def _write_local_server_record(
