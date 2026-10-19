@@ -1076,23 +1076,21 @@ def accounts_app_needs_setup(
     yield from _build_accounts_app(tmp_path, monkeypatch, init_admin_password=None)
 
 
-@pytest.fixture
-def header_mode_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """An app wired in header mode (accounts OFF) for negative-case tests.
+def _build_no_accounts_store_app(
+    tmp_path: Path,
+    *,
+    db_name: str,
+    auth_provider: AuthProvider | None = None,
+) -> Iterator[TestClient]:
+    """Build an app without an account store (header or oidc provider).
 
-    Mirrors ``accounts_app`` but with no accounts env vars and
-    ``account_store=None`` so /v1/info reports accounts_enabled=false
-    and the accounts router never mounts. Used to verify the
-    "internal hosted product is byte-equivalent" invariant.
+    :param tmp_path: Per-test temp dir for the sqlite DB and artifacts.
+    :param db_name: SQLite file name under *tmp_path*.
+    :param auth_provider: Provider to wire, or ``None`` to resolve it from
+        the environment via :func:`create_auth_provider`.
+    :returns: Iterator yielding a :class:`TestClient`.
     """
-    # Accounts is now the default provider — explicitly pin
-    # "header" so this negative-case fixture actually exercises
-    # header mode regardless of the global default.
-    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
-    monkeypatch.delenv("OMNIGENT_ACCOUNTS_COOKIE_SECRET", raising=False)
-    monkeypatch.delenv("OMNIGENT_ACCOUNTS_BASE_URL", raising=False)
-
-    db_url = f"sqlite:///{tmp_path}/header.db"
+    db_url = f"sqlite:///{tmp_path}/{db_name}"
     from omnigent.db.utils import get_or_create_engine
     from omnigent.runtime import init as init_runtime
     from omnigent.runtime import telemetry
@@ -1127,7 +1125,8 @@ def header_mode_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         artifact_store=artifact_store,
         comment_store=comment_store,
     )
-    auth_provider = create_auth_provider()
+    if auth_provider is None:
+        auth_provider = create_auth_provider()
     app = create_app(
         agent_store=agent_store,
         file_store=file_store,
@@ -1142,6 +1141,25 @@ def header_mode_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     )
     with TestClient(app) as client:
         yield client
+
+
+@pytest.fixture
+def header_mode_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """An app wired in header mode (accounts OFF) for negative-case tests.
+
+    Mirrors ``accounts_app`` but with no accounts env vars and
+    ``account_store=None`` so /v1/info reports accounts_enabled=false
+    and the accounts router never mounts. Used to verify the
+    "internal hosted product is byte-equivalent" invariant.
+    """
+    # Accounts is now the default provider — explicitly pin
+    # "header" so this negative-case fixture actually exercises
+    # header mode regardless of the global default.
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    monkeypatch.delenv("OMNIGENT_ACCOUNTS_COOKIE_SECRET", raising=False)
+    monkeypatch.delenv("OMNIGENT_ACCOUNTS_BASE_URL", raising=False)
+
+    yield from _build_no_accounts_store_app(tmp_path, db_name="header.db")
 
 
 def _login(client: TestClient, username: str, password: str) -> TestClient:
@@ -2176,3 +2194,98 @@ def test_cli_login_with_issue_refresh_issues_grant(accounts_app: TestClient) -> 
     assert "access_token" in refresh_body
     # Login grants don't rotate — same token is returned.
     assert refresh_body["refresh_token"] == refresh_token
+
+
+@pytest.fixture
+def oidc_mode_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """An app wired with an oidc provider (no account store).
+
+    The provider is built directly from a static :class:`OIDCConfig`, so no
+    IdP discovery or network access is involved; ``/v1/info`` only needs the
+    provider's source.
+    """
+    from omnigent.server.oidc import OIDCConfig
+
+    monkeypatch.delenv("OMNIGENT_ACCOUNTS_COOKIE_SECRET", raising=False)
+    monkeypatch.delenv("OMNIGENT_ACCOUNTS_BASE_URL", raising=False)
+    config = OIDCConfig(
+        issuer="https://accounts.google.com",
+        client_id="test-client",
+        client_secret="test-secret",
+        redirect_uri="https://app.example.com/auth/callback",
+        cookie_secret=secrets.token_hex(32),
+        scopes="openid email profile",
+        session_ttl_hours=8,
+        logout_redirect_uri=None,
+        allowed_domains=None,
+        provider_type="oidc",
+        authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint="https://oauth2.googleapis.com/token",
+        jwks_uri="https://www.googleapis.com/oauth2/v3/certs",
+        userinfo_endpoint=None,
+        allow_invites=False,
+    )
+    provider = UnifiedAuthProvider(source="oidc", oidc_config=config)
+    yield from _build_no_accounts_store_app(tmp_path, db_name="oidc.db", auth_provider=provider)
+
+
+def test_info_single_user_false_in_accounts_mode_with_local_marker(
+    accounts_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A login-backed server never reports ``single_user`` to the SPA.
+
+    The daemon-owned local server (``host/local_server.py``) sets
+    ``OMNIGENT_LOCAL_SINGLE_USER=1`` in every auth mode, because the marker
+    also carries the local operator-trust posture. In accounts mode the SPA
+    must still show Share, Members and Sharing settings, so ``single_user``
+    has to be false while the marker stays set.
+    """
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    resp = accounts_app.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["accounts_enabled"] is True
+    assert body["single_user"] is False
+
+
+def test_info_single_user_true_in_header_mode_with_local_marker(
+    header_mode_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Header mode with the local marker is the genuine one-user runtime.
+
+    Negative complement to the accounts-mode case above: without a login,
+    the marker alone still makes ``single_user`` true so the SPA keeps
+    hiding account/sharing chrome.
+    """
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    resp = header_mode_app.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["accounts_enabled"] is False
+    assert body["single_user"] is True
+
+
+def test_info_single_user_false_in_oidc_mode_with_local_marker(
+    oidc_mode_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OIDC login is multi-user too: the local marker must not hide sharing."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    resp = oidc_mode_app.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["single_user"] is False
+
+
+@pytest.mark.parametrize("app_fixture", ["accounts_app", "header_mode_app"])
+def test_info_single_user_false_without_local_marker(
+    app_fixture: str, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the marker no auth mode reports ``single_user``.
+
+    A multi-user header deploy (SSO proxy) and an accounts server both stay
+    false, so the marker remains a required input, not just the auth mode.
+    """
+    client: TestClient = request.getfixturevalue(app_fixture)
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    resp = client.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["single_user"] is False

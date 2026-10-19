@@ -3119,7 +3119,20 @@ def create_app(
         # X-Forwarded-Email) — both report accounts_enabled=false / login_url
         # null. The SPA uses it to hide account/sharing chrome that has no
         # meaning without other users.
-        single_user = local_single_user_enabled()
+        #
+        # A login-backed server (accounts, or oidc) is multi-user by
+        # construction even when it is the daemon-owned loopback runtime: the
+        # managed spawn path in host/local_server.py sets the marker
+        # unconditionally, because the marker also carries the local server's
+        # operator-trust posture (host_id re-own across an auth-mode flip,
+        # stdio / loopback MCP servers, custom policy handlers in uploaded
+        # bundles). Report single_user only when nobody logs in, so a
+        # login-backed local server still shows Share, Members and Sharing
+        # settings without changing that posture.
+        single_user = local_single_user_enabled() and auth_mode(auth_provider) not in (
+            "accounts",
+            "oidc",
+        )
         # needs_setup drives the SPA's first-run "Create admin" form:
         # true only in accounts mode while no password-having account
         # exists yet. Same predicate bootstrap_admin uses, computed
