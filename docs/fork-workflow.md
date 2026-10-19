@@ -88,22 +88,74 @@ Merge order:
 PM HUB and other important sessions are idle: the restart interrupts live
 turns.
 
+The script picks the launch layout from
+`~/Library/LaunchAgents/ai.omnigent.server.plist`. It does not create that
+plist and it does not switch layouts.
+
+**Local mode** (no server plist). One job, `ai.omnigent.host`, runs
+`python -m omnigent.host.service_entry --local` and that process spawns the
+server. Restart is unchanged: `omnigent server stop`, then wait for launchd
+(KeepAlive) to start the host again. Do not `launchctl kickstart` right after
+the stop: that started a second server. The script kickstarts the host once,
+without `-k`, only if no server process came back within 180 s.
+
+**Server mode** (server plist present). Two launchd jobs:
+
+| Job | Program |
+|---|---|
+| `ai.omnigent.server` | `python -P -m omnigent.cli server --host 127.0.0.1 --port 6767 … --no-open` (KeepAlive true) |
+| `ai.omnigent.host` | `python -m omnigent.host.service_entry --server http://127.0.0.1:6767` |
+
+Restart is one `launchctl kickstart -k gui/$(id -u)/ai.omnigent.server`, then
+a wait of at most 180 s until exactly one
+`omnigent.cli server --host 127.0.0.1 --port 6767` process is running and
+`/health` is 200. Then one
+`launchctl kickstart -k gui/$(id -u)/ai.omnigent.host`, and a check that
+exactly one `omnigent.host.service_entry --server` is running. If the server
+is already coming up, the script does not kickstart it again.
+
+Steps, in both modes:
+
 1. Builds the three wheels at SHA in `~/dev/omnigent-deploy` (detached) into
    `~/omnigent-backups/wheels-<sha>` with `OMNIGENT_BUILD_WEB_UI=1` (otherwise
-   setup.py reuses an old `static/web-ui` bundle). These directories are also the rollback
-   set; keep at least the last two.
-2. Backs up the launchd plist to `plist-<ts>/` (contains secrets: copy,
-   never print) and the DB with `sqlite3 .backup` to `db-<ts>/`.
+   setup.py reuses an old `static/web-ui` bundle). These directories are also
+   the build rollback set; keep at least the last two.
+2. Backs up launchd plists to `plist-<ts>/` (`chmod 700`; the files contain
+   secrets: copy, never print) and the DB with `sqlite3 .backup` to
+   `db-<ts>/`. Local mode backs up `ai.omnigent.host.plist`. Server mode
+   backs up that file and `ai.omnigent.server.plist`.
 3. `uv tool install --reinstall --find-links wheels-<sha> 'omnigent[dictation] @ …whl'`.
-4. `omnigent server stop`, then waits for launchd (KeepAlive) to start the
-   host again. Do not `launchctl kickstart` right after the stop: that started
-   a second server. The script kickstarts once only if no server came back
-   within 180 s.
+4. Restarts the active mode as above.
 5. Verifies: exactly one `omnigent.cli server --port 6767` process, `/health`
    200, `alembic_version` equals the code head (the server migrates on
-   start), session count not lower, `omnigent --version` shows the SHA.
+   start), session count not lower, `omnigent --version` shows the SHA. Server
+   mode also requires `/v1/info` `single_user` false and exactly one
+   `service_entry --server`.
 
-Rollback: `scripts/fork/deploy-local.sh --rollback <old-sha>` reinstalls from
-`wheels-<old-sha>`. A migration that already ran is not undone by that; if the
-old code cannot read the new schema, stop the server and restore
-`db-<ts>/chat.db` first.
+Switching into server mode is a plist edit, done by hand from the saved host
+plist (copy values, never print them). Do not use `omnigent host enable` for
+that switch: it writes the daemon environment from the current shell and
+drops variables that exist only in the installed plist (for example the host
+OAuth token). After the switch, move `~/.omnigent/local_server.*` aside into
+the same backup directory. If those files stay in place,
+`ensure_local_omnigent_server` can start a second server on the same
+`chat.db`.
+
+Build rollback (either mode): `scripts/fork/deploy-local.sh --rollback <old-sha>`
+reinstalls from `wheels-<old-sha>` and restarts the mode that is active now.
+A migration that already ran is not undone by that; if the old code cannot
+read the new schema, stop the server and restore `db-<ts>/chat.db` first.
+
+Layout rollback (server mode back to local mode):
+`scripts/fork/deploy-local.sh --rollback-mode <backup-dir>`. The directory
+must already contain `ai.omnigent.host.plist` from before the switch (the
+`--local` host job) and the `local_server.*` files that were moved aside.
+The script checks for the host plist before it changes anything and does not
+open either plist. It copies the current plists into a new `plist-<ts>/`
+(`chmod 700`) first, so the server-mode layout can be put back by hand. That
+directory is the layout being left, not a `--local` backup; do not point
+`--rollback-mode` at it. It then `launchctl bootout`s both jobs, restores the
+backup host plist, moves `ai.omnigent.server.plist` out of
+`~/Library/LaunchAgents`, copies any `local_server.*` files from the backup
+back to `~/.omnigent/`, and `launchctl bootstrap`s only the host so the host
+spawns the server again.
