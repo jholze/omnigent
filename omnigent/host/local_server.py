@@ -800,6 +800,12 @@ def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
     # host tunnel may re-own this machine's host_id across an auth-mode flip
     # (header↔accounts changes the owner). Deployed multi-user servers never
     # set this, preserving the W2-class host-hijack boundary.
+    #
+    # Set in accounts/oidc mode too: the marker also keeps the local
+    # operator-trust posture (stdio / loopback MCP servers, custom policy
+    # handlers in uploaded bundles). /v1/info derives the UI's single_user
+    # signal from marker AND auth mode, so a login-backed local server still
+    # shows Share/Members without dropping that posture here.
     child_env["OMNIGENT_LOCAL_SINGLE_USER"] = "1"
     _accounts_mode = resolve_auth_source() == "accounts"
     if _accounts_mode:
