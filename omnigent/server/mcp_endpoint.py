@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse, Response
 from omnigent.debug_logging import add_audit_attrs
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.agent_account_tokens import consume_mcp_request
-from omnigent.server.auth import AuthProvider
+from omnigent.server.auth import LEVEL_EDIT, AuthProvider
 from omnigent.server.chat_access import principal_kind
 from omnigent.server.feature_flags import Feature
 from omnigent.server.routes._auth_helpers import require_user
@@ -246,6 +246,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "(all, mine, shared, or archived; default all). "
                 "project or project_id filters to one project (id from list_projects, "
                 "or the project name; empty string lists sessions not in a project). "
+                "kind is omitted by default, which lists top-level sessions only. "
+                "kind=sub_agent lists children; kind=any lists both. "
                 "Rows are compact: id, title, status, agent_name, project_id, "
                 "working_directory (from the omnigent.composer_context.v1.0 label), updated_at."
             ),
@@ -272,7 +274,14 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "type": "string",
                         "description": "Alias of project when the value is a list_projects id.",
                     },
-                    "kind": {"type": "string", "enum": ["default", "sub_agent", "any"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["default", "sub_agent", "any"],
+                        "description": (
+                            "default (and omitted) is top-level sessions only. "
+                            "sub_agent lists children. any lists both."
+                        ),
+                    },
                     "visibility": {
                         "type": "string",
                         "enum": ["all", "mine", "shared", "archived"],
@@ -284,6 +293,8 @@ def tool_definitions() -> list[dict[str, Any]]:
             "name": "get_session",
             "description": (
                 "Fetch one session. GET /v1/sessions/{session_id}. "
+                "The response includes parent_session_id and root_conversation_id "
+                "(both null on a top-level session) and kind. "
                 "The embedded items array is omitted; use get_session_items for the transcript."
             ),
             "inputSchema": {
@@ -332,6 +343,14 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "Dry-run unless confirm is true: returns the request and changes nothing. "
                 "Pass agent_id or agent_name from list_agents. "
                 "A name is resolved with GET /v1/agents before the preview or the POST. "
+                "Optional parent_session_id creates a sub-agent (kind sub_agent) nested "
+                "under that parent, the same way an in-session spawn does: the child "
+                "keeps the parent's root and is omitted from the default session list. "
+                "The caller needs edit access on the parent. An unknown parent, or one "
+                "the caller cannot access, is not found. A parent in another project is "
+                "accepted when POST /v1/sessions accepts it. "
+                "Optional sub_agent_name is a sub-agent declared on the bound agent. "
+                "The dry-run body includes parent_session_id and sub_agent_name when set. "
                 "Optional message is stored as initial_items. To wait for the reply, "
                 "create without a message, then call send_message with wait."
             ),
@@ -365,6 +384,22 @@ def tool_definitions() -> list[dict[str, Any]]:
                     },
                     "host_type": {"type": "string", "enum": ["external", "managed"]},
                     "title": {"type": "string"},
+                    "parent_session_id": {
+                        "type": "string",
+                        "description": (
+                            "Parent session id. The new session is created as a "
+                            "sub-agent child of this session. Requires edit access. "
+                            "Included in the dry-run body. Nothing is written unless "
+                            "confirm is true."
+                        ),
+                    },
+                    "sub_agent_name": {
+                        "type": "string",
+                        "description": (
+                            "Sub-agent type declared on the bound agent, "
+                            "e.g. summarizer. Passed through to POST /v1/sessions."
+                        ),
+                    },
                     "message": {"type": "string", "description": "Optional first user message."},
                     "confirm": {"type": "boolean", "description": _CONFIRM_HELP},
                 },
@@ -1325,6 +1360,11 @@ async def _call_tool(
             if isinstance(account_id, str):
                 _reject_bot_session_quota(request.app, account_id)
         body = await _build_create_body(api, args)
+        parent_session_id = body.get("parent_session_id")
+        if isinstance(parent_session_id, str):
+            # Checked before the preview and the POST. The GET runs in-process,
+            # so an ogc_ bot is authorized as its owner. Nothing is written here.
+            await _require_parent_edit(api, parent_session_id)
         if args.get("confirm") is not True:
             return _preview("POST", "/v1/sessions", body)
         created = await api.call("POST", "/v1/sessions", body)
@@ -1466,6 +1506,12 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
     host_id = _optional_str(args.get("host_id"), "host_id")
     workspace = _optional_str(args.get("workspace"), "workspace")
     title = _optional_str(args.get("title"), "title")
+    parent_session_id = _blank_to_none(
+        _optional_str(args.get("parent_session_id"), "parent_session_id")
+    )
+    sub_agent_name = _blank_to_none(_optional_str(args.get("sub_agent_name"), "sub_agent_name"))
+    if parent_session_id is not None:
+        parent_session_id = _require_id(parent_session_id, "parent_session_id")
     message = args.get("message")
     if message is not None:
         message = _require_text(message)
@@ -1482,9 +1528,75 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
         body["workspace"] = workspace
     if title:
         body["title"] = title
+    if parent_session_id:
+        body["parent_session_id"] = parent_session_id
+    if sub_agent_name:
+        body["sub_agent_name"] = sub_agent_name
     if message:
         body["initial_items"] = [_user_message_event(message)]
     return body
+
+
+async def _require_parent_edit(api: _Api, parent_session_id: str) -> None:
+    """Require edit on the parent's effective grant before a child create.
+
+    Uses ``GET /v1/sessions/{id}`` on the in-process app, so an ``ogc_`` bot
+    is checked as its owner — the same principal the following POST uses.
+    No access and an unknown id are both not-found, matching the session
+    route.
+
+    ``permission_level`` on a sub-agent is only the display field. Grants
+    live on the top-level session, and ``check_session_access`` walks
+    ``parent_conversation_id`` to find them. This follows
+    ``parent_session_id`` the same way. A null level on that top-level
+    session means permissions are off. Read-only access is forbidden,
+    including when the named parent is itself a sub-agent. A parent filed
+    in another project is not rejected here: ``POST /v1/sessions`` does
+    not compare projects.
+
+    :param api: In-process client for the MCP request.
+    :param parent_session_id: Parent session id, e.g. ``"conv_abc123"``.
+    :raises ToolFailure: Not found, a parent cycle, or less than edit.
+    """
+    seen: set[str] = set()
+    current = parent_session_id
+    while True:
+        if current in seen:
+            raise ToolFailure(
+                f"edit permission is required on parent session {parent_session_id}",
+                code="forbidden",
+                http_status=403,
+            )
+        seen.add(current)
+        parent = await api.call(
+            "GET",
+            _with_query(
+                _session_path(current),
+                {
+                    "include_items": False,
+                    "include_usage": False,
+                    "include_liveness": False,
+                },
+            ),
+        )
+        if not isinstance(parent, dict):
+            raise ToolFailure(
+                f"edit permission is required on parent session {parent_session_id}",
+                code="forbidden",
+                http_status=403,
+            )
+        ancestor = parent.get("parent_session_id")
+        if isinstance(ancestor, str) and ancestor:
+            current = ancestor
+            continue
+        level = parent.get("permission_level")
+        if isinstance(level, int) and level < LEVEL_EDIT:
+            raise ToolFailure(
+                f"edit permission is required on parent session {parent_session_id}",
+                code="forbidden",
+                http_status=403,
+            )
+        return
 
 
 async def _control(api: _Api, args: Mapping[str, Any], event_type: str) -> Any:
