@@ -2176,3 +2176,39 @@ def test_cli_login_with_issue_refresh_issues_grant(accounts_app: TestClient) -> 
     assert "access_token" in refresh_body
     # Login grants don't rotate — same token is returned.
     assert refresh_body["refresh_token"] == refresh_token
+
+
+def test_info_single_user_false_in_accounts_mode_with_local_marker(
+    accounts_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A login-backed server never reports ``single_user`` to the SPA.
+
+    The daemon-owned local server (``host/local_server.py``) sets
+    ``OMNIGENT_LOCAL_SINGLE_USER=1`` in every auth mode, because the marker
+    also carries the local operator-trust posture. In accounts mode the SPA
+    must still show Share, Members and Sharing settings, so ``single_user``
+    has to be false while the marker stays set.
+    """
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    resp = accounts_app.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["accounts_enabled"] is True
+    assert body["single_user"] is False
+
+
+def test_info_single_user_true_in_header_mode_with_local_marker(
+    header_mode_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Header mode with the local marker is the genuine one-user runtime.
+
+    Negative complement to the accounts-mode case above: without a login,
+    the marker alone still makes ``single_user`` true so the SPA keeps
+    hiding account/sharing chrome.
+    """
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    resp = header_mode_app.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["accounts_enabled"] is False
+    assert body["single_user"] is True
