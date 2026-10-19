@@ -15,7 +15,7 @@ import {
   fetchChanges,
   teamChatQueryKeys,
 } from "./chatApi";
-import { normalizeChangeItem, useTeamChatStore } from "./teamChatStore";
+import { applyChatFrame, normalizeChangeItem, useTeamChatStore } from "./teamChatStore";
 import type { ChatUpdatesFrame } from "@/lib/sessionUpdatesSocket";
 
 function isFiniteNumber(value: unknown): value is number {
@@ -130,6 +130,26 @@ export function backfillFromCursor(queryClient: QueryClient, cursor: string): Pr
 }
 
 let backfillInFlight: Promise<void> | null = null;
+const framesDuringBackfill: ChatUpdatesFrame[] = [];
+let flushingBackfill = false;
+
+/** Apply a frame now, or after the in-flight changes backfill. */
+export function acceptChatFrame(frame: ChatUpdatesFrame): void {
+  if (backfillInFlight !== null && !flushingBackfill) {
+    framesDuringBackfill.push(frame);
+    return;
+  }
+  applyChatFrame(frame);
+}
+
+function flushFramesAfterBackfill(): void {
+  flushingBackfill = true;
+  try {
+    for (const frame of framesDuringBackfill.splice(0)) applyChatFrame(frame);
+  } finally {
+    flushingBackfill = false;
+  }
+}
 
 /** Start a backfill when a cursor exists. Overlapping calls share one flight. */
 export function requestChatBackfill(queryClient: QueryClient): void {
@@ -142,7 +162,32 @@ export function requestChatBackfill(queryClient: QueryClient): void {
     })
     .finally(() => {
       backfillInFlight = null;
+      flushFramesAfterBackfill();
     });
+}
+
+/**
+ * After the updates socket drops and opens again, backfill from the cursor.
+ * The provider is the only caller. A first connect does not backfill.
+ */
+export function watchChatSocketReconnect(
+  socket: {
+    isConnected: () => boolean;
+    subscribeStatus: (listener: () => void) => () => void;
+  },
+  queryClient: QueryClient,
+): () => void {
+  let connected = socket.isConnected();
+  let sawDrop = false;
+  return socket.subscribeStatus(() => {
+    const now = socket.isConnected();
+    if (connected && !now) sawDrop = true;
+    if (!connected && now && sawDrop) {
+      sawDrop = false;
+      requestChatBackfill(queryClient);
+    }
+    connected = now;
+  });
 }
 
 /**

@@ -6,7 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessagePageResponse } from "./chatApi";
 import { teamChatQueryKeys } from "./chatApi";
 import { applyChatFrame, useTeamChatStore } from "./teamChatStore";
-import { backfillFromCursor, parseChatFrame, useChatFrames } from "./useChatFrames";
+import {
+  acceptChatFrame,
+  backfillFromCursor,
+  parseChatFrame,
+  useChatFrames,
+  watchChatSocketReconnect,
+} from "./useChatFrames";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 
@@ -188,6 +194,84 @@ describe("backfill", () => {
     expect(useTeamChatStore.getState().pendingChannels).toContain("c1");
   });
 });
+
+function reconnectSocket() {
+  let connected = false;
+  const listeners = new Set<() => void>();
+  return {
+    isConnected: () => connected,
+    subscribeStatus(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    setConnected(value: boolean) {
+      connected = value;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+function messageFrame(id: string, createdAt: number) {
+  return {
+    type: "chat" as const,
+    kind: "message.created" as const,
+    channel_id: "c1",
+    message_id: id,
+    thread_root_id: null,
+    created_at: createdAt,
+    author_id: "anna",
+  };
+}
+
+describe("AC-082a", () => {
+  it("AC-082a backfills three changes after reconnect before applying a newer frame", async () => {
+    const cursor = "7:cursor";
+    useTeamChatStore.getState().seedCursor(cursor);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/v1/chat/changes")) {
+        await gate;
+        return jsonResponse({
+          items: [messageChange("m1", 1), messageChange("m2", 2), messageChange("m3", 3)],
+          next: "10:m3",
+          reset: false,
+        });
+      }
+      throw new Error(url);
+    });
+
+    const socket = reconnectSocket();
+    const stop = watchChatSocketReconnect(socket, queryClient());
+    socket.setConnected(true);
+    socket.setConnected(false);
+    socket.setConnected(true);
+    acceptChatFrame(messageFrame("m2", 2));
+    acceptChatFrame(messageFrame("m4", 4));
+
+    await act(async () => {
+      release();
+    });
+
+    await waitFor(() => {
+      expect(messageIds()).toEqual(["m1", "m2", "m3", "m4"]);
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/v1/chat/changes?${new URLSearchParams({ after: cursor })}`,
+      expect.anything(),
+    );
+    expect(messageIds().filter((id) => id === "m2")).toHaveLength(1);
+    stop();
+  });
+});
+
+function messageIds() {
+  return Object.values(useTeamChatStore.getState().changes)
+    .filter((change) => change.kind === "message")
+    .map((change) => change.id);
+}
 
 describe("useChatFrames", () => {
   it("caches a channel message page after a message.created frame", async () => {

@@ -39,8 +39,7 @@ import {
   removeIdsFromPages,
 } from "@/lib/sessionListCache";
 import { isModalHostResolved, resolveModalHost } from "@/lib/sessionHost";
-import { applyChatFrame } from "@/chat/teamChatStore";
-import { parseChatFrame, requestChatBackfill } from "@/chat/useChatFrames";
+import { acceptChatFrame, parseChatFrame, watchChatSocketReconnect } from "@/chat/useChatFrames";
 import { type SessionUpdatesFrame, sessionUpdatesSocket } from "@/lib/sessionUpdatesSocket";
 import { isTempConvId } from "@/lib/tempConversationId";
 
@@ -381,8 +380,9 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           return;
         case "chat": {
           // Ids only. The parser drops any body a buggy sender attached.
+          // Frames that arrive during a reconnect backfill wait for it.
           const parsed = parseChatFrame(frame);
-          if (parsed) applyChatFrame(parsed);
+          if (parsed) acceptChatFrame(parsed);
           return;
         }
         case "removed":
@@ -464,20 +464,10 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     // The updates socket is app-wide. After it drops and reconnects, backfill
     // team chat from the stored cursor. No cursor means the shell was never
     // opened, so this does not call `/v1/chat/*`.
-    let unsubscribeStatus = () => {};
-    if ("subscribeStatus" in sessionUpdatesSocket) {
-      let connected = sessionUpdatesSocket.isConnected();
-      let sawDrop = false;
-      unsubscribeStatus = sessionUpdatesSocket.subscribeStatus(() => {
-        const now = sessionUpdatesSocket.isConnected();
-        if (connected && !now) sawDrop = true;
-        if (!connected && now && sawDrop) {
-          sawDrop = false;
-          requestChatBackfill(queryClient);
-        }
-        connected = now;
-      });
-    }
+    const unsubscribeStatus =
+      "subscribeStatus" in sessionUpdatesSocket
+        ? watchChatSocketReconnect(sessionUpdatesSocket, queryClient)
+        : () => {};
     const cache = queryClient.getQueryCache();
     const unsubscribeCache = cache.subscribe((event) => {
       const key = event.query.queryKey;
