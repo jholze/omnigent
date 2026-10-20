@@ -4437,12 +4437,26 @@ class ElicitationResolvedEvent(_SSEEventBase):
         answered, so the prompt is gone rather than decided and the
         UI can say so instead of implying it was resolved elsewhere.
         ``None`` when a verdict is present or the reason is unknown.
+    :param decided_by: Authenticated user id of the decider. Present
+        only when ``action`` is ``"accept"`` / ``"decline"`` /
+        ``"cancel"`` — a reason-only (no-verdict) resolution has no
+        decider. ``None`` otherwise, and omitted from ``model_dump``
+        so a reason-only event does not carry the key.
     """
 
     type: Literal["response.elicitation_resolved"]
     elicitation_id: str
     action: Literal["accept", "decline", "cancel"] | None = None
     reason: Literal["unanswered"] | None = None
+    decided_by: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_decided_by(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Drop ``decided_by`` when unset, keeping ``reason``/``action`` None intact."""
+        data = handler(self)
+        if self.decided_by is None:
+            data.pop("decided_by", None)
+        return data
 
 
 class PolicyDeniedEvent(_SSEEventBase):

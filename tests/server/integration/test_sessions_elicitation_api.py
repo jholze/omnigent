@@ -151,6 +151,79 @@ async def test_get_after_resolution_returns_resolved(
         pending_elicitations.reset_for_tests()
 
 
+async def test_get_after_resolution_returns_verdict(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    After a verdict is accepted, GET replays it alongside ``resolved``.
+
+    The pending index has already drained the id, so this proves the
+    in-memory resolved memory (not a ledger read) is what answers the
+    follow-up poll. In single-user mode ``decided_by`` is ``None``.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    agent = await create_test_agent(client, "test-get-resolved-verdict")
+    session_id = await _create_session(client, agent["id"])
+    hook_task, elicitation_id = await _park_permission_hook(client, session_id)
+
+    try:
+        verdict = await client.post(
+            f"/v1/sessions/{session_id}/elicitations/{elicitation_id}/resolve",
+            json={"action": "decline"},
+        )
+        assert verdict.status_code == 202, verdict.text
+        async with asyncio.timeout(5):
+            _ = await hook_task
+
+        resp = await client.get(
+            f"/v1/sessions/{session_id}/elicitations/{elicitation_id}",
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "status": "resolved",
+            "verdict": "decline",
+            "decided_by": None,
+        }
+    finally:
+        if not hook_task.done():
+            hook_task.cancel()
+            await asyncio.gather(hook_task, return_exceptions=True)
+        pending_elicitations.reset_for_tests()
+
+
+async def test_get_resolved_verdict_includes_decided_by_when_authenticated(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    """
+    With auth active, the resolved replay carries the deciding user id.
+
+    ``decided_by`` comes from the identity that delivered the verdict,
+    not from the poller — resolving as Alice then reading back shows
+    ``alice@example.com`` on the resolved payload.
+    """
+    agent = await create_test_agent(auth_client, user="alice@example.com")
+    session_id = await _create_session(auth_client, agent["id"], user="alice@example.com")
+
+    verdict = await auth_client.post(
+        f"/v1/sessions/{session_id}/elicitations/elicit_known_verdict/resolve",
+        json={"action": "cancel"},
+        headers={"X-Forwarded-Email": "alice@example.com"},
+    )
+    assert verdict.status_code == 202, verdict.text
+
+    resp = await auth_client.get(
+        f"/v1/sessions/{session_id}/elicitations/elicit_known_verdict",
+        headers={"X-Forwarded-Email": "alice@example.com"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "status": "resolved",
+        "verdict": "cancel",
+        "decided_by": "alice@example.com",
+    }
+
+
 # ── POST /sessions/{id}/elicitations/{eid}/resolve ───────
 
 

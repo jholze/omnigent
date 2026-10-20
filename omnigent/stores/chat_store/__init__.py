@@ -399,6 +399,17 @@ class ChatStore(ABC):
         ...
 
     @abstractmethod
+    def list_thread_agent_states(self, root_message_ids: Collection[str]) -> dict[str, str]:
+        """Return ``agent_state`` for each thread root id that has a row.
+
+        Ids without a thread row are omitted from the result, so a caller
+        can distinguish "no thread yet" from a stored state. Read-only;
+        used to annotate thread-root messages on the channel view without
+        exposing the thread's ``session_id`` or other private columns.
+        """
+        ...
+
+    @abstractmethod
     def create_agent_account(
         self,
         owner_id: str,

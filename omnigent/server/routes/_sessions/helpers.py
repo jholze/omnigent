@@ -1588,6 +1588,7 @@ def _publish_elicitation_resolved_to_ancestors(
     elicitation_id: str,
     action: str | None = None,
     reason: str | None = None,
+    decided_by: str | None = None,
 ) -> None:
     """
     Mirror an elicitation-resolved event into each ancestor stream.
@@ -1601,9 +1602,13 @@ def _publish_elicitation_resolved_to_ancestors(
         mirrors; see :func:`_publish_elicitation_resolved`.
     :param reason: Optional no-verdict reason carried through to the
         mirrors; see :func:`_publish_elicitation_resolved`.
+    :param decided_by: Optional authenticated user id carried through
+        to the mirrors; see :func:`_publish_elicitation_resolved`.
     """
     for ancestor_id in _ancestor_session_ids(conv_store, session_id):
-        _publish_elicitation_resolved(ancestor_id, elicitation_id, action=action, reason=reason)
+        _publish_elicitation_resolved(
+            ancestor_id, elicitation_id, action=action, reason=reason, decided_by=decided_by
+        )
 
 
 @restart_on_stale_cursor
@@ -3208,6 +3213,7 @@ def _publish_elicitation_resolved(
     elicitation_id: str,
     action: str | None = None,
     reason: str | None = None,
+    decided_by: str | None = None,
 ) -> None:
     """
     Universal "approval done" signal — single publish drives both
@@ -3229,6 +3235,9 @@ def _publish_elicitation_resolved(
         it. Omitted when unknown, not a recognised reason, or when a
         verdict is present — a verdict and a no-verdict reason are
         mutually exclusive on the wire.
+    :param decided_by: Optional authenticated user id that decided.
+        Rides along only with a real verdict — a no-verdict ``reason``
+        has no decider. No body or message text is put on the event.
     """
     payload: dict[str, Any] = {
         "type": "response.elicitation_resolved",
@@ -3236,6 +3245,8 @@ def _publish_elicitation_resolved(
     }
     if action in _VALID_ELICITATION_ACTIONS:
         payload["action"] = action
+        if decided_by is not None:
+            payload["decided_by"] = decided_by
     elif reason in _VALID_ELICITATION_RESOLVED_REASONS:
         payload["reason"] = reason
     session_stream.publish(session_id, payload)

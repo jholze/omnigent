@@ -666,6 +666,19 @@ class SqlAlchemyChatStore(ChatStore):
             row = session.get(SqlChatThread, (current_workspace_id(), root_message_id))
             return _to_thread(row) if row is not None else None
 
+    def list_thread_agent_states(self, root_message_ids: Collection[str]) -> dict[str, str]:
+        """Return ``agent_state`` for each thread root id that has a row."""
+        if not root_message_ids:
+            return {}
+        with self._session("list_chat_thread_agent_states") as session:
+            rows = session.execute(
+                select(SqlChatThread.root_message_id, SqlChatThread.agent_state).where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.root_message_id.in_(root_message_ids),
+                )
+            ).all()
+            return {row.root_message_id: row.agent_state for row in rows}
+
     # ── Agent accounts ──────────────────────────────────────────
 
     def create_agent_account(

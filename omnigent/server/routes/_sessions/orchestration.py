@@ -2401,14 +2401,24 @@ async def _resolve_elicitation(
     # The verdict rides along so the parent-side resolution notice
     # states how the gate was answered instead of a bare "resolved".
     if isinstance(elicitation_id, str) and elicitation_id:
-        _publish_elicitation_resolved(session_id, elicitation_id, action=data.get("action"))
+        action = data.get("action")
+        # Remember the verdict in the in-memory resolved index so the
+        # standalone approval page can report it after the pending entry
+        # is drained. ``remember_resolved`` ignores anything that is not
+        # accept / decline / cancel (e.g. a malformed approval body).
+        pending_elicitations.remember_resolved(session_id, elicitation_id, action, decided_by)
+        _publish_elicitation_resolved(
+            session_id, elicitation_id, action=action, decided_by=decided_by
+        )
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_resolved_to_ancestors,
                 conversation_store,
                 session_id,
                 elicitation_id,
-                data.get("action"),
+                action,
+                None,
+                decided_by,
             )
     # Runner-side elicitations (policy approvals, scaffold dispatch)
     # resolve when the canonical approval event reaches the runner.
@@ -9417,6 +9427,7 @@ async def _relay_runner_stream_once(
                                 elicitation_id,
                                 event.get("action"),
                                 reason=event.get("reason"),
+                                decided_by=event.get("decided_by"),
                             )
                         continue
                     session_stream.publish(session_id, event)
