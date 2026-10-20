@@ -1,8 +1,9 @@
 # Omnigent Chat – Requirements Spec
-Version: 0.6 · Date: 2026-10-17 · Status: in review · Owner: Jens Holze
+Version: 0.7 · Date: 2026-10-20 · Status: in review (Nachtrag Demo-Feedback Jens 20.10.2026) · Owner: Jens Holze
 
 Quellen: `00-intake.md` v0.2, `01-goals.md` v0.1, `02-story-map.md` v0.3, `03-domain.md` v0.3, Bestand-Spec `omnigent-chat-session/chat-integration.md` („Bestand-Spec“). Code geprüft: `jholze/omnigent` main `87f6f08`, PR #4 `616ea2f`, PR #5 `8a703a3`, PR #14 `a2fcbe1`, PR #15 `a3014eb`. v0.5 zusätzlich: Gap-Analyse des nativen MCP-Endpoints auf Fork-`main` nach Merge von PR #14 (`omnigent/server/mcp_endpoint.py`, `omnigent/server/mcp_extensions.py`, `docs/mcp.md`, Stand 2026-10-17) und MCP-Spezifikation 2026-07-28 (Changelog, Security Best Practices) sowie OWASP MCP Security Cheat Sheet.
 v0.6: Entscheidung Jens Sa 17.10.2026 20:11 MESZ „Bots dürfen alles, was der Owner darf.“ – Agentenkonto-Tokens erhalten über MCP die vollen Rechte ihres Owners (ADR-0010, ersetzt die Allowlist aus ADR-0009 Punkt 1).
+v0.7: Demo-Feedback Jens Di 20.10.2026, erster Schnitt. Ausgangsstand auf `epic/team-chat` war v0.6 (kein v0.7.x im Branch). Neue FR-105…FR-110, NFR-032, ACs im Nachtrag v0.7. Keine neuen Produktfragen entschieden; offene Punkte in §12.
 Status je Item: **exists** / **adapt** / **new** mit Pfad. Unsicherheit: `[ANNAHME A-n]`, `[OFFEN Q-n]`.
 
 ## 1. Context & problem
@@ -91,7 +92,7 @@ Begriffe laut Glossar `03-domain.md`. „Server“ = Omnigent-Server, „Web-App
 ### Activity A3: Agenten beauftragen
 | ID | Requirement (EARS) | Story | Prio | Rel | Status | Notes |
 |---|---|---|---|---|---|---|
-| FR-033 | When a human posts a message containing an `<@omnigent_agent:HANDLE>` token in a Channel or DM (top-level or in a Thread without active agent), the Server shall create a session as the caller via the existing create path, send the Thread context as first `message` event, and link the Thread (`chat_threads.session_id`, `agent_state=active`). | ST-3.1.1 | Must | R0 | new (`omnigent/server/chat_agent_threads.py`; nutzt Create-Pfad von `POST /v1/sessions` und `POST /v1/sessions/{id}/events`, exists) | A-5, A-8; `host_id` optional (ohne: vom Aufrufer verwalteter Runner wie heute) |
+| FR-033 | When a human posts a message containing an `<@omnigent_agent:HANDLE>` token in a Channel or DM (top-level or in a Thread without active agent), the Server shall create a session as the caller via the existing create path, send the Thread context as first `message` event, and link the Thread (`chat_threads.session_id`, `agent_state=active`). | ST-3.1.1 | Must | R0 | new (`omnigent/server/chat_agent_threads.py`; nutzt Create-Pfad von `POST /v1/sessions` und `POST /v1/sessions/{id}/events`, exists) | A-5, A-8; `host_id` optional (ohne: vom Aufrufer verwalteter Runner wie heute). v0.7: ein gesetztes `host_id`, das dem Aufrufer gehört und live ist, startet die Session auf diesem Host und fällt nicht auf `internal` / „Agent-Start fehlgeschlagen (internal)“ (AC-033c, T-005) |
 | FR-034 | When an Agent-Thread session is created, the Server shall grant READ on it to every other human member of the Channel; if the sharing mode forbids new grants, then the Server shall skip the grants and post the system line „Live-Ansicht nur für {Aufrufer} (Freigabe am Server deaktiviert)“. | ST-3.1.1 | Must | R0 | adapt (Permission-Store, `omnigent/server/sharing_settings.py`) | Q-9; [OFFEN Q-17] spätere Mitglieder |
 | FR-035 | If session creation or the first message fails, then the Server shall set `agent_state=start_failed` and post a system line naming the reason class (`no_project`, `host_offline`, `agent_not_found`, `forbidden`, `timeout`, `internal`) without stack traces. | ST-3.1.1 | Must | R0 | new | |
 | FR-036 | When an Agentenkonto posts a message containing an `<@omnigent_agent:HANDLE>` token in a Channel or DM where FR-033 applies, the Server shall start the Agent-Thread as in FR-033 with the Agentenkonto's owner as caller (session owner = owner, project/host resolution for the owner per A-8) and store the Agentenkonto as initiator in `chat_threads.started_by_agent_account_id`. | ST-3.1.1, ST-7.1.5 | Must | R1 | new (`omnigent/server/chat_agent_threads.py`; Spalte `chat_threads.started_by_agent_account_id`) | **v0.6 ersetzt** das Verbot „Nur Menschen können Omnigent-Agenten starten“ (Entscheidung Jens 17.10.2026 20:11, ADR-0010). Kostenbremse über Grenzen statt Verbot: FR-092 (Rate-Limit), FR-074 (`bot_streak_limit`), FR-104 (optionales Kontingent, Zahlen [OFFEN Q-28]); Fehlerklassen wie FR-035 aus Sicht des Owners; Thread zeigt „gestartet von {Bot} ({Owner})“; Audit FR-103 [ANNAHME A-32] |
@@ -102,7 +103,7 @@ Begriffe laut Glossar `03-domain.md`. „Server“ = Omnigent-Server, „Web-App
 | FR-041 | If the author of a reply in an active Agent-Thread has level < EDIT on the session, then the Server shall store but not forward the reply and mark it `forward_state=not_forwarded`, and the Web-App shall label it „nicht an Agent“. | ST-3.1.3 | Must | R1 | new | folgt aus Q-8/Q-9 |
 | FR-042 | When the Aufrufer or a human with level ≥ EDIT triggers „Entlassen“ (button or `/dismiss`), the Server shall set `agent_state=dismissed` and stop forwarding without stopping the session. | ST-3.1.3 | Must | R1 | new | |
 | FR-043 | When a human with level ≥ EDIT mentions the Thread's agent handle in a dismissed Thread, the Server shall set `agent_state=active` again and forward that message to the same session. | ST-3.1.3 | Should | R1 | new | |
-| FR-044 | While an Agent-Thread is open, the Web-App shall show the session status chip (`launching`→„startet…“, `running`→„arbeitet“, `waiting`→„braucht Antwort“, `idle`→„fertig“, `failed`→„Fehler“, dismissed→„entlassen“) updated from the session stream. | ST-3.2.1 | Must | R0 | adapt (`web/src/components/SessionStateBadge.tsx`) | Visuelle Sprache der Status-Icons wie TaskSteps (Bogen = arbeitet, Häkchen = fertig, Kreuz = Fehler), ADR-0008 |
+| FR-044 | While an Agent-Thread is open, the Web-App shall show the session status chip (`launching`→„startet…“, `running`→„arbeitet“, `waiting`→„braucht Antwort“, `idle`→„fertig“, `failed`→„Fehler“, dismissed→„entlassen“) updated from the session stream. | ST-3.2.1 | Must | R0 | adapt (`web/src/components/SessionStateBadge.tsx`) | Visuelle Sprache der Status-Icons wie TaskSteps (Bogen = arbeitet, Häkchen = fertig, Kreuz = Fehler), ADR-0008. v0.7: die Kopfzeile zeigt nicht das alleinstehende Wort „fertig“ (AC-044d, [OFFEN Q-34]); Chip und Sidebar-Zähler aktualisieren ohne Reload (AC-044e, AC-009c) |
 | FR-045 | While an Agent-Thread is open and the viewer has READ on the session, the Web-App shall render the session's assistant output streaming via the existing conversation registry (`web/src/store/conversationRegistry.ts`) and AI-Elements `message`/`reasoning`. | ST-3.2.1 | Must | R0 | adapt (`web/src/components/ai-elements/*` exists) | |
 | FR-046 | When an Agent-Thread session reaches `idle` after a turn, the Server shall store the turn's final assistant text (max 32 000 characters, else truncated with „… vollständig in der Session“) as a Thread reply with `author_kind=omnigent_agent`. | ST-3.2.1 | Must | R0 | new | [ANNAHME A-11] |
 | FR-047 | The Web-App shall show a compact status chip on every Agent-Thread root in the Channel view, fed by the WS watch-set of `/v1/sessions/updates` (`SessionListItem.status`, `pending_elicitations_count`). | ST-3.2.1 | Must | R0 | adapt (WS exists; Rescan 4 s, `_SESSION_UPDATES_RESCAN_INTERVAL_S` in `_sessions/common.py`) | |
@@ -189,6 +190,18 @@ Grundlage: Gap-Analyse des gemergten MCP-Endpoints (PR #14): zustandsloses Strea
 | FR-086 | When a human joins a Channel, the Server shall grant READ on the sessions of all Agent-Threads of that Channel (unless the sharing mode forbids new grants). | ST-3.1.1 | Should | R1 | new | Default zu [OFFEN Q-17] |
 | FR-088 | When an Agentenkonto calls `chat_unread` (MCP) or `GET /v1/chat/unread`, the Server shall return its unread messages that mention it or were posted in its DMs (oldest first, at most 50, each with `channel_id`, `thread_root_id`, `message_id`, author, body), and `chat_mark_read` shall advance the account's read cursor past them. | ST-7.1.2 | Must | R1 | new (`chat_reads` je Principal, FR-007) | Wecken per Polling-Routine des Grok Bots, Intervall ≥ 5 min [ANNAHME A-23]; Webhook-Wecken R1.1 |
 | FR-087 | If a Thread stays in `agent_state=starting` for more than 120 s (z. B. Server-Neustart während des Starts), then the Server shall set `start_failed` with reason `timeout` and post the system line. | ST-3.1.1 | Must | R0 | new | Zustand liegt nur in `chat_threads` |
+
+### Nachtrag v0.7 – Demo-Feedback 20.10.2026
+Erster Schnitt. Jede UI-AC gilt bei 1280×800 und 390×844 (NFR-032). Marker exists/adapt/new aus dem Code auf `epic/team-chat`.
+
+| ID | Requirement (EARS) | Story | Prio | Rel | Status | Notes |
+|---|---|---|---|---|---|---|
+| FR-105 | When a DM is listed or opened, the Web-App shall show the other participants' display names in the sidebar and in the header, and shall show the DM's members; it shall not show only „Direktnachricht“. | ST-2.1.2 | Must | R0 | adapt (`web/src/chat/ChatSidebar.tsx` `dmLabel` → „Direktnachricht“, wenn `name` leer ist; `ChannelResponse` hat keine Teilnehmernamen; `GET /v1/chat/channels/{id}/members` liefert `display`) | T-007b |
+| FR-106 | When the user activates the thread pane's close control, the Web-App shall close the pane and leave the channel open without the thread. | ST-2.2.1 | Must | R0 | adapt (`web/src/chat/ThreadPane.tsx`, Link `chat.thread.close`; Demo: das X tut nichts) | T-007b |
+| FR-107 | While an agent request that needs an answer is unresolved, the Web-App shall keep it visible in the channel or re-surface it until it is resolved, including after the message list scrolls. | ST-4.1.1 | Must | R0 | new (`web/src/chat/ChannelView.tsx`, `MessageList.tsx`) | FR-010 („Braucht dich“, T-112) bleibt eine eigene Ansicht und ersetzt das nicht |
+| FR-108 | The chat UI shall render message bodies, the channel header and sidebar entries at least at the interface font step (`text-ui`) and with looser spacing than `text-xs` and the desktop sidebar padding `md:py-1.5`, at both viewports of NFR-032. | ST-UX-1 | Must | R0 | adapt (`web/src/chat/*` nutzt `text-sm` = 0,9× Interface-Schrift und `text-xs`; `--text-sm` folgt `--desktop-ui-font-size`) | [ANNAHME A-37]; T-007b |
+| FR-109 | Where an Appearance theme is selected (mode light/dark/system and the color theme), the chat UI shall follow it through the existing semantic tokens, including a switch without reload. | ST-UX-1 | Must | R0 | exists (`web/src/chat/*` ohne feste Palette; Tokens `border-border`, `text-foreground`, `bg-muted`, `text-muted-foreground`; `ThemeProvider` / `next-themes`) | T-007b |
+| FR-110 | The Web-App shall let a permitted human create a public channel, edit its name and topic, archive it, change its channel settings (at least topic and `project_name`) and add or remove members. | ST-6.1.1 | Should | R1 | new | Wer jede Aktion darf: [OFFEN Q-16, Q-29]. Schließen = `archived_at` [ANNAHME A-36], Bestätigung [OFFEN Q-30]. Weitere Einstellungen [OFFEN Q-31]. Private Channels bleiben ST-6.1.2 / E-R2-4 [OFFEN Q-32]. API-Anlegen und join/leave: FR-005/FR-006, T-003. Design-PATCH und Spalte `archived_at` ohne Route. `GET …/members` existiert (FR-076 zeigt Status, verwaltet nicht). Kein bestehendes Ticket. |
 
 #### Acceptance criteria
 Testdaten für alle ACs: Workspace 0; Menschen `anna@bloopark.de` (Anna), `jens@bloopark.de` (Jens), `bob@bloopark.de` (Bob), `carla@bloopark.de` (Carla); Channels `#general`, `#billing` (Mitglieder Anna, Jens, Bob); Agent „coder“; Annas Projekt „billing“ mit `agent_id=coder`, `host_id=h-anna` (online); Agentenkonto „Grok“ `grok-jens` (Owner Jens). Mit „E2E“ markierte ACs werden als Playwright-Test in `tests/e2e_ui/team_chat/` umgesetzt (Mock-LLM); alle übrigen als pytest/Vitest.
@@ -670,7 +683,7 @@ Then erscheint das Häkchen ohne Skalierung (nur Opacity ≤ 120 ms), der Bogen 
 ```gherkin
 Given die Session läuft
 When Anna "/interrupt" sendet
-Then wird ein Event type "interrupt" gesendet und der Chip wechselt binnen 1 s auf "fertig"
+Then wird ein Event type "interrupt" gesendet und der Chip wechselt binnen 1 s in den Idle-Zustand, ohne das alleinstehende Wort "fertig" (AC-044d)
 ```
 **AC-049b (FR-049)**
 ```gherkin
@@ -1264,6 +1277,122 @@ When grok-jens nacheinander 3 Sessions startet
 Then werden alle 3 Sessions angelegt (es gelten nur FR-092 und FR-074)
 ```
 
+**Nachtrag v0.7 – Demo-Feedback Jens 20.10.2026** (Testdaten wie oben: Anna, Jens, Bob. Jede UI-AC zusätzlich bei 1280×800 und 390×844, NFR-032.)
+
+**AC-033c (FR-033, A-8)**
+```gherkin
+Given Annas Projekt "billing" nennt host_id eines Hosts, der Anna gehört und live ist
+When Anna in "#billing" "<@omnigent_agent:agent> bitte Tests fixen" sendet
+Then entsteht die Session mit dieser host_id
+And der Thread zeigt nicht "Agent-Start fehlgeschlagen (internal)"
+```
+**AC-044d (FR-044) – E2E**
+```gherkin
+Given Anna hat einen Agent-Thread offen und die Session ist idle
+Then zeigt die Kopfzeile nicht das alleinstehende Wort "fertig"
+And entweder nennt das Label, wer fertig ist, oder der Idle-Chip fehlt
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-044e (FR-044, FR-047) – E2E**
+```gherkin
+Given Anna hat den Channel offen und der Chip zeigt "arbeitet"
+When die Session nach waiting mit einer offenen Freigabe wechselt und Anna nicht neu lädt
+Then zeigt der Chip in der Kopfzeile und an der Thread-Wurzel binnen 1 s bzw. 5 s "braucht Antwort"
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-009c (FR-008, FR-009) – E2E**
+```gherkin
+Given Anna hat die Sidebar offen und "#billing" zeigt einen Ungelesen-Zähler
+When Jens in "#billing" eine Nachricht schreibt und Anna nicht neu lädt
+Then steigt der Zähler in der Sidebar, ohne dass Anna die Seite neu lädt
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-105a (FR-105) – E2E**
+```gherkin
+When Anna eine DM mit Bob anlegt und sie öffnet
+Then steht in der Sidebar und in der Kopfzeile Bobs Anzeigename, nicht nur "Direktnachricht"
+And Anna sieht die Mitglieder dieser DM mit Anzeigenamen
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-106a (FR-106) – E2E**
+```gherkin
+Given Anna hat einen Thread in der Seitenleiste offen
+When sie das X „Thread schließen“ aktiviert
+Then ist die Thread-Leiste zu und der Channel bleibt offen
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-107a (FR-107) – E2E**
+```gherkin
+Given im Channel liegt eine offene Agent-Anfrage, die eine Antwort braucht
+When Anna in der Nachrichtenliste so weit scrollt, dass die ursprüngliche Karte aus dem Blick gerät
+Then bleibt die Anfrage sichtbar oder wird erneut eingeblendet, bis sie beantwortet ist
+And nach dem Beantworten verschwindet diese Hervorhebung
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-108a (FR-108) – E2E**
+```gherkin
+Given die Interface-Schrift ist die Appearance-Voreinstellung
+When Anna einen Channel mit Nachrichten öffnet
+Then sind Nachrichtentext, Kopfzeile und Sidebar-Einträge mindestens auf der Stufe text-ui
+And der Abstand der Sidebar-Zeilen ist größer als die heutige Desktop-Polsterung md:py-1.5
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-109a (FR-109) – E2E**
+```gherkin
+Given Anna stellt unter Einstellungen > Darstellung das Thema auf Dunkel und eine Farbpalette, die nicht die Voreinstellung ist
+When sie /chat öffnet
+Then nutzen Sidebar, Kopfzeile, Nachrichten und Composer dieselben semantischen Flächen- und Schriftfarben wie die übrige Shell
+When sie ohne Neuladen auf Hell wechselt
+Then wechseln dieselben Chat-Flächen mit der Shell
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+**AC-110a (FR-110) – E2E**
+```gherkin
+Given die noch offene Regel Q-16 lässt Anna Channels anlegen
+When Anna aus der Chat-Oberfläche einen öffentlichen Channel "demo-feedback" anlegt
+Then erscheint "#demo-feedback" in ihrer Sidebar und sie ist Mitglied
+```
+**AC-110b (FR-110) – E2E**
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna den Channel bearbeiten
+When Anna Name und Thema von "#demo-feedback" ändert
+Then zeigen Sidebar und Kopfzeile den neuen Namen und das neue Thema
+```
+**AC-110c (FR-110) – E2E**
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna "#demo-feedback" schließen
+When Anna den Channel schließt
+Then verschwindet er aus der aktiven Sidebar und ein neuer Post wird nicht gespeichert (409)
+And ob "#general" geschlossen werden darf, bleibt [OFFEN Q-30]
+```
+**AC-110d (FR-110)**
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna die Channel-Einstellungen ändern
+When Anna topic und project_name von "#demo-feedback" speichert
+Then liefert das nächste Lesen des Channels beide Werte
+And welche weiteren Einstellungen es gibt, bleibt [OFFEN Q-31]
+```
+**AC-110e (FR-110) – E2E**
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna Mitglieder von "#demo-feedback" verwalten
+When Anna Bob hinzufügt und später wieder entfernt
+Then sieht sie Bob mit Anzeigenamen in der Mitgliederliste und nach dem Entfernen nicht mehr
+And Bob sieht den Channel nach dem Hinzufügen in der Sidebar und nach dem Entfernen nicht mehr
+```
+**AC-133a (C-13) – Chore, kein Produkt-FR**
+```gherkin
+Given ein leerer Accounts-Server und das Demo-Seed aus PR #49
+When das Seed läuft
+Then gibt es aktive Demo-Projekte mit laufenden Sessions und in den Channels lebende Agenten
+And Projekt-Sessions dürfen Opus nutzen
+And Chat-Agenten nutzen Haiku oder Sonnet
+```
+**AC-133b (C-13)**
+```gherkin
+When das Seed ein zweites Mal auf derselben Instanz läuft
+Then legt es dieselben Channels und Sessions nicht doppelt an
+```
+
 ## 7. Non-functional requirements
 Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLite oder Postgres), LAN-Latenz ≤ 10 ms, Browser Chrome stable auf Laptop mit ≥ 4 Kernen.
 
@@ -1300,6 +1429,7 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 | NFR-029 | Safety | Kostenbremse Bots über Grenzen statt Verbot | Agentenkonten dürfen Sessions starten und steuern (FR-036, FR-077, FR-070); begrenzt durch 120 Requests/60 s (FR-092), Bot-Streak ≤ 5 je Thread (FR-074) und optionales Kontingent je Agentenkonto (FR-104, Zahlen [OFFEN Q-28]) | pytest (AC-074a/b, AC-092a, AC-104a/b) | new (v0.6 umgestellt) |
 | NFR-030 | Interaction capability | Wahrgenommene Reaktion | jede Klick-Aktion zeigt ≤ 100 ms sichtbares Feedback (Pressed-State, Spinner oder optimistische Änderung) | UX-Review + Playwright-Stichprobe | new |
 | NFR-031 | Compatibility | MCP-Client-Kompatibilität Bot-Pfad | Protokollversionen 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 aushandelbar (FR-097); ein realer Grok-Bot-MCP-Client (Streamable HTTP, Bearer `ogc_`) besteht vor dem R1-Launch den Smoke-Test AC-069c ohne Abweichung (v0.6: `tools/list` = Tool-Menge des Owners) | pytest AC-097a + Smoke-Protokoll in `docs/runbooks/team-chat-r1.md` (T-129) | new (v0.5, v0.6 angepasst) |
+| NFR-032 | Interaction capability | Viewport-Pflicht jeder Chat-UI-AC | Prüfung bei 1280×800 und bei 390×844; kein horizontaler Scroll, die AC bleibt bedienbar. Ergänzt NFR-021 (Desktop ≥ 1024 px). Kein Mobile-Produkt (Non-goal und Story Map „Später“ bleiben) | Playwright-Viewport an jeder UI-AC | new (v0.7) [ANNAHME A-33] |
 
 ## 8. Constraints & interfaces
 - C-1 Stack unverändert: FastAPI, SQLAlchemy 2/Alembic, React 19 (Issue #16 vor UI-Arbeit gemergt), Vite, Tailwind 4, shadcn/Radix, zustand, TanStack Query, Tiptap 3.30.5, lucide. Neue Web-Dependencies nur `motion`, `@tiptap/extension-mention`, `@tiptap/suggestion` (3.30.5). Neue Test-Dependency `axe-playwright-python`.
@@ -1311,6 +1441,9 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 - C-7 Alembic: genau ein Head nach jedem Merge (Merge-Revision falls nötig).
 - C-8 Upstream-Fähigkeit (A-2): alles hinter Flag, keine Fork-Hardcodes.
 - C-9 Repo-Konventionen: benannte DB-Sessions (`make_named_managed_session_maker`, AGENTS.md „Database query names“), kurze Kommentare ohne Issue-Nummern, `pre-commit` grün, `openapi.json` via `scripts/dump_openapi.py` aktuell (`tests/server/test_openapi_drift.py`).
+- C-12 (v0.7) Kein i18n und keine Spracheinstellung (kein `i18next`, keine `locales`). Chat-Texte sind fest Deutsch, Einstellungsseiten fest Englisch. Kein i18n-System bauen. [OFFEN Q-35] Befund: `web/src/components/blocks/ApprovalCard.tsx` hat weiterhin englische Zweige („Requested by sub-agent“, „Approve & switch to auto mode“, „Allow commands starting with…“, „Approve for this session“, „Approve & don't ask again“), obwohl der Team-Chat deutsche `CHAT_APPROVAL_LABELS` übergibt (`web/src/chat/agent/agentApprovals.ts`).
+- C-13 (v0.7) Demo-Seed, kein Produktverhalten. PR #49 (`feat/team-chat-demo-seed`, offen; Skript auf diesem Branch noch nicht vorhanden) soll aktive Demo-Projekte mit laufenden Sessions füllen, in den Channels lebende Agenten haben, Opus für Projekt-Sessions erlauben und für Chat-Agenten Haiku oder Sonnet nutzen. [ANNAHME A-35] Ticket T-133. AC-133a/b.
+- C-14 (v0.7) Einstellungen, Befund am Code, keine weiteren ACs außer FR-108/FR-109. Der Chat folgt der Darstellung (Modus, Farbpalette) über semantische Tokens (FR-109, exists). Interface-Schriftgröße und -familie steuern `--desktop-ui-font-size` / `--ui-font-family`; Chat nutzt heute `text-sm` (0,9×) und `text-xs` statt `text-ui` (FR-108, adapt). Default Workspace Tab ist `files` | `changes` | `github` | `subagents` (`web/src/lib/workspaceTabPreferences.ts`) und gilt für die Session-Leiste, nicht für `/chat` – Chat als Tab [OFFEN Q-33]. Workspace-Panel, Default-Transcript (Chat/Terminal der Session), Terminal-Thema und Code-Schrift gelten für die Session-Arbeitsfläche bzw. Editor/Terminal, nicht sichtbar für den Team-Chat [OFFEN Q-37].
 - C-10 (v0.5) MCP-Basis R1: Streamable HTTP zustandslos mit reinem JSON wie PR #14; unterstützte Protokollversionen 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 (FR-097); 2026-07-28 erst R2 (Q-21). Bestehende Nicht-Chat-Tools aus PR #14 werden in ihrem Verhalten für User-JWT nicht geändert (außer Protokoll-Hygiene FR-097…FR-099 und Audit FR-100); Annotationen/Structured Output nur für `chat_*` (Q-24). v0.6: Für Agentenkonto-Tokens verhalten sich alle Nicht-Chat-Tools wie für den User-JWT des Owners (FR-070, FR-101).
 - C-11 (v0.5, v0.6 geändert) Annotationen (FR-093) sind keine Sicherheitsgrenze; Sicherheit für Bots entsteht durch Auth-Zweig mit Pfadgrenze (FR-066), Owner-Äquivalenz ohne Zusatzrechte (FR-070, FR-101), Owner-Teilmengenregel im Chat (FR-067), `confirm` für Writes (Dry-Run, FR-069 und PR #14), Untrusted-Markierung (FR-095/096), Grenzen (FR-092, FR-074, FR-104), Audit mit Bot und Owner (FR-100, FR-103) und Widerruf (FR-064, FR-102). Es gibt keine Bot-spezifische Tool-Allowlist mehr (ADR-0010).
 - Schnittstellen: REST `/v1/chat/*`; WS-Frame-Typ `chat` auf `/v1/sessions/updates`; MCP `chat_*`; Webhook `chat.mention` (Envelope wie PR #15). Details in `05-design.md`.
@@ -1325,14 +1458,14 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 | Goal | Story | FR/NFR | AC / test | Task |
 |---|---|---|---|---|
 | G-1 | ST-1.1.1 | FR-001, FR-005, FR-006 | AC-001a/b, AC-005a/b, AC-006a/b; E2E `test_chat_shell.py` | T-003, T-006, T-009 |
-| G-1 | ST-6.1.1 | FR-002, FR-003, FR-004, NFR-025 | AC-002a, AC-003a/b, AC-004a/b | T-001, T-003, T-006 |
+| G-1 | ST-6.1.1 | FR-002, FR-003, FR-004, FR-110, NFR-025 | AC-002a, AC-003a/b, AC-004a/b, AC-110a–e | T-001, T-003, T-006, T-132 |
 | G-1 | ST-2.1.1 | FR-013–FR-020, FR-032, FR-082–FR-084, NFR-001/002/014/018 | AC-013a…AC-020a, AC-032a, AC-082a–AC-084a; E2E `test_channel_messaging.py`, `test_reconnect_backfill.py` | T-002, T-003, T-006, T-007, T-009, T-111, T-119, T-124 |
-| G-1 | ST-2.1.2 | FR-021, FR-022 | AC-021a/b, AC-022a; E2E `test_dm.py` | T-002, T-003, T-007, T-009 |
-| G-1 | ST-2.2.1 | FR-023–FR-025 | AC-023a–AC-025a; E2E `test_threads.py` | T-002, T-003, T-007, T-009 |
-| G-2 | ST-3.1.1 | FR-027, FR-033–FR-038, FR-085–FR-087 | AC-027a/b, AC-033a…AC-038a, AC-085a/b, AC-086a, AC-087a; E2E `test_agent_thread.py` | T-002, T-005, T-008, T-009, T-103, T-109, T-113 |
-| G-2 | ST-3.2.1 | FR-044–FR-047, NFR-004/005 | AC-044a…AC-047a; E2E `test_agent_thread.py` | T-005, T-008, T-009, T-118 |
-| G-2 | ST-4.1.1 | FR-055–FR-058 | AC-055a…AC-058a; E2E `test_agent_thread_approval.py` | T-008, T-009 |
-| G-1 | ST-1.2.1 | FR-007–FR-009 | AC-007a–AC-009b; E2E `test_unread.py` | T-101, T-111, T-120 |
+| G-1 | ST-2.1.2 | FR-021, FR-022, FR-105 | AC-021a/b, AC-022a, AC-105a; E2E `test_dm.py` | T-002, T-003, T-007, T-007b, T-009 |
+| G-1 | ST-2.2.1 | FR-023–FR-025, FR-106 | AC-023a–AC-025a, AC-106a; E2E `test_threads.py` | T-002, T-003, T-007, T-007b, T-009 |
+| G-2 | ST-3.1.1 | FR-027, FR-033–FR-038, FR-085–FR-087 | AC-027a/b, AC-033a…AC-038a, AC-033c, AC-085a/b, AC-086a, AC-087a; E2E `test_agent_thread.py` | T-002, T-005, T-008, T-009, T-103, T-109, T-113 |
+| G-2 | ST-3.2.1 | FR-044–FR-047, NFR-004/005 | AC-044a…AC-047a, AC-044d, AC-044e; E2E `test_agent_thread.py` | T-005, T-008, T-007b, T-009, T-118 |
+| G-2 | ST-4.1.1 | FR-055–FR-058, FR-107 | AC-055a…AC-058a, AC-107a; E2E `test_agent_thread_approval.py` | T-008, T-007b, T-009 |
+| G-1 | ST-1.2.1 | FR-007–FR-009 | AC-007a–AC-009b, AC-009c; E2E `test_unread.py` | T-101, T-111, T-007b, T-120 |
 | G-1 | ST-1.2.2 | FR-010 | AC-010a/b; E2E `test_needs_you.py` | T-112, T-120 |
 | G-1 | ST-1.2.3 | FR-011, FR-012 | AC-011a, AC-012a; Vitest | T-112 |
 | G-1 | ST-2.3.1 | FR-026, FR-027 | AC-026a/b; E2E `test_mentions.py` | T-002, T-110, T-120 |
@@ -1352,11 +1485,12 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 | G-2 | ST-7.1.4 | FR-061–FR-065 | AC-061a…AC-065a; E2E `test_agent_accounts_ui.py` | T-105, T-116, T-121 |
 | G-2 | ST-7.1.5 | FR-036, FR-074, FR-075, FR-077, FR-091, FR-092, FR-104, NFR-029 | AC-036a/b, AC-074a, AC-074b, AC-075a, AC-077a/b, AC-091a, AC-104a/b | T-109, T-104 (FR-077), T-127, T-119 |
 | G-2 | ST-7.1.6 | FR-069, FR-070, FR-091, FR-093, FR-094, FR-097–FR-099, FR-101, NFR-031 | AC-069a/b/c, AC-070a–e, AC-091a, AC-093a, AC-094a/b, AC-097a/b, AC-098a/b, AC-099a, AC-101a | T-107, T-126, T-127, T-128, T-129 |
-| G-3 | ST-UX-1 | FR-078–FR-081, NFR-006–NFR-011, NFR-030 | AC-078a…AC-081a; E2E `test_motion.py`, `test_a11y.py` | T-117, T-118, T-120 |
+| G-3 | ST-UX-1 | FR-078–FR-081, FR-108, FR-109, NFR-006–NFR-011, NFR-030, NFR-032 | AC-078a…AC-081a, AC-108a, AC-109a; E2E `test_motion.py`, `test_a11y.py` | T-117, T-118, T-007b, T-120 |
+| – | Demo-Seed (C-13) | – | AC-133a/b | T-133 |
 | G-3 | ST-UX-2 | NFR-027 | PR-Checkliste | T-000, T-122 |
 | G-4 | (quer) | NFR-022–NFR-025, C-7, C-8 | CI | T-000, T-001, T-119 |
 
-Lücken: Erfolgsmessung G-1/G-2 ohne Telemetrie (bewusst, Q-6). Keine Story ohne FR, keine Must-FR ohne AC. v0.5-Selbstcheck: jede neue FR-091…FR-100 hat ≥ 1 AC und ≥ 1 Task (Coverage in `07-tasks.md` v0.4). v0.6-Selbstcheck: FR-036/068/070/077/100 neu formuliert, FR-101…FR-104 neu – jede hat ≥ 1 AC (Must ≥ 1 Happy Path + ≥ 1 Fehler-/Randfall) und ≥ 1 Task (Coverage in `07-tasks.md` v0.5).
+Lücken: Erfolgsmessung G-1/G-2 ohne Telemetrie (bewusst, Q-6). Keine Story ohne FR, keine Must-FR ohne AC. v0.5-Selbstcheck: jede neue FR-091…FR-100 hat ≥ 1 AC und ≥ 1 Task (Coverage in `07-tasks.md` v0.4). v0.6-Selbstcheck: FR-036/068/070/077/100 neu formuliert, FR-101…FR-104 neu – jede hat ≥ 1 AC (Must ≥ 1 Happy Path + ≥ 1 Fehler-/Randfall) und ≥ 1 Task (Coverage in `07-tasks.md` v0.5). v0.7-Selbstcheck: FR-105…FR-110 und NFR-032 haben je ≥ 1 AC und genau ein Ticket (T-007b, T-005 für AC-033c, T-132, T-133 für C-13). AC-133a/b sind Chore ohne Produkt-FR. T-007b hat 8 ACs und wird nicht gesplittet (siehe `07-tasks.md`).
 
 ## 11. Assumptions
 | ID | Annahme | Bestätigen durch |
@@ -1392,6 +1526,11 @@ Lücken: Erfolgsmessung G-1/G-2 ohne Telemetrie (bewusst, Q-6). Keine Story ohne
 | A-30 | [ANNAHME] „Owner deaktiviert oder gelöscht“ (FR-102) wird im Auth-Zweig bei jedem Request über den bestehenden Accounts-/Permission-Store geprüft; in Auth-Modi ohne Nutzerverwaltung (Header/Single-User) gilt nur der Token-Widerruf (FR-064) | Tech Lead (T-105) |
 | A-31 | [ANNAHME] Legt ein Agentenkonto einen Channel an, werden Agentenkonto und Owner Mitglied (sonst greift FR-067 sofort und der Bot verliert den Zugriff) | Jens |
 | A-32 | [ANNAHME] Von einem Bot gestartete Sessions gehören dem Owner (A-5 mit Owner als Aufrufer); der Bot erscheint nur als Initiator (`started_by_agent_account_id`, Audit FR-103, Anzeige „gestartet von {Bot} ({Owner})“) | Jens |
+| A-33 | [ANNAHME] NFR-032 (1280×800 und 390×844) gilt für jede Chat-UI-AC. Das ist die Prüfgröße aus dem Demo-Feedback, nicht das zurückgestellte Mobile-Produkt | Jens |
+| A-34 | [ANNAHME] Das „fertig“ in der Kopfzeile ist der Idle-Chip der Thread-Leiste (`AgentThreadStatus` in `web/src/chat/ThreadPane.tsx`), nicht der Channel-Titel | Jens |
+| A-35 | [ANNAHME] Opus für Projekt-Sessions und Haiku/Sonnet für Chat-Agenten gilt nur für das Demo-Seed (C-13), nicht als Produktregel für Modelle | Jens |
+| A-36 | [ANNAHME] „Schließen“ eines Channels schreibt das bestehende Feld `archived_at` (Design `chat_channels`). Ob `#general` geschlossen werden darf, ist nicht entschieden | Jens (Q-30) |
+| A-37 | [ANNAHME] „Etwas größer“ heißt: Nachricht, Kopfzeile und Sidebar mindestens auf der Interface-Stufe `text-ui`. Die Appearance-Schriftgröße bleibt die Quelle. Keine zweite Schriftleiter | Jens |
 
 ## 12. Open questions
 | ID | Question | Owner | Blocks | Due | Answer |
@@ -1418,6 +1557,15 @@ Lücken: Erfolgsmessung G-1/G-2 ohne Telemetrie (bewusst, Q-6). Keine Story ohne
 | Q-27 | Dürfen Agentenkonten weitere Agentenkonten anlegen/rotieren/widerrufen, wenn ihr Owner es darf? **Empfohlener Default:** nein (A-29), weil sonst der Widerruf eines Bots nicht alle von ihm erzeugten Tokens erfasst | Jens | T-106 | vor T-106 | |
 | Q-28 | Grenzwerte und Konfigurationsweg des optionalen Kontingents je Agentenkonto (FR-104): max. Sessions/24 h, max. Runs/24 h, max. gleichzeitig laufende Sessions; global per Env oder je Konto in den Einstellungen? [OFFEN] Bis zur Entscheidung: kein Kontingent konfiguriert, es gelten nur FR-092 und FR-074 | Jens | nichts (FR-104 ist Should) | vor R1-Launch | |
 | Q-20 | Lizenz von interior.dev (TaskSteps, shadcn-Registry `https://www.interior.dev/r/task-steps.json`) erlaubt Übernahme des Codes in `jholze/omnigent` (und ggf. upstream)? Bis zur Klärung: nur Muster nachbauen, kein Copy-in | Jens / Lead | T-115 | vor T-115 (Do 22.10.) | |
+| Q-29 | [OFFEN] Wer darf bei einem öffentlichen Channel Name und Thema ändern, ihn schließen, Einstellungen ändern und Mitglieder hinzufügen oder entfernen? Anlegen bleibt Q-16. Nicht entschieden | Jens | T-132 | vor T-132 | |
+| Q-30 | [OFFEN] Heißt „Schließen“ `archived_at` (A-36)? Darf `#general` geschlossen werden? Nicht entschieden | Jens | T-132 | vor T-132 | |
+| Q-31 | [OFFEN] Welche Channel-Einstellungen gibt es außer `topic` und `project_name` (A-8)? Nicht entschieden | Jens | T-132 | vor T-132 | |
+| Q-32 | [OFFEN] Mitgliederverwaltung öffentlicher Channels in T-132 gegenüber privaten Channels in ST-6.1.2 / E-R2-4. Private Channels werden hier nicht vorgezogen. Nicht entschieden, wie beides sich schneidet | Jens | T-132 | vor T-132 | |
+| Q-33 | [OFFEN] Soll Team-Chat eine Option von „Default Workspace tab“ werden? Heute nur `files`, `changes`, `github`, `subagents`, und die Einstellung gilt für die Session-Leiste, nicht für `/chat`. Kein AC | Jens | nichts | – | |
+| Q-34 | [OFFEN] Idle in der Kopfzeile: Label mit Subjekt oder Chip weglassen? Beides erfüllt AC-044d. Wortlaut nicht entschieden | Jens | T-007b | – | |
+| Q-35 | [OFFEN] Es gibt kein i18n und keine Spracheinstellung (C-12). Chat bleibt vorerst fest auf Deutsch. Die Freigabe-Karte zeigt auf manchen Zweigen weiter Englisch. Kein i18n-System in diesem Schnitt | Jens | nichts | – | |
+| Q-36 | [OFFEN] Liegt die Channel-Verwaltung (T-132) in der Demo am 21.10. oder reicht R1? Ticket steht auf R1, nicht entschieden | Jens | T-132 | vor der Demo | |
+| Q-37 | [OFFEN] Welche weiteren Appearance-Einstellungen müssen den Team-Chat treffen (Workspace-Panel, Transcript-Ansicht, Code-Schrift in Agent-Nachrichten, Terminal-Thema)? Befund C-14. Kein AC, außer Schriftstufe (FR-108) und Thema (FR-109) | Jens | nichts | – | |
 
 ## 13. Risks
 | ID | Risk | Likelihood | Impact | Mitigation |
@@ -1448,6 +1596,7 @@ Lücken: Erfolgsmessung G-1/G-2 ohne Telemetrie (bewusst, Q-6). Keine Story ohne
 ## Changelog
 | Version | Date | Change |
 |---|---|---|
+| 0.7 | 2026-10-20 | Demo-Feedback Jens 20.10., erster Schnitt. Ausgang war v0.6. Neu: FR-105…FR-110, NFR-032, AC-009c, AC-033c, AC-044d/e, AC-105a, AC-106a, AC-107a, AC-108a, AC-109a, AC-110a–e, AC-133a/b. AC-049a: Idle nicht mehr das alleinstehende Wort „fertig“. C-12…C-14, A-33…A-37, Q-29…Q-37. Tickets: T-007b (8 ACs, nicht gesplittet), AC-033c an T-005, T-132, T-133. |
 | 0.1 | 2026-10-16 | Erste Fassung: FR-001…FR-084, NFR-001…NFR-030, 127 ACs, Traceability, Risiken. |
 | 0.6 | 2026-10-17 | Entscheidung Jens Sa 17.10.2026 20:11 („Bots dürfen alles, was der Owner darf.“), ADR-0010 ersetzt ADR-0009 Punkt 1 (Allowlist). Neu formuliert: FR-036 (Bots starten Agent-Threads als Owner; Kostenbremse über Grenzen), FR-068 (Bot-Aktionen inkl. Elicitation-Antworten mit Owner-Rechtecheck statt Verbotsliste), FR-070 (Tool-Menge und Ergebnis = Owner, keine Allowlist), FR-077 (Weiterleitung von Bot-Antworten bei EDIT des Owners), FR-100 (Should → Must, `owner_id`); Notizen FR-066, FR-093. Neu: FR-101 (In-Process-Autorisierung als Owner, ohne Cache), FR-102 (deaktivierter Owner → 401), FR-103 (Audit jeder Bot-Aktion mit Bot + Owner), FR-104 (optionales Kontingent, Should, [OFFEN Q-28]). ACs neu formuliert: AC-036a, AC-068a, AC-069c, AC-070a–d, AC-077a, AC-100a; neu: AC-036b, AC-068b–e, AC-070e, AC-077b, AC-100c, AC-101a/b, AC-102a, AC-103a/b, AC-104a/b. NFR-013/017/028/029/031 angepasst; C-10/C-11; Rolle Agentenkonto; A-12 ersetzt, neu A-29…A-32; Q-24/Q-25 aktualisiert (offen, relevanter), neu Q-26…Q-28; R-9/R-17/R-19 angepasst, neu R-21/R-22; Traceability ST-7.1.1/7.1.5/7.1.6. |
 | 0.5 | 2026-10-17 | MCP-Bot-Pfad nach Gap-Analyse des gemergten MCP-Endpoints (PR #14) und MCP-Spec 2026-07-28; Freigabe Jens 17.10.2026 19:19 („Ok. Mach und umbauen.“). Neu: FR-091…FR-100 (stabile Fehlercodes, Rate-Limit-Verhalten, Annotationen, Structured Output, Untrusted-Markierung, Tool-Beschreibungen, Protokollversionen 2025-06-18/2025-11-25, Header-Validierung, `-32601`-Regression, MCP-Audit), NFR-031, 23 ACs (AC-069c, AC-070c/d, AC-074b, AC-076b, AC-088c, AC-091a, AC-092a–c, AC-093a, AC-094a/b, AC-095a/b, AC-096a, AC-097a/b, AC-098a/b, AC-099a, AC-100a/b). Präzisiert: FR-070 (Allowlist statt Präfix), FR-074 (MCP-Code), FR-076 (`last_seen_at` bei MCP), NFR-013, NFR-017, NFR-028. Non-goals um MCP-„Später“-Liste ergänzt; C-10, C-11; A-24…A-28; Q-21…Q-25; R-17…R-20; Traceability ST-7.1.x. |
