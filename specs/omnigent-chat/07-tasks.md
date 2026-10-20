@@ -1,6 +1,17 @@
 # Tasks: Omnigent Chat – R0, R1 (+ R1.1) · aus `04-requirements.md` v0.6 / `05-design.md` v0.6 · Tasks v0.5 (2026-10-17)
 
-Status: Entwurf zur Freigabe durch Jens. Es werden **keine** Issues angelegt, bevor Jens zustimmt (Skill `spec-to-agent-tasks`, Schritt 9). Labels je Task: `spec:omnigent-chat`, `release:R0|R1|R1.1`, `type:feature|chore|test`, `agent-ready`.
+Status: Entwurf zur Freigabe durch Jens. Es werden **keine** Issues angelegt, bevor Jens zustimmt (Skill `spec-to-agent-tasks`, Schritt 9). Ausnahme 2026-10-20: das Epic Team-Chat und seine offenen Tickets, weil Jens das in diesem Auftrag ausdrücklich verlangt hat (`specs/team-chat/`). Labels je Task: `spec:omnigent-chat`, `release:R0|R1|R1.1`, `type:feature|chore|test`, `agent-ready`, dazu `stage:prototyping` oder `stage:polish`.
+
+## Ticket-Vorlage (Kopf)
+
+Neue und als Nächstes angefasste Tasks tragen diese Zeile im Kopf. Die Lead-Session liest sie am Start (`specs/team-chat/review-mode.md`, `python3 scripts/fork/review_mode.py <ticket-id>`).
+
+**Review-Modus:** `prototyping` | `polish`
+
+- `prototyping` — die Funktion wird gebaut. Prüfungen: ACs und die genannten Tests grün, CI (die Tests sind wirklich gelaufen), Lint, Code-Review DeepSeek danach Opus. Kein UX-Review.
+- `polish` — volles Gate. Bei UI zusätzlich UX-Review, NFR-032 (1280×800 und 390×844) und Kontrast/NFR-009. Eine Erweiterung einer fertigen Funktion ist immer `polish`.
+
+Die bestehenden Task-Körper in dieser Datei haben die Zeile noch nicht. Die Zuordnung der offenen Tickets steht in `specs/team-chat/review-mode.md`. Nicht still in jeden Kopf schreiben, ohne die Stufe dort zu prüfen. Der Demo-Nachtrag (T-007b, T-132, T-133) liegt in PR #53 und wird hier nicht eingearbeitet.
 
 ## Arbeitsweise (gilt für jeden Task)
 - **Laufende Omnigent-Sessions bleiben laufen** – keine Neustarts bestehender Sessions/Runner für diese Arbeit (Entscheidung Jens 16.10.2026).
@@ -3145,6 +3156,7 @@ Hinweis (Stand 16.10. 23:30): Die Rohantwort aus der OKR-PM-Session liegt in `re
 | #2 | Nightly-E2E rot | nicht Teil dieser Spec; blockiert die Chat-Suite nicht, weil `team_chat_server` eigenständig ist | – |
 
 ## Changelog
+- 2026-10-20 Vorlage: Feld `Review-Modus`. Task-Körper unverändert, Version bleibt v0.5. Die Demo-Nachträge T-007b, T-132, T-133 liegen in PR #53.
 - v0.5 (2026-10-17) Spec v0.6 – Entscheidung Jens 20:11 „Bots dürfen alles, was der Owner darf.“ (ADR-0010): T-104 (FR-077 Bot-Weiterleitung bei EDIT des Owners, AC-077a neu, AC-077b; +1 h), T-105 (FR-102 Owner aktiv, AC-102a; +1 h), T-106 (FR-068 Owner-Rechtecheck statt Verbotsliste, AC-068a neu, AC-068b–e), T-107 (FR-070 ohne Allowlist, FR-101 Owner als effektiver Principal, AC-070a/b neu, AC-101a/b; +1 h), T-109 (FR-036 Bot-Start als Owner, FR-104 Kontingent, AC-036a neu, AC-036b, AC-104a/b; +1 h), T-128 (Owner-Äquivalenztests statt Allowlist-Negativtests, AC-070c/d neu, AC-070e), T-129 (AC-069c: `tools/list` = Owner-Liste), T-131 (FR-100 Must + `owner_id`, FR-103, AC-100a neu, AC-100c, AC-103a/b; +1 h); Block-Tabelle, Arbeitsweise, Coverage, AGENTS.md-Vorschlag; R1 141 h.
 - v0.4 (2026-10-17) MCP-Bot-Pfad nach Gap-Analyse PR #14 (Freigabe Jens 17.10. 19:19): neue Tasks T-125 (unread-Route, aus T-107 gelöst), T-126 (Protokollhygiene), T-127 (Struktur/Annotationen/Fehlercodes), T-128 (Allowlist-Negativtests, Untrusted, Beschreibungen), T-129 (Grok-Bot-Smoke), T-130 (Messung/Changes-Reset, aus T-119 gelöst), T-131 (MCP-Audit, `last_seen_at`); T-119 umgebaut (Rate-Limits inkl. `rate_limited`, No-Body); FR-077/AC-077a von T-109 nach T-104; Abhängigkeiten T-101/T-105 → T-003, T-109 → T-005+T-106, T-107 → +T-125/T-126, T-121 → +Bot-Pfad, T-123 → +T-129; Waves neu, Abschnitt „MCP-Bot-Pfad“; Coverage auf 04 v0.5; R1 30 Tasks / 136 h.
 - v0.3 (2026-10-16) T-115 auf interior.dev TaskSteps ausgerichtet (FR-089/090, Q-20: kein Copy-in vor Lizenzklärung); T-121 um `test_agent_steps.py`; Q-19 gelöst → D-1.

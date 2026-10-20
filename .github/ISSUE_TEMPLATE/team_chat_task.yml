@@ -1,0 +1,61 @@
+name: Team-Chat-Task
+description: Ticket aus der Team-Chat-Spec im Fork. Die Lead liest den Review-Modus am Start.
+title: "T-XXX: "
+body:
+  - type: input
+    id: stable-id
+    attributes:
+      label: Stabile ID
+      description: Zum Beispiel T-007b oder T-005-AC-033c. Dieselbe ID wie in specs/omnigent-chat/07-tasks.md.
+      placeholder: T-007b
+    validations:
+      required: true
+
+  - type: dropdown
+    id: review-modus
+    attributes:
+      label: Review-Modus
+      description: >
+        prototyping oder polish. Die Lead-Session liest das Feld am Start
+        (specs/team-chat/review-mode.md). Eine Erweiterung einer fertigen
+        Funktion ist immer polish. prototyping prüft ACs, Tests, CI, Lint
+        und Code-Review (DeepSeek, dann Opus). polish ist das volle Gate
+        und zieht bei UI das UX-Review, NFR-032 (1280x800 und 390x844)
+        und den Kontrast nach.
+      options:
+        - prototyping
+        - polish
+    validations:
+      required: true
+
+  - type: dropdown
+    id: marker
+    attributes:
+      label: Marker
+      description: exists, adapt oder new, bezogen auf den Code, den das Ticket anfasst.
+      options:
+        - new
+        - adapt
+        - exists
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: EARS oder Given/When/Then. Eine AC pro Block. UI-ACs im Polish nennen 1280x800 und 390x844.
+      placeholder: |
+        Given …
+        When …
+        Then …
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Kontext
+      description: Eine kurze Einordnung. Offene Produktfragen verlinken, nicht entscheiden.
+    validations:
+      required: false
