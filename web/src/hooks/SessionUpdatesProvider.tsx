@@ -40,6 +40,7 @@ import {
 } from "@/lib/sessionListCache";
 import { isModalHostResolved, resolveModalHost } from "@/lib/sessionHost";
 import { acceptChatFrame, parseChatFrame, watchChatSocketReconnect } from "@/chat/useChatFrames";
+import { useAgentThreadStore, watchedAgentSessionIds } from "@/chat/agent/agentThreadStore";
 import { type SessionUpdatesFrame, sessionUpdatesSocket } from "@/lib/sessionUpdatesSocket";
 import { isTempConvId } from "@/lib/tempConversationId";
 
@@ -223,6 +224,11 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
 
+  // Team-chat Agent-Thread sessions on screen (open thread, thread roots in
+  // the open channel) that no other part of the app watches. Their rows feed
+  // the chat status chips only and never enter the sidebar caches.
+  const chatOnlyIdsRef = useRef(new Set<string>());
+
   // Recompute the watch-set from the cache and push it to the socket.
   // setWatched no-ops when the id-set is unchanged, so in-place field
   // patches (and navigation between already-watched sessions) don't bounce
@@ -263,6 +269,16 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
         }
       }
     }
+    // Agent-Thread sessions the team chat shows (FR-047). Only ids a chat
+    // view registered, never every session in the account.
+    const appIds = new Set(ids);
+    const chatOnly = new Set<string>();
+    for (const id of watchedAgentSessionIds()) {
+      if (appIds.has(id)) continue;
+      chatOnly.add(id);
+      ids.push(id);
+    }
+    chatOnlyIdsRef.current = chatOnly;
     sessionUpdatesSocket.setWatched(ids.filter((id) => !isTempConvId(id)));
   }, [queryClient]);
 
@@ -386,6 +402,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           return;
         }
         case "removed":
+          useAgentThreadStore.getState().dropSessions(frame.ids);
           for (const id of frame.ids) commentsFingerprintsRef.current.delete(id);
           queryClient.setQueryData<PinnedConversationsResult>(
             PINNED_CONVERSATIONS_KEY,
@@ -403,6 +420,14 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           return;
         case "snapshot":
         case "changed": {
+          // Chat status chips read Agent-Thread rows (by label or by chat
+          // watch). Rows only the chat watches stay out of the sidebar.
+          useAgentThreadStore.getState().applySessionItems(frame.items);
+          const chatOnly = chatOnlyIdsRef.current;
+          const appItems =
+            chatOnly.size === 0
+              ? frame.items
+              : frame.items.filter((item) => !chatOnly.has(item.id));
           syncCommentsFingerprints(frame.items);
           if (frame.type === "snapshot") {
             // A snapshot restates the full watch-set, so fingerprints for
@@ -419,7 +444,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           // views (SubagentsPanel, SubagentsGraphView) pick up status changes
           // without polling.
           const parentIds = new Set<string>();
-          for (const item of frame.items) {
+          for (const item of appItems) {
             if (item.parent_session_id) parentIds.add(item.parent_session_id);
           }
           for (const parentId of parentIds) {
@@ -427,7 +452,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           }
           const { missingIds, needsRefetch } = applyItemsToCache(
             queryClient,
-            frame.items,
+            appItems,
             activeIdRef.current,
             getCurrentUserId(),
           );
@@ -461,6 +486,16 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     };
 
     pushWatched();
+    // A chat view opening or closing an Agent-Thread changes the watch-set
+    // without touching the conversations cache. Push right away: the open
+    // thread's chip has a 1 s budget (NFR-005).
+    let agentWatchKey = watchedAgentSessionIds().join(",");
+    const unsubscribeAgentWatch = useAgentThreadStore.subscribe((state) => {
+      const key = watchedAgentSessionIds(state).join(",");
+      if (key === agentWatchKey) return;
+      agentWatchKey = key;
+      pushWatched();
+    });
     // The updates socket is app-wide. After it drops and reconnects, backfill
     // team chat from the stored cursor. No cursor means the shell was never
     // opened, so this does not call `/v1/chat/*`.
@@ -486,6 +521,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
 
     return () => {
       unsubscribeFrames();
+      unsubscribeAgentWatch();
       unsubscribeStatus();
       unsubscribeMutations();
       unsubscribeCache();

@@ -83,6 +83,11 @@ class MessageResponse(BaseModel):
     ``SqlChatThread.agent_state`` (``none``/``starting``/``active``/
     ``dismissed``/``start_failed``/``closed``) so the UI can render
     the agent thread's start state without a separate thread fetch.
+
+    ``session_id`` follows the same rule: present only on thread-root
+    messages whose thread has an agent session, omitted otherwise. It
+    is the value ``thread.updated`` already sends to every channel
+    member, so a reloaded client can mount the live view.
     """
 
     id: str
@@ -94,6 +99,7 @@ class MessageResponse(BaseModel):
     body: str
     client_id: str | None
     agent_state: str | None = None
+    session_id: str | None = None
 
 
 class DirectoryEntry(BaseModel):
@@ -307,27 +313,24 @@ def _channel_response(
     )
 
 
-def _message_response(message: ChatMessage, agent_state: str | None = None) -> MessageResponse:
+def _message_response(
+    message: ChatMessage,
+    agent_state: str | None = None,
+    session_id: str | None = None,
+) -> MessageResponse:
     """Map a stored message onto its wire shape.
 
     :param agent_state: Optional thread ``agent_state`` for a thread-root
         message; ``None`` (the default) leaves the field unset so the
         wire shape omits it (replies and POST-created messages).
+    :param session_id: Optional agent ``session_id`` for a thread-root
+        message; ``None`` (the default) leaves the field unset, same rule.
     """
-    # Pass agent_state only when it is set so the wire shape omits the key
-    # on replies and on messages created by POST.
-    if agent_state is None:
-        return MessageResponse(
-            id=message.id,
-            channel_id=message.channel_id,
-            thread_root_id=message.thread_root_id,
-            author_id=message.author_id,
-            author_kind=message.author_kind,
-            created_at=message.created_at,
-            body=message.body,
-            client_id=message.client_id,
-        )
-    return MessageResponse(
+    # Pass the optional fields only when they are set so the wire shape
+    # omits the keys on replies and on messages created by POST
+    # (the routes use ``response_model_exclude_unset``). Pydantic adds an
+    # assigned field to ``model_fields_set``, so assignment marks it set.
+    response = MessageResponse(
         id=message.id,
         channel_id=message.channel_id,
         thread_root_id=message.thread_root_id,
@@ -336,8 +339,12 @@ def _message_response(message: ChatMessage, agent_state: str | None = None) -> M
         created_at=message.created_at,
         body=message.body,
         client_id=message.client_id,
-        agent_state=agent_state,
     )
+    if agent_state is not None:
+        response.agent_state = agent_state
+    if session_id is not None:
+        response.session_id = session_id
+    return response
 
 
 def _cursor_string(cursor: tuple[int, str] | None) -> str | None:
@@ -651,8 +658,8 @@ def create_chat_router(
     @router.get(
         "/chat/channels/{channel_id}/messages",
         response_model=MessagePageResponse,
-        # ``agent_state`` is unset on replies / thread-less roots and must
-        # be omitted from the wire, not emitted as ``null``.
+        # ``agent_state`` / ``session_id`` are unset on replies / thread-less
+        # roots and must be omitted from the wire, not emitted as ``null``.
         response_model_exclude_unset=True,
     )
     async def list_messages(
@@ -715,10 +722,16 @@ def create_chat_router(
             if root_ids
             else {}
         )
+        session_ids = (
+            await asyncio.to_thread(chat_store.list_thread_session_ids, root_ids)
+            if root_ids
+            else {}
+        )
         items = [
             _message_response(
                 item,
                 agent_state=(agent_states.get(item.id) if item.thread_root_id is None else None),
+                session_id=(session_ids.get(item.id) if item.thread_root_id is None else None),
             )
             for item in page.items
         ]

@@ -89,6 +89,38 @@ actions (send with Enter, channel switch via shortcut, command palette).
 - `ChatComposerCard` (proposed, T-007): reuses `ChatComposer` + `ComposerSendButton`
   unchanged; send button `max-md:size-11`; wrapper `px-3 md:px-4`,
   `pb-[max(20px,env(safe-area-inset-bottom))] md:pb-4`.
+- `AgentStatusChip` (proposed, T-008, `web/src/chat/agent/AgentStatusChip.tsx`; thread header
+  + channel root row): `h-5 px-1.5 rounded-sm border text-xs font-medium`, lucide icon
+  `size-3.5` + verbatim FR-044 label, text content = label only (E2E reads it). Fixed width =
+  longest label via an invisible `before:content-['arbeitet_im_Hintergrund']` sizer in a
+  1-cell `grid-cols-1` grid, so a status change never moves the row; chip `max-w-full`, grid
+  `min-w-0 overflow-hidden`, label `truncate`, so a narrow row (390 px) caps the chip instead
+  of scrolling. `braucht Antwort` only with an open approval (waiting + pending > 0, or a
+  running row with pending > 0); waiting with none = `arbeitet im Hintergrund`, same icon and
+  border as `arbeitet`. Tones: `braucht Antwort` = `bg-warning/15
+  border-warning/50 text-foreground` (the one accent; warning hue fails 4.5:1 as text, so it
+  is fill only); `Fehler` (live) and `Start fehlgeschlagen` (`chat_threads.start_failed`) =
+  `text-destructive border-destructive/40`; `arbeitet` / `arbeitet im Hintergrund` =
+  foreground; the rest muted. Icons: `LoaderCircle` (startet…/arbeitet/im Hintergrund, static until T-117),
+  `MessageCircleQuestionMark`, `CircleCheck`, `CircleX`, `LogOut` (entlassen), `Bot` (aktiv),
+  `CircleSlash` (beendet). Header chip sits in `role="status"` with sr-only "Agent:"; row
+  chip has sr-only "Agent-Thread:" and sits next to the reply count. `data-source="thread"`
+  marks the `chat_threads` fallback (title says it is not the live status).
+- `AgentThreadLive` (proposed, T-008, `AgentThreadView.tsx`): under the stored replies, same
+  row grid as `MessageRow` (avatar `size-7` agent, name `text-sm font-medium`, meta "schreibt
+  gerade"/"live" `text-xs muted`), body = AI Elements `MessageResponse` / `ReasoningView`,
+  approval cards inline at their item position. Only the current turn; once the mirrored
+  reply is stored it steps back. Notices (`Live-Ansicht lädt…`, `Live-Ansicht nur für X`,
+  `Live-Ansicht nicht verfügbar` + link "Erneut versuchen") are one `text-xs muted` line
+  with a 16 px icon, `px-4 pb-3`.
+- `SystemLine` (proposed, T-008, `MessageItem.tsx`): server notices as one muted `text-xs`
+  row, `InfoIcon` in the avatar gutter, time after the text, sr-only "Systemmeldung:".
+- Approval card in the chat (proposed, T-008): existing `ApprovalCard` with `labels`
+  (Genehmigen/Ablehnen, Genehmigt/Abgelehnt "von X" with X = own name or
+  `principalLabel(decided_by)`, Bereits beantwortet when the verdict is unknown), `readOnlyNote`
+  ("Nur Aufrufer und Bearbeiter können antworten"; also "Antwort wird gesendet…" while a
+  verdict is in flight) and `resolvedBy`. Phone: card buttons `min-h-11`. Send failure: one
+  `text-xs text-destructive` line under the card, never a toast.
 
 ## Motion backlog (ideas parked until T-117 / T-118)
 - _empty_
@@ -97,8 +129,19 @@ actions (send with Enter, channel switch via shortcut, command palette).
 - T-007: thread pane open slide on desktop (`dur.pane`, `ease.inOut`); phone swap stays instant.
 - T-007: reply action toolbar fade on row hover (`dur.micro`, opacity only).
 - T-007: "nicht gesendet" → sent: body colour crossfade (`dur.color`).
+- T-008: status chip crossfade between labels (`dur.color`, opacity only; width is fixed).
+- T-008: `LoaderCircle` on startet…/arbeitet spins (`loop.arc`, `ease.linear`), static under
+  reduced motion; stop when the chip is off-screen.
+- T-008: "Agent arbeitet…" line uses the existing `Shimmer` (`loop.shimmer`).
+- T-008: approval card mount (`spring.card`) and pending → resolved crossfade (`dur.color`).
+- T-008: live turn handing over to the mirrored reply: opacity-only exit (`dur.exit`).
 
 ## Change log
 - 2026-10-18: seeded from ADR-0008, NFR-006…NFR-011, FR-078…FR-081 (ux-builder bootstrap).
 - 2026-10-20: T-007 MessageRow, ThreadPane, ChatComposerCard patterns (proposed) and four
   motion backlog items.
+- 2026-10-20: T-008 AgentStatusChip, AgentThreadLive, SystemLine, chat approval card
+  (proposed) and five motion backlog items.
+- 2026-10-20: T-008 chip rule (open approval = braucht Antwort, else arbeitet im Hintergrund),
+  sizer on the widest label with truncation, Start fehlgeschlagen, verdict names from
+  `decided_by`.

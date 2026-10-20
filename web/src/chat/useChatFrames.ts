@@ -16,7 +16,12 @@ import {
   teamChatQueryKeys,
 } from "./chatApi";
 import { applyChatFrame, normalizeChangeItem, useTeamChatStore } from "./teamChatStore";
-import type { ChatUpdatesFrame } from "@/lib/sessionUpdatesSocket";
+import { applyAgentThreadFrame } from "./agent/agentThreadStore";
+import type {
+  ChatChangeFrame,
+  ChatThreadFrame,
+  ChatUpdatesFrame,
+} from "@/lib/sessionUpdatesSocket";
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -28,12 +33,38 @@ function threadRootId(value: unknown): string | null | undefined {
   return undefined;
 }
 
+/**
+ * `thread.updated` carries Agent-Thread state only. The parser rebuilds the
+ * frame from known fields, so anything else a sender attached is dropped.
+ */
+function parseThreadFrame(
+  frame: Record<string, unknown>,
+  channelId: string,
+): ChatThreadFrame | null {
+  if (typeof frame.root_message_id !== "string" || frame.root_message_id === "") return null;
+  if (typeof frame.agent_state !== "string" || frame.agent_state === "") return null;
+  if (!isFiniteNumber(frame.reply_count) || frame.reply_count < 0) return null;
+  const session = frame.session_id;
+  if (session !== null && session !== undefined && typeof session !== "string") return null;
+  return {
+    type: "chat",
+    kind: "thread.updated",
+    channel_id: channelId,
+    root_message_id: frame.root_message_id,
+    reply_count: frame.reply_count,
+    agent_state: frame.agent_state,
+    session_id: typeof session === "string" && session !== "" ? session : null,
+    bot_streak: isFiniteNumber(frame.bot_streak) ? frame.bot_streak : 0,
+  };
+}
+
 /** Narrow a socket payload to a body-less chat frame. Unknown kinds are ignored. */
 export function parseChatFrame(raw: unknown): ChatUpdatesFrame | null {
   if (typeof raw !== "object" || raw === null) return null;
   const frame = raw as Record<string, unknown>;
   if (frame.type !== "chat") return null;
   if (typeof frame.channel_id !== "string" || frame.channel_id === "") return null;
+  if (frame.kind === "thread.updated") return parseThreadFrame(frame, frame.channel_id);
   const thread = threadRootId(frame.thread_root_id);
   if (thread === undefined || !isFiniteNumber(frame.created_at)) return null;
   if (frame.kind === "message.created") {
@@ -130,11 +161,20 @@ export function backfillFromCursor(queryClient: QueryClient, cursor: string): Pr
 }
 
 let backfillInFlight: Promise<void> | null = null;
-const framesDuringBackfill: ChatUpdatesFrame[] = [];
+const framesDuringBackfill: ChatChangeFrame[] = [];
 let flushingBackfill = false;
 
-/** Apply a frame now, or after the in-flight changes backfill. */
+/**
+ * Apply a frame now, or after the in-flight changes backfill.
+ *
+ * A `thread.updated` frame is a state snapshot, not a change id, so it
+ * applies at once and never waits for the backfill.
+ */
 export function acceptChatFrame(frame: ChatUpdatesFrame): void {
+  if (frame.kind === "thread.updated") {
+    applyAgentThreadFrame(frame);
+    return;
+  }
   if (backfillInFlight !== null && !flushingBackfill) {
     framesDuringBackfill.push(frame);
     return;

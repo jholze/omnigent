@@ -17,6 +17,12 @@ import {
   type ChatMessage,
   type DirectoryEntry,
 } from "./chatApi";
+import { AgentRootChip } from "./agent/AgentStatusChip";
+import {
+  useAgentThreadStore,
+  useSeedAgentThreads,
+  useWatchAgentSessions,
+} from "./agent/agentThreadStore";
 import { ChatComposerCard } from "./ChatComposerCard";
 import { retryChatMessage, useChatOutbox, type OutboxEntry } from "./chatOutbox";
 import { toEpochMs, type MessageView } from "./MessageItem";
@@ -102,6 +108,31 @@ export function useReplyCounts(channelId: string): Map<string, number> {
   }, [changes, channelId]);
 }
 
+/**
+ * Watch the sessions of Agent-Thread roots on this page, so their chips
+ * follow the updates socket even with no thread open (FR-047, AC-047a).
+ */
+function useChannelAgentThreads(channelId: string, rootIds: string[]): Set<string> {
+  const rootKey = rootIds.join(",");
+  const threadKey = useAgentThreadStore((state) => {
+    const roots = new Set(rootKey.split(","));
+    return Object.values(state.threads)
+      .filter((thread) => thread.channelId === channelId && roots.has(thread.rootId))
+      .map((thread) => `${thread.rootId}=${thread.sessionId ?? ""}`)
+      .sort()
+      .join(",");
+  });
+  const { agentRoots, sessionIds } = useMemo(() => {
+    const pairs = threadKey === "" ? [] : threadKey.split(",").map((pair) => pair.split("="));
+    return {
+      agentRoots: new Set(pairs.map(([root]) => root)),
+      sessionIds: pairs.flatMap(([, session]) => (session ? [session] : [])),
+    };
+  }, [threadKey]);
+  useWatchAgentSessions(`channel:${channelId}`, sessionIds);
+  return agentRoots;
+}
+
 export function MessagesSkeleton() {
   return (
     <div aria-busy="true" className="flex min-h-0 flex-1 flex-col justify-end gap-4 px-4 pb-4">
@@ -163,6 +194,12 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
     () => withOutbox(messages.data?.items ?? [], outbox, channelId, null),
     [messages.data, outbox, channelId],
   );
+  const rootIds = useMemo(
+    () => (messages.data?.items ?? []).map((message) => message.id),
+    [messages.data],
+  );
+  useSeedAgentThreads(messages.data?.items);
+  const agentRoots = useChannelAgentThreads(channelId, rootIds);
 
   let body;
   if (messages.isPending) {
@@ -183,6 +220,9 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
             : undefined
         }
         replyCounts={replyCounts}
+        renderThreadAccessory={(message) =>
+          message.id && agentRoots.has(message.id) ? <AgentRootChip rootId={message.id} /> : null
+        }
         onRetry={(clientId) => retryChatMessage(queryClient, clientId)}
         empty={
           <div

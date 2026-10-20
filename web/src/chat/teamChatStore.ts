@@ -6,7 +6,7 @@
  */
 import { create } from "zustand";
 
-import type { ChatUpdatesFrame } from "@/lib/sessionUpdatesSocket";
+import type { ChatChangeFrame } from "@/lib/sessionUpdatesSocket";
 
 export interface TeamChatChange {
   id: string;
@@ -104,7 +104,7 @@ export const useTeamChatStore = create<TeamChatState>((set, get) => ({
 }));
 
 /** Record one parsed chat frame. A repeat of the same id is a no-op. */
-export function applyChatFrame(frame: ChatUpdatesFrame): void {
+export function applyChatFrame(frame: ChatChangeFrame): void {
   const change =
     frame.kind === "message.created"
       ? {

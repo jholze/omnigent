@@ -410,6 +410,19 @@ class ChatStore(ABC):
         ...
 
     @abstractmethod
+    def list_thread_session_ids(self, root_message_ids: Collection[str]) -> dict[str, str]:
+        """Return the agent ``session_id`` for each thread root id that has one.
+
+        Ids without a thread row, or whose row has no session yet, are
+        omitted. Read-only and batched (one query for the whole page);
+        the same value already reaches every channel member through the
+        ``thread.updated`` frame, so this exposes nothing new. Used to
+        annotate thread-root messages so a reloaded client can mount the
+        agent thread's live view.
+        """
+        ...
+
+    @abstractmethod
     def create_agent_account(
         self,
         owner_id: str,

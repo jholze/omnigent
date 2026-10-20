@@ -1367,6 +1367,29 @@ let queryClient: QueryClient | null = null;
 const streamEventRevisions = new Map<string, number>();
 conversationRegistry.subscribeDisposed((id) => streamEventRevisions.delete(id));
 
+/**
+ * Count of stream events applied to a conversation so far. A caller that
+ * re-reads durable state compares it before and after its fetch: a change
+ * means a live event landed meanwhile and the fetched snapshot may be older.
+ */
+export function conversationStreamRevision(id: string): number {
+  return streamEventRevisions.get(id) ?? 0;
+}
+
+const streamConnectedListeners = new Set<(id: string) => void>();
+
+/**
+ * Called after every successful stream open (first connect and reconnects).
+ * The stream has no replay, so anything published before this moment is
+ * only in a snapshot read after it.
+ */
+export function subscribeConversationStreamConnected(listener: (id: string) => void): () => void {
+  streamConnectedListeners.add(listener);
+  return () => {
+    streamConnectedListeners.delete(listener);
+  };
+}
+
 // Reconnects share a binding; only one usage request may hydrate it at a time.
 const sessionUsageHydrations = new WeakSet<AbortController>();
 const sessionUsageRevisions = new WeakMap<ConversationEntry, { cost: number; models: number }>();
@@ -5802,6 +5825,13 @@ export async function startStreamPump(
         const streamEpoch = streamRes.headers.get("x-omnigent-stream-epoch");
         if (!hasConnected) clearSseLog(id);
         hasConnected = true;
+        for (const listener of streamConnectedListeners) {
+          try {
+            listener(id);
+          } catch (err) {
+            console.warn(`Session ${id}: stream-connected listener failed`, err);
+          }
+        }
         hostReaddressed = false;
         failedOpens = 0;
         consecutive404s = 0;
@@ -8217,6 +8247,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           response: {
             action: event.action ?? "auto_resolved",
             ...(event.reason ? { reason: event.reason } : {}),
+            ...(event.action && event.decidedBy ? { decidedBy: event.decidedBy } : {}),
           },
         };
         return {

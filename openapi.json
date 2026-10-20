@@ -4723,7 +4723,7 @@
         "type": "object"
       },
       "MessageResponse": {
-        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.",
+        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.\n\n`session_id` follows the same rule: present only on thread-root\nmessages whose thread has an agent session, omitted otherwise. It\nis the value `thread.updated` already sends to every channel\nmember, so a reloaded client can mount the live view.",
         "properties": {
           "agent_state": {
             "anyOf": [
@@ -4771,6 +4771,17 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
           },
           "thread_root_id": {
             "anyOf": [

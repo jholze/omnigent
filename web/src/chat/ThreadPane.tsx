@@ -4,6 +4,9 @@
  *
  * Desktop: a column right of the channel. Phone: replaces the channel column
  * and brings its own back control. Escape closes the pane.
+ *
+ * An Agent-Thread adds the status chip to the header and the live agent
+ * output below the stored replies (T-008).
  */
 import { useEffect, useMemo, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -17,10 +20,23 @@ import {
   teamChatQueryKeys,
   type DirectoryEntry,
 } from "./chatApi";
+import { AgentThreadStatus } from "./agent/AgentStatusChip";
+import { AgentThreadView } from "./agent/AgentThreadView";
+import {
+  useAgentThreadStore,
+  useSeedAgentThreads,
+  useWatchAgentSessions,
+} from "./agent/agentThreadStore";
 import { ChatComposerCard } from "./ChatComposerCard";
 import { MessagesError, MessagesSkeleton, messageViewOf, withOutbox } from "./ChannelView";
 import { retryChatMessage, useChatOutbox } from "./chatOutbox";
-import { MessageItem, replyCountLabel } from "./MessageItem";
+import {
+  isAgentKind,
+  MessageItem,
+  principalLabel,
+  replyCountLabel,
+  type MessageView,
+} from "./MessageItem";
 import { MessageList } from "./MessageList";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
@@ -35,6 +51,25 @@ export interface ThreadPaneProps {
 }
 
 const TITLE_ID = "chat-thread-title";
+
+const AGENT_MENTION_RE = /<@omnigent_agent:[^>\s]+>/;
+/** Prefix of the server's sharing notice (`chat_agent_threads._post_sharing_notice`). */
+const SHARING_NOTICE_PREFIX = "Live-Ansicht nur für ";
+
+/**
+ * The person who started the agent: the first human message in the thread
+ * that mentions an Omnigent agent. The server starts the session as that
+ * author. A bot mention starts it as the bot's owner, which this view does
+ * not know, so it returns `null` there.
+ */
+function agentStarterLabel(
+  messages: MessageView[],
+  directory: Map<string, DirectoryEntry>,
+): string | null {
+  const starter = messages.find((message) => AGENT_MENTION_RE.test(message.body));
+  if (starter === undefined || starter.authorKind !== "user") return null;
+  return principalLabel(starter.authorId, directory);
+}
 
 export function ThreadPane({
   channelId,
@@ -61,6 +96,7 @@ export function ThreadPane({
   });
   const outbox = useChatOutbox((state) => state.entries);
   const root = channelMessages.data?.items.find((message) => message.id === threadRootId);
+  useSeedAgentThreads(channelMessages.data?.items);
 
   // Loaded replies count toward "n Antworten" on the root row.
   useEffect(() => {
@@ -110,6 +146,33 @@ export function ThreadPane({
   const sentCount = views.filter((view) => view.status === "sent").length;
   const onRetry = (clientId: string) => retryChatMessage(queryClient, clientId);
 
+  const agentSessionId = useAgentThreadStore(
+    (state) => state.threads[threadRootId]?.sessionId ?? null,
+  );
+  useWatchAgentSessions(`thread:${threadRootId}`, agentSessionId ? [agentSessionId] : []);
+  const agentReplyCount = views.filter(
+    (view) =>
+      view.status === "sent" && (view.authorKind === "system" || isAgentKind(view.authorKind)),
+  ).length;
+  const sharingNoticeStored = views.some(
+    (view) => view.authorKind === "system" && view.body.startsWith(SHARING_NOTICE_PREFIX),
+  );
+  const ownerLabel = useMemo(
+    () => agentStarterLabel([...(root ? [messageViewOf(root)] : []), ...views], directory),
+    [root, views, directory],
+  );
+  const agentFooter = agentSessionId ? (
+    <AgentThreadView
+      key={agentSessionId}
+      sessionId={agentSessionId}
+      me={me}
+      directory={directory}
+      ownerLabel={ownerLabel}
+      agentReplyCount={agentReplyCount}
+      sharingNoticeStored={sharingNoticeStored}
+    />
+  ) : null;
+
   let rootBlock;
   if (root) {
     rootBlock = (
@@ -145,6 +208,7 @@ export function ThreadPane({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {header}
         <MessagesSkeleton />
+        {agentFooter}
       </div>
     );
   } else if (replies.isError && replies.data === undefined) {
@@ -158,6 +222,7 @@ export function ThreadPane({
         me={me}
         label="Antworten im Thread"
         header={header}
+        footer={agentFooter}
         onRetry={onRetry}
       />
     );
@@ -192,6 +257,7 @@ export function ThreadPane({
         <h2 id={TITLE_ID} className="shrink-0 text-sm font-medium">
           Thread
         </h2>
+        <AgentThreadStatus rootId={threadRootId} />
         <span className="min-w-0 flex-1 text-xs break-words text-muted-foreground max-md:hidden">
           {channelLabel}
         </span>

@@ -654,6 +654,11 @@ export interface ElicitationBlock {
     reason?: "unanswered";
     content?: Record<string, unknown>;
     _meta?: Record<string, unknown>;
+    /**
+     * User id that decided, when the server reports it
+     * (`response.elicitation_resolved.decided_by`). Only with a verdict.
+     */
+    decidedBy?: string;
   } | null;
   /**
    * Structured AskUserQuestion payload — present when the gated

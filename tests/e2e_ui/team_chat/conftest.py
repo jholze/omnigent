@@ -235,11 +235,13 @@ class TeamChatServer:
     :param runner_owner: Email of the user who owns the runner, or ``None``
         when the server was spawned without one.
     :param runner_id: The runner's id, or ``None`` without a runner.
+    :param database_uri: The server's SQLite URI, for seeds with no REST route.
     """
 
     base_url: str
     runner_owner: str | None
     runner_id: str | None
+    database_uri: str
 
 
 def _runner_online(base_url: str, runner_id: str, owner: str) -> tuple[bool, str]:
@@ -326,6 +328,8 @@ def spawn_team_chat_server(
     """
     agent_yaml = tmp / "hello_world.yaml"
     agent_yaml.write_text(_TEST_AGENT_YAML)
+    # isolated_local_server keeps its database at this path.
+    database_uri = f"sqlite:///{tmp / 'chat.db'}"
     binding_token = secrets.token_urlsafe(32)
     server_env: dict[str, str | None] = {
         # Multi-user: every request names its user via X-Forwarded-Email.
@@ -345,7 +349,12 @@ def spawn_team_chat_server(
         poll_interval=_HEALTH_POLL_INTERVAL_S,
     ) as base_url:
         if runner_owner is None:
-            yield TeamChatServer(base_url=base_url, runner_owner=None, runner_id=None)
+            yield TeamChatServer(
+                base_url=base_url,
+                runner_owner=None,
+                runner_id=None,
+                database_uri=database_uri,
+            )
             return
         set_fallback_mock_llm(mock_llm_url, "gpt-4o-mini", "Mock LLM response.")
         with _owned_runner(
@@ -355,7 +364,12 @@ def spawn_team_chat_server(
             mock_llm_url=mock_llm_url,
             tmp=tmp,
         ) as runner_id:
-            yield TeamChatServer(base_url=base_url, runner_owner=runner_owner, runner_id=runner_id)
+            yield TeamChatServer(
+                base_url=base_url,
+                runner_owner=runner_owner,
+                runner_id=runner_id,
+                database_uri=database_uri,
+            )
 
 
 @pytest.fixture(scope="module")

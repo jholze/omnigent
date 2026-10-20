@@ -309,6 +309,11 @@ export interface ElicitationResolved {
    * is gone rather than decided. Never present alongside `action`.
    */
   reason?: "unanswered";
+  /**
+   * Authenticated user id that decided. Only present together with
+   * `action`; never on a verdict-less clear.
+   */
+  decidedBy?: string;
 }
 
 /** A provider-native tool output (web_search, mcp, etc.). */
