@@ -1,0 +1,166 @@
+/**
+ * Optimistic sends for team chat (FR-084, NFR-002).
+ *
+ * A send shows its row at once with a fresh `client_id`. On a network error,
+ * 429 or 5xx the row stays as "nicht gesendet"; "erneut senden" posts the same
+ * `client_id` and body again, so the server stores at most one message (201
+ * first time, 200 on replay). Bodies stay in memory and are never logged.
+ */
+import type { QueryClient } from "@tanstack/react-query";
+import { create } from "zustand";
+
+import {
+  CLIENT_ID_PATTERN,
+  ChatApiError,
+  postMessage,
+  teamChatQueryKeys,
+  type BootstrapResponse,
+  type ChatMessage,
+  type MessagePageResponse,
+} from "./chatApi";
+import { useTeamChatStore } from "./teamChatStore";
+
+export type OutboxStatus = "sending" | "failed";
+
+export interface OutboxEntry {
+  clientId: string;
+  channelId: string;
+  threadRootId: string | null;
+  authorId: string;
+  body: string;
+  createdAtMs: number;
+  status: OutboxStatus;
+}
+
+interface OutboxState {
+  entries: OutboxEntry[];
+  add: (entry: OutboxEntry) => void;
+  setStatus: (clientId: string, status: OutboxStatus) => void;
+  remove: (clientId: string) => void;
+}
+
+export const useChatOutbox = create<OutboxState>((set) => ({
+  entries: [],
+  add: (entry) => set((state) => ({ entries: [...state.entries, entry] })),
+  setStatus: (clientId, status) =>
+    set((state) => ({
+      entries: state.entries.map((entry) =>
+        entry.clientId === clientId ? { ...entry, status } : entry,
+      ),
+    })),
+  remove: (clientId) =>
+    set((state) => ({ entries: state.entries.filter((entry) => entry.clientId !== clientId) })),
+}));
+
+/** A `client_id` the server accepts (`^[A-Za-z0-9_-]{1,64}$`). */
+export function newClientId(): string {
+  const random =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+  const id = `web-${random}`.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+  return CLIENT_ID_PATTERN.test(id) ? id : `web-${Date.now().toString(36)}`;
+}
+
+/** Network failures, 429 and 5xx keep the row for a retry (FR-084). */
+export function isRetryableSendError(error: unknown): boolean {
+  if (!(error instanceof ChatApiError)) return true;
+  return error.status === 429 || error.status >= 500;
+}
+
+function mergeIntoPage(
+  page: MessagePageResponse | undefined,
+  message: ChatMessage,
+): MessagePageResponse | undefined {
+  if (page === undefined) return page;
+  if (page.items.some((item) => item.id === message.id)) return page;
+  const items = [...page.items, message].sort(
+    (a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id),
+  );
+  return { ...page, items };
+}
+
+function storeSent(queryClient: QueryClient, message: ChatMessage): void {
+  if (message.thread_root_id === null) {
+    const key = teamChatQueryKeys.messages(message.channel_id);
+    if (queryClient.getQueryData(key) === undefined) {
+      void queryClient.invalidateQueries({ queryKey: key });
+    } else {
+      queryClient.setQueryData<MessagePageResponse>(key, (page) => mergeIntoPage(page, message));
+    }
+    return;
+  }
+  const threadKey = teamChatQueryKeys.thread(message.channel_id, message.thread_root_id);
+  queryClient.setQueryData<MessagePageResponse>(threadKey, (page) => mergeIntoPage(page, message));
+  // The reply count reads the change set; the frame for this id dedupes later.
+  useTeamChatStore.getState().mergeChanges([
+    {
+      id: message.id,
+      kind: "message",
+      channel_id: message.channel_id,
+      thread_root_id: message.thread_root_id,
+      created_at: message.created_at,
+      author_id: message.author_id,
+    },
+  ]);
+}
+
+/** A first message in a DM the sidebar does not list yet refetches bootstrap (AC-021a). */
+function refreshSidebarIfUnknown(queryClient: QueryClient, channelId: string): void {
+  const bootstrap = queryClient.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+  if (bootstrap === undefined) return;
+  const known =
+    bootstrap.channels.some((channel) => channel.id === channelId) ||
+    bootstrap.dms.some((channel) => channel.id === channelId);
+  if (!known) void queryClient.invalidateQueries({ queryKey: teamChatQueryKeys.bootstrap });
+}
+
+async function deliver(queryClient: QueryClient, entry: OutboxEntry): Promise<void> {
+  const outbox = useChatOutbox.getState();
+  outbox.setStatus(entry.clientId, "sending");
+  try {
+    const message = await postMessage(entry.channelId, {
+      body: entry.body,
+      client_id: entry.clientId,
+      thread_root_id: entry.threadRootId,
+    });
+    storeSent(queryClient, message);
+    useChatOutbox.getState().remove(entry.clientId);
+    refreshSidebarIfUnknown(queryClient, entry.channelId);
+  } catch {
+    // FR-084 names network, 429 and 5xx (`isRetryableSendError`). Other answers
+    // (403, 409) also stay as "nicht gesendet", so the text is never dropped silently.
+    useChatOutbox.getState().setStatus(entry.clientId, "failed");
+  }
+}
+
+/**
+ * Show the message at once and post it. Returns false for a blank body, which
+ * is never posted (AC-015a: the server would answer 422 `empty_body`).
+ */
+export function sendChatMessage(
+  queryClient: QueryClient,
+  input: { channelId: string; threadRootId: string | null; authorId: string; body: string },
+): boolean {
+  const body = input.body.trim();
+  if (body === "") return false;
+  const entry: OutboxEntry = {
+    clientId: newClientId(),
+    channelId: input.channelId,
+    threadRootId: input.threadRootId,
+    authorId: input.authorId,
+    body,
+    createdAtMs: Date.now(),
+    status: "sending",
+  };
+  useChatOutbox.getState().add(entry);
+  void deliver(queryClient, entry);
+  return true;
+}
+
+/** "erneut senden": the same `client_id` and body. A row already sending is left alone. */
+export function retryChatMessage(queryClient: QueryClient, clientId: string): void {
+  const entry = useChatOutbox.getState().entries.find((item) => item.clientId === clientId);
+  if (entry === undefined || entry.status === "sending") return;
+  void deliver(queryClient, entry);
+}

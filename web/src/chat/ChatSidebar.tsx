@@ -4,6 +4,8 @@
  * Direct messages stay on screen when the list is empty. A channel name
  * renders with one leading `#`.
  */
+import type { ReactNode } from "react";
+
 import type { ChatChannel } from "./chatApi";
 import { CHAT_TEST_IDS } from "./testids";
 import { Link } from "@/lib/routing";
@@ -15,6 +17,8 @@ export interface ChatSidebarProps {
   activeChannelId?: string;
   /** Under `md` the list fills the width on `/chat` and hides once a channel is open. */
   className?: string;
+  /** Control next to the "Direktnachrichten" heading (new DM). */
+  dmAction?: ReactNode;
 }
 
 /** True for `/chat`, `/chat/:channelId`, and `/chat/:channelId/t/:threadRootId`. */
@@ -69,7 +73,13 @@ function EntryLink({
   );
 }
 
-export function ChatSidebar({ channels, dms, activeChannelId, className }: ChatSidebarProps) {
+export function ChatSidebar({
+  channels,
+  dms,
+  activeChannelId,
+  className,
+  dmAction,
+}: ChatSidebarProps) {
   return (
     <aside
       data-testid={CHAT_TEST_IDS.sidebar}
@@ -93,9 +103,12 @@ export function ChatSidebar({ channels, dms, activeChannelId, className }: ChatS
         </ul>
       </section>
       <section aria-label="Direktnachrichten">
-        <h2 className="px-3 pb-1 pt-3 text-xs font-medium text-muted-foreground">
-          Direktnachrichten
-        </h2>
+        <div className="flex items-center justify-between gap-2 pr-1">
+          <h2 className="px-3 pb-1 pt-3 text-xs font-medium text-muted-foreground">
+            Direktnachrichten
+          </h2>
+          {dmAction}
+        </div>
         <ul>
           {dms.map((channel) => (
             <EntryLink

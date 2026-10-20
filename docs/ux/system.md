@@ -70,9 +70,35 @@ actions (send with Enter, channel switch via shortcut, command palette).
 
 ## Component patterns (add when used twice; record measurements)
 - _empty — builder fills this in, e.g._ `MessageRow — 8px 12px pad · avatar 28 · name 13/600 · body 14/400 · meta 12/400 muted tabular-nums`
+- `MessageRow` (proposed, T-007, `web/src/chat/MessageItem.tsx`; channel list + thread pane):
+  flat row, no card · `px-4`, header row `pt-2`, compact row `py-0.5` · avatar `size-7`
+  `rounded-md` (human: initial on `bg-muted`; agent: `BotIcon` on `bg-secondary` + text
+  "Agent") · name `text-sm font-medium` · time `text-xs muted tabular-nums`, `HH:MM` today,
+  else `9. Okt., 10:53`, full date in `title` · body `text-sm whitespace-pre-wrap
+  wrap-anywhere` · hover/focus-within `bg-muted/50`. Consecutive rows of one author within
+  5 min are compact (time in the gutter on hover/focus). Sending: body `text-muted-foreground`;
+  failed: `CircleAlertIcon` + "nicht gesendet" + link button "erneut senden" in
+  `text-destructive` under the body (FR-084). Reply action: floating `size-7` bordered
+  icon button top-right on desktop (opacity 0 → 100 on hover/focus-within, no transition),
+  always visible `size-11` on phone; reply count link `text-xs text-primary` with
+  `MessageSquareIcon`.
+- `ThreadPane` (proposed, T-007): right column `md:w-80 lg:w-96` with `border-l`; header
+  `min-h-11` "Thread" + channel label + close `XIcon` link; root row, then a hairline
+  divider with "n Antworten"; reply composer at the bottom. Tablet (md–lg): chat sidebar
+  hides while a thread is open. Phone: replaces the channel column, own `min-h-11` back link.
+- `ChatComposerCard` (proposed, T-007): reuses `ChatComposer` + `ComposerSendButton`
+  unchanged; send button `max-md:size-11`; wrapper `px-3 md:px-4`,
+  `pb-[max(20px,env(safe-area-inset-bottom))] md:pb-4`.
 
 ## Motion backlog (ideas parked until T-117 / T-118)
 - _empty_
+- T-007: message enter for frames from others (`dur.enter`, opacity + y 8→0); not for the
+  own Enter send (keyboard action) and not for backfill.
+- T-007: thread pane open slide on desktop (`dur.pane`, `ease.inOut`); phone swap stays instant.
+- T-007: reply action toolbar fade on row hover (`dur.micro`, opacity only).
+- T-007: "nicht gesendet" → sent: body colour crossfade (`dur.color`).
 
 ## Change log
 - 2026-10-18: seeded from ADR-0008, NFR-006…NFR-011, FR-078…FR-081 (ux-builder bootstrap).
+- 2026-10-20: T-007 MessageRow, ThreadPane, ChatComposerCard patterns (proposed) and four
+  motion backlog items.
