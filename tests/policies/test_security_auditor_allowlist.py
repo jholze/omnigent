@@ -23,6 +23,11 @@ _VALIDATOR = (
     "/Users/jholze/dev/omnigent-src/.work/security-auditor/agents/lead/"
     "agents/security_auditor/skills/security-audit/validate-findings.cjs"
 )
+_MAIN_VALIDATOR = (
+    "/Users/jholze/dev/omnigent-src/agents/lead/agents/security_auditor/"
+    "skills/security-audit/validate-findings.cjs"
+)
+_BYPASS_FINDINGS = "/Users/jholze/dev/omnigent-src/.work/security-audit-out/x/findings.json"
 
 
 def _expression(spec, policy_name: str) -> str:
@@ -64,7 +69,9 @@ def test_shell_allowlist_blocks_target_execution(auditor_spec) -> None:
         "git -C /Users/jholze/dev/omnigent-src/.work/security-auditor rev-parse HEAD",
         "git merge-base abc123 def456",
         "grep -n permission omnigent/server",
+        "git grep -n permission omnigent/server",
         f"node {_VALIDATOR} {_FINDINGS}",
+        f"node {_MAIN_VALIDATOR} {_FINDINGS}",
     ]
     denied = [
         "python -c 'print(1)'",
@@ -74,10 +81,32 @@ def test_shell_allowlist_blocks_target_execution(auditor_spec) -> None:
         "git diff HEAD && rm -rf /",
         "git status --porcelain > /tmp/out",
         "bash -lc git status",
+        "rg",
         "rg --pre ./evil.sh",
         "rg -n permission omnigent/server",
         "git diff --output=/tmp/out",
         "git diff --output /tmp/out",
+        (
+            "node /;sh${IFS}./evil.sh;/agents/lead/agents/security_auditor/"
+            "skills/security-audit/validate-findings.cjs " + _BYPASS_FINDINGS
+        ),
+        (
+            "node /$(sh${IFS}evil.sh)/agents/lead/agents/security_auditor/"
+            "skills/security-audit/validate-findings.cjs " + _BYPASS_FINDINGS
+        ),
+        (
+            "node /`id`/agents/lead/agents/security_auditor/"
+            "skills/security-audit/validate-findings.cjs " + _BYPASS_FINDINGS
+        ),
+        "git grep -Ocat x",
+        "git grep -Osh -l x -- evil.sh",
+        "git grep -Oecho -l spec_version -- README.md",
+        "git grep --open-files-in-pager x",
+        "git grep --open x -- README.md",
+        (
+            "node /tmp/agents/lead/agents/security_auditor/skills/"
+            "security-audit/validate-findings.cjs " + _FINDINGS
+        ),
         "",
     ]
     for command in allowed:
