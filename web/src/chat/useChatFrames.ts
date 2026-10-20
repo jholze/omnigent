@@ -95,9 +95,10 @@ export function parseChatFrame(raw: unknown): ChatUpdatesFrame | null {
 }
 
 function cacheChannelMessages(queryClient: QueryClient, channelId: string): void {
+  const queryKey = teamChatQueryKeys.messages(channelId);
   void queryClient
     .fetchQuery({
-      queryKey: teamChatQueryKeys.messages(channelId),
+      queryKey,
       queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
       // The app client keeps pages fresh for 30s. This fill must run every time.
       staleTime: 0,
@@ -105,6 +106,9 @@ function cacheChannelMessages(queryClient: QueryClient, channelId: string): void
     .catch((error: unknown) => {
       const status = error instanceof ChatApiError ? String(error.status) : "error";
       console.warn(`[team-chat] message cache fill failed (${status})`);
+      // A failed fill does not count as loaded: mark any cached page stale so
+      // an open view refetches once now and the next mount asks the server.
+      void queryClient.invalidateQueries({ queryKey, exact: true });
     });
 }
 

@@ -187,6 +187,9 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
   const messages = useQuery({
     queryKey: teamChatQueryKeys.messages(channelId),
     queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
+    // Opening a channel always asks the server: a page cached before its
+    // first message (e.g. a fresh DM) must not stay "fresh" for 30s (AC-021a).
+    refetchOnMount: "always",
   });
   const outbox = useChatOutbox((state) => state.entries);
   const replyCounts = useReplyCounts(channelId);

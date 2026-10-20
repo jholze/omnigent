@@ -89,6 +89,8 @@ export function ThreadPane({
   const channelMessages = useQuery({
     queryKey: teamChatQueryKeys.messages(channelId),
     queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
+    // Same observer as ChannelView: never trust a 30s-fresh cached page on open.
+    refetchOnMount: "always",
   });
   const replies = useQuery({
     queryKey: threadKey,

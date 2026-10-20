@@ -16,6 +16,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { Link, useParams } from "@/lib/routing";
 import { cn } from "@/lib/utils";
 import {
+  ChatApiError,
   fetchBootstrap,
   teamChatQueryKeys,
   type BootstrapResponse,
@@ -33,25 +34,77 @@ function channelsOf(channels: ChatChannel[] | undefined): ChatChannel[] {
   return (channels ?? []).filter((channel) => channel.id !== "");
 }
 
+/** Bootstrap fetches per new-channel frame before the next frame has to retry. */
+const NEW_CHANNEL_BOOTSTRAP_ATTEMPTS = 3;
+const NEW_CHANNEL_RETRY_DELAY_MS = 400;
+
+function bootstrapChannelIds(data: BootstrapResponse): Set<string> {
+  return new Set([...data.channels, ...data.dms].map((channel) => channel.id));
+}
+
 /**
  * A message in a channel the sidebar does not list (a DM someone just opened
- * with me) refetches bootstrap once per channel (AC-021a).
+ * with me) refetches bootstrap until the response lists it (AC-021a).
+ *
+ * `fetchQuery` with `staleTime: 0` can still join an older in-flight fetch
+ * that predates the DM, so each response is checked and the fetch repeated a
+ * bounded number of times. A channel id counts as done only once a response
+ * contains it. A failed or short round leaves it open: the next frame for
+ * that channel starts a new round. One round per frame, so no loop.
  */
 function useBootstrapForNewChannels(enabled: boolean, data: BootstrapResponse | undefined): void {
   const queryClient = useQueryClient();
   const changes = useTeamChatStore((state) => state.changes);
-  const requestedRef = useRef(new Set<string>());
+  const confirmedRef = useRef(new Set<string>());
+  // Channel id -> message count (changes are merged by id) a round already ran for.
+  const attemptedRef = useRef(new Map<string, number>());
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   useEffect(() => {
     if (!enabled || data === undefined) return;
-    const known = new Set([...data.channels, ...data.dms].map((channel) => channel.id));
-    let stale = false;
+    const known = bootstrapChannelIds(data);
+    for (const id of known) confirmedRef.current.add(id);
+    const newest = new Map<string, number>();
     for (const change of Object.values(changes)) {
       if (change.kind !== "message" || known.has(change.channel_id)) continue;
-      if (requestedRef.current.has(change.channel_id)) continue;
-      requestedRef.current.add(change.channel_id);
-      stale = true;
+      if (confirmedRef.current.has(change.channel_id)) continue;
+      newest.set(change.channel_id, (newest.get(change.channel_id) ?? 0) + 1);
     }
-    if (stale) void queryClient.invalidateQueries({ queryKey: teamChatQueryKeys.bootstrap });
+    const wanted = [...newest].flatMap(([channelId, marker]) => {
+      if (attemptedRef.current.get(channelId) === marker) return [];
+      attemptedRef.current.set(channelId, marker);
+      return [channelId];
+    });
+    if (wanted.length === 0) return;
+    const attempt = (n: number): void => {
+      if (!mountedRef.current) return;
+      queryClient
+        .fetchQuery({
+          queryKey: teamChatQueryKeys.bootstrap,
+          queryFn: ({ signal }) => fetchBootstrap(signal),
+          // The app client keeps bootstrap fresh for 30s; this must hit the network.
+          staleTime: 0,
+        })
+        .then((fresh) => {
+          const listed = bootstrapChannelIds(fresh);
+          for (const id of wanted) if (listed.has(id)) confirmedRef.current.add(id);
+        })
+        .catch((error: unknown) => {
+          const status = error instanceof ChatApiError ? String(error.status) : "error";
+          console.warn(`[team-chat] bootstrap refetch for a new channel failed (${status})`);
+        })
+        .finally(() => {
+          if (wanted.every((id) => confirmedRef.current.has(id))) return;
+          if (n >= NEW_CHANNEL_BOOTSTRAP_ATTEMPTS) return;
+          setTimeout(() => attempt(n + 1), NEW_CHANNEL_RETRY_DELAY_MS * n);
+        });
+    };
+    attempt(1);
   }, [enabled, data, changes, queryClient]);
 }
 
@@ -91,7 +144,10 @@ export function ChatPage() {
     );
   }
 
-  const rootClassName = "flex min-h-0 w-full min-w-0 flex-1 overflow-x-hidden";
+  // Phone: the shell header floats over the page (absolute, h-14) with the
+  // Open-sidebar button in it. Start team chat below it, so back controls are
+  // neither covered nor under the header's hit area.
+  const rootClassName = "flex min-h-0 w-full min-w-0 flex-1 overflow-x-hidden max-md:pt-14";
 
   if (bootstrap.isPending) {
     return (
