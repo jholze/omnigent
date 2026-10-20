@@ -68,6 +68,17 @@ export interface ChatMessage {
   created_at: number;
   body: string;
   client_id: string | null;
+  /**
+   * `chat_threads.agent_state` on a thread root (`thread_root_id` null), when
+   * the thread has a row. Replies omit it. Read-only.
+   */
+  agent_state?: string | null;
+  /**
+   * `chat_threads.session_id` on a thread root, when the agent thread has a
+   * session. Lets a reloaded client mount the live view. Replies omit it.
+   * Read-only.
+   */
+  session_id?: string | null;
 }
 
 export interface MessagePageResponse {
@@ -123,7 +134,9 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof value.author_kind === "string" &&
     typeof value.created_at === "number" &&
     typeof value.body === "string" &&
-    (value.client_id === null || typeof value.client_id === "string")
+    (value.client_id === null || typeof value.client_id === "string") &&
+    (value.agent_state == null || typeof value.agent_state === "string") &&
+    (value.session_id == null || typeof value.session_id === "string")
   );
 }
 

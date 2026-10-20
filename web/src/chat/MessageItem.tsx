@@ -3,11 +3,14 @@
  *
  * Human bodies render as text nodes only (FR-020, NFR-015): no HTML, no
  * Markdown. `http(s)` URLs become links with `rel="noopener noreferrer"`, and
- * `<@kind:id>` tokens become name chips. Agent Markdown is T-008; until then an
- * agent body renders the same way.
+ * `<@kind:id>` tokens become name chips. Agent and bot bodies are Markdown
+ * through AI Elements `MessageResponse` (streamdown-security). System lines
+ * (server notices such as a failed agent start) are one muted text line.
  */
-import { BotIcon, CircleAlertIcon, MessageSquareIcon } from "lucide-react";
+import type { ReactNode } from "react";
+import { BotIcon, CircleAlertIcon, InfoIcon, MessageSquareIcon } from "lucide-react";
 
+import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
@@ -212,11 +215,11 @@ export function replyCountLabel(n: number): string {
   return `${numberFormat.format(n)} ${noun}`;
 }
 
-function isAgentKind(kind: string): boolean {
+export function isAgentKind(kind: string): boolean {
   return kind === "agent_account" || kind === "omnigent_agent" || kind === "agent";
 }
 
-function Avatar({ label, agent }: { label: string; agent: boolean }) {
+export function MessageAvatar({ label, agent }: { label: string; agent: boolean }) {
   return (
     <span
       aria-hidden="true"
@@ -239,6 +242,39 @@ export interface MessageItemProps {
   threadHref?: string;
   replyCount?: number;
   onRetry?: (clientId: string) => void;
+  /** Shown next to the reply count on a thread root, e.g. the agent status chip. */
+  threadAccessory?: ReactNode;
+}
+
+function SystemLine({ message, directory }: Pick<MessageItemProps, "message" | "directory">) {
+  const date = new Date(message.createdAtMs);
+  return (
+    <li
+      data-testid={CHAT_TEST_IDS.message}
+      data-message-id={message.id ?? undefined}
+      data-author-kind="system"
+      className="flex gap-3 px-4 py-1"
+    >
+      <div className="flex w-7 shrink-0 justify-center pt-px">
+        <InfoIcon className="size-4 text-muted-foreground" aria-hidden="true" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
+        <span className="sr-only">Systemmeldung:</span>
+        <MessageBody
+          body={message.body}
+          directory={directory}
+          className="min-w-0 text-xs text-muted-foreground"
+        />
+        <time
+          dateTime={date.toISOString()}
+          title={fullFormat.format(date)}
+          className="text-xs text-muted-foreground tabular-nums"
+        >
+          {formatMessageTime(message.createdAtMs)}
+        </time>
+      </div>
+    </li>
+  );
 }
 
 export function MessageItem({
@@ -248,6 +284,32 @@ export function MessageItem({
   threadHref,
   replyCount = 0,
   onRetry,
+  threadAccessory,
+}: MessageItemProps) {
+  if (message.authorKind === "system") {
+    return <SystemLine message={message} directory={directory} />;
+  }
+  return (
+    <MessageRow
+      message={message}
+      directory={directory}
+      compact={compact}
+      threadHref={threadHref}
+      replyCount={replyCount}
+      onRetry={onRetry}
+      threadAccessory={threadAccessory}
+    />
+  );
+}
+
+function MessageRow({
+  message,
+  directory,
+  compact = false,
+  threadHref,
+  replyCount = 0,
+  onRetry,
+  threadAccessory,
 }: MessageItemProps) {
   const author = principalLabel(message.authorId, directory);
   const agent = isAgentKind(message.authorKind);
@@ -255,6 +317,7 @@ export function MessageItem({
   const dateTime = new Date(message.createdAtMs).toISOString();
   const fullTime = fullFormat.format(new Date(message.createdAtMs));
   const failed = message.status === "failed";
+  const showReplies = Boolean(threadHref) && replyCount > 0;
 
   return (
     <li
@@ -280,7 +343,7 @@ export function MessageItem({
             {timeFormat.format(new Date(message.createdAtMs))}
           </time>
         ) : (
-          <Avatar label={author} agent={agent} />
+          <MessageAvatar label={author} agent={agent} />
         )}
       </div>
       <div className={cn("min-w-0 flex-1", threadHref && "max-md:pr-10")}>
@@ -299,11 +362,17 @@ export function MessageItem({
             </time>
           </div>
         )}
-        <MessageBody
-          body={message.body}
-          directory={directory}
-          className={message.status === "sent" ? undefined : "text-muted-foreground"}
-        />
+        {agent ? (
+          <div className="min-w-0 text-sm text-pretty">
+            <MessageResponse>{message.body}</MessageResponse>
+          </div>
+        ) : (
+          <MessageBody
+            body={message.body}
+            directory={directory}
+            className={message.status === "sent" ? undefined : "text-muted-foreground"}
+          />
+        )}
         {failed ? (
           <div
             role="alert"
@@ -327,16 +396,21 @@ export function MessageItem({
             ) : null}
           </div>
         ) : null}
-        {threadHref && replyCount > 0 ? (
-          <Link
-            to={threadHref}
-            componentId="chat.message.replies"
-            data-testid={CHAT_TEST_IDS.replyCount}
-            className="inline-flex min-h-11 items-center gap-1 rounded-sm text-xs font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring md:min-h-0 md:py-0.5"
-          >
-            <MessageSquareIcon className="size-4 shrink-0" aria-hidden="true" />
-            <span className="tabular-nums">{replyCountLabel(replyCount)}</span>
-          </Link>
+        {showReplies || threadAccessory ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2">
+            {showReplies && threadHref ? (
+              <Link
+                to={threadHref}
+                componentId="chat.message.replies"
+                data-testid={CHAT_TEST_IDS.replyCount}
+                className="inline-flex min-h-11 items-center gap-1 rounded-sm text-xs font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring md:min-h-0 md:py-0.5"
+              >
+                <MessageSquareIcon className="size-4 shrink-0" aria-hidden="true" />
+                <span className="tabular-nums">{replyCountLabel(replyCount)}</span>
+              </Link>
+            ) : null}
+            {threadAccessory}
+          </div>
         ) : null}
       </div>
       {threadHref && message.status === "sent" ? (

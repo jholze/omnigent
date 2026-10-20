@@ -144,6 +144,8 @@ export type RenderItem =
         action: "accept" | "decline" | "cancel" | "auto_resolved";
         content?: Record<string, unknown>;
         _meta?: Record<string, unknown>;
+        /** User id that decided, when the server reported it. */
+        decidedBy?: string;
       } | null;
       askUserQuestion?: Record<string, unknown> | null;
       exitPlanMode?: Record<string, unknown> | null;

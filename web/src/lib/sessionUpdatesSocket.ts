@@ -41,7 +41,24 @@ export type ChatUpdatesFrame =
       thread_root_id: string | null;
       created_at: number;
       id: string;
+    }
+  | {
+      /** Agent-Thread state from `chat_threads`. No body, no names. */
+      type: "chat";
+      kind: "thread.updated";
+      channel_id: string;
+      root_message_id: string;
+      reply_count: number;
+      agent_state: string;
+      session_id: string | null;
+      bot_streak: number;
     };
+
+/** Chat frames that record a change id (message or read cursor). */
+export type ChatChangeFrame = Exclude<ChatUpdatesFrame, { kind: "thread.updated" }>;
+
+/** The body-less Agent-Thread state frame. */
+export type ChatThreadFrame = Extract<ChatUpdatesFrame, { kind: "thread.updated" }>;
 
 /** A frame pushed by the server over the updates stream. */
 export type SessionUpdatesFrame =

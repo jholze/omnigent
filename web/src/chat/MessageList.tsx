@@ -7,6 +7,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
+import { cn } from "@/lib/utils";
 import type { DirectoryEntry } from "./chatApi";
 import { MessageItem, principalLabel, type MessageView } from "./MessageItem";
 import { CHAT_TEST_IDS } from "./testids";
@@ -86,6 +87,10 @@ export interface MessageListProps {
   threadHrefFor?: (message: MessageView) => string | undefined;
   replyCounts?: Map<string, number>;
   onRetry: (clientId: string) => void;
+  /** Extra content next to a thread root's reply count (agent status chip). */
+  renderThreadAccessory?: (message: MessageView) => ReactNode;
+  /** Rendered below the rows inside the scroller (live agent output). */
+  footer?: ReactNode;
 }
 
 export function MessageList({
@@ -98,8 +103,11 @@ export function MessageList({
   threadHrefFor,
   replyCounts,
   onRetry,
+  renderThreadAccessory,
+  footer,
 }: MessageListProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const announcement = useNewMessageAnnouncement(messages, me, directory);
   const last = messages.at(-1);
@@ -115,6 +123,19 @@ export function MessageList({
     }
   }, [lastKey, messages.length, ownSend]);
 
+  // Streamed agent output grows the footer without adding a row. Follow it
+  // only while the reader is at the bottom (FR-080); no smoothing.
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    const content = contentRef.current;
+    if (scroller === null || content === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (atBottomRef.current) scroller.scrollTop = scroller.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div
       ref={scrollerRef}
@@ -125,24 +146,28 @@ export function MessageList({
         atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLACK_PX;
       }}
     >
-      {header}
-      {messages.length === 0 ? (
-        empty
-      ) : (
-        <ol aria-label={label} className="flex flex-col pb-3">
-          {messages.map((message, index) => (
-            <MessageItem
-              key={message.key}
-              message={message}
-              directory={directory}
-              compact={isCompact(messages[index - 1], message)}
-              threadHref={threadHrefFor?.(message)}
-              replyCount={message.id ? (replyCounts?.get(message.id) ?? 0) : 0}
-              onRetry={onRetry}
-            />
-          ))}
-        </ol>
-      )}
+      <div ref={contentRef} className={cn(messages.length === 0 && !footer && "h-full")}>
+        {header}
+        {messages.length === 0 ? (
+          empty
+        ) : (
+          <ol aria-label={label} className={cn("flex flex-col", footer ? "pb-1" : "pb-3")}>
+            {messages.map((message, index) => (
+              <MessageItem
+                key={message.key}
+                message={message}
+                directory={directory}
+                compact={isCompact(messages[index - 1], message)}
+                threadHref={threadHrefFor?.(message)}
+                replyCount={message.id ? (replyCounts?.get(message.id) ?? 0) : 0}
+                onRetry={onRetry}
+                threadAccessory={renderThreadAccessory?.(message)}
+              />
+            ))}
+          </ol>
+        )}
+        {footer}
+      </div>
       <div aria-live="polite" aria-atomic="true" className="sr-only">
         {announcement}
       </div>

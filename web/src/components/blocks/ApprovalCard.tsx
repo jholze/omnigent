@@ -114,6 +114,25 @@ export type SubmitApprovalFn = (
   meta?: Record<string, unknown>,
 ) => void;
 
+/**
+ * Copy for a surface outside the English session chat (the team chat).
+ * Covers the binary card and the generic verdicts; harness-specific modes
+ * (plan review, Codex commands, question forms) keep their own copy.
+ */
+export interface ApprovalCardLabels {
+  /** Pending title of the binary card, e.g. "Freigabe nötig". */
+  title: string;
+  approve: string;
+  reject: string;
+  approved: string;
+  rejected: string;
+  cancelled: string;
+  resolvedElsewhere: string;
+  resolvedElsewhereDetail: string;
+  /** Verdict plus resolver, e.g. `("Genehmigt", "Anna") => "Genehmigt von Anna"`. */
+  byResolver: (verdict: string, resolver: string) => string;
+}
+
 /** Sub-agent session behind a prompt mirrored into an ancestor's view. */
 export interface SubagentRequester {
   /** Sub-agent session that owns the prompt, e.g. ``"conv_child123"``. */
@@ -235,6 +254,18 @@ interface ApprovalCardProps {
   requester?: SubagentRequester | null;
   /** Extra classes for the card container, e.g. to drop its border when embedded. */
   className?: string;
+  /** Surface copy; defaults to the English session-chat copy. */
+  labels?: ApprovalCardLabels;
+  /**
+   * Who answered, when the surface knows it. Shown with an accept/decline
+   * verdict, e.g. "Approved by Anna".
+   */
+  resolvedBy?: string | null;
+  /**
+   * Viewer may read but not answer: the pending card shows the request and
+   * this note instead of any action control.
+   */
+  readOnlyNote?: string | null;
 }
 
 const EMPTY_CODEX_PERSIST_MODES: CodexPersistMode[] = [];
@@ -260,6 +291,9 @@ export function ApprovalCard({
   onSubmit,
   requester,
   className,
+  labels,
+  resolvedBy,
+  readOnlyNote,
 }: ApprovalCardProps) {
   // In a side-chat pane this resolves to the child id, so the verdict targets
   // the child's elicitation rather than the main conversation's. null (the main
@@ -415,7 +449,7 @@ export function ApprovalCard({
     <div className="flex flex-wrap gap-2 pt-1">
       <Button size="sm" onClick={() => submitBinary("accept")} componentId="approval.approve">
         <CheckIcon className="mr-1 size-3.5" />
-        Approve
+        {labels?.approve ?? "Approve"}
       </Button>
       {agyPermission?.alwaysAllowPattern && (
         <>
@@ -521,7 +555,7 @@ export function ApprovalCard({
         componentId="approval.reject"
       >
         <XIcon className="mr-1 size-3.5" />
-        Reject
+        {labels?.reject ?? "Reject"}
       </Button>
     </div>
   );
@@ -588,7 +622,7 @@ export function ApprovalCard({
         : null;
 
     let icon = <XIcon className="size-4 text-destructive" />;
-    let label = isExitPlanMode ? "Plan rejected" : "Rejected";
+    let label = isExitPlanMode ? "Plan rejected" : (labels?.rejected ?? "Rejected");
     if (promptExpired) {
       // The server cleared the prompt because the hook stopped waiting
       // before anyone answered (a severed poll never re-parked, the ask
@@ -598,21 +632,22 @@ export function ApprovalCard({
       label = "Prompt expired";
     } else if (autoResolved) {
       // Verdict unknown here; explain the neutral pill.
+      const detail = labels?.resolvedElsewhereDetail ?? AUTO_RESOLVED_DETAIL;
       icon = (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span tabIndex={0} className="inline-flex" aria-label={AUTO_RESOLVED_DETAIL}>
+            <span tabIndex={0} className="inline-flex" aria-label={detail}>
               <InfoIcon className="size-4 text-muted-foreground" />
             </span>
           </TooltipTrigger>
-          <TooltipContent className="max-w-72">{AUTO_RESOLVED_DETAIL}</TooltipContent>
+          <TooltipContent className="max-w-72">{detail}</TooltipContent>
         </Tooltip>
       );
-      label = "Resolved elsewhere";
+      label = labels?.resolvedElsewhere ?? "Resolved elsewhere";
     } else if (response.action === "cancel") {
       // Dismissed without deciding — neither approved nor rejected.
       icon = <InfoIcon className="size-4 text-muted-foreground" />;
-      label = "Cancelled";
+      label = labels?.cancelled ?? "Cancelled";
     } else if (submittedAnswers !== null) {
       icon = <CheckIcon className="size-4 text-success" />;
       label = "Submitted";
@@ -647,7 +682,11 @@ export function ApprovalCard({
       label = "Always allowed";
     } else if (accepted) {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = isExitPlanMode ? "Plan approved" : "Approved";
+      label = isExitPlanMode ? "Plan approved" : (labels?.approved ?? "Approved");
+    }
+    const decided = response.action === "accept" || response.action === "decline";
+    if (decided && resolvedBy) {
+      label = labels ? labels.byResolver(label, resolvedBy) : `${label} by ${resolvedBy}`;
     }
 
     // The gating message ("Claude wants to call **AskUserQuestion**") is
@@ -671,9 +710,13 @@ export function ApprovalCard({
         data-state="responded"
         className={cn("flex flex-col gap-1 border-muted", className)}
       >
-        <AlertTitle className="flex items-center gap-2 text-ui">
+        <AlertTitle className="flex min-w-0 items-center gap-2 text-ui">
           {icon}
-          {label}
+          {/* NFR-032: a long resolver (raw email / user id) wraps inside the
+              card instead of overflowing it; the full label stays readable. */}
+          <span className="min-w-0 break-words" title={label} aria-label={label}>
+            {label}
+          </span>
           {policyLabel && <span className="text-muted-foreground text-sm">· {policyLabel}</span>}
         </AlertTitle>
         {hasBody && (
@@ -758,7 +801,7 @@ export function ApprovalCard({
               ? askUserQuestionTitle
               : isMultiChoice
                 ? "Choose an option"
-                : "Approval required"}
+                : (labels?.title ?? "Approval required")}
         {policyLabel && !isAskUserQuestion && !isExitPlanMode && (
           <span className="text-muted-foreground text-sm">· {policyLabel}</span>
         )}
@@ -768,7 +811,19 @@ export function ApprovalCard({
       </AlertTitle>
       <AlertDescription className="flex flex-col gap-2">
         {requesterLine}
-        {isExitPlanMode ? (
+        {readOnlyNote ? (
+          <>
+            <ElicitationMessage message={message} />
+            {formattedPreview && (
+              <pre className="max-h-64 overflow-y-auto rounded bg-muted px-2 py-1 font-mono text-sm whitespace-pre-wrap break-words">
+                {formattedPreview}
+              </pre>
+            )}
+            <span data-testid="approval-card-read-only" className="text-sm text-muted-foreground">
+              {readOnlyNote}
+            </span>
+          </>
+        ) : isExitPlanMode ? (
           <>
             <span>Claude finished planning and wants to proceed.</span>
             <ExitPlanModeReview
@@ -866,10 +921,14 @@ export function ApprovalCard({
 export function ElicitationCard({
   item,
   onSubmit,
+  labels,
+  resolvedBy,
+  readOnlyNote,
+  className,
 }: {
   item: Extract<RenderItem, { kind: "elicitation" }>;
   onSubmit?: SubmitApprovalFn;
-}) {
+} & Pick<ApprovalCardProps, "labels" | "resolvedBy" | "readOnlyNote" | "className">) {
   // A sub-agent's prompt is mirrored into its ancestors' streams with
   // ``targetSessionId`` naming the sub-agent that asked.
   const conversationId = useScopedConversationId();
@@ -898,6 +957,10 @@ export function ElicitationCard({
       agyPermission={item.agyPermission}
       onSubmit={onSubmit}
       requester={requester}
+      labels={labels}
+      resolvedBy={resolvedBy}
+      readOnlyNote={readOnlyNote}
+      className={className}
     />
   );
 }

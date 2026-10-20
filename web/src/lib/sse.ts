@@ -1144,6 +1144,10 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       // Keep the verdict when present so the card can show it instead
       // of the ambiguous "Resolved elsewhere" pill.
       ...(hasVerdict ? { action } : {}),
+      // Who decided rides along only with a real verdict.
+      ...(hasVerdict && typeof data.decided_by === "string" && data.decided_by !== ""
+        ? { decidedBy: data.decided_by }
+        : {}),
       // Only a verdict-less clear may say why: "unanswered" means the
       // prompt expired, so the card can tell the user what to do next.
       ...(!hasVerdict && data.reason === "unanswered" ? { reason: data.reason } : {}),
