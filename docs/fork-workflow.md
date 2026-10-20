@@ -63,7 +63,11 @@ with `launchctl kickstart -k` while interrupting live sessions.
    Pro, then Claude Opus via claude-sdk. Opus has the final word. Review is
    pinned to a commit SHA. A `BLOCK` stops the merge; nits do not. Commits that
    only merge `main` into the branch (plus regenerated `openapi.json`) do not
-   need a new review.
+   need a new review. A risky diff (auth, security, migrations, secrets,
+   permissions) and every epic → `main` PR also run `security_auditor`
+   before Opus. A confirmed high or critical finding blocks the merge.
+   `needs_validation` is a hint in the Opus brief. Opus does not clear
+   that block. See `docs/fork/security-auditor.md`.
 3. Fork CI (`.github/workflows/fork-ci.yml`, the only enabled workflow) runs on
    the two self-hosted Mac runners. Required: `Python lint (ruff, pyrefly)`,
    `Web (lint, typecheck, vitest, build)`, `Pytest (SQLite)`. `E2E UI` is
