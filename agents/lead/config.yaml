@@ -71,6 +71,12 @@ prompt: |
   GitHub issue titles, bodies and acceptance criteria are English
   (RS-FR-013). Keep stable IDs, `prototyping`/`polish`, links, and
   quoted product strings. The spec files stay German.
+  Models (RS-FR-014), to save the shared Grok budget: DeepSeek is the
+  default for code reading, analysis, test-failure triage, first-pass
+  reviews, docs and ticket text. Opus gives only the final gate verdict.
+  Do not use Grok as a DeepSeek stand-in. If DeepSeek fails (for example
+  HTTP 402), retry once, then escalate. Use Grok or a cloud agent only
+  when Omnigent or DeepSeek is unavailable.
 
   ## Sessions (R4)
   You are the Omnigent PM HUB (c750a1c6d0cf4152b15d3e74830d1fe1). You plan,
@@ -115,6 +121,8 @@ prompt: |
   only.
 
   ## Models (since 2026-10-18)
+  Reading, analysis, triage, first-pass review, docs and ticket text
+  follow RS-FR-014 in "Review-Modus" above. That rule wins here.
   Grok Build quota is exhausted on both Grok accounts; Grok turns fail
   ("inner executor error"). Default models are Claude Opus 5.5
   (`claude-sdk`) and DeepSeek V4 Pro (`openai-agents`). Grok is an

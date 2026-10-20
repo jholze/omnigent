@@ -1,6 +1,6 @@
 # Review-Modus
 
-Version: 0.2
+Version: 0.3
 Datum: 2026-10-20
 Status: Entwurf
 Owner: Jens Holze
@@ -14,6 +14,7 @@ Die Begründung, die Simulation und die offenen Fragen stehen in `review-stages.
 2. Fehlt das Feld, gilt die Tabelle. Dieselbe Zuordnung tragen die Labels `stage:prototyping` und `stage:polish`. Am 2026-10-20 ließen sich diese Labels mit dem Token dieses Laufs nicht anlegen (HTTP 403). Bis sie existieren, steht der Modus im Issue-Titel als `[prototyping]` oder `[polish]`.
 3. Fehlt das Ticket in der Tabelle, leitet die Lead nach `review-stages.md` RS-FR-012 ab und trägt das Feld ein, bevor sie coden lässt. Eine Erweiterung einer fertigen Funktion wird dabei nie `prototyping`.
 4. Tickets immer auf Englisch (RS-FR-013). Titel, Body und ACs eines GitHub-Issues sind Englisch. Stabile IDs, `prototyping`/`polish`, Links und wörtliche UI-Strings bleiben. Die Spec bleibt Deutsch.
+5. Modell (RS-FR-014). DeepSeek ist der Default für Code lesen, Analyse, Test-Triage, Erstreview, Doku und Tickettexte, damit das gemeinsame Grok-Budget bleibt. Opus gibt nur das Abschluss-Verdikt. Grok ist kein DeepSeek-Ersatz: bei Ausfall (z. B. HTTP 402) einmal wiederholen, dann eskalieren. Grok oder ein Cloud-Agent nur, wenn Omnigent oder DeepSeek nicht verfügbar ist.
 
 ## Prüfungen
 
@@ -77,5 +78,6 @@ Klasse `erweiterung` oder `gate` ist nie `prototyping`. Klasse `neu` ist die Fun
 
 | Version | Datum | Änderung |
 |---|---|---|
+| 0.3 | 2026-10-20 | Regel 5: DeepSeek-Default, Opus nur Abschluss-Verdikt, Grok kein Ersatz (RS-FR-014). |
 | 0.2 | 2026-10-20 | Regel 4: GitHub-Tickets immer auf Englisch (RS-FR-013). |
 | 0.1 | 2026-10-20 | Erste Fassung. Tabelle der offenen Team-Chat-Tickets. Gemergte T-000…T-008 ohne AC-033c stehen nicht drin. Labels `stage:*` sind vorgesehen; der Lauf konnte sie nicht anlegen (HTTP 403), der Issue-Titel trägt den Modus bis dahin. |

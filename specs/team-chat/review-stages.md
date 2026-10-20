@@ -1,6 +1,6 @@
 # Review-Stufen
 
-Version: 0.2
+Version: 0.3
 Datum: 2026-10-20
 Status: Entwurf
 Owner: Jens Holze
@@ -13,6 +13,7 @@ Die Kurzregel, die die Lead am Start liest, ist `review-mode.md`. Dieses Dokumen
 
 | Version | Datum | Änderung |
 |---|---|---|
+| 0.3 | 2026-10-20 | Modellregel RS-FR-014: DeepSeek ist der Default für Lesen, Analyse, Test-Triage, Erstreview, Doku und Tickettexte. Opus nur das Abschluss-Verdikt. Grok ist kein DeepSeek-Ersatz (402: ein Retry, dann eskalieren). Grok/Cloud nur wenn Omnigent oder DeepSeek nicht verfügbar ist. |
 | 0.2 | 2026-10-20 | Tickets immer auf Englisch (RS-FR-013). Titel, Body und ACs. IDs, Modus-Werte, Links und wörtliche UI-Strings bleiben. Die Spec selbst bleibt Deutsch. |
 | 0.1 | 2026-10-20 | Erste Fassung. Stufen, Ableitung, Umbau-Vorschlag, Simulation CLI-GUI und Team-Chat, RACI, Fragen an Jens. |
 
@@ -52,6 +53,7 @@ Diese Spec ändert keine fachliche Anforderung in `specs/omnigent-chat/` außer 
 | RS-FR-011 | When eine Review denselben Fehlertyp zum zweiten Mal zeigt, the Lead shall eine Zeile an der Ticket-Vorlage ergänzen, kein neues System. | new |
 | RS-FR-012 | If das Feld fehlt, the Lead shall den Modus aus der Tabelle in `review-mode.md` nehmen, sonst nach der Ableitregel in Abschnitt 4, und das Feld eintragen, bevor sie coden lässt. | new |
 | RS-FR-013 | When ein GitHub-Issue für diesen Prozess angelegt oder fortgeschrieben wird, the title, the body and the acceptance criteria shall be English. Stabile IDs, die Werte `prototyping` und `polish`, Links und wörtliche Produkt-Strings bleiben unverändert. Die Spec-Dateien bleiben Deutsch. | new |
+| RS-FR-014 | Um das gemeinsame Grok-Budget zu schonen, the Lead shall DeepSeek als Default für Code lesen, Analyse, Test-Fehler-Triage, Erstreview, Doku und Tickettexte verwenden. Opus gibt nur das Abschluss-Verdikt des Gates. Grok ist kein DeepSeek-Ersatz. If DeepSeek ausfällt (z. B. HTTP 402), the Lead shall einmal wiederholen und dann eskalieren (RS-Q-002). Grok oder ein Cloud-Agent nur, wenn Omnigent oder DeepSeek nicht verfügbar ist. | new |
 
 ### Abnahmekriterien
 
@@ -128,6 +130,16 @@ And the stable ID, the review mode and the links are unchanged
 And a quoted product string such as "Direktnachricht" stays in the product language
 ```
 
+**RS-AC-009 (RS-FR-014)**
+
+```gherkin
+Given ein Erstreview bekommt von DeepSeek HTTP 402
+When die Lead den Ausfall behandelt
+Then wiederholt sie DeepSeek einmal
+And sie setzt keinen Grok-Lauf als Ersatz an
+And ein zweiter Ausfall wird eskaliert
+```
+
 ## 4. Stufen, Eintritt, Ausgang
 
 ### 4.1 Prototyping
@@ -171,7 +183,7 @@ Alle Punkte:
 
 1. Die Basis-ACs des Tickets sind als Tests grün.
 2. Der Tester hat die genannten Kommandos in diesem Lauf ausgeführt. Drei grüne Läufe bleiben Pflicht, wo das Ticket sie schon verlangt (T-009, NFR-024).
-3. DeepSeek-Review liegt vor, danach Opus PASS. Ein 402 von DeepSeek ist kein PASS. [OFFEN RS-Q-002]
+3. DeepSeek-Review liegt vor, danach Opus PASS. Ein 402 von DeepSeek ist kein PASS. Ein Retry, dann eskalieren. Grok springt nicht ein (RS-FR-014). [OFFEN RS-Q-002]
 4. Kein Blocker.
 
 Die Lead stellt das Feld auf `polish` oder eröffnet das Feinschliff-Ticket und setzt das alte auf erledigt für die Funktion. Sie informiert Jens in der kurzen Statuszeile. Sie fragt ihn nicht, außer RS-Q-001 ist noch unbeantwortet und der nächste Diff ist UI. Bis zur Antwort gilt der Default aus RS-Q-001.
