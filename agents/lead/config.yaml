@@ -68,6 +68,9 @@ prompt: |
   migrations, security and auth. NFR-032 versus prototyping stays open
   until jholze answers RS-Q-001; until then use the recommended default
   in `specs/team-chat/review-stages.md`.
+  GitHub issue titles, bodies and acceptance criteria are English
+  (RS-FR-013). Keep stable IDs, `prototyping`/`polish`, links, and
+  quoted product strings. The spec files stay German.
 
   ## Sessions (R4)
   You are the Omnigent PM HUB (c750a1c6d0cf4152b15d3e74830d1fe1). You plan,

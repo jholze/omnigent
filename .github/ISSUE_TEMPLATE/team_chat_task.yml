@@ -1,12 +1,19 @@
-name: Team-Chat-Task
-description: Ticket aus der Team-Chat-Spec im Fork. Die Lead liest den Review-Modus am Start.
+name: Team-Chat task
+description: Ticket from the team-chat spec on the fork. Tickets in English. The lead reads the review mode at start.
 title: "T-XXX: "
 body:
+  - type: markdown
+    attributes:
+      value: |
+        **Tickets in English.** The title, the body and the acceptance criteria are English.
+        Keep stable IDs, the values `prototyping` and `polish`, links, and quoted product UI strings.
+        See `specs/team-chat/review-stages.md` (RS-FR-013).
+
   - type: input
     id: stable-id
     attributes:
-      label: Stabile ID
-      description: Zum Beispiel T-007b oder T-005-AC-033c. Dieselbe ID wie in specs/omnigent-chat/07-tasks.md.
+      label: Stable ID
+      description: For example T-007b or T-005-AC-033c. The same ID as in specs/omnigent-chat/07-tasks.md.
       placeholder: T-007b
     validations:
       required: true
@@ -14,14 +21,13 @@ body:
   - type: dropdown
     id: review-modus
     attributes:
-      label: Review-Modus
+      label: Review mode
       description: >
-        prototyping oder polish. Die Lead-Session liest das Feld am Start
-        (specs/team-chat/review-mode.md). Eine Erweiterung einer fertigen
-        Funktion ist immer polish. prototyping prüft ACs, Tests, CI, Lint
-        und Code-Review (DeepSeek, dann Opus). polish ist das volle Gate
-        und zieht bei UI das UX-Review, NFR-032 (1280x800 und 390x844)
-        und den Kontrast nach.
+        prototyping or polish. The lead session reads this field at start
+        (specs/team-chat/review-mode.md). An extension of a finished feature
+        is always polish. prototyping checks ACs, tests, CI, lint and code
+        review (DeepSeek, then Opus). polish is the full gate and, for UI,
+        adds the UX review, NFR-032 (1280x800 and 390x844) and contrast.
       options:
         - prototyping
         - polish
@@ -32,7 +38,7 @@ body:
     id: marker
     attributes:
       label: Marker
-      description: exists, adapt oder new, bezogen auf den Code, den das Ticket anfasst.
+      description: exists, adapt or new, for the code this ticket changes.
       options:
         - new
         - adapt
@@ -44,7 +50,7 @@ body:
     id: acceptance
     attributes:
       label: Acceptance criteria
-      description: EARS oder Given/When/Then. Eine AC pro Block. UI-ACs im Polish nennen 1280x800 und 390x844.
+      description: English EARS or Given/When/Then. One AC per block. Polish UI ACs name 1280x800 and 390x844. Keep quoted product strings in the product language.
       placeholder: |
         Given …
         When …
@@ -55,7 +61,7 @@ body:
   - type: textarea
     id: context
     attributes:
-      label: Kontext
-      description: Eine kurze Einordnung. Offene Produktfragen verlinken, nicht entscheiden.
+      label: Context
+      description: A short English note. Link open product questions. Do not decide them.
     validations:
       required: false

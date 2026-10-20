@@ -139,6 +139,13 @@ def test_lead_prompt_and_ticket_template_point_at_the_rule():
     form = (REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / "team_chat_task.yml").read_text(
         encoding="utf-8"
     )
+    stages = (REPO_ROOT / "specs" / "team-chat" / "review-stages.md").read_text(
+        encoding="utf-8"
+    )
     assert "specs/team-chat/review-mode.md" in lead
     assert "Review-Modus" in tasks
+    assert "Tickets in English" in tasks
+    assert "Tickets in English" in form
+    assert "RS-FR-013" in stages
+    assert "Version: 0.2" in stages
     assert "prototyping" in form and "polish" in form

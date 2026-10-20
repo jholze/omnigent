@@ -1,6 +1,6 @@
 # Review-Modus
 
-Version: 0.1
+Version: 0.2
 Datum: 2026-10-20
 Status: Entwurf
 Owner: Jens Holze
@@ -13,6 +13,7 @@ Die Begründung, die Simulation und die offenen Fragen stehen in `review-stages.
 1. Steht `Review-Modus` im Ticket, gilt das Feld. Ausnahme: `prototyping` an einer Erweiterung oder einem Gate-Ticket ist ungültig. Die Lead korrigiert auf `polish` und schreibt das in den PR. Die Verbotsregel schlägt das Feld (RS-FR-004).
 2. Fehlt das Feld, gilt die Tabelle. Dieselbe Zuordnung tragen die Labels `stage:prototyping` und `stage:polish`. Am 2026-10-20 ließen sich diese Labels mit dem Token dieses Laufs nicht anlegen (HTTP 403). Bis sie existieren, steht der Modus im Issue-Titel als `[prototyping]` oder `[polish]`.
 3. Fehlt das Ticket in der Tabelle, leitet die Lead nach `review-stages.md` RS-FR-012 ab und trägt das Feld ein, bevor sie coden lässt. Eine Erweiterung einer fertigen Funktion wird dabei nie `prototyping`.
+4. Tickets immer auf Englisch (RS-FR-013). Titel, Body und ACs eines GitHub-Issues sind Englisch. Stabile IDs, `prototyping`/`polish`, Links und wörtliche UI-Strings bleiben. Die Spec bleibt Deutsch.
 
 ## Prüfungen
 
@@ -76,4 +77,5 @@ Klasse `erweiterung` oder `gate` ist nie `prototyping`. Klasse `neu` ist die Fun
 
 | Version | Datum | Änderung |
 |---|---|---|
+| 0.2 | 2026-10-20 | Regel 4: GitHub-Tickets immer auf Englisch (RS-FR-013). |
 | 0.1 | 2026-10-20 | Erste Fassung. Tabelle der offenen Team-Chat-Tickets. Gemergte T-000…T-008 ohne AC-033c stehen nicht drin. Labels `stage:*` sind vorgesehen; der Lauf konnte sie nicht anlegen (HTTP 403), der Issue-Titel trägt den Modus bis dahin. |

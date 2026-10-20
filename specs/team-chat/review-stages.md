@@ -1,6 +1,6 @@
 # Review-Stufen
 
-Version: 0.1
+Version: 0.2
 Datum: 2026-10-20
 Status: Entwurf
 Owner: Jens Holze
@@ -13,6 +13,7 @@ Die Kurzregel, die die Lead am Start liest, ist `review-mode.md`. Dieses Dokumen
 
 | Version | Datum | Änderung |
 |---|---|---|
+| 0.2 | 2026-10-20 | Tickets immer auf Englisch (RS-FR-013). Titel, Body und ACs. IDs, Modus-Werte, Links und wörtliche UI-Strings bleiben. Die Spec selbst bleibt Deutsch. |
 | 0.1 | 2026-10-20 | Erste Fassung. Stufen, Ableitung, Umbau-Vorschlag, Simulation CLI-GUI und Team-Chat, RACI, Fragen an Jens. |
 
 ## 1. Wozu
@@ -50,6 +51,7 @@ Diese Spec ändert keine fachliche Anforderung in `specs/omnigent-chat/` außer 
 | RS-FR-010 | If ein Stop aus Abschnitt 11 greift, the Lead shall anhalten und nur den dort genannten Entscheider fragen. | new |
 | RS-FR-011 | When eine Review denselben Fehlertyp zum zweiten Mal zeigt, the Lead shall eine Zeile an der Ticket-Vorlage ergänzen, kein neues System. | new |
 | RS-FR-012 | If das Feld fehlt, the Lead shall den Modus aus der Tabelle in `review-mode.md` nehmen, sonst nach der Ableitregel in Abschnitt 4, und das Feld eintragen, bevor sie coden lässt. | new |
+| RS-FR-013 | When ein GitHub-Issue für diesen Prozess angelegt oder fortgeschrieben wird, the title, the body and the acceptance criteria shall be English. Stabile IDs, die Werte `prototyping` und `polish`, Links und wörtliche Produkt-Strings bleiben unverändert. Die Spec-Dateien bleiben Deutsch. | new |
 
 ### Abnahmekriterien
 
@@ -114,6 +116,16 @@ And der Modus ändert daran nichts
 Given ein UI-Ticket hat NFR-032 im Prototyping aufgeschoben
 When der Epic nach main soll
 Then ist die Polish-Stufe dieser Fläche grün, einschließlich 1280×800 und 390×844
+```
+
+**RS-AC-008 (RS-FR-013)**
+
+```gherkin
+Given a new GitHub issue for a team-chat ticket
+When the lead or the requirements writer files it
+Then the title, the body and the acceptance criteria are English
+And the stable ID, the review mode and the links are unchanged
+And a quoted product string such as "Direktnachricht" stays in the product language
 ```
 
 ## 4. Stufen, Eintritt, Ausgang
@@ -315,6 +327,7 @@ Die Vorlage trägt ab diesem PR:
 - Marker `exists | adapt | new`
 - ACs in EARS oder Given/When/Then
 - einen Satz, dass eine Erweiterung immer `polish` ist
+- die Regel „Tickets in English“ (RS-FR-013): Titel, Body und ACs auf Englisch; IDs, Modus-Werte, Links und wörtliche UI-Strings bleiben
 
 RS-FR-011: wiederholt sich ein Review-Befund, kommt eine Zeile an diese Vorlage, kein zweites Werkzeug. Der erste Kandidat, noch nicht eingetragen, weil RS-Q-002 offen ist: „DeepSeek 402 ist kein PASS.“
 

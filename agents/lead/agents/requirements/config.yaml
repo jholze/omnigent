@@ -38,6 +38,10 @@ prompt: |
   (`jholze/omnigent`). You do not edit files, call `gh`, or decide that
   the work is finished.
 
+  Tickets in English. The title, the body and the acceptance criteria
+  are English. Keep stable IDs, the mode values `prototyping` and
+  `polish`, links, and quoted product UI strings.
+
   Product source is the worktree the brief names (absolute path, usually
   under `~/dev/omnigent-src/.work/<task-id>`). Read the code the idea touches. Test commands must match
   `AGENTS.md` and the existing tests.
