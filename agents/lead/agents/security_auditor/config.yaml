@@ -35,8 +35,11 @@ guardrails:
       function:
         path: omnigent.policies.builtins.cel.cel_policy
         arguments:
+          # Every present path key must be the findings file. A decoy
+          # file_path must not hide a different path, which is the key
+          # sys_os_write and sys_os_edit actually write.
           expression: |-
-            event.type == "tool_call" && event.data.name in ["Write", "Edit", "MultiEdit", "NotebookEdit", "sys_os_write", "sys_os_edit", "write", "edit"] ? (event.data.name in ["MultiEdit", "NotebookEdit"] ? {"result": "DENY", "reason": "security_auditor may write only findings.json."} : (has(event.data.arguments.file_path) && type(event.data.arguments.file_path) == string ? event.data.arguments.file_path : (has(event.data.arguments.path) && type(event.data.arguments.path) == string ? event.data.arguments.path : "")).matches("^/Users/jholze/dev/omnigent-src/\\.work/security-audit-out/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/findings\\.json$") ? {"result": "ALLOW"} : {"result": "DENY", "reason": "security_auditor may write only <repo>/.work/security-audit-out/<run-id>/findings.json."}) : {"result": "ALLOW"}
+            event.type == "tool_call" && event.data.name in ["Write", "Edit", "MultiEdit", "NotebookEdit", "sys_os_write", "sys_os_edit", "write", "edit"] ? (event.data.name in ["MultiEdit", "NotebookEdit"] ? {"result": "DENY", "reason": "security_auditor may write only findings.json."} : ((has(event.data.arguments.file_path) ? (type(event.data.arguments.file_path) == string && event.data.arguments.file_path.matches("^/Users/jholze/dev/omnigent-src/\\.work/security-audit-out/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/findings\\.json$")) : true) && (has(event.data.arguments.path) ? (type(event.data.arguments.path) == string && event.data.arguments.path.matches("^/Users/jholze/dev/omnigent-src/\\.work/security-audit-out/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/findings\\.json$")) : true) && ((has(event.data.arguments.file_path) && type(event.data.arguments.file_path) == string) || (has(event.data.arguments.path) && type(event.data.arguments.path) == string)) ? {"result": "ALLOW"} : {"result": "DENY", "reason": "security_auditor may write only <repo>/.work/security-audit-out/<run-id>/findings.json."})) : {"result": "ALLOW"}
     security_auditor_shell:
       type: function
       on: [tool_call]

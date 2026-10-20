@@ -150,10 +150,83 @@ def test_writes_only_findings_json(auditor_spec) -> None:
             "data": {"name": "MultiEdit", "arguments": {"file_path": _FINDINGS}},
         }
     )
+    allow_os = evaluate(
+        {
+            "type": "tool_call",
+            "data": {"name": "sys_os_write", "arguments": {"path": _FINDINGS}},
+        }
+    )
+    allow_both = evaluate(
+        {
+            "type": "tool_call",
+            "data": {
+                "name": "sys_os_edit",
+                "arguments": {"file_path": _FINDINGS, "path": _FINDINGS},
+            },
+        }
+    )
+    deny_decoy = evaluate(
+        {
+            "type": "tool_call",
+            "data": {
+                "name": "sys_os_write",
+                "arguments": {
+                    "file_path": _FINDINGS,
+                    "path": "/Users/jholze/.ssh/authorized_keys",
+                },
+            },
+        }
+    )
+    deny_gitconfig = evaluate(
+        {
+            "type": "tool_call",
+            "data": {
+                "name": "sys_os_write",
+                "arguments": {
+                    "file_path": _FINDINGS,
+                    "path": "/Users/jholze/.gitconfig",
+                },
+            },
+        }
+    )
+    deny_reverse = evaluate(
+        {
+            "type": "tool_call",
+            "data": {
+                "name": "Write",
+                "arguments": {
+                    "file_path": "/Users/jholze/.ssh/authorized_keys",
+                    "path": _FINDINGS,
+                },
+            },
+        }
+    )
+    deny_missing = evaluate(
+        {
+            "type": "tool_call",
+            "data": {"name": "sys_os_write", "arguments": {}},
+        }
+    )
+    deny_bad_type = evaluate(
+        {
+            "type": "tool_call",
+            "data": {
+                "name": "sys_os_write",
+                "arguments": {"file_path": _FINDINGS, "path": 1},
+            },
+        }
+    )
     assert allow == {"result": "ALLOW"}
+    assert allow_os == {"result": "ALLOW"}
+    assert allow_both == {"result": "ALLOW"}
     assert deny_repo["result"] == "DENY"
     assert deny_home["result"] == "DENY"
     assert deny_multi["result"] == "DENY"
+    assert deny_decoy["result"] == "DENY"
+    assert deny_gitconfig["result"] == "DENY"
+    assert deny_reverse["result"] == "DENY"
+    assert deny_missing["result"] == "DENY"
+    assert deny_bad_type["result"] == "DENY"
 
 
 def test_spawn_and_network_are_denied(auditor_spec) -> None:
