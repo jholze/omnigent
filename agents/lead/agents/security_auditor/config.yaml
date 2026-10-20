@@ -44,7 +44,7 @@ guardrails:
         path: omnigent.policies.builtins.cel.cel_policy
         arguments:
           expression: |-
-            event.type == "tool_call" && event.data.name in ["Bash", "Shell", "bash", "shell", "sys_os_shell", "terminal", "developer__shell"] ? ((has(event.data.arguments.command) && type(event.data.arguments.command) == string ? event.data.arguments.command : (has(event.data.arguments.cmd) && type(event.data.arguments.cmd) == string ? event.data.arguments.cmd : "")).matches("^(git( -C /[A-Za-z0-9_./-]+)? (diff|show|log|grep|rev-parse|status|merge-base|ls-files|blame)( [A-Za-z0-9_./:@~+=,?*\\[\\]{} -]*)?|rg( [A-Za-z0-9_./:@~+=,?*\\[\\]{} -]*)?|grep( [A-Za-z0-9_./:@~+=,?*\\[\\]{} -]*)?|node /\\S*agents/lead/agents/security_auditor/skills/security-audit/validate-findings\\.cjs /Users/jholze/dev/omnigent-src/\\.work/security-audit-out/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/findings\\.json)$") ? {"result": "ALLOW"} : {"result": "DENY", "reason": "security_auditor shell is an allowlist: git read, rg, grep, and the vendored findings validator. No target code."}) : {"result": "ALLOW"}
+            event.type == "tool_call" && event.data.name in ["Bash", "Shell", "bash", "shell", "sys_os_shell", "terminal", "developer__shell"] ? ((has(event.data.arguments.command) && type(event.data.arguments.command) == string ? event.data.arguments.command : (has(event.data.arguments.cmd) && type(event.data.arguments.cmd) == string ? event.data.arguments.cmd : "")).matches("^(git( -C /[A-Za-z0-9_./-]+)? (diff|show|log|grep|rev-parse|status|merge-base|ls-files|blame)( [A-Za-z0-9_./:@~+,?*\\[\\]{} -]*)?|grep( [A-Za-z0-9_./:@~+,?*\\[\\]{} -]*)?|node /\\S*agents/lead/agents/security_auditor/skills/security-audit/validate-findings\\.cjs /Users/jholze/dev/omnigent-src/\\.work/security-audit-out/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/findings\\.json)$") && !(has(event.data.arguments.command) && type(event.data.arguments.command) == string ? event.data.arguments.command : (has(event.data.arguments.cmd) && type(event.data.arguments.cmd) == string ? event.data.arguments.cmd : "")).contains("--output") && !(has(event.data.arguments.command) && type(event.data.arguments.command) == string ? event.data.arguments.command : (has(event.data.arguments.cmd) && type(event.data.arguments.cmd) == string ? event.data.arguments.cmd : "")).contains("--pre") ? {"result": "ALLOW"} : {"result": "DENY", "reason": "security_auditor shell is an allowlist: git read, grep, and the vendored findings validator. No rg, no --pre, no git --output."}) : {"result": "ALLOW"}
     security_auditor_no_spawn_no_network:
       type: function
       on: [tool_call]
@@ -114,7 +114,7 @@ prompt: |
 
   Shell you may use: `git diff`, `git show`, `git log`, `git grep`,
   `git rev-parse`, `git status`, `git merge-base`, `git ls-files`,
-  `git blame`, `rg`, `grep`, and that validator. No other command.
+  `git blame`, `grep`, and that validator. Do not use `rg`. No other command.
   No network. No GitHub writes. No edits in the repository.
 
   Gate, from the validated file, using `severity.overall_severity`:

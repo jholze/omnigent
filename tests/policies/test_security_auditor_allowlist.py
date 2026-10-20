@@ -63,7 +63,7 @@ def test_shell_allowlist_blocks_target_execution(auditor_spec) -> None:
         "git rev-parse HEAD",
         "git -C /Users/jholze/dev/omnigent-src/.work/security-auditor rev-parse HEAD",
         "git merge-base abc123 def456",
-        "rg -n permission omnigent/server",
+        "grep -n permission omnigent/server",
         f"node {_VALIDATOR} {_FINDINGS}",
     ]
     denied = [
@@ -74,6 +74,10 @@ def test_shell_allowlist_blocks_target_execution(auditor_spec) -> None:
         "git diff HEAD && rm -rf /",
         "git status --porcelain > /tmp/out",
         "bash -lc git status",
+        "rg --pre ./evil.sh",
+        "rg -n permission omnigent/server",
+        "git diff --output=/tmp/out",
+        "git diff --output /tmp/out",
         "",
     ]
     for command in allowed:
