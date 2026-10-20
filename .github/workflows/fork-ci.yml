@@ -23,7 +23,11 @@ name: Fork CI
 
 on:
   pull_request:
-    branches: [main]
+    # The filter is the pull request's base branch. epic/** covers
+    # epic/team-chat and later epic branches; main stays included.
+    branches:
+      - main
+      - "epic/**"
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
