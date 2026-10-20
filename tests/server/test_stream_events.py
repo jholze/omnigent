@@ -24,6 +24,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from omnigent.server.schemas import (
+    ElicitationResolvedEvent,
     PolicyDeniedEvent,
     ServerStreamEvent,
     SessionCreatedEvent,
@@ -540,3 +541,39 @@ def test_session_created_event_payload_shape() -> None:
     assert parsed.conversation_id == "conv_parent"
     assert parsed.child_session_id == "conv_child"
     assert parsed.agent_id == "agent_xyz"
+
+
+def test_elicitation_resolved_event_round_trips_decided_by() -> None:
+    """``response.elicitation_resolved`` preserves ``decided_by`` through the union.
+
+    The SSE serializer validates every published event with
+    ``TypeAdapter(ServerStreamEvent).validate_python`` and re-emits
+    ``model_dump()`` — a verdict carrying the deciding user id must
+    survive that round-trip, and a reason-only (unanswered) event
+    must not gain a ``decided_by`` key.
+    """
+    accept = {
+        "type": "response.elicitation_resolved",
+        "elicitation_id": "elicit_abc",
+        "action": "accept",
+        "decided_by": "user_123",
+    }
+    parsed = _ADAPTER.validate_python(accept)
+    assert isinstance(parsed, ElicitationResolvedEvent)
+    dumped = parsed.model_dump()
+    assert dumped["decided_by"] == "user_123"
+    assert dumped["action"] == "accept"
+    # ``reason`` stays present as null on verdict events.
+    assert dumped["reason"] is None
+
+    unanswered = {
+        "type": "response.elicitation_resolved",
+        "elicitation_id": "elicit_abc",
+        "reason": "unanswered",
+    }
+    parsed_unanswered = _ADAPTER.validate_python(unanswered)
+    assert isinstance(parsed_unanswered, ElicitationResolvedEvent)
+    dumped_unanswered = parsed_unanswered.model_dump()
+    assert "decided_by" not in dumped_unanswered
+    assert dumped_unanswered["reason"] == "unanswered"
+    assert dumped_unanswered["action"] is None

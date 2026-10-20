@@ -2485,6 +2485,19 @@
             "description": "Optional MCP verdict recorded when the resolution carried a human decision (`\"accept\"` / `\"decline\"` / `\"cancel\"`). `None` for resolutions without a verdict \u2014 timeout, severed wait, or a runner that predates verdict carriage \u2014 so consumers can say \"no verdict was recorded\" rather than guessing one.",
             "title": "Action"
           },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Authenticated user id of the decider. Present only when `action` is `\"accept\"` / `\"decline\"` / `\"cancel\"` \u2014 a reason-only (no-verdict) resolution has no decider. `None` otherwise, and omitted from `model_dump` so a reason-only event does not carry the key.",
+            "title": "Decided By"
+          },
           "elicitation_id": {
             "description": "Correlation id of the elicitation being cleared, e.g. `\"elicit_abc123\"`. Must match the id of a prior `ElicitationRequestEvent`.",
             "title": "Elicitation Id",
