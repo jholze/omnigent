@@ -659,11 +659,15 @@ def link_session(
         session.commit()
 
 
+def _has_agent_reply(api: DemoApi, channel_id: str, root_id: str) -> bool:
+    items = api.thread_messages("anna", channel_id, root_id)
+    return any(item.get("author_kind") == "omnigent_agent" for item in items)
+
+
 def _wait_for_agent_reply(api: DemoApi, channel_id: str, root_id: str) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        items = api.thread_messages("anna", channel_id, root_id)
-        if any(item.get("author_kind") == "omnigent_agent" for item in items):
+        if _has_agent_reply(api, channel_id, root_id):
             return
         time.sleep(0.2)
     raise RuntimeError("agent reply did not appear in the thread")
@@ -713,21 +717,23 @@ def seed(api: DemoApi, plan: SeedPlan, database_uri: str, *, hold: bool) -> str:
         )
     api.grant(session_id, "jens", _LEVEL_EDIT)
     api.grant(session_id, "bob", _LEVEL_READ)
-    api.event(
-        session_id,
-        "external_assistant_message",
-        {
-            "agent": "chat_agent",
-            "text": plan.agent.reply_text,
-            "response_id": plan.agent.response_id,
-        },
-    )
-    api.event(
-        session_id,
-        "external_session_status",
-        {"status": "idle", "response_id": plan.agent.response_id},
-    )
-    _wait_for_agent_reply(api, agent_channel_id, agent_root_id)
+    # The session transcript is append-only; send the reply only once per thread.
+    if not _has_agent_reply(api, agent_channel_id, agent_root_id):
+        api.event(
+            session_id,
+            "external_assistant_message",
+            {
+                "agent": "chat_agent",
+                "text": plan.agent.reply_text,
+                "response_id": plan.agent.response_id,
+            },
+        )
+        api.event(
+            session_id,
+            "external_session_status",
+            {"status": "idle", "response_id": plan.agent.response_id},
+        )
+        _wait_for_agent_reply(api, agent_channel_id, agent_root_id)
     api.event(
         session_id,
         "external_session_status",
