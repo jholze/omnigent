@@ -103,6 +103,9 @@ def test_shell_allowlist_blocks_target_execution(auditor_spec) -> None:
         "git grep -Oecho -l spec_version -- README.md",
         "git grep --open-files-in-pager x",
         "git grep --open x -- README.md",
+        "git grep -lOsh x -- evil.sh",
+        "git grep -nOwc x",
+        "git -C /Users/jholze/dev/omnigent-src/.work/security-auditor grep -lO x",
         (
             "node /tmp/agents/lead/agents/security_auditor/skills/"
             "security-audit/validate-findings.cjs " + _FINDINGS
