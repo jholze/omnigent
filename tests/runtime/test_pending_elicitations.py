@@ -686,3 +686,67 @@ def test_snapshot_for_returns_independent_copies() -> None:
     # the index; if "tampered-top-level", the top-level copy is
     # there but nested values are still shared.
     assert snap2[0]["params"]["message"] == "original"
+
+
+# ── Resolved verdict memory (remember_resolved / resolved_for) ────
+
+
+def test_remember_resolved_records_verdict_and_decided_by() -> None:
+    """
+    An accepted verdict is remembered for the exact session + id pair.
+
+    ``resolved_for`` then replays the verdict and decider so the
+    approval page can show how the prompt was answered after the
+    pending entry is drained.
+    """
+    pending_elicitations.remember_resolved("conv_a", "elicit_1", "accept", "alice@example.com")
+    resolved = pending_elicitations.resolved_for("conv_a", "elicit_1")
+    assert resolved == {"verdict": "accept", "decided_by": "alice@example.com"}
+
+
+def test_resolved_for_returns_none_for_other_session() -> None:
+    """
+    A remembered verdict is scoped to the session that resolved it.
+
+    Session B must not read session A's verdict, matching the same
+    owner-scoping the pending index already enforces.
+    """
+    pending_elicitations.remember_resolved("conv_a", "elicit_1", "decline", None)
+    assert pending_elicitations.resolved_for("conv_b", "elicit_1") is None
+
+
+def test_resolved_for_returns_none_for_unknown_id() -> None:
+    """
+    An id never remembered resolves to ``None`` — callers fall back to
+    the bare ``{"status": "resolved"}`` shape.
+    """
+    assert pending_elicitations.resolved_for("conv_a", "elicit_never") is None
+
+
+@pytest.mark.parametrize("verdict", [None, "", "allow", "approve", 42])
+def test_remember_resolved_ignores_non_verdict_actions(verdict: Any) -> None:
+    """
+    Only ``accept`` / ``decline`` / ``cancel`` are remembered.
+
+    A malformed approval body (missing action, an unknown literal, or
+    a non-string) is not a decision, so it must not fabricate a verdict
+    for the approval page to replay.
+    """
+    pending_elicitations.remember_resolved("conv_a", "elicit_1", verdict, "alice")
+    assert pending_elicitations.resolved_for("conv_a", "elicit_1") is None
+
+
+def test_resolved_for_prunes_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Once the TTL passes, the remembered verdict is dropped and pruned.
+
+    The approval page must stop replaying a stale verdict — the id
+    falls back to the bare resolved shape and the entry is removed so
+    it does not accumulate forever.
+    """
+    monkeypatch.setattr(pending_elicitations, "_RESOLVED_ELICITATION_TTL_S", -1)
+    pending_elicitations.remember_resolved("conv_a", "elicit_1", "cancel", None)
+    assert pending_elicitations.resolved_for("conv_a", "elicit_1") is None
+    # Pruned: a fresh lookup must not resurrect it via the index.
+    assert pending_elicitations.resolved_for("conv_a", "elicit_1") is None
+    assert "conv_a" not in pending_elicitations._resolved

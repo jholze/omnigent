@@ -4710,8 +4710,19 @@
         "type": "object"
       },
       "MessageResponse": {
-        "description": "Wire shape of one stored message.",
+        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.",
         "properties": {
+          "agent_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent State"
+          },
           "author_id": {
             "title": "Author Id",
             "type": "string"

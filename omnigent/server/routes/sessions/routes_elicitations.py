@@ -188,16 +188,26 @@ def register_elicitations_routes(
                 raise _session_not_found()
 
         found = pending_elicitations.lookup(elicitation_id)
-        if found is None or found[0] != session_id:
-            return {"status": "resolved"}
+        if found is not None and found[0] == session_id:
+            _conv_id, event = found
+            params_value = event.get("params")
+            params = params_value if isinstance(params_value, dict) else {}
+            return {
+                "status": "pending",
+                "message": params.get("message", "Approval required"),
+                "phase": params.get("phase", ""),
+                "policy_name": params.get("policy_name", ""),
+                "content_preview": params.get("content_preview", ""),
+            }
 
-        _conv_id, event = found
-        params_value = event.get("params")
-        params = params_value if isinstance(params_value, dict) else {}
-        return {
-            "status": "pending",
-            "message": params.get("message", "Approval required"),
-            "phase": params.get("phase", ""),
-            "policy_name": params.get("policy_name", ""),
-            "content_preview": params.get("content_preview", ""),
-        }
+        # The id is no longer pending. If a verdict was accepted for this
+        # session recently, replay it (plus the decider) from the in-memory
+        # resolved index; otherwise keep the bare resolved shape.
+        resolved = pending_elicitations.resolved_for(session_id, elicitation_id)
+        if resolved is not None:
+            return {
+                "status": "resolved",
+                "verdict": resolved["verdict"],
+                "decided_by": resolved["decided_by"],
+            }
+        return {"status": "resolved"}

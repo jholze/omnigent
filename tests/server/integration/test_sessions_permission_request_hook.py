@@ -1923,6 +1923,65 @@ async def test_publish_elicitation_resolved_keeps_verdict_and_reason_exclusive(
     assert "reason" not in captured[2]
 
 
+async def test_publish_elicitation_resolved_includes_decided_by_with_verdict(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    ``decided_by`` rides the resolved event only beside a real verdict.
+
+    The resolved fan-out already carries ``action``; ``decided_by`` names
+    who decided. It must not appear for a no-verdict clear, and it must
+    not drop the ``action`` field (the two are additive).
+    """
+    agent = await create_test_agent(client, "test-publish-resolved-decided-by")
+    session_id = await _create_session(client, agent["id"])
+    captured: list[dict[str, object]] = []
+
+    async def _drain_three() -> None:
+        """
+        Collect the three resolved events published below.
+
+        :returns: None.
+        """
+        async with asyncio.timeout(3.0):
+            async for event in session_stream.subscribe(session_id):
+                if event.get("type") == "response.elicitation_resolved":
+                    captured.append(event)
+                    if len(captured) == 3:
+                        return
+
+    drain_task = asyncio.create_task(_drain_three())
+    await asyncio.sleep(0.05)
+    sessions_route._publish_elicitation_resolved(
+        session_id, "elicit_a", action="accept", decided_by="alice@example.com"
+    )
+    sessions_route._publish_elicitation_resolved(
+        session_id, "elicit_b", action="decline", decided_by=None
+    )
+    sessions_route._publish_elicitation_resolved(
+        session_id, "elicit_c", reason="unanswered", decided_by="bob@example.com"
+    )
+    await drain_task
+
+    assert captured[0] == {
+        "type": "response.elicitation_resolved",
+        "elicitation_id": "elicit_a",
+        "action": "accept",
+        "decided_by": "alice@example.com",
+    }
+    assert captured[1] == {
+        "type": "response.elicitation_resolved",
+        "elicitation_id": "elicit_b",
+        "action": "decline",
+    }
+    # A no-verdict clear carries the reason, never the decider.
+    assert captured[2] == {
+        "type": "response.elicitation_resolved",
+        "elicitation_id": "elicit_c",
+        "reason": "unanswered",
+    }
+
+
 async def test_pre_resolved_elicitation_tombstone_expires_before_hook_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

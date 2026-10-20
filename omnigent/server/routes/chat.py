@@ -76,7 +76,14 @@ class ChannelResponse(BaseModel):
 
 
 class MessageResponse(BaseModel):
-    """Wire shape of one stored message."""
+    """Wire shape of one stored message.
+
+    ``agent_state`` is read-only and present only on thread-root
+    messages (``thread_root_id is None``); replies omit it. It mirrors
+    ``SqlChatThread.agent_state`` (``none``/``starting``/``active``/
+    ``dismissed``/``start_failed``/``closed``) so the UI can render
+    the agent thread's start state without a separate thread fetch.
+    """
 
     id: str
     channel_id: str
@@ -86,6 +93,7 @@ class MessageResponse(BaseModel):
     created_at: int
     body: str
     client_id: str | None
+    agent_state: str | None = None
 
 
 class DirectoryEntry(BaseModel):
@@ -299,8 +307,26 @@ def _channel_response(
     )
 
 
-def _message_response(message: ChatMessage) -> MessageResponse:
-    """Map a stored message onto its wire shape."""
+def _message_response(message: ChatMessage, agent_state: str | None = None) -> MessageResponse:
+    """Map a stored message onto its wire shape.
+
+    :param agent_state: Optional thread ``agent_state`` for a thread-root
+        message; ``None`` (the default) leaves the field unset so the
+        wire shape omits it (replies and POST-created messages).
+    """
+    # Pass agent_state only when it is set so the wire shape omits the key
+    # on replies and on messages created by POST.
+    if agent_state is None:
+        return MessageResponse(
+            id=message.id,
+            channel_id=message.channel_id,
+            thread_root_id=message.thread_root_id,
+            author_id=message.author_id,
+            author_kind=message.author_kind,
+            created_at=message.created_at,
+            body=message.body,
+            client_id=message.client_id,
+        )
     return MessageResponse(
         id=message.id,
         channel_id=message.channel_id,
@@ -310,6 +336,7 @@ def _message_response(message: ChatMessage) -> MessageResponse:
         created_at=message.created_at,
         body=message.body,
         client_id=message.client_id,
+        agent_state=agent_state,
     )
 
 
@@ -621,7 +648,13 @@ def create_chat_router(
             raise OmnigentError("cannot leave general", code=ErrorCode.CONFLICT)
         await asyncio.to_thread(chat_store.remove_member, channel.id, caller)
 
-    @router.get("/chat/channels/{channel_id}/messages", response_model=MessagePageResponse)
+    @router.get(
+        "/chat/channels/{channel_id}/messages",
+        response_model=MessagePageResponse,
+        # ``agent_state`` is unset on replies / thread-less roots and must
+        # be omitted from the wire, not emitted as ``null``.
+        response_model_exclude_unset=True,
+    )
     async def list_messages(
         request: Request,
         channel_id: str,
@@ -673,15 +706,36 @@ def create_chat_router(
             after=after_cursor,
             before=before_cursor,
         )
+        # Annotate thread-root messages with their agent thread state.
+        # Replies (thread_root_id set) stay without it. One batched read
+        # for the page, not one query per root.
+        root_ids = [item.id for item in page.items if item.thread_root_id is None]
+        agent_states = (
+            await asyncio.to_thread(chat_store.list_thread_agent_states, root_ids)
+            if root_ids
+            else {}
+        )
+        items = [
+            _message_response(
+                item,
+                agent_state=(agent_states.get(item.id) if item.thread_root_id is None else None),
+            )
+            for item in page.items
+        ]
         return MessagePageResponse(
-            items=[_message_response(item) for item in page.items],
+            items=items,
             has_older=page.has_older,
             has_more=page.has_more,
             next_after=_cursor_string(page.next_after),
             next_before=_cursor_string(page.next_before),
         )
 
-    @router.post("/chat/channels/{channel_id}/messages", response_model=MessageResponse)
+    @router.post(
+        "/chat/channels/{channel_id}/messages",
+        response_model=MessageResponse,
+        # Keep write responses stable: ``agent_state`` is never set here.
+        response_model_exclude_unset=True,
+    )
     async def post_message(
         request: Request,
         channel_id: str,

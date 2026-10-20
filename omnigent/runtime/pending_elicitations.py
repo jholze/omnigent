@@ -42,6 +42,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -59,6 +60,22 @@ _logger = logging.getLogger(__name__)
 # SSE chokepoint). Empty inner dicts are popped eagerly so
 # :func:`count_for` doesn't see stale keys.
 _pending: WorkspaceScopedCache[str, dict[str, dict[str, Any]]] = WorkspaceScopedCache()
+
+# Resolved elicitation memory. When a verdict is accepted the id is
+# remembered here (session, verdict, decider) for a short TTL so
+# ``GET /v1/sessions/{id}/elicitations/{eid}`` can report the verdict
+# to a client that resolved the prompt and then re-polls. In-memory
+# only; no DB persistence. Entries are pruned lazily on read once the
+# TTL passes. The TTL matches the existing pre-resolved-harness-tombstone
+# TTL: long enough for the polling client to observe the verdict, short
+# enough to bound memory and stop stale verdicts from resurfacing.
+_RESOLVED_ELICITATION_TTL_S = 300.0
+_resolved: WorkspaceScopedCache[str, dict[str, dict[str, Any]]] = WorkspaceScopedCache()
+
+# Verdicts worth remembering. Anything else (``None`` from a malformed
+# approval body, or an unknown literal) is not a decision and is dropped.
+_VALID_RESOLVED_VERDICTS: tuple[str, ...] = ("accept", "decline", "cancel")
+
 _lock = threading.Lock()
 
 # Optional observer (``subagent_block_notifier``) run synchronously on every
@@ -411,6 +428,79 @@ def lookup(elicitation_id: str) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
+def remember_resolved(
+    conversation_id: str,
+    elicitation_id: str,
+    verdict: str | None,
+    decided_by: str | None,
+) -> None:
+    """
+    Remember an accepted verdict for a resolved elicitation.
+
+    Called once the shared resolution path has accepted a verdict.
+    Only ``accept`` / ``decline`` / ``cancel`` are remembered; anything
+    else (a missing or unknown action from a malformed approval body)
+    is not a decision and is ignored. The entry is keyed by
+    ``(conversation_id, elicitation_id)`` and stores the decider so
+    :func:`resolved_for` can replay ``verdict`` + ``decided_by`` to the
+    standalone approval page after the pending entry has been drained.
+
+    In-memory only and TTL-bounded: nothing is persisted, and stale
+    entries are pruned lazily on read.
+
+    :param conversation_id: Session/conversation id the verdict was
+        delivered against, e.g. ``"conv_abc123"``.
+    :param elicitation_id: Elicitation correlation id, e.g.
+        ``"elicit_abc123"``.
+    :param verdict: The MCP action (``accept`` / ``decline`` /
+        ``cancel``) from the approval payload, or ``None`` when absent.
+    :param decided_by: Authenticated user id that decided, or ``None``
+        when the caller has no user (single-user mode).
+    :returns: None.
+    """
+    if verdict not in _VALID_RESOLVED_VERDICTS:
+        return
+    with _lock:
+        ids = _resolved.setdefault(conversation_id, {})
+        ids[elicitation_id] = {
+            "resolved_at": time.time(),
+            "verdict": verdict,
+            "decided_by": decided_by,
+        }
+
+
+def resolved_for(conversation_id: str, elicitation_id: str) -> dict[str, Any] | None:
+    """
+    Return a remembered verdict for a resolved elicitation, if fresh.
+
+    Read by ``GET /v1/sessions/{id}/elicitations/{eid}`` after the
+    pending index no longer holds the id. Returns ``None`` when the
+    id was never remembered, was remembered for a different session,
+    or its TTL has passed — in which case the entry is pruned and the
+    caller falls back to the bare ``{"status": "resolved"}`` shape.
+
+    :param conversation_id: Session/conversation id being queried,
+        e.g. ``"conv_abc123"``.
+    :param elicitation_id: Elicitation correlation id, e.g.
+        ``"elicit_abc123"``.
+    :returns: ``{"verdict": str, "decided_by": str | None}`` when the
+        verdict is remembered and within TTL, else ``None``.
+    """
+    with _lock:
+        ids = _resolved.get(conversation_id)
+        if ids is None:
+            return None
+        entry = ids.get(elicitation_id)
+        if entry is None:
+            return None
+        if time.time() - entry["resolved_at"] > _RESOLVED_ELICITATION_TTL_S:
+            ids.pop(elicitation_id, None)
+            if not ids:
+                _resolved.pop(conversation_id, None)
+            return None
+        return {"verdict": entry["verdict"], "decided_by": entry["decided_by"]}
+
+
 def reset_for_tests() -> None:
     """
     Clear the entire index. For test isolation only.
@@ -424,4 +514,5 @@ def reset_for_tests() -> None:
     global _observer
     with _lock:
         _pending.clear()
+        _resolved.clear()
     _observer = None

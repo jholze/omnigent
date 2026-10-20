@@ -24,8 +24,9 @@ from omnigent.db.db_models import (
     SqlChatChannel,
     SqlChatMember,
     SqlChatMessage,
+    SqlChatThread,
 )
-from omnigent.db.utils import get_or_create_engine
+from omnigent.db.utils import get_or_create_engine, now_epoch_us
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import UnifiedAuthProvider
@@ -472,3 +473,63 @@ async def test_ac_022a_non_participant_reading_dm_is_404(
     )
 
     assert resp.status_code == 404, resp.text
+
+
+async def test_ac_023b_thread_root_message_carries_agent_state_reply_does_not(
+    chat_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """
+    The channel view surfaces ``agent_state`` on a thread root only.
+
+    A top-level message with a ``chat_threads`` row reads its stored
+    ``agent_state``; a reply to that root stays without the field, and
+    a root with no thread row also omits it (no state to populate).
+    """
+    general_id = await _general_id(chat_client, ANNA)
+    root = await _post(chat_client, ANNA, general_id, "Root with an agent thread")
+    assert root.status_code == 201, root.text
+    root_id = root.json()["id"]
+
+    # Attach a thread row (as the agent-start path would) with a live state.
+    with Session(get_or_create_engine(db_uri)) as session:
+        session.add(
+            SqlChatThread(
+                root_message_id=root_id,
+                channel_id=general_id,
+                reply_count=0,
+                participants="[]",
+                bot_streak=0,
+                agent_state="active",
+                updated_at=now_epoch_us(),
+            )
+        )
+        session.commit()
+
+    reply = await _post(chat_client, ANNA, general_id, "A reply", thread_root_id=root_id)
+    assert reply.status_code == 201, reply.text
+
+    # A second root with no thread row must not fabricate an agent_state.
+    rootless = await _post(chat_client, ANNA, general_id, "Root with no thread row")
+    assert rootless.status_code == 201, rootless.text
+    rootless_id = rootless.json()["id"]
+
+    listed = await chat_client.get(
+        f"/v1/chat/channels/{general_id}/messages",
+        headers=_headers(ANNA),
+    )
+    assert listed.status_code == 200, listed.text
+    by_id = {item["id"]: item for item in listed.json()["items"]}
+
+    assert by_id[root_id]["agent_state"] == "active"
+    assert "agent_state" not in by_id[rootless_id]
+
+    # The reply view (thread_root_id set) must not carry agent_state.
+    thread = await chat_client.get(
+        f"/v1/chat/channels/{general_id}/messages",
+        params={"thread_root_id": root_id},
+        headers=_headers(ANNA),
+    )
+    assert thread.status_code == 200, thread.text
+    (reply_item,) = thread.json()["items"]
+    assert reply_item["id"] == reply.json()["id"]
+    assert "agent_state" not in reply_item
