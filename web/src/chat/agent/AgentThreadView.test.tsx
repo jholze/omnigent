@@ -384,7 +384,7 @@ describe("AgentThreadStatus (open thread)", () => {
     expect(getSessionSlimMock).not.toHaveBeenCalled();
     const started = performance.now();
     emitConnected();
-    await waitFor(() => expect(chipText()).toBe("fertig"), { timeout: 1000 });
+    await waitFor(() => expect(chipText()).toBe("Agent fertig"), { timeout: 1000 });
     expect(performance.now() - started).toBeLessThan(1000);
     expect(getSessionSlimMock).toHaveBeenCalledWith(SESSION, expect.anything());
   });

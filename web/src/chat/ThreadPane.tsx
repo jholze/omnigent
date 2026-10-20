@@ -263,16 +263,17 @@ export function ThreadPane({
         <span className="min-w-0 flex-1 text-xs break-words text-muted-foreground max-md:hidden">
           {channelLabel}
         </span>
-        <Link
-          to={channelPath}
-          componentId="chat.thread.close"
+        {/* A button with its own navigate(): same exit as Escape, independent of the Link wrapper. */}
+        <button
+          type="button"
           aria-label="Thread schließen"
           title="Thread schließen (Esc)"
           data-testid={CHAT_TEST_IDS.threadClose}
-          className="ml-auto flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring max-md:hidden"
+          onClick={() => navigate(channelPath)}
+          className="ml-auto flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring md:size-8"
         >
           <XIcon className="size-4" aria-hidden="true" />
-        </Link>
+        </button>
       </header>
       {body}
       <ChatComposerCard

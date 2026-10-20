@@ -1,0 +1,23 @@
+/* T-007b AC: chat type sits one step above the app default so a thread
+   stays readable at 1280x800 and at 390x844. Utility classes set an
+   explicit size, so this sheet overrides them inside the chat page. */
+[data-testid="chat-page"] .text-sm {
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+
+[data-testid="chat-page"] .text-xs {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+[data-testid="chat-page"] [data-testid="chat-message"] {
+  padding-top: 0.75rem;
+  padding-bottom: 0.375rem;
+}
+
+/* Desktop otherwise shrinks the thread close control to 32px. Keep the 44px target. */
+[data-testid="chat-page"] [data-testid="chat-thread-close"] {
+  width: 2.75rem;
+  height: 2.75rem;
+}

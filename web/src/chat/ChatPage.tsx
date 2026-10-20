@@ -6,7 +6,7 @@
  * explains that and does not call `/v1/chat/*`.
  */
 import { useEffect, useMemo, useRef } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeftIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -18,12 +18,15 @@ import { cn } from "@/lib/utils";
 import {
   ChatApiError,
   fetchBootstrap,
+  listChannelMembers,
   teamChatQueryKeys,
   type BootstrapResponse,
   type ChatChannel,
 } from "./chatApi";
 import { ChannelView, directoryMap } from "./ChannelView";
+import "./chatScale.css";
 import { ChatSidebar, channelLabel, dmLabel } from "./ChatSidebar";
+import { dmHeading, dmParticipantLine } from "./dmTitle";
 import { NewDmDialog } from "./NewDmDialog";
 import { ThreadPane } from "./ThreadPane";
 import { CHAT_TEST_IDS } from "./testids";
@@ -123,6 +126,28 @@ export function ChatPage() {
     () => directoryMap(bootstrap.data?.directory ?? []),
     [bootstrap.data?.directory],
   );
+  const dmChannels = useMemo(
+    () => channelsOf(bootstrap.data?.dms).filter((channel) => channel.kind === "dm"),
+    [bootstrap.data?.dms],
+  );
+  const memberQueries = useQueries({
+    queries: dmChannels.map((dm) => ({
+      queryKey: teamChatQueryKeys.members(dm.id),
+      queryFn: ({ signal }: { signal: AbortSignal }) => listChannelMembers(dm.id, signal),
+      enabled: enabled && dm.id !== "",
+      staleTime: 30_000,
+    })),
+  });
+  const meId = bootstrap.data?.me ?? "";
+  const dmTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    dmChannels.forEach((dm, index) => {
+      const members = memberQueries[index]?.data;
+      if (!members) return;
+      titles.set(dm.id, dmHeading(meId, members, directory));
+    });
+    return titles;
+  }, [directory, dmChannels, meId, memberQueries]);
   useEffect(() => {
     if (!enabled) return;
     const cursor = bootstrap.data?.changes_cursor;
@@ -144,10 +169,10 @@ export function ChatPage() {
     );
   }
 
-  // Phone: the shell header floats over the page (absolute, h-14) with the
-  // Open-sidebar button in it. Start team chat below it, so back controls are
-  // neither covered nor under the header's hit area.
-  const rootClassName = "flex min-h-0 w-full min-w-0 flex-1 overflow-x-hidden max-md:pt-14";
+  // The shell header floats over the page (absolute, h-14, md:h-12). Start
+  // team chat below it, or the thread close control sits under that header
+  // and the click never reaches it. Same offset as the extension host.
+  const rootClassName = "flex min-h-0 w-full min-w-0 flex-1 overflow-x-hidden pt-14 md:pt-12";
 
   if (bootstrap.isPending) {
     return (
@@ -191,9 +216,14 @@ export function ChatPage() {
   const dms = channelsOf(bootstrap.data?.dms);
   const selectedChannel = channels.find((channel) => channel.id === channelId);
   const selectedDm = dms.find((channel) => channel.id === channelId);
+  const selectedMembers = selectedDm
+    ? memberQueries[dmChannels.findIndex((dm) => dm.id === selectedDm.id)]?.data
+    : undefined;
   let heading: string | null = null;
   if (selectedChannel) heading = channelLabel(selectedChannel.name);
-  else if (selectedDm) heading = dmLabel(selectedDm);
+  else if (selectedDm) heading = dmTitles.get(selectedDm.id) ?? dmLabel(selectedDm);
+  const participantLine =
+    selectedDm && selectedMembers ? dmParticipantLine(meId, selectedMembers, directory) : "";
   const missing = Boolean(channelId) && heading === null;
   const me = bootstrap.data?.me ?? "";
   const openChannelId = channelId && heading !== null ? channelId : null;
@@ -208,6 +238,7 @@ export function ChatPage() {
         // Tablet with a thread open: channel and thread get the width.
         className={cn(channelId && "max-md:hidden", threadOpen && "md:max-lg:hidden")}
         dmAction={<NewDmDialog me={me} directory={bootstrap.data?.directory ?? []} />}
+        dmTitles={dmTitles}
       />
       <div
         className={cn(
@@ -229,9 +260,12 @@ export function ChatPage() {
           </Link>
         ) : null}
         {heading ? (
-          <h1 className="min-w-0 break-words border-b border-border px-4 py-3 text-sm font-medium">
-            {heading}
-          </h1>
+          <div className="min-w-0 border-b border-border px-4 py-3">
+            <h1 className="break-words text-sm font-medium">{heading}</h1>
+            {participantLine !== "" ? (
+              <p className="break-words text-sm text-muted-foreground">{participantLine}</p>
+            ) : null}
+          </div>
         ) : null}
         {missing ? (
           <p

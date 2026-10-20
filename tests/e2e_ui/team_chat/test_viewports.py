@@ -294,6 +294,50 @@ def test_ac021_phone_390_channel_back_clear_of_open_sidebar(
     _assert_no_horizontal_scroll(page)
 
 
+def _assert_chat_message_is_readable(page: Page) -> None:
+    """Message text is at least 16px and the page does not scroll sideways."""
+    body = page.get_by_test_id(CHAT_TEST_IDS["message"]).locator("p").first
+    expect(body).to_be_visible(timeout=30_000)
+    size = body.evaluate("el => parseFloat(getComputedStyle(el).fontSize)")
+    assert size >= 16, f"message font is {size}px"
+    _assert_no_horizontal_scroll(page)
+
+
+def test_t007b_desktop_1280_chat_type_is_readable(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 1280x800 a channel message uses the larger chat type scale."""
+    page = page_as(ANNA, viewport=DESKTOP)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    _assert_chat_message_is_readable(page)
+
+
+def test_t007b_phone_390_chat_type_is_readable(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 390x844 a channel message uses the larger chat type scale."""
+    page = page_as(ANNA, viewport=PHONE)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    _assert_chat_message_is_readable(page)
+
+
+def test_t007b_thread_close_returns_to_the_channel(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """The thread close control leaves the thread at both gate viewports."""
+    for viewport in (DESKTOP, PHONE):
+        page = page_as(ANNA, viewport=viewport)
+        page.goto(f"{team_chat_server.base_url}{_thread_path(conversation)}")
+        close = page.get_by_test_id(CHAT_TEST_IDS["threadClose"])
+        expect(close).to_be_visible(timeout=30_000)
+        close.click()
+        expect(page).to_have_url(
+            f"{team_chat_server.base_url}{_channel_path(conversation)}", timeout=15_000
+        )
+        expect(page.get_by_test_id(CHAT_TEST_IDS["threadPane"])).to_be_hidden()
+        _assert_no_horizontal_scroll(page)
+
+
 def test_ac021_phone_390_thread_back_clear_of_open_sidebar(
     team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
 ) -> None:

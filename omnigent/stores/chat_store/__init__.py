@@ -76,6 +76,25 @@ class ChatThread:
 
 
 @dataclass(frozen=True)
+class ChannelAgentThread:
+    """An agent thread that is still running in one channel.
+
+    :param agent_state: ``chat_threads.agent_state``. This list is only
+        the ``active`` rows.
+    :param session_id: Agent session, or ``None`` before one exists. The
+        same id channel members already receive on ``thread.updated``.
+    :param body: Root message text, or ``None`` when that row is missing
+        or deleted. The client then titles the strip "Agent-Thread".
+    """
+
+    root_message_id: str
+    channel_id: str
+    agent_state: str
+    session_id: str | None
+    body: str | None
+
+
+@dataclass(frozen=True)
 class ChatAgentAccount:
     """An agent account surfaced in the chat directory.
 
@@ -419,6 +438,19 @@ class ChatStore(ABC):
         ``thread.updated`` frame, so this exposes nothing new. Used to
         annotate thread-root messages so a reloaded client can mount the
         agent thread's live view.
+        """
+        ...
+
+    @abstractmethod
+    def list_channel_agent_threads(self, channel_id: str) -> tuple[ChannelAgentThread, ...]:
+        """Return active agent threads in *channel_id*, newest update first.
+
+        Read-only. ``agent_state == "active"`` is the set that can still
+        be waiting on an approval, including roots outside the channel's
+        loaded message page. The root body is joined from ``chat_messages``;
+        a missing or deleted root leaves :attr:`ChannelAgentThread.body`
+        as ``None``. ``session_id`` is the value ``thread.updated`` already
+        sends to channel members.
         """
         ...
 

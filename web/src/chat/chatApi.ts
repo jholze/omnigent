@@ -92,9 +92,12 @@ export interface MessagePageResponse {
 export const teamChatQueryKeys = {
   bootstrap: ["team-chat", "bootstrap"] as const,
   messages: (channelId: string) => ["team-chat", "messages", channelId] as const,
+  /** Active agent threads in one channel, including roots outside the tail page. */
+  agentThreads: (channelId: string) => ["team-chat", "agent-threads", channelId] as const,
   /** Replies of one thread. Separate prefix, so a channel refetch never touches it. */
   thread: (channelId: string, threadRootId: string) =>
     ["team-chat", "thread", channelId, threadRootId] as const,
+  members: (channelId: string) => ["team-chat", "members", channelId] as const,
 };
 
 /** Server rule for `client_id` (`POST .../messages`). */
@@ -190,6 +193,46 @@ export async function fetchChannelMessages(
   return readJson(response, "Invalid chat messages response", isMessagePageResponse);
 }
 
+/** Active agent thread in a channel. `GET /v1/chat/channels/{id}/agent-threads`. */
+export interface ChannelAgentThread {
+  root_message_id: string;
+  agent_state: string;
+  /** Present once the agent session exists. Same id as `thread.updated`. */
+  session_id?: string | null;
+  /** Root message text. Omitted when that row is missing; the strip then says "Agent-Thread". */
+  body?: string | null;
+}
+
+function isChannelAgentThread(value: unknown): value is ChannelAgentThread {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.root_message_id === "string" &&
+    value.root_message_id !== "" &&
+    typeof value.agent_state === "string" &&
+    (value.session_id == null || typeof value.session_id === "string") &&
+    (value.body == null || typeof value.body === "string")
+  );
+}
+
+function isChannelAgentThreadList(value: unknown): value is ChannelAgentThread[] {
+  return Array.isArray(value) && value.every(isChannelAgentThread);
+}
+
+/**
+ * Active agent threads in the channel, including roots outside the loaded
+ * tail of 50 messages. A non-member gets the route's 403 or 404.
+ */
+export async function fetchChannelAgentThreads(
+  channelId: string,
+  signal?: AbortSignal,
+): Promise<ChannelAgentThread[]> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/agent-threads`,
+    { signal },
+  );
+  return readJson(response, "Invalid chat agent threads response", isChannelAgentThreadList);
+}
+
 /** Newest replies of one thread, ascending (`?tail=true&thread_root_id=`). */
 export async function fetchThreadMessages(
   channelId: string,
@@ -245,4 +288,29 @@ export async function openDm(principals: string[]): Promise<ChatChannel> {
     body: JSON.stringify({ principals }),
   });
   return readJson(response, "Invalid chat DM response", isChatChannel);
+}
+
+/** One row of `GET /v1/chat/channels/{id}/members`. Only the id is required to name a DM. */
+export interface ChatMember {
+  principal_id: string;
+}
+
+function isChatMember(value: unknown): value is ChatMember {
+  return isRecord(value) && typeof value.principal_id === "string" && value.principal_id !== "";
+}
+
+function isChatMemberList(value: unknown): value is ChatMember[] {
+  return Array.isArray(value) && value.every(isChatMember);
+}
+
+/** Members the caller may already read. A non-member gets the route's 403 or 404. */
+export async function listChannelMembers(
+  channelId: string,
+  signal?: AbortSignal,
+): Promise<ChatMember[]> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/members`,
+    { signal },
+  );
+  return readJson(response, "Invalid chat members response", isChatMemberList);
 }

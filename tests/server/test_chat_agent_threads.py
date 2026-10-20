@@ -1086,3 +1086,109 @@ async def test_accounts_mode_bot_mention_starts_and_reply_forwards(
     turns = _user_texts(db_uri, thread.session_id)
     assert len(turns) == 2
     assert "accounts forward" in _unwrap_chat_turn(turns[1])
+
+
+def _add_agent_thread(
+    db_uri: str, channel_id: str, root_id: str, agent_state: str, session_id: str | None = None
+) -> None:
+    """Attach a ``chat_threads`` row to *root_id*, as the agent-start path would."""
+    with _session(db_uri) as session:
+        session.add(
+            SqlChatThread(
+                root_message_id=root_id,
+                channel_id=channel_id,
+                reply_count=0,
+                participants="[]",
+                bot_streak=0,
+                agent_state=agent_state,
+                session_id=session_id,
+                updated_at=now_epoch_us(),
+            )
+        )
+        session.commit()
+
+
+async def _list_agent_threads(
+    client: httpx.AsyncClient, user: str, channel_id: str
+) -> httpx.Response:
+    path = f"/v1/chat/channels/{channel_id}/agent-threads"
+    return await client.get(path, headers=_headers(user))
+
+
+async def test_ac_107b_active_root_outside_tail_is_listed_with_body(
+    chat_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    channel_id = await _create_channel(chat_client, ANNA, "agents")
+    store = SqlAlchemyChatStore(db_uri)
+    root = store.post_message(channel_id, ANNA, "Old agent question").message
+    session_id = uuid.uuid4().hex
+    _add_agent_thread(db_uri, channel_id, root.id, "active", session_id)
+    for index in range(51):
+        store.post_message(channel_id, ANNA, f"newer {index}")
+    tail = await chat_client.get(
+        f"/v1/chat/channels/{channel_id}/messages", params={"tail": "1"}, headers=_headers(ANNA)
+    )
+    assert root.id not in [item["id"] for item in tail.json()["items"]]
+
+    listed = await _list_agent_threads(chat_client, ANNA, channel_id)
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == [
+        {
+            "root_message_id": root.id,
+            "agent_state": "active",
+            "session_id": session_id,
+            "body": "Old agent question",
+        }
+    ]
+
+
+async def test_ac_107b_dismissed_and_closed_threads_are_not_listed(
+    chat_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    channel_id = await _create_channel(chat_client, ANNA, "agents")
+    store = SqlAlchemyChatStore(db_uri)
+    active = store.post_message(channel_id, ANNA, "still running").message
+    _add_agent_thread(db_uri, channel_id, active.id, "active")
+    for state in ("dismissed", "closed", "start_failed", "starting", "none"):
+        root = store.post_message(channel_id, ANNA, state).message
+        _add_agent_thread(db_uri, channel_id, root.id, state)
+
+    listed = await _list_agent_threads(chat_client, ANNA, channel_id)
+
+    assert listed.status_code == 200, listed.text
+    assert [thread["root_message_id"] for thread in listed.json()] == [active.id]
+
+
+async def test_ac_107b_non_member_is_refused_like_list_messages(
+    chat_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    channel_id = await _create_channel(chat_client, ANNA, "agents")
+    root = SqlAlchemyChatStore(db_uri).post_message(channel_id, ANNA, "secret").message
+    _add_agent_thread(db_uri, channel_id, root.id, "active")
+
+    listed = await _list_agent_threads(chat_client, BOB, channel_id)
+
+    assert listed.status_code == 403, listed.text
+    assert listed.json()["error"]["code"] == "not_a_member"
+    assert "secret" not in listed.text
+
+
+async def test_ac_107b_deleted_root_is_listed_without_body(
+    chat_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    channel_id = await _create_channel(chat_client, ANNA, "agents")
+    root = SqlAlchemyChatStore(db_uri).post_message(channel_id, ANNA, "removed text").message
+    _add_agent_thread(db_uri, channel_id, root.id, "active")
+    with _session(db_uri) as session:
+        session.execute(
+            update(SqlChatMessage)
+            .where(SqlChatMessage.id == root.id)
+            .values(deleted_at=now_epoch_us())
+        )
+        session.commit()
+
+    listed = await _list_agent_threads(chat_client, ANNA, channel_id)
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == [{"root_message_id": root.id, "agent_state": "active"}]
