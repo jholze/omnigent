@@ -18,6 +18,7 @@ export interface PrimaryNavLinkProps {
   testId?: string;
   onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
   trailing?: ReactNode;
+  className?: string;
 }
 
 export function PrimaryNavLink({
@@ -29,6 +30,7 @@ export function PrimaryNavLink({
   testId,
   onClick,
   trailing,
+  className,
 }: PrimaryNavLinkProps) {
   return (
     <Button
@@ -39,6 +41,7 @@ export function PrimaryNavLink({
         "w-full justify-start border-0 font-normal",
         HOVER_HIGHLIGHT,
         active && ACTIVE_HIGHLIGHT,
+        className,
       )}
       data-testid={testId}
     >

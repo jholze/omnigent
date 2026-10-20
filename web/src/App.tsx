@@ -52,6 +52,13 @@ const InboxPage = withPageView(
   "inbox",
   lazy(() => import("@/pages/InboxPage").then((m) => ({ default: m.InboxPage }))),
 );
+// Team chat is a separate shell from the agent session page at `/` and `/c/:id`.
+// The page itself decides the flag so a hard load of `/chat` does not fall
+// through to "Page not found" while `/v1/info` is still in flight.
+const TeamChatPage = withPageView(
+  "team_chat",
+  lazy(() => import("@/chat/ChatPage").then((m) => ({ default: m.ChatPage }))),
+);
 // The shell owns the board so selecting a conversation never unmounts it.
 const CanvasLandingPage = withPageView("canvas", () => null);
 const TasksPage = withPageView(
@@ -169,6 +176,9 @@ function AppRoutes({ basename }: AppProps) {
           <Route path={prefix || "/"} element={<ChatPage />} />
           <Route path={`${prefix}/c/:conversationId`} element={<ChatPage />} />
           <Route path={`${prefix}/inbox`} element={<InboxPage />} />
+          <Route path={`${prefix}/chat`} element={<TeamChatPage />} />
+          <Route path={`${prefix}/chat/:channelId`} element={<TeamChatPage />} />
+          <Route path={`${prefix}/chat/:channelId/t/:threadRootId`} element={<TeamChatPage />} />
           <Route
             path={`${prefix}/canvas`}
             element={

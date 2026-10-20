@@ -20,6 +20,29 @@ import { isHostRoutingEnabled, resolveWebSocketUrl } from "@/lib/host";
 import { modalHostId } from "@/lib/sessionHost";
 import type { SessionListWireItem } from "@/lib/sessionListCache";
 
+/**
+ * Team-chat push. Ids only — a frame never carries a message body.
+ * Unknown `kind` values are ignored by the parser.
+ */
+export type ChatUpdatesFrame =
+  | {
+      type: "chat";
+      kind: "message.created";
+      channel_id: string;
+      message_id: string;
+      thread_root_id: string | null;
+      created_at: number;
+      author_id: string;
+    }
+  | {
+      type: "chat";
+      kind: "read.updated";
+      channel_id: string;
+      thread_root_id: string | null;
+      created_at: number;
+      id: string;
+    };
+
 /** A frame pushed by the server over the updates stream. */
 export type SessionUpdatesFrame =
   | { type: "snapshot"; items: SessionListWireItem[] }
@@ -27,7 +50,8 @@ export type SessionUpdatesFrame =
   | { type: "removed"; ids: string[] }
   | { type: "hosts_changed" }
   | { type: "projects_changed" }
-  | { type: "heartbeat" };
+  | { type: "heartbeat" }
+  | ChatUpdatesFrame;
 
 type FrameListener = (frame: SessionUpdatesFrame) => void;
 

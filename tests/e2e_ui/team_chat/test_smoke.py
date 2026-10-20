@@ -8,7 +8,6 @@ both see the "Chat" entry, and the server tells them apart. Flag off: no
 from __future__ import annotations
 
 import httpx
-import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.team_chat.conftest import (
@@ -33,10 +32,6 @@ def _open_app(page: Page, base_url: str) -> None:
     expect(page.get_by_test_id("sidebar-primary-nav")).to_be_visible(timeout=30_000)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="team_chat flag is unknown and the chat shell UI is not landed yet",
-)
 def test_t004_ac1_flag_on_two_users_see_chat_entry(
     team_chat_server: TeamChatServer, page_as
 ) -> None:
