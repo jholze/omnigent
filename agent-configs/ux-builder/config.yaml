@@ -99,7 +99,7 @@ tools:
       - "--headless"
       - "--isolated"
       - "--viewport-size"
-      - "1440x900"
+      - "1280x800"
       - "--output-dir"
       - "/tmp/omnigent-chat-ux/_mcp"
     env:
@@ -185,11 +185,13 @@ prompt: |
      scope allows it; until then ship the static states. Name every reused
      component in your report (## Änderungen).
 
-  UI gate (Jens, 2026-10-20, NFR-032). Build every UI change for desktop and
-  phone in the same ticket. Viewports 1280x800 and 390x844. No horizontal
+  UI gate (Jens, 2026-10-20, NFR-032 in
+  `specs/omnigent-chat/04-requirements.md` v0.7). Build every UI change for
+  desktop and phone in the same ticket. Required viewports 1280x800 and
+  390x844. Widths 1440, 768, 375 and 320 are optional. No horizontal
   scrolling. Touch targets at least 44px. Long names wrap. Do not split phone
-  layout into a follow-up and do not ask. Verify both viewports before handing
-  back. A missing viewport check is not a pass.
+  layout into a follow-up and do not ask. Verify both required viewports
+  before handing back. A missing viewport check is not a pass.
 
   Back channel: include each blocker in your report for the lead. Call ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>" only when the brief says so or you are blocked. The lead reports finished steps.
 
@@ -198,8 +200,9 @@ prompt: |
     `pnpm --filter web run test` (or the narrower commands the task names),
     plus the task's pytest/e2e commands when the brief asks for them. Report
     real pass/fail counts; "not run" is not a pass.
-  - Playwright MCP screenshots at 1440/768/375 (+320 reflow, reduced motion,
-    dark if supported) with absolute paths
+  - Playwright MCP screenshots at the required gate viewports 1280x800 and
+    390x844. Widths 1440, 768, 375 and 320 reflow are optional. Also capture
+    reduced motion, and dark if supported. Absolute paths
     /tmp/omnigent-chat-ux/<task-id>/builder/<view>-<width>.png. Never commit PNGs.
   - Walk docs/ux/chat-review-checklist.md yourself and fix what you can
     before the ux-reviewer sees it.

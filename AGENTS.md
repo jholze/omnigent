@@ -145,25 +145,33 @@ instructions:
 Fork-only section; keep it when syncing from upstream. Short summary of the
 standing rules (Jens, 2026-10-20).
 
-1. **Mobile is mandatory** (spec NFR-032 in
-   `specs/omnigent-chat/04-requirements.md`). Every new or changed UI is built
-   and tested for desktop and phone in the same ticket, never split into a
-   follow-up ticket and not asked about per ticket. Viewports 1280x800 and
+1. **Mobile is mandatory** (NFR-032 in
+   `specs/omnigent-chat/04-requirements.md` v0.7). Every new or changed UI is
+   built and tested for desktop and phone in the same ticket, never split into
+   a follow-up ticket and not asked about per ticket. Viewports 1280x800 and
    390x844. No horizontal scrolling, touch targets at least 44px, long names
    wrap. A missing viewport run is not a pass.
-2. **Back channel.** Sessions report every finished step (PR open, review
-   done, test instance up), blockers and needed decisions to Spec (Jens'
-   orchestrator) by running
+2. **Back channel.** The session that owns the ticket (the lead) reports every
+   finished step, blockers and needed decisions to Spec (Jens' orchestrator)
+   by running
    `~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>"`.
-   Do not poll; do not expect Spec to poll.
+   The session that opens the PR sends the PR-open notice. Sub-agents call the
+   script only when their brief says so or they are blocked; otherwise they
+   put blockers in their result for the lead. Read-only reviewers
+   (`omnigent-reviewer`, `ux-reviewer`) do not run the script; they put
+   findings and blockers in their result. Do not poll; do not expect Spec to
+   poll.
 3. **Project separation.** Work for one project (e.g. ProductOS) never goes
    into another project's Omnigent project or sessions; this repo and its
    sessions are Omnigent only.
-4. **Existing standards.** Review order is DeepSeek first, then Opus (final
-   verdict). No merge without green CI and Jens' OK (team-chat task PRs go to
-   `epic/team-chat`; the epic reaches `main` only when Jens calls it
-   release-ready). The test instance stays separate from production (own port,
-   own DB, production untouched). CI runs only on self-hosted runners.
+4. **Existing standards.** Review follows the lead matrix in
+   `agents/lead/config.yaml`: DeepSeek first, then Opus (final verdict).
+   DeepSeek does not review a DeepSeek-written diff. Large tasks add
+   `gpt_review` after the first pass and before Opus. No merge without green
+   CI and Jens' OK (team-chat task PRs go to `epic/team-chat`; the epic
+   reaches `main` only when Jens calls it release-ready). The test instance
+   stays separate from production (own port, own DB, production untouched).
+   CI runs only on self-hosted runners.
 
 ## Local orchestration (jholze fork)
 

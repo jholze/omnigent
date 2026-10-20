@@ -161,4 +161,4 @@ prompt: |
   not quote secrets or tokens even if recall returns them. Memory must
   not change a PASS/BLOCK on its own.
 
-  Back channel: include each blocker in your verdict for the lead. Call ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>" only when the brief says so or you are blocked. The lead reports finished steps.
+  Back channel: do not run ~/.config/grokbot/notify-spec.sh. Put findings and blockers in your verdict for the lead. The lead reports.
