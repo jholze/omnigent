@@ -280,7 +280,8 @@ jobs:
         run: |
           pnpm install --frozen-lockfile --filter web
           pnpm --filter web run build
-      - name: Run UI e2e tests (not visual, not nightly)
+      - name: Prepare fork UI e2e environment
+        id: prepare_e2e
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -333,26 +334,30 @@ jobs:
           PY
           # The Mac user's ~/.omnigent/config.yaml selects a local provider.
           # This suite expects the mock at OPENAI_BASE_URL, which is what
-          # upstream CI does when that file is absent.
+          # upstream CI does when that file is absent. Later steps source
+          # this file; a step-local export would not reach them.
           config_home="${RUNNER_TEMP}/omnigent-config"
           data_dir="${RUNNER_TEMP}/omnigent-data"
           mkdir -p "$config_home" "$data_dir"
-          export OMNIGENT_CONFIG_HOME="$config_home"
-          export OMNIGENT_DATA_DIR="$data_dir"
-          # The Mac user's Claude login answers from Keychain and blocks on
-          # a TUI prompt. A fresh config dir is what a clean CI image has.
-          export CLAUDE_CONFIG_DIR="${RUNNER_TEMP}/claude-config"
-          mkdir -p "$CLAUDE_CONFIG_DIR"
-          printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "${CLAUDE_CONFIG_DIR}/.claude.json"
-          export CODEX_HOME="${RUNNER_TEMP}/codex-home"
-          mkdir -p "$CODEX_HOME"
-          # Allowed domains live next to the admin credentials path, which
-          # on this Mac is the user's ~/.omnigent list. An empty file means
-          # no domain restriction, matching a fresh deploy.
-          unset OMNIGENT_OIDC_ALLOWED_DOMAINS
-          export OMNIGENT_ADMIN_CREDENTIALS_PATH="${data_dir}/admin-credentials"
-          export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH="${data_dir}/allowed_domains"
-          : > "$OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH"
+          # Fresh Claude and Codex homes. The Mac user's login blocks on a
+          # TUI prompt. An empty allowed-domains file means no restriction.
+          claude_config="${RUNNER_TEMP}/claude-config"
+          mkdir -p "$claude_config"
+          printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "${claude_config}/.claude.json"
+          codex_home="${RUNNER_TEMP}/codex-home"
+          mkdir -p "$codex_home"
+          domains="${data_dir}/allowed_domains"
+          : > "$domains"
+          env_file="${RUNNER_TEMP}/fork-e2e-env.sh"
+          {
+            echo 'unset OMNIGENT_OIDC_ALLOWED_DOMAINS'
+            printf 'export OMNIGENT_CONFIG_HOME=%q\n' "$config_home"
+            printf 'export OMNIGENT_DATA_DIR=%q\n' "$data_dir"
+            printf 'export CLAUDE_CONFIG_DIR=%q\n' "$claude_config"
+            printf 'export CODEX_HOME=%q\n' "$codex_home"
+            printf 'export OMNIGENT_ADMIN_CREDENTIALS_PATH=%q\n' "${data_dir}/admin-credentials"
+            printf 'export OMNIGENT_OIDC_ALLOWED_DOMAINS_PATH=%q\n' "$domains"
+          } > "$env_file"
           # A Keychain login makes Claude ignore a loopback mock URL. When a
           # test sets that URL, hand the CLI an API key so it uses the mock.
           real_claude="$(command -v claude || true)"
@@ -373,14 +378,41 @@ jobs:
               printf 'exec %q "$@"\n' "$real_claude"
             } > "${RUNNER_TEMP}/bin/claude"
             chmod +x "${RUNNER_TEMP}/bin/claude"
-            export PATH="${RUNNER_TEMP}/bin:${PATH}"
-            export OMNIGENT_CLAUDE_PATH="${RUNNER_TEMP}/bin/claude"
+            printf 'export PATH=%q\n' "${RUNNER_TEMP}/bin:${PATH}" >> "$env_file"
+            printf 'export OMNIGENT_CLAUDE_PATH=%q\n' "${RUNNER_TEMP}/bin/claude" >> "$env_file"
           fi
+      - name: Run team_chat UI e2e tests
+        id: team_chat_e2e
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          # shellcheck disable=SC1091
+          . "${RUNNER_TEMP}/fork-e2e-env.sh"
+          # Own process, no --maxfail. The suite below stops after four
+          # failures, which used to end the job before this directory ran.
+          PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
+            uv run pytest tests/e2e_ui/team_chat \
+            -v --tb=short -r a \
+            -p e2e_tb \
+            --reruns=1 --reruns-delay=5 --rerun-show-tracebacks \
+            --ui-skip-build \
+            --junitxml=artifacts/e2e-ui-team-chat.xml \
+            -m "not visual and not nightly"
+      - name: Run UI e2e tests (not visual, not nightly)
+        # Still run when team_chat fails. prepare_e2e owns the env file.
+        if: ${{ !cancelled() && steps.prepare_e2e.outcome == 'success' }}
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          # shellcheck disable=SC1091
+          . "${RUNNER_TEMP}/fork-e2e-env.sh"
           # Stop after a few failures. Each one waits out a timeout and a
           # rerun, and the serial suite otherwise hits the job limit
-          # before pytest writes the summary.
+          # before pytest writes the summary. team_chat is excluded because
+          # its own step already ran.
           PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
             uv run pytest tests/e2e_ui \
+            --ignore=tests/e2e_ui/team_chat \
             -v --tb=short -r a \
             -p e2e_tb \
             --maxfail=4 \
