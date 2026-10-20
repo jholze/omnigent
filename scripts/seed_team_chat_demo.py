@@ -7,11 +7,14 @@ a mode-600 file and are never printed.
 
 The open approval card stays up only while ``--hold`` is running. The
 permission hook times out after 24 hours, or sooner when someone answers.
+Point ``--hold`` at the server itself (``http://127.0.0.1:<port>``). A public
+proxy such as a Cloudflare quick tunnel closes that long poll after about
+100 seconds and the card disappears.
 
 Example::
 
     python scripts/seed_team_chat_demo.py \\
-        --base-url https://example.trycloudflare.com \\
+        --base-url http://127.0.0.1:6791 \\
         --credentials /path/credentials \\
         --database-uri sqlite:////path/demo.db \\
         --hold
