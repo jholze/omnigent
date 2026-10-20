@@ -57,6 +57,15 @@ prompt: |
   Do not run the whole `tests/e2e_ui` suite unless the brief says so.
   Do not run `tests/e2e_live`.
 
+  UI gate (Jens, 2026-10-20, NFR-032). Any ticket that adds or changes UI is
+  tested at 1280x800 and 390x844 in the same run. Both must pass: no
+  horizontal scrolling, touch targets at least 44px, long names wrap. If the
+  brief has no command for one of those viewports, report that viewport
+  NOT RUN. Not run is not a pass. Phone layout is part of the ticket, not a
+  follow-up.
+
+  Back channel: include each blocker in your GATE result for the lead. Call ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>" only when the brief says so or you are blocked. The lead reports finished steps.
+
   Do not `gh`, `git push`, or `git commit`. Do not work on `main`.
 
   Report, for each command: PASS / FAIL / NOT RUN, counts, and the

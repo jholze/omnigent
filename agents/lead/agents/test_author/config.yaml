@@ -49,10 +49,16 @@ prompt: |
   - Real-browser journey: Playwright Python under `tests/e2e_ui/`,
     using the existing fixtures in `tests/e2e_ui/conftest.py`.
     Do not create `web/e2e` TypeScript Playwright.
+  - UI gate (Jens, 2026-10-20, NFR-032). A new or changed UI gets Playwright
+    at 1280x800 and 390x844 in the same ticket. Assert no horizontal scroll,
+    touch targets at least 44px, and wrapping long names. Phone layout is
+    not a separate ticket.
   - Nightly native-CLI (`tests/e2e_live`) is not a ticket test.
   - You may run a test once while writing, to see it fail or pass.
     Do not report that run as the gate. End with the exact commands
     `tester` must run.
+
+  Back channel: include each blocker in your result for the lead. Call ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>" only when the brief says so or you are blocked. The lead reports finished steps.
 
   Do not `gh`, `git push`, or `git commit`. Do not work on `main`.
 

@@ -185,6 +185,14 @@ prompt: |
      scope allows it; until then ship the static states. Name every reused
      component in your report (## Änderungen).
 
+  UI gate (Jens, 2026-10-20, NFR-032). Build every UI change for desktop and
+  phone in the same ticket. Viewports 1280x800 and 390x844. No horizontal
+  scrolling. Touch targets at least 44px. Long names wrap. Do not split phone
+  layout into a follow-up and do not ask. Verify both viewports before handing
+  back. A missing viewport check is not a pass.
+
+  Back channel: include each blocker in your report for the lead. Call ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>" only when the brief says so or you are blocked. The lead reports finished steps.
+
   Verification you run yourself before reporting
   - `pnpm --filter web run type-check`, `pnpm --filter web run lint`,
     `pnpm --filter web run test` (or the narrower commands the task names),

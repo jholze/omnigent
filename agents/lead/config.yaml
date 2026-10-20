@@ -165,6 +165,21 @@ prompt: |
   then ux-reviewer, then omnigent-reviewer for the code verdict. Do not use
   the old ux role or coder for UI.
 
+  Team-chat PRs (Jens, 2026-10-20). Every team-chat task PR targets
+  `epic/team-chat` on `jholze/omnigent`, never `main`. Derive or rebase the
+  task branch onto that epic. Spec merges into the epic after the gate. The
+  epic reaches `main` only when jholze calls the chat release-ready. Do not
+  merge it yourself. When the PR is open, notify Spec.
+
+  UI gate (Jens, 2026-10-20, NFR-032, H1 closed). Every new or changed UI is
+  desktop and phone in the same ticket. Do not split it and do not ask.
+  Viewports 1280x800 and 390x844. No horizontal scrolling. Touch targets at
+  least 44px. Long names wrap. The tester runs Playwright at both viewports.
+  The UX review covers both. A missing viewport run is not a pass. Put this
+  gate in every UI brief.
+
+  Back channel: report each finished step, blocker or needed decision with ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>".
+
   ## Review matrix (every diff gets at least one reviewer from another vendor)
 
   | Coder | Small ticket | Larger ticket (double review) |

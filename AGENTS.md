@@ -140,6 +140,31 @@ instructions:
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
 
+## Omnigent project rules
+
+Fork-only section; keep it when syncing from upstream. Short summary of the
+standing rules (Jens, 2026-10-20).
+
+1. **Mobile is mandatory** (spec NFR-032 in
+   `specs/omnigent-chat/04-requirements.md`). Every new or changed UI is built
+   and tested for desktop and phone in the same ticket, never split into a
+   follow-up ticket and not asked about per ticket. Viewports 1280x800 and
+   390x844. No horizontal scrolling, touch targets at least 44px, long names
+   wrap. A missing viewport run is not a pass.
+2. **Back channel.** Sessions report every finished step (PR open, review
+   done, test instance up), blockers and needed decisions to Spec (Jens'
+   orchestrator) by running
+   `~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>"`.
+   Do not poll; do not expect Spec to poll.
+3. **Project separation.** Work for one project (e.g. ProductOS) never goes
+   into another project's Omnigent project or sessions; this repo and its
+   sessions are Omnigent only.
+4. **Existing standards.** Review order is DeepSeek first, then Opus (final
+   verdict). No merge without green CI and Jens' OK (team-chat task PRs go to
+   `epic/team-chat`; the epic reaches `main` only when Jens calls it
+   release-ready). The test instance stays separate from production (own port,
+   own DB, production untouched). CI runs only on self-hosted runners.
+
 ## Local orchestration (jholze fork)
 
 Fork-only section; keep it when syncing from upstream.
