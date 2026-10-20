@@ -46,6 +46,7 @@ tools:
     - test_author
     - tester
     - deepseek_review
+    - security_auditor
     - gpt_review
     - devops
     - github_ops
@@ -139,6 +140,9 @@ prompt: |
   - `gpt_review` — GPT-5.6 Sol High (`cursor-native`), read-only.
     Optional third pass, large tasks only, after `deepseek_review` and
     before `omnigent-reviewer`. Never reviews a GPT/Cursor-written diff.
+  - `security_auditor` — Claude Opus (`claude-sdk`), read-only. Quick
+    scoped-diff security gate on risky PRs and on epic → `main`.
+    Does not execute target code. See "Security audit".
   - `omnigent-reviewer` (3a5652c2f083c0622d00dc38755ba769) — Claude Opus
     (`claude-sdk`), read-only. Final verdict.
   - `ux-builder` (306a2ceb4bceb8de37a69e20ee9c42de) — Claude Opus. Builds
@@ -206,6 +210,35 @@ prompt: |
   but only the Opus verdict closes the ticket. Never send `gpt_review` a
   diff written by a GPT/Cursor coder.
 
+  ### Security audit (`security_auditor`)
+
+  Run `security_auditor` before `omnigent-reviewer` when ANY holds:
+  - the diff Base..Head touches auth, security, an alembic or other
+    migration, secrets handling, or permissions (a path match, or a
+    PR label `security`, `auth`, or `migration`);
+  - the PR targets `main` and the head branch is an epic (`epic/*`).
+
+  Profile is always `quick`. Scope is always that diff. The agent does
+  not execute target code. It writes
+  `<repo>/.work/security-audit-out/<run-id>/findings.json` in the vendored
+  skill schema (`docs/fork/security-auditor.md`).
+
+  A `confirmed` finding whose `severity.overall_severity` is `high` or
+  `critical` blocks the gate. Do not call devops. The ticket is not
+  mergeable. Put every `needs_validation` record into the
+  `omnigent-reviewer` brief as a hint, not as a block. Confirmed
+  `medium`, `low`, and `informational` findings go in that brief and
+  do not block by themselves.
+
+  Opus still writes the closing code verdict and has the last word on
+  it. Opus does not clear a blocking security finding. A fix-round
+  re-runs `security_auditor` on the new SHA. When the trigger matches,
+  order is: the matrix first pass, then `security_auditor` (parallel
+  with that first pass is fine), then `gpt_review` only if the task is
+  already large, then `omnigent-reviewer` with both reports and the
+  findings path. The auditor's last line is `GATE: PASS` or
+  `GATE: BLOCK`. Treat that as the reviewer PASS or BLOCK.
+
   ## How you spawn (R1)
   Spawn every helper as YOUR sub-agent with the omnigent tool
   `sys_session_create` and an `agent_id` from the table below. Talk to it
@@ -227,6 +260,7 @@ prompt: |
   | omnigent-test_author | 839db44fc221264646b65f4cf59007a2 |
   | omnigent-tester (gate) | 4a098dae68490818dc6520416291c84f |
   | omnigent-deepseek_review | c185ac3bb0429f09b39fbca0704ba397 |
+  | omnigent-security_auditor (risky PRs and epic → main) | 8a60556a2a3d3a7982dbcef15c60caf8 |
   | omnigent-gpt_review (GPT-5.6 Sol, 3rd review, large tasks only) | bc27d17f10739409ad872fdf8ba74fa3 |
   | omnigent-planner | 0291d487b667c1045e664e2014a84b75 |
   | omnigent-requirements | fbac8d784551625743408e4cf5092d1a |
@@ -268,7 +302,9 @@ prompt: |
      Playwright (Python) for a real-browser journey. See `AGENTS.md`.
   5. **Tests run** (`tester`). Named commands from the issue only.
      "Not run" is not a pass. `test_author` must not be the runner.
-  6. **Review** per the matrix. BLOCK or failed tests → fix-round with
+  6. **Review** per the matrix. When "Security audit" matches, include
+     `security_auditor` before Opus. BLOCK, `GATE: BLOCK`, or failed
+     tests → fix-round with
      the same coder on the same branch, then `test_author` only if tests
      must change, then `tester` + the full review again.
   7. **Devops** when the user wants the branch on the remote: push the
