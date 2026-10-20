@@ -81,7 +81,13 @@ export interface MessagePageResponse {
 export const teamChatQueryKeys = {
   bootstrap: ["team-chat", "bootstrap"] as const,
   messages: (channelId: string) => ["team-chat", "messages", channelId] as const,
+  /** Replies of one thread. Separate prefix, so a channel refetch never touches it. */
+  thread: (channelId: string, threadRootId: string) =>
+    ["team-chat", "thread", channelId, threadRootId] as const,
 };
+
+/** Server rule for `client_id` (`POST .../messages`). */
+export const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -105,6 +111,25 @@ function isChangesResponse(value: unknown): value is ChangesResponse {
     (value.next === null || typeof value.next === "string") &&
     typeof value.reset === "boolean"
   );
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.channel_id === "string" &&
+    (value.thread_root_id === null || typeof value.thread_root_id === "string") &&
+    typeof value.author_id === "string" &&
+    typeof value.author_kind === "string" &&
+    typeof value.created_at === "number" &&
+    typeof value.body === "string" &&
+    (value.client_id === null || typeof value.client_id === "string")
+  );
+}
+
+function isChatChannel(value: unknown): value is ChatChannel {
+  if (!isRecord(value)) return false;
+  return typeof value.id === "string" && value.id !== "" && typeof value.kind === "string";
 }
 
 function isMessagePageResponse(value: unknown): value is MessagePageResponse {
@@ -150,4 +175,61 @@ export async function fetchChannelMessages(
     { signal },
   );
   return readJson(response, "Invalid chat messages response", isMessagePageResponse);
+}
+
+/** Newest replies of one thread, ascending (`?tail=true&thread_root_id=`). */
+export async function fetchThreadMessages(
+  channelId: string,
+  threadRootId: string,
+  signal?: AbortSignal,
+): Promise<MessagePageResponse> {
+  const params = new URLSearchParams({ tail: "true", thread_root_id: threadRootId });
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/messages?${params}`,
+    { signal },
+  );
+  return readJson(response, "Invalid chat thread response", isMessagePageResponse);
+}
+
+export interface PostMessageInput {
+  body: string;
+  client_id?: string;
+  thread_root_id?: string | null;
+}
+
+/**
+ * `POST /v1/chat/channels/{id}/messages`.
+ *
+ * 201 stores, 200 replays the same `client_id`. Any other status throws a
+ * `ChatApiError`; a network failure throws the fetch error unchanged.
+ */
+export async function postMessage(
+  channelId: string,
+  input: PostMessageInput,
+): Promise<ChatMessage> {
+  const payload: Record<string, string> = { body: input.body };
+  if (input.client_id) payload.client_id = input.client_id;
+  if (input.thread_root_id) payload.thread_root_id = input.thread_root_id;
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return readJson(response, "Invalid chat message response", isChatMessage);
+}
+
+/**
+ * `POST /v1/chat/dms` with the other participants (never the caller).
+ * 201 creates, 200 returns the existing DM; both carry the same channel id.
+ */
+export async function openDm(principals: string[]): Promise<ChatChannel> {
+  const response = await authenticatedFetch("/v1/chat/dms", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ principals }),
+  });
+  return readJson(response, "Invalid chat DM response", isChatChannel);
 }
