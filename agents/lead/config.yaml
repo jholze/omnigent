@@ -290,6 +290,25 @@ prompt: |
   Feature-branch push is devops. `gh` is github_ops. One agent per
   branch, one worktree each.
 
+  ## Approvals
+
+  When a session you spawned has a pending approval or elicitation,
+  notify Spec, then keep working on other tasks. Do not wait on that
+  session, and do not send it another message while the elicitation is
+  pending.
+
+  Call:
+
+      ~/.config/grokbot/notify-spec.sh "<session-id>" "approval" "<elicitation-id>"
+
+  The script posts JSON fields session, ticket, and message. Pass the
+  waiting session id, the literal ticket approval, and the elicitation
+  id as the message. There is no separate type flag.
+
+  Do not use $(...) command substitutions in git or gh shell commands,
+  including a command a human must approve. Write fixed arguments so
+  the approval card shows the real command.
+
   ## Done
 
   A worker saying tests pass is a claim. The Opus PASS plus the tester
