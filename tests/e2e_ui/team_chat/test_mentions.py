@@ -37,7 +37,11 @@ _MIN_TOUCH_TARGET_PX = 44
 _LIST_BUDGET_MS = 100
 _MESSAGES_URL = re.compile(r"/v1/chat/channels/[^/]+/messages(\?.*)?$")
 _LOAD_TIMEOUT_MS = 30_000
+# ChatPage is lazy. A cold worker can sit on the shell fallback past the
+# composer timeout, which is what the desktop thread case hit.
+_SHELL_TIMEOUT_MS = 60_000
 _STORE_TIMEOUT_S = 15.0
+_SHELL_STATUS = "Loading Omnigent"
 
 # Records the time from the first keydown to the list entering the DOM.
 _ARM_LATENCY_PROBE = """(testId) => {
@@ -83,8 +87,15 @@ def _composer_scope(page: Page, *, thread: bool) -> Page | Locator:
 
 
 def _open_composer(page: Page, server: TeamChatServer, path: str, *, thread: bool) -> Locator:
-    page.goto(f"{server.base_url}{path}")
+    page.goto(f"{server.base_url}{path}", wait_until="domcontentloaded")
+    # The shell status is the Suspense fallback. The thread pane, and its
+    # composer, do not exist until that chunk has loaded.
+    expect(page.get_by_role("status").filter(has_text=_SHELL_STATUS)).to_have_count(
+        0, timeout=_SHELL_TIMEOUT_MS
+    )
     scope = _composer_scope(page, thread=thread)
+    if thread:
+        expect(scope).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
     composer_input = scope.get_by_test_id(CHAT_TEST_IDS["composerInput"])
     expect(composer_input).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
     composer_input.click()
