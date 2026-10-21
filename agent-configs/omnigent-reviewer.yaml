@@ -160,3 +160,5 @@ prompt: |
   the mismatch. Do not retain, create, update, or delete memories. Do
   not quote secrets or tokens even if recall returns them. Memory must
   not change a PASS/BLOCK on its own.
+
+  Back channel: do not run ~/.config/grokbot/notify-spec.sh. Put findings and blockers in your verdict for the lead. The lead reports.

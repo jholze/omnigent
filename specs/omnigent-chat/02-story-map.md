@@ -1,4 +1,4 @@
-# Story Map: Omnigent Chat — v0.1 (2026-10-16, Status: Entwurf)
+# Story Map: Omnigent Chat — v0.4 (2026-10-20, Status: Entwurf)
 
 Ziel-Launch Release 1: Wochenende 24./25.10.2026 (Jens). Status je Story: exists / adapt / new (Basis: jholze/omnigent main 87f6f08 + PR #4).
 
@@ -66,7 +66,9 @@ Ziel-Launch Release 1: Wochenende 24./25.10.2026 (Jens). Status je Story: exists
 - ST-3.3.3 Server-seitige Nachrichten-Queue für Agenten. (adapt: Queue heute nur localStorage)
 
 ### Später
-Reaktionen, Bearbeiten/Löschen, Dateien, Suche, Export, Mobile, Vorlesen/Sprachdialog (TTS), GitHub-Webhooks, Slack-Brücke.
+Reaktionen, Bearbeiten/Löschen, Dateien, Suche, Export, Vorlesen/Sprachdialog (TTS), GitHub-Webhooks, Slack-Brücke.
+
+Mobile ist Pflicht für jedes UI-Ticket (NFR-032, Jens 2026-10-20).
 
 ## Rollen-Abdeckung je Slice
 | Rolle | R0 | R1 | R2 | Zurückgestellt |
@@ -108,6 +110,7 @@ sequenceDiagram
 | Q-11 | Ist R0 ein interner Zwischenstand (z. B. Mittwoch) zum Ausprobieren? | Ja, Demo Mitte der Woche | Stufe 7 |
 
 ## Changelog
+- v0.4 (2026-10-20) Mobile aus „Später“ gestrichen; Pflicht für jedes UI-Ticket (NFR-032, Jens 2026-10-20).
 - v0.3 (2026-10-16) Rechtefragen entschieden; Agenten-Konten, Bot-zu-Bot mit Bremse, MCP-Chat-Tools; Abhängigkeiten #14/#15 und Server aus Fork.
 - v0.2 (2026-10-16) Grok-Bot-Agenten als Rolle, komplett in R1 (Jens); Board-Widget in R2 (Vorschlag).
 - v0.1 (2026-10-16) Erster Entwurf nach Code-Analyse (Elicitation, Status, Steuerung, Diktat, GitHub, Slack-Integration).

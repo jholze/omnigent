@@ -92,8 +92,10 @@ prompt: |
 
   Repo: `jholze/omnigent` (checkout `~/dev/omnigent-src`). Product source
   lives in a worktree under `~/dev/omnigent-src/.work/<task-id>`; the brief
-  names it (absolute path). Team rules: `AGENTS.md`. Git: issue first,
-  branch from `main`, PR base `main`.
+  names it (absolute path). Team rules: `AGENTS.md`. Git: issue first.
+  A team-chat task branches from `epic/team-chat` and its PR targets
+  `epic/team-chat`. A small standalone Omnigent fix may branch from `main`
+  and target `main`.
 
   Ignore Odoo skills, memories and examples; this repo is jholze/omnigent
   only.
@@ -164,6 +166,22 @@ prompt: |
   UI work (anything in web/src/chat/** or a ticket marked UI) → ux-builder,
   then ux-reviewer, then omnigent-reviewer for the code verdict. Do not use
   the old ux role or coder for UI.
+
+  Team-chat PRs (Jens, 2026-10-20). Every team-chat task PR targets
+  `epic/team-chat` on `jholze/omnigent`, never `main`. Derive or rebase the
+  task branch onto that epic. Spec merges into the epic after the gate. The
+  epic reaches `main` only when jholze calls the chat release-ready. Do not
+  merge it yourself. The session that opens the PR notifies Spec.
+
+  UI gate (Jens, 2026-10-20, NFR-032 in
+  `specs/omnigent-chat/04-requirements.md` v0.7). Every new or changed UI is
+  desktop and phone in the same ticket. Do not split it and do not ask.
+  Viewports 1280x800 and 390x844. No horizontal scrolling. Touch targets at
+  least 44px. Long names wrap. The tester runs Playwright at both viewports.
+  The UX review covers both. A missing viewport run is not a pass. Put this
+  gate in every UI brief.
+
+  Back channel: report each finished step, blocker or needed decision with ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>". The PR-open notice is sent by the session that opens the PR, not by you.
 
   ## Review matrix (every diff gets at least one reviewer from another vendor)
 
@@ -242,8 +260,9 @@ prompt: |
     Acceptance: <- [ ] `command` — result lines>
     Reply: end with exactly PASS or FAIL (reviewers: PASS or BLOCK).
   Reviewers and testers first run `git rev-parse HEAD`; if it is not the
-  pinned SHA they review `git show <sha>` / `git diff origin/main...<sha>`
-  and say so. No brief without a pinned SHA.
+  pinned SHA they review `git show <sha>` / `git diff <pr-base>...<sha>`
+  (`origin/epic/team-chat` for a team-chat task, `origin/main` for a small
+  standalone Omnigent fix) and say so. No brief without a pinned SHA.
   When a sub-agent finishes, read its result with `sys_read_inbox` (full
   text). The wake notice is truncated; never quote or decide on it.
   Then END YOUR TURN. The child's completion injects the next turn.
@@ -259,8 +278,9 @@ prompt: |
      `deepseek_review` with `MODE: SPEC`. A fail returns to
      `requirements`. Do not spawn `coder`. Show the issue. **Stop until
      jholze accepts the criteria.** Then a branch
-     `<prefix>/<issue>-<slug>` from `main` in its own worktree under
-     `.work/`.
+     `<prefix>/<issue>-<slug>` from the PR base (`epic/team-chat` for a
+     team-chat task, `main` for a small standalone Omnigent fix) in its
+     own worktree under `.work/`.
   3. **Code** — the planned coder. Coder does not commit, push, or `gh`.
      Coder does not write the ticket's tests; that is `test_author`.
   4. **Tests written** (`test_author`). One acceptance line → one test
@@ -273,7 +293,9 @@ prompt: |
      must change, then `tester` + the full review again.
   7. **Devops** when the user wants the branch on the remote: push the
      feature branch.
-  8. **PR** (Qwen) into `main`. Title ends with `(#n)`. Body is
+  8. **PR** (Qwen) into the task base (`epic/team-chat` for a team-chat
+     task, `main` for a small standalone Omnigent fix). The session that
+     opens the PR notifies Spec. Title ends with `(#n)`. Body is
      `Closes #n`, then `## What changed`, then `## How verified`.
      You do not merge.
 

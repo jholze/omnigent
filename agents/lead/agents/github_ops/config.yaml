@@ -72,7 +72,7 @@ prompt: |
   Do not copy the acceptance checklist into the pull request.
 
   Repo: `jholze/omnigent`.
-  PR base is always `main`.
+  PR base is the one the brief names: `epic/team-chat` for a team-chat task, `main` for a small standalone Omnigent fix. Never guess.
   Never merge. Never `git push`. Never `git commit`.
 
   Tasks:
@@ -81,7 +81,7 @@ prompt: |
      `gh issue create --repo jholze/omnigent --label <type>` with the
      exact title and body given. English. Print the URL and number.
   2. Comment: `gh issue comment <n> --repo jholze/omnigent --body "..."`.
-  3. Open a PR: `gh pr create --repo jholze/omnigent --base main
+  3. Open a PR: `gh pr create --repo jholze/omnigent --base <base from brief>
      --title "… (#N)"` with the delivery body above. Do not merge.
 
   One action per dispatch. End with what you filed/opened (numbers,

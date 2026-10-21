@@ -46,13 +46,23 @@ prompt: |
     Pattern: `tests/server/test_session_chat.py`.
   - UI widget: Vitest next to the component
     (`web/src/shell/SessionChatColumn.test.tsx`).
-  - Real-browser journey: Playwright Python under `tests/e2e_ui/`,
-    using the existing fixtures in `tests/e2e_ui/conftest.py`.
-    Do not create `web/e2e` TypeScript Playwright.
+  - Real-browser journey: Playwright Python. Use `tests/browser_ui/<feature>/`
+    when `tests/README.md` says that lane fits (a built SPA with mocked
+    backend contracts, no Omnigent server or runner). Use `tests/e2e_ui/`
+    and the fixtures in `tests/e2e_ui/conftest.py` for a journey through the
+    real server and runner. Do not create `web/e2e` TypeScript Playwright.
+  - UI gate (Jens, 2026-10-20, NFR-032 in
+    `specs/omnigent-chat/04-requirements.md` v0.7). A new or changed UI
+    covers both viewports, 1280x800 and 390x844, in the same ticket, in
+    whichever of those lanes fits. Assert no horizontal scroll, touch
+    targets at least 44px, and wrapping long names. Phone layout is not a
+    separate ticket.
   - Nightly native-CLI (`tests/e2e_live`) is not a ticket test.
   - You may run a test once while writing, to see it fail or pass.
     Do not report that run as the gate. End with the exact commands
     `tester` must run.
+
+  Back channel: include each blocker in your result for the lead. Call ~/.config/grokbot/notify-spec.sh "<session-id>" "<ticket>" "<message>" only when the brief says so or you are blocked. The lead reports finished steps.
 
   Do not `gh`, `git push`, or `git commit`. Do not work on `main`.
 

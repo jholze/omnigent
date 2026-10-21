@@ -1,4 +1,4 @@
-# Intake: Omnigent Chat (Slack-artig, Menschen + Agenten) — v0.1 (2026-10-16, Status: Entwurf)
+# Intake: Omnigent Chat (Slack-artig, Menschen + Agenten) — v0.3 (2026-10-20, Status: Entwurf)
 
 ## Problem (zur Bestätigung)
 Omnigent hat heute nur einen einfachen Menschen-Chat pro geteilter Session (PR #4); der Agent liest nicht mit, es gibt keine Channels, DMs, Threads oder Erwähnungen. Ziel ist, dass ein Team komplett in Omnigent im Chat arbeiten kann, mit Menschen und Agenten als echten Gesprächspartnern, und dass sich das richtig gut anfühlt.
@@ -45,7 +45,9 @@ Omnigent hat heute nur einen einfachen Menschen-Chat pro geteilter Session (PR #
 Channels, DMs, Threads, @-Erwähnungen, Ungelesen-Status, Agenten per @.
 
 ### Später
-Reaktionen, Dateien, Suche, Mobile, Export.
+Reaktionen, Dateien, Suche, Export.
+
+Mobile ist Pflicht für jedes UI-Ticket (NFR-032, Jens 2026-10-20).
 
 ## Nicht-Ziele
 - Slack-Brücke anfassen oder erweitern (Datenmodell soll Andocken später erlauben).
@@ -108,5 +110,6 @@ Reaktionen, Dateien, Suche, Mobile, Export.
 | Agent-Thread | Thread, in dem ein Agent arbeitet; dahinter eine Session |
 
 ## Changelog
+- v0.3 (2026-10-20) Mobile aus „Später“ gestrichen; Pflicht für jedes UI-Ticket (NFR-032, Jens 2026-10-20).
 - v0.2 (2026-10-16) UX-Basis und UX-Agent entschieden, Q-5 erledigt.
 - v0.1 (2026-10-16) Erster Entwurf aus Intake-Gespräch, Code-Analyse, enger Session-Spec und Slack-/UI-Recherche.
