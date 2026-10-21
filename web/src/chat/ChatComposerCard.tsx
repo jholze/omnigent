@@ -348,7 +348,7 @@ function MentionList({
               data-mention-kind={candidate.kind}
               data-mention-id={candidate.id}
               className={cn(
-                "flex min-h-11 shrink-0 cursor-pointer items-center gap-2 px-3 py-2 text-sm text-foreground md:min-h-9 md:py-1.5",
+                "group flex min-h-11 shrink-0 cursor-pointer items-center gap-2 px-3 py-2 text-sm text-foreground md:min-h-9 md:py-1.5",
                 index === active && "bg-muted",
               )}
               // Keep focus (and the caret) in the textarea.
@@ -370,7 +370,9 @@ function MentionOptionLabel({ candidate }: { candidate: MentionCandidate }) {
     return (
       <>
         <span className="min-w-0 flex-1 truncate font-medium">@{candidate.label}</span>
-        <span className="shrink-0 text-xs text-muted-foreground">Omnigent-Agent</span>
+        <span className="shrink-0 text-xs text-muted-foreground group-aria-selected:text-foreground">
+          Omnigent-Agent
+        </span>
       </>
     );
   }

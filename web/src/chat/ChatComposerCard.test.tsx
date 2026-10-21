@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -163,12 +163,19 @@ describe("ChatComposerCard mentions", () => {
     const rows = screen.getAllByTestId(CHAT_TEST_IDS.mentionOption);
     expect(rows.map((row) => row.getAttribute("data-mention-id"))).toEqual(["agent", BOB, JENS]);
     expect(rows[0]).toHaveAttribute("aria-selected", "true");
+    expect(rows[1]).toHaveAttribute("aria-selected", "false");
+    expect(rows[2]).toHaveAttribute("aria-selected", "false");
+    // Selected-row meta text switches to text-foreground to clear 4.5:1 on bg-muted.
+    expect(rows[0]).toHaveClass("group");
+    const agentMeta = within(rows[0]).getByText("Omnigent-Agent");
+    expect(agentMeta).toHaveClass("text-muted-foreground", "group-aria-selected:text-foreground");
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(screen.getAllByTestId(CHAT_TEST_IDS.mentionOption)[1]).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    const movedRows = screen.getAllByTestId(CHAT_TEST_IDS.mentionOption);
+    expect(movedRows[1]).toHaveAttribute("aria-selected", "true");
+    // The agent row is no longer selected, so its subtitle stays muted.
+    expect(movedRows[0]).toHaveAttribute("aria-selected", "false");
+    expect(within(movedRows[0]).getByText("Omnigent-Agent")).toHaveClass("text-muted-foreground");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(chipTokens()).toEqual([`<@user:${BOB}>`]);
