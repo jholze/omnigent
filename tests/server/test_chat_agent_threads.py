@@ -585,7 +585,7 @@ async def tunnel_chat(
 
 @contextlib.asynccontextmanager
 async def _answering_runner(
-    app: Any, runner_id: str, owner: str
+    app: Any, runner_id: str, owner: str | None
 ) -> AsyncIterator[list[tuple[str, str]]]:
     """Register a tunnel runner that answers every request with 202.
 
@@ -704,6 +704,7 @@ async def test_ac_033a_no_host_refuses_a_foreign_online_runner(
     channel_id, _project_id = await _prepared_channel(
         client, db_uri, project_name="billing", config={"agent_id": agent_id}
     )
+    before = _conversation_count(db_uri)
 
     async with _answering_runner(app, "runner_jens", JENS) as jens_seen:
         posted = await _post(client, ANNA, channel_id, f"{MENTION} schau mal")
@@ -711,10 +712,39 @@ async def test_ac_033a_no_host_refuses_a_foreign_online_runner(
         root_id = posted.json()["id"]
         await _wait_for_start()
 
-    assert _thread(db_uri, root_id).agent_state == "start_failed"
+    assert _conversation_count(db_uri) == before
+    thread = _thread(db_uri, root_id)
+    assert thread.agent_state == "start_failed"
+    assert thread.session_id is None
     assert (HOST_OFFLINE, "host_offline") in _system_rows(db_uri, root_id)
     assert "runner_jens" not in _runner_ids(db_uri)
     assert jens_seen == []
+
+
+async def test_ac_033a_no_host_refuses_an_unowned_online_runner(
+    tunnel_chat: tuple[httpx.AsyncClient, Any], db_uri: str
+) -> None:
+    """An online runner with no owner is not the caller's, so no session starts."""
+    client, app = tunnel_chat
+    agent_id = _create_agent(db_uri)
+    channel_id, _project_id = await _prepared_channel(
+        client, db_uri, project_name="billing", config={"agent_id": agent_id}
+    )
+    before = _conversation_count(db_uri)
+
+    async with _answering_runner(app, "runner_unowned", None) as seen:
+        posted = await _post(client, ANNA, channel_id, f"{MENTION} schau mal")
+        assert posted.status_code == 201, posted.text
+        root_id = posted.json()["id"]
+        await _wait_for_start()
+
+    assert _conversation_count(db_uri) == before
+    thread = _thread(db_uri, root_id)
+    assert thread.agent_state == "start_failed"
+    assert thread.session_id is None
+    assert (HOST_OFFLINE, "host_offline") in _system_rows(db_uri, root_id)
+    assert "runner_unowned" not in _runner_ids(db_uri)
+    assert seen == []
 
 
 async def test_ac_033a_no_host_and_no_online_runner_is_host_offline(
