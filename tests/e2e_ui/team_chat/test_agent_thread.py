@@ -763,3 +763,85 @@ def test_nfr032_long_decided_by_wraps(
         box = card.bounding_box()
         assert box is not None
         assert box["x"] + box["width"] <= client_width, "approval card overflows the viewport"
+
+
+def _push_root_out_of_tail(server: TeamChatServer, channel_id: str, count: int = 51) -> None:
+    """Post *count* newer top-level messages, so the root leaves the tail of 50.
+
+    The posts rotate over the three members to stay under the per-member post limit.
+    """
+    authors = (JENS, BOB, ANNA)
+    for index in range(count):
+        seed_message(
+            server,
+            as_user=authors[index % len(authors)],
+            channel_id=channel_id,
+            body=f"newer message {index}",
+        )
+
+
+def _pending_strip(page: Page, thread: AgentThread) -> Locator:
+    return page.get_by_test_id(CHAT_TEST_IDS["pendingRequest"]).filter(has_text=thread.token)
+
+
+def _open_strip_with_root_outside_tail(
+    server: TeamChatServer, page_as, viewport: dict[str, int]
+) -> tuple[Page, AgentThread, Locator]:
+    """Anna loads a channel whose waiting agent root is older than the tail of 50."""
+    channel = _agent_channel(server)
+    thread = _start_agent_thread(server, channel["id"])
+    _push_root_out_of_tail(server, channel["id"])
+    _set_status(server, thread, "running", response_id="resp_turn")
+    page = page_as(ANNA, viewport=viewport)
+    _open_channel(page, server, channel["id"])
+    expect(_root_row(page, thread.token)).to_have_count(0)
+    return page, thread, _pending_strip(page, thread)
+
+
+def _approve_in_thread(page: Page) -> None:
+    card = _thread_card(page.get_by_test_id(CHAT_TEST_IDS["threadPane"]))
+    approve = card.get_by_role("button", name="Genehmigen")
+    expect(approve).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+    approve.click()
+    expect(card).to_have_attribute("data-state", "responded", timeout=_LOAD_TIMEOUT_MS)
+
+
+def test_ac_107b_desktop_1280_strip_names_root_outside_tail_and_clears_on_resolve(
+    team_chat_server: TeamChatServer, page_as
+) -> None:
+    """1280x800: strip row for a root outside the tail opens the thread and goes on resolve."""
+    page, thread, strip = _open_strip_with_root_outside_tail(team_chat_server, page_as, DESKTOP)
+
+    with _parked_approval(team_chat_server, thread.session_id):
+        _set_status(team_chat_server, thread, "waiting", response_id="resp_turn")
+        expect(strip).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+        expect(strip).to_have_attribute("data-root-id", thread.root_id)
+        expect(strip).to_contain_text("Agent braucht Antwort")
+        _assert_no_horizontal_scroll(page)
+
+        strip.click()
+        expect(page).to_have_url(re.compile(f"/t/{re.escape(thread.root_id)}$"))
+        _approve_in_thread(page)
+        expect(strip).to_have_count(0, timeout=_LOAD_TIMEOUT_MS)
+
+
+def test_ac_107b_phone_390_strip_names_root_outside_tail_and_clears_on_resolve(
+    team_chat_server: TeamChatServer, page_as
+) -> None:
+    """390x844: 44px strip row opens the thread; back in the channel it is gone after resolve."""
+    page, thread, strip = _open_strip_with_root_outside_tail(team_chat_server, page_as, PHONE)
+
+    with _parked_approval(team_chat_server, thread.session_id):
+        _set_status(team_chat_server, thread, "waiting", response_id="resp_turn")
+        _assert_touch_target(strip, "pending request strip")
+        expect(strip).to_have_attribute("data-root-id", thread.root_id)
+        _assert_no_horizontal_scroll(page)
+
+        strip.click()
+        expect(page).to_have_url(re.compile(f"/t/{re.escape(thread.root_id)}$"))
+        _approve_in_thread(page)
+        page.go_back()
+        expect(page.get_by_test_id(CHAT_TEST_IDS["messageList"]).first).to_be_visible(
+            timeout=_LOAD_TIMEOUT_MS
+        )
+        expect(strip).to_have_count(0, timeout=_LOAD_TIMEOUT_MS)

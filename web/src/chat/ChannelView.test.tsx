@@ -15,6 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BootstrapResponse, ChatChannel, ChatMessage } from "./chatApi";
 import { CLIENT_ID_PATTERN } from "./chatApi";
 import { useChatOutbox } from "./chatOutbox";
+import { threadNameOf } from "./agent/PendingAgentRequests";
+import { pendingRequestCandidates, threadPath } from "./ChannelView";
 import { ChatPage } from "./ChatPage";
 import { CHAT_TEST_IDS } from "./testids";
 import { applyChatFrame, useTeamChatStore } from "./teamChatStore";
@@ -90,6 +92,14 @@ function handle(url: string, init?: RequestInit) {
       server.bootstrap = { ...server.bootstrap, dms: [...server.bootstrap.dms, dm] };
     }
     return jsonResponse(dm, 201);
+  }
+  const members = /^\/v1\/chat\/channels\/([^/]+)\/members$/.exec(path);
+  if (members) {
+    const channelId = decodeURIComponent(members[1]);
+    if (channelId === "d-1") {
+      return jsonResponse([{ principal_id: "jens" }, { principal_id: "anna" }]);
+    }
+    return jsonResponse([]);
   }
   const match = /^\/v1\/chat\/channels\/([^/]+)\/messages$/.exec(path);
   if (match) {
@@ -342,11 +352,72 @@ describe("NewDmDialog", () => {
     expect(people.map((person) => person.getAttribute("data-principal-id"))).toEqual(["anna"]);
     fireEvent.click(people[0]);
 
-    expect(
-      await screen.findByRole("heading", { level: 1, name: "Direktnachricht" }, SLOW),
-    ).toBeVisible();
+    expect(await screen.findByRole("heading", { level: 1, name: "Anna" }, SLOW)).toBeVisible();
+    expect(screen.getByText("Teilnehmer: jens (du), Anna")).toBeVisible();
     expect(server.dmPosts).toEqual([{ principals: ["anna"] }]);
     const dms = screen.getByRole("region", { name: "Direktnachrichten" });
-    expect(within(dms).getAllByRole("link")).toHaveLength(1);
+    expect(within(dms).getByRole("link", { name: "Anna" })).toBeVisible();
+  });
+});
+
+describe("pendingRequestCandidates", () => {
+  it("AC-107b includes a listed root that is not in the loaded tail", () => {
+    const tail = [message({ id: "m-new", body: "newer" })];
+
+    const roots = pendingRequestCandidates(
+      "c-general",
+      [{ rootId: "m-old", body: "Old agent question" }],
+      tail,
+      new Set(),
+    );
+
+    expect(roots).toEqual([
+      { rootId: "m-old", body: "Old agent question", href: threadPath("c-general", "m-old") },
+    ]);
+  });
+
+  it("AC-107b a listed root without a body gets an empty body for the Agent-Thread fallback", () => {
+    const roots = pendingRequestCandidates(
+      "c-general",
+      [{ rootId: "m-deleted", body: null }],
+      [],
+      new Set(),
+    );
+
+    expect(roots.map((root) => root.body)).toEqual([""]);
+  });
+
+  it("AC-107b the strip titles an empty or whitespace body Agent-Thread", () => {
+    expect(threadNameOf("", new Map())).toBe("Agent-Thread");
+    expect(threadNameOf("  \n ", new Map())).toBe("Agent-Thread");
+  });
+
+  it("AC-107b a tail agent root is a candidate before the list returns", () => {
+    const tail = [
+      message({ id: "m-agent", body: "@agent hilf" }),
+      message({ id: "m-plain", body: "hi" }),
+    ];
+
+    const roots = pendingRequestCandidates("c-general", [], tail, new Set(["m-agent"]));
+
+    expect(roots.map((root) => [root.rootId, root.body])).toEqual([["m-agent", "@agent hilf"]]);
+  });
+
+  it("AC-107b a root that is both listed and in the tail appears once", () => {
+    const tail = [message({ id: "m-agent", body: "tail text" })];
+
+    const roots = pendingRequestCandidates(
+      "c-general",
+      [
+        { rootId: "m-agent", body: "listed text" },
+        { rootId: "m-agent", body: "listed text" },
+      ],
+      tail,
+      new Set(["m-agent"]),
+    );
+
+    expect(roots).toEqual([
+      { rootId: "m-agent", body: "tail text", href: threadPath("c-general", "m-agent") },
+    ]);
   });
 });

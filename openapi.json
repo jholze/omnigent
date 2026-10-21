@@ -1106,6 +1106,47 @@
         "title": "ChangesResponse",
         "type": "object"
       },
+      "ChannelAgentThreadResponse": {
+        "description": "One active agent thread the caller may already read.\n\n`session_id` is omitted until the thread has a session. Channel\nmembers already receive that id from `thread.updated` and from\nthe message page. `body` is the root message text, omitted when\nthat row is missing or deleted.",
+        "properties": {
+          "agent_state": {
+            "title": "Agent State",
+            "type": "string"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "root_message_id": {
+            "title": "Root Message Id",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "root_message_id",
+          "agent_state"
+        ],
+        "title": "ChannelAgentThreadResponse",
+        "type": "object"
+      },
       "ChannelCreateBody": {
         "description": "`POST /v1/chat/channels`.",
         "properties": {
@@ -11778,6 +11819,53 @@
           }
         },
         "summary": "Create Channel",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/channels/{channel_id}/agent-threads": {
+      "get": {
+        "description": "List active agent threads, including roots outside the message tail.\n\nAuth is `require_read`, the same gate as `list_messages`.\nWaiting is not stored on the thread; the client watches the\nreturned sessions and keeps a strip row only while an approval\nis open.",
+        "operationId": "list_channel_agent_threads_v1_chat_channels__channel_id__agent_threads_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChannelAgentThreadResponse"
+                  },
+                  "title": "Response List Channel Agent Threads V1 Chat Channels  Channel Id  Agent Threads Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Channel Agent Threads",
         "tags": [
           "chat"
         ]

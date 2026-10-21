@@ -2,11 +2,12 @@
  * "Neue Direktnachricht": pick one person from the bootstrap directory.
  *
  * `POST /v1/chat/dms` returns the same channel id for the same people (201
- * created, 200 existing; AC-021a). Bootstrap is refetched before navigating,
- * so the DM is listed under "Direktnachrichten" and the route resolves.
+ * created, 200 existing; AC-021a). The channel is written into the bootstrap
+ * cache, then a fresh bootstrap is fetched, before navigating. An older
+ * in-flight bootstrap must not be the one that lands.
  */
 import { useMemo, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { BotIcon, PlusIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -20,9 +21,26 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useNavigate } from "@/lib/routing";
-import { openDm, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
+import {
+  fetchBootstrap,
+  openDm,
+  teamChatQueryKeys,
+  type BootstrapResponse,
+  type ChatChannel,
+  type DirectoryEntry,
+} from "./chatApi";
+import { fetchLatest } from "./freshQuery";
 import { principalLabel } from "./MessageItem";
 import { CHAT_TEST_IDS } from "./testids";
+
+/** List the DM at once, so the route can resolve before the refetch returns. */
+function rememberDm(queryClient: QueryClient, channel: ChatChannel): void {
+  queryClient.setQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap, (current) => {
+    if (current === undefined) return current;
+    if (current.dms.some((dm) => dm.id === channel.id)) return current;
+    return { ...current, dms: [...current.dms, channel] };
+  });
+}
 
 export interface NewDmDialogProps {
   me: string;
@@ -57,7 +75,10 @@ export function NewDmDialog({ me, directory }: NewDmDialogProps) {
     setFailed(false);
     try {
       const channel = await openDm([principalId]);
-      await queryClient.invalidateQueries({ queryKey: teamChatQueryKeys.bootstrap });
+      rememberDm(queryClient, channel);
+      await fetchLatest(queryClient, teamChatQueryKeys.bootstrap, (signal) =>
+        fetchBootstrap(signal),
+      );
       setOpen(false);
       navigate(`/chat/${encodeURIComponent(channel.id)}`);
     } catch {

@@ -37,6 +37,7 @@ from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.stores.chat_store import (
     AccountStatus,
+    ChannelAgentThread,
     ChatAgentAccount,
     ChatChannel,
     ChatMessage,
@@ -129,6 +130,21 @@ class MessagePageResponse(BaseModel):
     has_more: bool
     next_after: str | None
     next_before: str | None
+
+
+class ChannelAgentThreadResponse(BaseModel):
+    """One active agent thread the caller may already read.
+
+    ``session_id`` is omitted until the thread has a session. Channel
+    members already receive that id from ``thread.updated`` and from
+    the message page. ``body`` is the root message text, omitted when
+    that row is missing or deleted.
+    """
+
+    root_message_id: str
+    agent_state: str
+    session_id: str | None = None
+    body: str | None = None
 
 
 class ChangeItem(BaseModel):
@@ -344,6 +360,23 @@ def _message_response(
         response.agent_state = agent_state
     if session_id is not None:
         response.session_id = session_id
+    return response
+
+
+def _agent_thread_response(thread: ChannelAgentThread) -> ChannelAgentThreadResponse:
+    """Map a stored agent thread onto its wire shape.
+
+    Optional fields are assigned only when set, so ``response_model_exclude_unset``
+    omits a missing session or root body.
+    """
+    response = ChannelAgentThreadResponse(
+        root_message_id=thread.root_message_id,
+        agent_state=thread.agent_state,
+    )
+    if thread.session_id:
+        response.session_id = thread.session_id
+    if thread.body is not None:
+        response.body = thread.body
     return response
 
 
@@ -742,6 +775,29 @@ def create_chat_router(
             next_after=_cursor_string(page.next_after),
             next_before=_cursor_string(page.next_before),
         )
+
+    @router.get(
+        "/chat/channels/{channel_id}/agent-threads",
+        response_model=list[ChannelAgentThreadResponse],
+        response_model_exclude_unset=True,
+    )
+    async def list_channel_agent_threads(
+        request: Request, channel_id: str
+    ) -> list[ChannelAgentThreadResponse]:
+        """List active agent threads, including roots outside the message tail.
+
+        Auth is ``require_read``, the same gate as ``list_messages``.
+        Waiting is not stored on the thread; the client watches the
+        returned sessions and keeps a strip row only while an approval
+        is open.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
+        if channel is None:
+            raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_read, chat_store, channel, caller)
+        threads = await asyncio.to_thread(chat_store.list_channel_agent_threads, channel.id)
+        return [_agent_thread_response(thread) for thread in threads]
 
     @router.post(
         "/chat/channels/{channel_id}/messages",

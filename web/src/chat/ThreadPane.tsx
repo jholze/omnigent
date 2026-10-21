@@ -14,12 +14,7 @@ import { ChevronLeftIcon, XIcon } from "lucide-react";
 
 import { Link, useNavigate } from "@/lib/routing";
 import { cn } from "@/lib/utils";
-import {
-  fetchChannelMessages,
-  fetchThreadMessages,
-  teamChatQueryKeys,
-  type DirectoryEntry,
-} from "./chatApi";
+import { fetchThreadMessages, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
 import { AgentThreadStatus } from "./agent/AgentStatusChip";
 import { AgentThreadView } from "./agent/AgentThreadView";
 import {
@@ -28,6 +23,7 @@ import {
   useWatchAgentSessions,
 } from "./agent/agentThreadStore";
 import { ChatComposerCard } from "./ChatComposerCard";
+import { messageQueryOptions, shareMessagePage } from "./messagePage";
 import { MessagesError, MessagesSkeleton, messageViewOf, withOutbox } from "./ChannelView";
 import { retryChatMessage, useChatOutbox } from "./chatOutbox";
 import {
@@ -86,13 +82,11 @@ export function ThreadPane({
     () => teamChatQueryKeys.thread(channelId, threadRootId),
     [channelId, threadRootId],
   );
-  const channelMessages = useQuery({
-    queryKey: teamChatQueryKeys.messages(channelId),
-    queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
-  });
+  const channelMessages = useQuery(messageQueryOptions(channelId));
   const replies = useQuery({
     queryKey: threadKey,
     queryFn: ({ signal }) => fetchThreadMessages(channelId, threadRootId, signal),
+    structuralSharing: shareMessagePage,
   });
   const outbox = useChatOutbox((state) => state.entries);
   const root = channelMessages.data?.items.find((message) => message.id === threadRootId);
@@ -261,16 +255,17 @@ export function ThreadPane({
         <span className="min-w-0 flex-1 text-xs break-words text-muted-foreground max-md:hidden">
           {channelLabel}
         </span>
-        <Link
-          to={channelPath}
-          componentId="chat.thread.close"
+        {/* A button with its own navigate(): same exit as Escape, independent of the Link wrapper. */}
+        <button
+          type="button"
           aria-label="Thread schließen"
           title="Thread schließen (Esc)"
           data-testid={CHAT_TEST_IDS.threadClose}
-          className="ml-auto flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring max-md:hidden"
+          onClick={() => navigate(channelPath)}
+          className="ml-auto flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring md:size-8"
         >
           <XIcon className="size-4" aria-hidden="true" />
-        </Link>
+        </button>
       </header>
       {body}
       <ChatComposerCard

@@ -179,7 +179,9 @@ describe("Agent-Thread root in ChannelView", () => {
     renderWith(
       <ChannelView channelId="c-billing" label="#billing" me="jens" directory={directory} />,
     );
-    const row = await screen.findByText(/Tests laufen lassen/);
+    // The open-request strip names the thread too; read the row in the list.
+    const list = await screen.findByTestId(CHAT_TEST_IDS.messageList);
+    const row = await within(list).findByText(/Tests laufen lassen/);
     const item = row.closest("li") as HTMLElement;
     expect(within(item).getByTestId(CHAT_TEST_IDS.agentStatusChip).textContent).toBe(
       "braucht Antwort",

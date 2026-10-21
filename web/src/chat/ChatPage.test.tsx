@@ -1,9 +1,9 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BootstrapResponse, ChatChannel } from "./chatApi";
+import { teamChatQueryKeys, type BootstrapResponse, type ChatChannel } from "./chatApi";
 import { ChatPage } from "./ChatPage";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
@@ -196,6 +196,57 @@ describe("ChatPage", () => {
     expect(screen.queryByTestId(CHAT_TEST_IDS.channelMissing)).toBeNull();
   });
 
+  it("keeps an open DM mounted when a later bootstrap omits it", async () => {
+    serverState.info = { features: { team_chat: true } };
+    const dm = channel({ id: "d-jens", name: "Jens", kind: "dm" });
+    let bootstrapCalls = 0;
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/messages")) {
+        return jsonResponse({
+          items: [],
+          has_older: false,
+          has_more: false,
+          next_after: null,
+          next_before: null,
+        });
+      }
+      // Leave members pending so the heading stays the channel name.
+      if (url.includes("/members")) return new Promise(() => {});
+      if (url.includes("/changes")) return jsonResponse({ items: [], next: null, reset: false });
+      bootstrapCalls += 1;
+      return jsonResponse(bootstrap({ dms: bootstrapCalls === 1 ? [dm] : [] }));
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/chat/d-jens"]}>
+          <Routes>
+            <Route path="/chat/:channelId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Jens" })).toBeInTheDocument();
+    const input = await screen.findByTestId(CHAT_TEST_IDS.composerInput);
+    fireEvent.change(input, { target: { value: "Hallo" } });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: teamChatQueryKeys.bootstrap });
+    });
+
+    await waitFor(() => {
+      const cached = client.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+      expect(cached?.dms ?? []).toEqual([]);
+      expect(screen.queryByRole("link", { name: "Jens" })).toBeNull();
+    });
+    expect(screen.getByRole("heading", { level: 1, name: "Jens" })).toBeInTheDocument();
+    expect(screen.getByTestId(CHAT_TEST_IDS.composerInput)).toHaveValue("Hallo");
+    expect(screen.queryByTestId(CHAT_TEST_IDS.channelMissing)).toBeNull();
+  });
+
   it("long channel and DM names wrap instead of truncating", async () => {
     serverState.info = { features: { team_chat: true } };
     const longName = "a".repeat(120);
@@ -219,5 +270,103 @@ describe("ChatPage", () => {
     }
     expect(screen.getByTestId(CHAT_TEST_IDS.page)).toHaveClass("overflow-x-hidden");
     expect(screen.getByTestId(CHAT_TEST_IDS.sidebar)).toHaveClass("md:w-60");
+  });
+});
+
+describe("ChatPage bootstrap refetch for a new channel (AC-021a)", () => {
+  const NEW_DM = channel({ id: "d-new", name: "Jens", kind: "dm" });
+  // Longer than the product's retry back-off (400ms + 800ms).
+  const QUIET_MS = 2_000;
+
+  function bootstrapCalls(): number {
+    return fetchMock.mock.calls.filter((call) => String(call[0]) === "/v1/chat/bootstrap").length;
+  }
+
+  function messageIn(channelId: string, id: string): void {
+    act(() => {
+      useTeamChatStore
+        .getState()
+        .mergeChanges([
+          { kind: "message", id, channel_id: channelId, thread_root_id: null, created_at: 10 },
+        ]);
+    });
+  }
+
+  async function renderLoaded(): Promise<number> {
+    renderPage();
+    expect(await screen.findByRole("link", { name: "#general" })).toBeInTheDocument();
+    return bootstrapCalls();
+  }
+
+  async function settle(): Promise<void> {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(QUIET_MS);
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    serverState.info = { features: { team_chat: true } };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("a response without the new DM leaves it open, and a later message fetches bootstrap again", async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(bootstrap()));
+    const initial = await renderLoaded();
+
+    messageIn("d-new", "m-1");
+    await settle();
+    const afterFirstRound = bootstrapCalls();
+    expect(afterFirstRound).toBeGreaterThan(initial);
+
+    messageIn("d-new", "m-2");
+    await waitFor(() => expect(bootstrapCalls()).toBeGreaterThan(afterFirstRound));
+  });
+
+  it("a response that lists the new DM does not fetch again for the same changes", async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(bootstrap()));
+    const initial = await renderLoaded();
+    fetchMock.mockImplementation(async () => jsonResponse(bootstrap({ dms: [NEW_DM] })));
+
+    messageIn("d-new", "m-1");
+    await waitFor(() => expect(bootstrapCalls()).toBe(initial + 1));
+    expect(await screen.findByRole("link", { name: "Jens" })).toBeInTheDocument();
+    await settle();
+    expect(bootstrapCalls()).toBe(initial + 1);
+  });
+
+  it("a failed fetch does not mark the channel confirmed", async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(bootstrap()));
+    const initial = await renderLoaded();
+    fetchMock.mockImplementation(async () => jsonResponse({ detail: "boom" }, 500));
+
+    messageIn("d-new", "m-1");
+    await settle();
+    const afterFailedRound = bootstrapCalls();
+    expect(afterFailedRound).toBeGreaterThan(initial);
+
+    fetchMock.mockImplementation(async () => jsonResponse(bootstrap({ dms: [NEW_DM] })));
+    messageIn("d-new", "m-2");
+    await waitFor(() => expect(bootstrapCalls()).toBe(afterFailedRound + 1));
+  });
+
+  it("stops after three attempts until a new message change arrives", async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(bootstrap()));
+    const initial = await renderLoaded();
+
+    messageIn("d-new", "m-1");
+    await settle();
+    expect(bootstrapCalls()).toBe(initial + 3);
+    await settle();
+    expect(bootstrapCalls()).toBe(initial + 3);
+
+    messageIn("d-new", "m-2");
+    await settle();
+    expect(bootstrapCalls()).toBe(initial + 6);
   });
 });

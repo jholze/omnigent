@@ -29,6 +29,7 @@ export const CHAT_TEST_IDS = {
   mentionChip: "chat-mention-chip",
   agentStatusChip: "agent-status-chip",
   approvalCard: "approval-card",
+  pendingRequest: "chat-pending-request",
 } as const;
 
 export type ChatTestId = (typeof CHAT_TEST_IDS)[keyof typeof CHAT_TEST_IDS];

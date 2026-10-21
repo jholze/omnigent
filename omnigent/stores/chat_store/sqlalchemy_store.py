@@ -36,6 +36,7 @@ from omnigent.stores.chat_store import (
     AccountWriteResult,
     AgentTokenIssue,
     ChangesPage,
+    ChannelAgentThread,
     ChatAgentAccount,
     ChatChannel,
     ChatMember,
@@ -692,6 +693,43 @@ class SqlAlchemyChatStore(ChatStore):
                 )
             ).all()
             return {row.root_message_id: row.session_id for row in rows}
+
+    def list_channel_agent_threads(self, channel_id: str) -> tuple[ChannelAgentThread, ...]:
+        """Return active agent threads in one channel. See the base class."""
+        with self._session("list_channel_agent_threads") as session:
+            rows = session.execute(
+                select(
+                    SqlChatThread.root_message_id,
+                    SqlChatThread.channel_id,
+                    SqlChatThread.agent_state,
+                    SqlChatThread.session_id,
+                    SqlChatMessage.body,
+                    SqlChatMessage.deleted_at,
+                )
+                .outerjoin(
+                    SqlChatMessage,
+                    and_(
+                        SqlChatMessage.workspace_id == SqlChatThread.workspace_id,
+                        SqlChatMessage.id == SqlChatThread.root_message_id,
+                    ),
+                )
+                .where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.channel_id == channel_id,
+                    SqlChatThread.agent_state == "active",
+                )
+                .order_by(SqlChatThread.updated_at.desc(), SqlChatThread.root_message_id.asc())
+            ).all()
+            return tuple(
+                ChannelAgentThread(
+                    root_message_id=row.root_message_id,
+                    channel_id=row.channel_id,
+                    agent_state=row.agent_state,
+                    session_id=row.session_id,
+                    body=None if row.body is None or row.deleted_at is not None else row.body,
+                )
+                for row in rows
+            )
 
     # ── Agent accounts ──────────────────────────────────────────
 

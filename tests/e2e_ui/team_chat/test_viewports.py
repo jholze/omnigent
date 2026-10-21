@@ -259,3 +259,96 @@ def test_nfr032_phone_390_failed_send_retry_is_44px(
     assert retry_box is not None
     assert retry_box["height"] >= _MIN_TOUCH_TARGET_PX, f"retry is {retry_box['height']}px tall"
     _assert_no_horizontal_scroll(page)
+
+
+def _assert_clear_of_open_sidebar(page: Page, control: Locator, name: str) -> None:
+    """The control is 44px tall and its box does not overlap any "Open sidebar" button."""
+    expect(control).to_be_visible()
+    box = control.bounding_box()
+    assert box is not None, f"{name} has no box"
+    assert box["height"] >= _MIN_TOUCH_TARGET_PX, f"{name} is {box['height']}px tall"
+    open_sidebar = page.get_by_role("button", name="Open sidebar", exact=True)
+    expect(open_sidebar.first).to_be_visible()
+    for index in range(open_sidebar.count()):
+        other = open_sidebar.nth(index).bounding_box()
+        if other is None:
+            continue
+        overlaps = (
+            box["x"] < other["x"] + other["width"]
+            and other["x"] < box["x"] + box["width"]
+            and box["y"] < other["y"] + other["height"]
+            and other["y"] < box["y"] + box["height"]
+        )
+        assert not overlaps, f"{name} {box} overlaps the Open sidebar button {other}"
+
+
+def test_ac021_phone_390_channel_back_clear_of_open_sidebar(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 390x844 the channel back control does not sit under the Open sidebar button."""
+    page = page_as(ANNA, viewport=PHONE)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    back = page.get_by_test_id(CHAT_TEST_IDS["back"])
+    expect(back).to_be_visible(timeout=30_000)
+    _assert_clear_of_open_sidebar(page, back, "channel back")
+    _assert_no_horizontal_scroll(page)
+
+
+def _assert_chat_message_is_readable(page: Page) -> None:
+    """Message text is at least 16px and the page does not scroll sideways."""
+    body = page.get_by_test_id(CHAT_TEST_IDS["message"]).locator("p").first
+    expect(body).to_be_visible(timeout=30_000)
+    size = body.evaluate("el => parseFloat(getComputedStyle(el).fontSize)")
+    assert size >= 16, f"message font is {size}px"
+    _assert_no_horizontal_scroll(page)
+
+
+def test_t007b_desktop_1280_chat_type_is_readable(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 1280x800 a channel message uses the larger chat type scale."""
+    page = page_as(ANNA, viewport=DESKTOP)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    _assert_chat_message_is_readable(page)
+
+
+def test_t007b_phone_390_chat_type_is_readable(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 390x844 a channel message uses the larger chat type scale."""
+    page = page_as(ANNA, viewport=PHONE)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    _assert_chat_message_is_readable(page)
+
+
+def test_t007b_thread_close_returns_to_the_channel(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """The thread close control leaves the thread at both gate viewports."""
+    for viewport in (DESKTOP, PHONE):
+        page = page_as(ANNA, viewport=viewport)
+        page.goto(f"{team_chat_server.base_url}{_thread_path(conversation)}")
+        close = page.get_by_test_id(CHAT_TEST_IDS["threadClose"])
+        expect(close).to_be_visible(timeout=30_000)
+        close.click()
+        expect(page).to_have_url(
+            f"{team_chat_server.base_url}{_channel_path(conversation)}", timeout=15_000
+        )
+        expect(page.get_by_test_id(CHAT_TEST_IDS["threadPane"])).to_be_hidden()
+        _assert_no_horizontal_scroll(page)
+
+
+def test_ac021_phone_390_thread_back_clear_of_open_sidebar(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 390x844 the thread back control does not sit under the Open sidebar button."""
+    page = page_as(ANNA, viewport=PHONE)
+    page.goto(f"{team_chat_server.base_url}{_thread_path(conversation)}")
+    thread = page.get_by_test_id(CHAT_TEST_IDS["threadPane"])
+    expect(thread.get_by_test_id(CHAT_TEST_IDS["message"]).filter(has_text="Passt")).to_be_visible(
+        timeout=30_000
+    )
+    _assert_clear_of_open_sidebar(
+        page, thread.get_by_test_id(CHAT_TEST_IDS["threadBack"]), "thread back"
+    )
+    _assert_no_horizontal_scroll(page)

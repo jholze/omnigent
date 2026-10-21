@@ -21,7 +21,7 @@ import { create } from "zustand";
 
 import type { SessionListWireItem } from "@/lib/sessionListCache";
 import type { ChatThreadFrame } from "@/lib/sessionUpdatesSocket";
-import type { ChatMessage } from "../chatApi";
+import type { ChannelAgentThread, ChatMessage } from "../chatApi";
 
 /** Session label the server stamps on an Agent-Thread session. */
 export const CHAT_THREAD_LABEL_KEY = "omnigent.chat.v1";
@@ -48,6 +48,8 @@ interface AgentThreadStoreState {
   watchers: Record<string, string[]>;
   applyThreadFrame: (frame: ChatThreadFrame) => void;
   seedFromMessages: (messages: readonly ChatMessage[]) => void;
+  /** Active agent threads from `GET .../agent-threads`, including off-page roots. */
+  seedFromChannelThreads: (channelId: string, threads: readonly ChannelAgentThread[]) => void;
   applySessionItems: (items: SessionListWireItem[]) => void;
   dropSessions: (ids: string[]) => void;
   setWatched: (key: string, ids: string[]) => void;
@@ -81,6 +83,52 @@ function sessionInfoOf(item: SessionListWireItem): AgentSessionInfo {
     status: typeof item.status === "string" ? item.status : null,
     pendingElicitations: typeof pending === "number" && Number.isFinite(pending) ? pending : 0,
     permissionLevel: typeof item.permission_level === "number" ? item.permission_level : null,
+  };
+}
+
+function pageAgentState(raw: string | null | undefined): string | null {
+  return typeof raw === "string" && raw !== "" && raw !== "none" ? raw : null;
+}
+
+function pageSessionId(raw: string | null | undefined): string | null {
+  return typeof raw === "string" && raw !== "" ? raw : null;
+}
+
+/**
+ * Merge one stored thread into the map.
+ *
+ * A frame that already set `agentState` or `sessionId` wins. A null
+ * `agentState` is still empty, so a later page can fill it. Returns the
+ * same map when nothing changed.
+ */
+function absorbThreadSeed(
+  threads: Record<string, AgentThreadInfo>,
+  seed: {
+    channelId: string;
+    rootId: string;
+    agentState: string | null;
+    sessionId: string | null;
+  },
+): Record<string, AgentThreadInfo> {
+  if (seed.rootId === "" || (seed.agentState === null && seed.sessionId === null)) return threads;
+  const current = threads[seed.rootId];
+  const agentState = current?.agentState ?? seed.agentState;
+  const sessionId = current?.sessionId ?? seed.sessionId;
+  if (
+    current !== undefined &&
+    current.agentState === agentState &&
+    current.sessionId === sessionId
+  ) {
+    return threads;
+  }
+  return {
+    ...threads,
+    [seed.rootId]: {
+      channelId: seed.channelId,
+      rootId: seed.rootId,
+      agentState,
+      sessionId,
+    },
   };
 }
 
@@ -121,34 +169,25 @@ export const useAgentThreadStore = create<AgentThreadStoreState>((set, get) => (
     let next = threads;
     for (const message of messages) {
       if (message.thread_root_id !== null) continue;
-      const rawState = message.agent_state;
-      const pageState =
-        typeof rawState === "string" && rawState !== "" && rawState !== "none" ? rawState : null;
-      const rawSession = message.session_id;
-      const pageSession = typeof rawSession === "string" && rawSession !== "" ? rawSession : null;
-      if (pageState === null && pageSession === null) continue;
-      const current = next[message.id];
-      // A live frame already set the state; the stored page is not newer.
-      const agentState = current?.agentState ?? pageState;
-      // Fill a missing session id from the page, but never wipe one a frame
-      // or a session row already linked.
-      const sessionId = current?.sessionId ?? pageSession;
-      if (
-        current !== undefined &&
-        current.agentState === agentState &&
-        current.sessionId === sessionId
-      ) {
-        continue;
-      }
-      next = {
-        ...next,
-        [message.id]: {
-          channelId: message.channel_id,
-          rootId: message.id,
-          agentState,
-          sessionId,
-        },
-      };
+      next = absorbThreadSeed(next, {
+        channelId: message.channel_id,
+        rootId: message.id,
+        agentState: pageAgentState(message.agent_state),
+        sessionId: pageSessionId(message.session_id),
+      });
+    }
+    if (next !== threads) set({ threads: next });
+  },
+  seedFromChannelThreads: (channelId, rows) => {
+    const threads = get().threads;
+    let next = threads;
+    for (const row of rows) {
+      next = absorbThreadSeed(next, {
+        channelId,
+        rootId: row.root_message_id,
+        agentState: pageAgentState(row.agent_state),
+        sessionId: pageSessionId(row.session_id),
+      });
     }
     if (next !== threads) set({ threads: next });
   },
@@ -220,6 +259,18 @@ export function useSeedAgentThreads(messages: readonly ChatMessage[] | undefined
   useEffect(() => {
     if (messages !== undefined) useAgentThreadStore.getState().seedFromMessages(messages);
   }, [messages]);
+}
+
+/** Seed active agent threads, including roots outside the loaded tail (AC-107b). */
+export function useSeedChannelAgentThreads(
+  channelId: string,
+  threads: readonly ChannelAgentThread[] | undefined,
+): void {
+  useEffect(() => {
+    if (threads !== undefined) {
+      useAgentThreadStore.getState().seedFromChannelThreads(channelId, threads);
+    }
+  }, [channelId, threads]);
 }
 
 /** Keep `ids` in the session watch-set while the calling view is mounted. */

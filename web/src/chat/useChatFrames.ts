@@ -15,6 +15,7 @@ import {
   fetchChanges,
   teamChatQueryKeys,
 } from "./chatApi";
+import { fetchLatest } from "./freshQuery";
 import { applyChatFrame, normalizeChangeItem, useTeamChatStore } from "./teamChatStore";
 import { applyAgentThreadFrame } from "./agent/agentThreadStore";
 import type {
@@ -95,17 +96,19 @@ export function parseChatFrame(raw: unknown): ChatUpdatesFrame | null {
 }
 
 function cacheChannelMessages(queryClient: QueryClient, channelId: string): void {
-  void queryClient
-    .fetchQuery({
-      queryKey: teamChatQueryKeys.messages(channelId),
-      queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
-      // The app client keeps pages fresh for 30s. This fill must run every time.
-      staleTime: 0,
-    })
-    .catch((error: unknown) => {
-      const status = error instanceof ChatApiError ? String(error.status) : "error";
-      console.warn(`[team-chat] message cache fill failed (${status})`);
-    });
+  const queryKey = teamChatQueryKeys.messages(channelId);
+  // Cancel an in-flight page first. A fetch started before this message
+  // existed must not land last and leave the open DM empty (AC-021a).
+  const fill = fetchLatest(queryClient, queryKey, (signal) =>
+    fetchChannelMessages(channelId, signal),
+  );
+  void fill.catch((error: unknown) => {
+    const status = error instanceof ChatApiError ? String(error.status) : "error";
+    console.warn(`[team-chat] message cache fill failed (${status})`);
+    // A failed fill does not count as loaded: mark any cached page stale so
+    // an open view refetches once now and the next mount asks the server.
+    void queryClient.invalidateQueries({ queryKey, exact: true });
+  });
 }
 
 function cursorAfter(next: string | null): string | null {
@@ -134,12 +137,9 @@ async function mergeChangesPage(
   const added = useTeamChatStore.getState().mergeChanges(normalized);
   useTeamChatStore.getState().noteChannels(added);
   if (page.reset) {
-    const fresh = await queryClient.fetchQuery({
-      queryKey: teamChatQueryKeys.bootstrap,
-      queryFn: ({ signal }) => fetchBootstrap(signal),
-      // A cached bootstrap must not replace a cursor paging already advanced.
-      staleTime: 0,
-    });
+    const fresh = await fetchLatest(queryClient, teamChatQueryKeys.bootstrap, (signal) =>
+      fetchBootstrap(signal),
+    );
     useTeamChatStore.getState().replaceCursor(fresh.changes_cursor);
     useTeamChatStore
       .getState()

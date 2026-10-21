@@ -19,6 +19,8 @@ export interface ChatSidebarProps {
   className?: string;
   /** Control next to the "Direktnachrichten" heading (new DM). */
   dmAction?: ReactNode;
+  /** Resolved titles for DMs, keyed by channel id. Missing ids use `dmLabel`. */
+  dmTitles?: ReadonlyMap<string, string>;
 }
 
 /** True for `/chat`, `/chat/:channelId`, and `/chat/:channelId/t/:threadRootId`. */
@@ -79,6 +81,7 @@ export function ChatSidebar({
   activeChannelId,
   className,
   dmAction,
+  dmTitles,
 }: ChatSidebarProps) {
   return (
     <aside
@@ -114,7 +117,7 @@ export function ChatSidebar({
             <EntryLink
               key={channel.id}
               channel={channel}
-              label={dmLabel(channel)}
+              label={dmTitles?.get(channel.id) ?? dmLabel(channel)}
               active={channel.id === activeChannelId}
               componentId="chat.dm"
             />

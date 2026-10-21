@@ -127,7 +127,7 @@ export function principalLabel(id: string, directory: Map<string, DirectoryEntry
   return id;
 }
 
-function mentionLabel(
+export function mentionLabel(
   segment: Extract<BodySegment, { type: "mention" }>,
   directory: Map<string, DirectoryEntry>,
 ): string {
