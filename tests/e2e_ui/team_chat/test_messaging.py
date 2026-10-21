@@ -216,11 +216,34 @@ def test_ac_021a_dm_opens_once_and_appears_for_jens_after_first_message(
 
     anna_input = anna.get_by_test_id(CHAT_TEST_IDS["composerInput"]).first
     expect(anna_input).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
-    _send(anna_input, "Hallo Jens, kurze Frage")
+    expect(anna.get_by_test_id(CHAT_TEST_IDS["messageList"]).first).to_be_visible(
+        timeout=_LOAD_TIMEOUT_MS
+    )
+    # Fill can land on a composer that the next bootstrap remounts. Put the
+    # text back until the Send button keeps it, then click that button.
+    send = anna.get_by_test_id(CHAT_TEST_IDS["composer"]).first.get_by_role(
+        "button", name="Senden"
+    )
+    body = "Hallo Jens, kurze Frage"
+    kept = False
+    for _attempt in range(3):
+        anna_input.fill(body)
+        try:
+            expect(anna_input).to_have_value(body, timeout=2_000)
+            expect(send).to_be_enabled(timeout=2_000)
+        except AssertionError:
+            continue
+        send.click()
+        kept = True
+        break
+    assert kept, "composer did not keep the DM text long enough to send"
+    expect(_message_row(anna, "Hallo Jens, kurze Frage")).to_have_attribute(
+        "data-status", "sent", timeout=_LOAD_TIMEOUT_MS
+    )
 
     jens_dms = jens.get_by_role("region", name="Direktnachrichten")
     dm_link = jens_dms.locator(f'a[href$="/chat/{quote(first_dm_id, safe="")}"]')
-    expect(dm_link).to_be_visible(timeout=_LIVE_TIMEOUT_MS)
+    expect(dm_link).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
     dm_link.click()
     expect(_message_row(jens, "Hallo Jens, kurze Frage")).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
 

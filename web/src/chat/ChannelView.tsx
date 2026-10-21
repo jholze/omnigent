@@ -10,7 +10,7 @@
  * threads come from `GET .../agent-threads` (AC-107b). The chip still
  * decides which of those rows stay visible.
  */
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,8 @@ import {
   useWatchAgentSessions,
 } from "./agent/agentThreadStore";
 import { ChatComposerCard } from "./ChatComposerCard";
+import { fetchLatest } from "./freshQuery";
+import { messageQueryOptions } from "./messagePage";
 import { retryChatMessage, useChatOutbox, type OutboxEntry } from "./chatOutbox";
 import { toEpochMs, type MessageView } from "./MessageItem";
 import { MessageList } from "./MessageList";
@@ -263,13 +265,35 @@ export interface ChannelViewProps {
 
 export function ChannelView({ channelId, label, me, directory }: ChannelViewProps) {
   const queryClient = useQueryClient();
-  const messages = useQuery({
-    queryKey: teamChatQueryKeys.messages(channelId),
-    queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
-    // Opening a channel always asks the server: a page cached before its
-    // first message (e.g. a fresh DM) must not stay "fresh" for 30s (AC-021a).
-    refetchOnMount: "always",
-  });
+  const messages = useQuery(messageQueryOptions(channelId));
+  const refillAttempts = useRef(new Map<string, number>());
+  const pendingRootIds = useTeamChatStore((state) =>
+    Object.values(state.changes)
+      .filter(
+        (change) =>
+          change.kind === "message" &&
+          change.channel_id === channelId &&
+          change.thread_root_id === null,
+      )
+      .map((change) => change.id)
+      .sort()
+      .join(","),
+  );
+  // A page fetched before the message committed can stay empty. When the
+  // change feed already names a root that the page lacks, load the page again.
+  useEffect(() => {
+    if (pendingRootIds === "" || messages.data === undefined) return;
+    const loaded = new Set(messages.data.items.map((item) => item.id));
+    const missing = pendingRootIds.split(",").filter((id) => id !== "" && !loaded.has(id));
+    if (missing.length === 0) return;
+    const key = missing.join(",");
+    const attempts = refillAttempts.current.get(key) ?? 0;
+    if (attempts >= 3) return;
+    refillAttempts.current.set(key, attempts + 1);
+    void fetchLatest(queryClient, teamChatQueryKeys.messages(channelId), (signal) =>
+      fetchChannelMessages(channelId, signal),
+    );
+  }, [pendingRootIds, messages.data, channelId, queryClient]);
   const agentThreads = useQuery({
     queryKey: teamChatQueryKeys.agentThreads(channelId),
     queryFn: ({ signal }) => fetchChannelAgentThreads(channelId, signal),

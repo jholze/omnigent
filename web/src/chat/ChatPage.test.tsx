@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BootstrapResponse, ChatChannel } from "./chatApi";
+import { teamChatQueryKeys, type BootstrapResponse, type ChatChannel } from "./chatApi";
 import { ChatPage } from "./ChatPage";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
@@ -193,6 +193,57 @@ describe("ChatPage", () => {
     renderPage("/chat/d-jens");
 
     expect(await screen.findByRole("heading", { level: 1, name: "Jens" })).toBeInTheDocument();
+    expect(screen.queryByTestId(CHAT_TEST_IDS.channelMissing)).toBeNull();
+  });
+
+  it("keeps an open DM mounted when a later bootstrap omits it", async () => {
+    serverState.info = { features: { team_chat: true } };
+    const dm = channel({ id: "d-jens", name: "Jens", kind: "dm" });
+    let bootstrapCalls = 0;
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/messages")) {
+        return jsonResponse({
+          items: [],
+          has_older: false,
+          has_more: false,
+          next_after: null,
+          next_before: null,
+        });
+      }
+      // Leave members pending so the heading stays the channel name.
+      if (url.includes("/members")) return new Promise(() => {});
+      if (url.includes("/changes")) return jsonResponse({ items: [], next: null, reset: false });
+      bootstrapCalls += 1;
+      return jsonResponse(bootstrap({ dms: bootstrapCalls === 1 ? [dm] : [] }));
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/chat/d-jens"]}>
+          <Routes>
+            <Route path="/chat/:channelId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Jens" })).toBeInTheDocument();
+    const input = await screen.findByTestId(CHAT_TEST_IDS.composerInput);
+    fireEvent.change(input, { target: { value: "Hallo" } });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: teamChatQueryKeys.bootstrap });
+    });
+
+    await waitFor(() => {
+      const cached = client.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+      expect(cached?.dms ?? []).toEqual([]);
+      expect(screen.queryByRole("link", { name: "Jens" })).toBeNull();
+    });
+    expect(screen.getByRole("heading", { level: 1, name: "Jens" })).toBeInTheDocument();
+    expect(screen.getByTestId(CHAT_TEST_IDS.composerInput)).toHaveValue("Hallo");
     expect(screen.queryByTestId(CHAT_TEST_IDS.channelMissing)).toBeNull();
   });
 

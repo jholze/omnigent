@@ -416,7 +416,7 @@ def test_ac_044a_open_thread_chip_shows_braucht_antwort_within_1s(
     thread = _start_agent_thread(team_chat_server, channel["id"])
     pane = _open_live_thread(page, thread)
     chip = _thread_chip(pane)
-    expect(chip).to_have_text("Agent fertig", timeout=_LOAD_TIMEOUT_MS)
+    expect(chip).to_have_text("fertig", timeout=_LOAD_TIMEOUT_MS)
 
     _set_status(team_chat_server, thread, "running", response_id="resp_turn")
     expect(chip).to_have_text("arbeitet", timeout=_LOAD_TIMEOUT_MS)
@@ -454,7 +454,7 @@ def test_ac_044b_failed_turn_shows_fehler_chip_and_system_line_without_raw_text(
     _open_channel(page, team_chat_server, channel["id"])
     thread = _start_agent_thread(team_chat_server, channel["id"])
     pane = _open_live_thread(page, thread)
-    expect(_thread_chip(pane)).to_have_text("Agent fertig", timeout=_LOAD_TIMEOUT_MS)
+    expect(_thread_chip(pane)).to_have_text("fertig", timeout=_LOAD_TIMEOUT_MS)
 
     raw_error = f"upstream exploded: HTTP 500 from provider ({thread.token})"
     _set_status(team_chat_server, thread, "running", response_id="resp_turn")
@@ -478,7 +478,7 @@ def test_ac_045a_read_viewer_sees_streamed_text_grow_without_reload(
     page.evaluate("() => { window.__t008NoReload = true; }")
     thread = _start_agent_thread(team_chat_server, channel["id"])
     pane = _open_live_thread(page, thread)
-    expect(_thread_chip(pane)).to_have_text("Agent fertig", timeout=_LOAD_TIMEOUT_MS)
+    expect(_thread_chip(pane)).to_have_text("fertig", timeout=_LOAD_TIMEOUT_MS)
 
     _set_status(team_chat_server, thread, "running", response_id="resp_turn")
     live = pane.get_by_test_id(_LIVE_TESTID)
@@ -513,7 +513,7 @@ def test_ac_047a_channel_root_chip_shows_braucht_antwort_within_5s(
     _open_channel(page, team_chat_server, channel["id"])
     thread = _start_agent_thread(team_chat_server, channel["id"])
     chip = _root_chip(page, thread.token)
-    expect(chip).to_have_text("Agent fertig", timeout=_LOAD_TIMEOUT_MS)
+    expect(chip).to_have_text("fertig", timeout=_LOAD_TIMEOUT_MS)
 
     _set_status(team_chat_server, thread, "running", response_id="resp_turn")
     expect(chip).to_have_text("arbeitet", timeout=5_000)

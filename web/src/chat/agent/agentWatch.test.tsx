@@ -172,7 +172,7 @@ describe("Agent-Thread watch-set", () => {
     acceptChatFrame(parseChatFrame(threadFrame())!);
     renderChannel(client, ["conv_agent"]);
     emit({ type: "changed", items: [{ id: "conv_agent", status: "idle", labels: {} }] });
-    expect(screen.getByTestId(CHAT_TEST_IDS.agentStatusChip).textContent).toBe("Agent fertig");
+    expect(screen.getByTestId(CHAT_TEST_IDS.agentStatusChip).textContent).toBe("fertig");
     emit({ type: "removed", ids: ["conv_agent"] });
     expect(screen.getByTestId(CHAT_TEST_IDS.agentStatusChip).textContent).toBe("aktiv");
   });

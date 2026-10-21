@@ -12,12 +12,14 @@ import { create } from "zustand";
 import {
   CLIENT_ID_PATTERN,
   ChatApiError,
+  fetchBootstrap,
   postMessage,
   teamChatQueryKeys,
   type BootstrapResponse,
   type ChatMessage,
   type MessagePageResponse,
 } from "./chatApi";
+import { fetchLatest } from "./freshQuery";
 import { useTeamChatStore } from "./teamChatStore";
 
 export type OutboxStatus = "sending" | "failed";
@@ -68,11 +70,21 @@ export function isRetryableSendError(error: unknown): boolean {
   return error.status === 429 || error.status >= 500;
 }
 
+function emptyPage(message: ChatMessage): MessagePageResponse {
+  return {
+    items: [message],
+    has_older: false,
+    has_more: false,
+    next_after: null,
+    next_before: null,
+  };
+}
+
 function mergeIntoPage(
   page: MessagePageResponse | undefined,
   message: ChatMessage,
-): MessagePageResponse | undefined {
-  if (page === undefined) return page;
+): MessagePageResponse {
+  if (page === undefined) return emptyPage(message);
   if (page.items.some((item) => item.id === message.id)) return page;
   const items = [...page.items, message].sort(
     (a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id),
@@ -81,17 +93,14 @@ function mergeIntoPage(
 }
 
 function storeSent(queryClient: QueryClient, message: ChatMessage): void {
-  if (message.thread_root_id === null) {
-    const key = teamChatQueryKeys.messages(message.channel_id);
-    if (queryClient.getQueryData(key) === undefined) {
-      void queryClient.invalidateQueries({ queryKey: key });
-    } else {
-      queryClient.setQueryData<MessagePageResponse>(key, (page) => mergeIntoPage(page, message));
-    }
-    return;
-  }
-  const threadKey = teamChatQueryKeys.thread(message.channel_id, message.thread_root_id);
-  queryClient.setQueryData<MessagePageResponse>(threadKey, (page) => mergeIntoPage(page, message));
+  const key =
+    message.thread_root_id === null
+      ? teamChatQueryKeys.messages(message.channel_id)
+      : teamChatQueryKeys.thread(message.channel_id, message.thread_root_id);
+  // Seed the page when the first fetch has not landed. Invalidating instead
+  // would drop the optimistic row and let that older empty fetch win (AC-021a).
+  queryClient.setQueryData<MessagePageResponse>(key, (page) => mergeIntoPage(page, message));
+  if (message.thread_root_id === null) return;
   // The reply count reads the change set; the frame for this id dedupes later.
   useTeamChatStore.getState().mergeChanges([
     {
@@ -112,7 +121,9 @@ function refreshSidebarIfUnknown(queryClient: QueryClient, channelId: string): v
   const known =
     bootstrap.channels.some((channel) => channel.id === channelId) ||
     bootstrap.dms.some((channel) => channel.id === channelId);
-  if (!known) void queryClient.invalidateQueries({ queryKey: teamChatQueryKeys.bootstrap });
+  if (!known) {
+    void fetchLatest(queryClient, teamChatQueryKeys.bootstrap, (signal) => fetchBootstrap(signal));
+  }
 }
 
 async function deliver(queryClient: QueryClient, entry: OutboxEntry): Promise<void> {
@@ -124,6 +135,12 @@ async function deliver(queryClient: QueryClient, entry: OutboxEntry): Promise<vo
       client_id: entry.clientId,
       thread_root_id: entry.threadRootId,
     });
+    const key =
+      message.thread_root_id === null
+        ? teamChatQueryKeys.messages(message.channel_id)
+        : teamChatQueryKeys.thread(message.channel_id, message.thread_root_id);
+    // An older page fetch must not land after this write and hide the row.
+    await queryClient.cancelQueries({ queryKey: key, exact: true });
     storeSent(queryClient, message);
     useChatOutbox.getState().remove(entry.clientId);
     refreshSidebarIfUnknown(queryClient, entry.channelId);

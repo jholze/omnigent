@@ -16,7 +16,7 @@ describe("agentChipState (status mapping, 03-domain)", () => {
     ["launching", "startet…"],
     ["running", "arbeitet"],
     ["waiting", "arbeitet im Hintergrund"],
-    ["idle", "Agent fertig"],
+    ["idle", "fertig"],
     ["failed", "Fehler"],
   ])("FR-044 session status %s with no open approval shows %s", (status, label) => {
     const state = agentChipState({ agentState: "active", sessionStatus: status });
@@ -114,7 +114,7 @@ describe("AgentStatusChip", () => {
       `before:content-['${AGENT_CHIP_WIDEST_LABEL.replaceAll(" ", "_")}']`,
     );
     expect(chip.className).toContain("max-w-full");
-    expect(chip.textContent).toBe("Agent fertig");
+    expect(chip.textContent).toBe("fertig");
     for (const label of Object.values(AGENT_CHIP_LABELS)) {
       expect(label.length).toBeLessThanOrEqual(AGENT_CHIP_WIDEST_LABEL.length);
     }

@@ -31,7 +31,8 @@ import { NewDmDialog } from "./NewDmDialog";
 import { ThreadPane } from "./ThreadPane";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
-import { useChatFrames } from "./useChatFrames";
+import { fetchLatest } from "./freshQuery";
+import { requestChatBackfill, useChatFrames } from "./useChatFrames";
 
 function channelsOf(channels: ChatChannel[] | undefined): ChatChannel[] {
   return (channels ?? []).filter((channel) => channel.id !== "");
@@ -49,11 +50,10 @@ function bootstrapChannelIds(data: BootstrapResponse): Set<string> {
  * A message in a channel the sidebar does not list (a DM someone just opened
  * with me) refetches bootstrap until the response lists it (AC-021a).
  *
- * `fetchQuery` with `staleTime: 0` can still join an older in-flight fetch
- * that predates the DM, so each response is checked and the fetch repeated a
- * bounded number of times. A channel id counts as done only once a response
- * contains it. A failed or short round leaves it open: the next frame for
- * that channel starts a new round. One round per frame, so no loop.
+ * `fetchLatest` cancels an older in-flight bootstrap, which would otherwise
+ * hide the new DM. A channel id counts as done only once a response contains
+ * it. A failed or short round leaves it open: the next frame for that
+ * channel starts a new round. One round per frame, so no loop.
  */
 function useBootstrapForNewChannels(enabled: boolean, data: BootstrapResponse | undefined): void {
   const queryClient = useQueryClient();
@@ -86,13 +86,7 @@ function useBootstrapForNewChannels(enabled: boolean, data: BootstrapResponse | 
     if (wanted.length === 0) return;
     const attempt = (n: number): void => {
       if (!mountedRef.current) return;
-      queryClient
-        .fetchQuery({
-          queryKey: teamChatQueryKeys.bootstrap,
-          queryFn: ({ signal }) => fetchBootstrap(signal),
-          // The app client keeps bootstrap fresh for 30s; this must hit the network.
-          staleTime: 0,
-        })
+      fetchLatest(queryClient, teamChatQueryKeys.bootstrap, (signal) => fetchBootstrap(signal))
         .then((fresh) => {
           const listed = bootstrapChannelIds(fresh);
           for (const id of wanted) if (listed.has(id)) confirmedRef.current.add(id);
@@ -122,6 +116,15 @@ export function ChatPage() {
   });
   useChatFrames(enabled);
   useBootstrapForNewChannels(enabled, bootstrap.data);
+  const queryClient = useQueryClient();
+  const heldChannelHeading = useRef<{ id: string; heading: string } | null>(null);
+  // The updates socket is the fast path. A dropped frame still has to surface
+  // a new DM, so poll the changes feed while the page is open (AC-021a).
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => requestChatBackfill(queryClient), 2_000);
+    return () => clearInterval(timer);
+  }, [enabled, queryClient]);
   const directory = useMemo(
     () => directoryMap(bootstrap.data?.directory ?? []),
     [bootstrap.data?.directory],
@@ -174,7 +177,9 @@ export function ChatPage() {
   // and the click never reaches it. Same offset as the extension host.
   const rootClassName = "flex min-h-0 w-full min-w-0 flex-1 overflow-x-hidden pt-14 md:pt-12";
 
-  if (bootstrap.isPending) {
+  // A failed or cancelled refetch must not replace a page that already has
+  // data: that unmounts the open DM and drops text the user just typed.
+  if (bootstrap.isPending && bootstrap.data === undefined) {
     return (
       <div
         data-testid={CHAT_TEST_IDS.page}
@@ -185,7 +190,7 @@ export function ChatPage() {
       </div>
     );
   }
-  if (bootstrap.isError) {
+  if (bootstrap.isError && bootstrap.data === undefined) {
     return (
       <div
         data-testid={CHAT_TEST_IDS.page}
@@ -224,9 +229,19 @@ export function ChatPage() {
   else if (selectedDm) heading = dmTitles.get(selectedDm.id) ?? dmLabel(selectedDm);
   const participantLine =
     selectedDm && selectedMembers ? dmParticipantLine(meId, selectedMembers, directory) : "";
-  const missing = Boolean(channelId) && heading === null;
   const me = bootstrap.data?.me ?? "";
-  const openChannelId = channelId && heading !== null ? channelId : null;
+  // A bootstrap fetched before this DM existed can land later and omit it.
+  // Keep the heading we already showed so the composer stays mounted (AC-021a).
+  if (channelId && heading !== null) {
+    heldChannelHeading.current = { id: channelId, heading };
+  }
+  const visibleHeading =
+    heading ??
+    (channelId !== undefined && heldChannelHeading.current?.id === channelId
+      ? heldChannelHeading.current.heading
+      : null);
+  const missing = Boolean(channelId) && visibleHeading === null;
+  const openChannelId = channelId && visibleHeading !== null ? channelId : null;
   const threadOpen = openChannelId !== null && Boolean(threadRootId);
 
   return (
@@ -259,9 +274,9 @@ export function ChatPage() {
             Channels
           </Link>
         ) : null}
-        {heading ? (
+        {visibleHeading ? (
           <div className="min-w-0 border-b border-border px-4 py-3">
-            <h1 className="break-words text-sm font-medium">{heading}</h1>
+            <h1 className="min-w-0 break-words text-sm font-medium">{visibleHeading}</h1>
             {participantLine !== "" ? (
               <p className="break-words text-sm text-muted-foreground">{participantLine}</p>
             ) : null}
@@ -275,22 +290,22 @@ export function ChatPage() {
             Channel nicht gefunden
           </p>
         ) : null}
-        {openChannelId !== null && heading !== null ? (
+        {openChannelId !== null && visibleHeading !== null ? (
           <ChannelView
             key={openChannelId}
             channelId={openChannelId}
-            label={heading}
+            label={visibleHeading}
             me={me}
             directory={directory}
           />
         ) : null}
       </div>
-      {threadOpen && openChannelId !== null && heading !== null && threadRootId ? (
+      {threadOpen && openChannelId !== null && visibleHeading !== null && threadRootId ? (
         <ThreadPane
           key={`${openChannelId}:${threadRootId}`}
           channelId={openChannelId}
           threadRootId={threadRootId}
-          channelLabel={heading}
+          channelLabel={visibleHeading}
           me={me}
           directory={directory}
         />

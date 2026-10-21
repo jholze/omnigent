@@ -39,7 +39,7 @@ export const AGENT_CHIP_LABELS: Record<AgentChipKind, string> = {
   running: "arbeitet",
   background: "arbeitet im Hintergrund",
   waiting: "braucht Antwort",
-  idle: "Agent fertig",
+  idle: "fertig",
   failed: "Fehler",
   startFailed: "Start fehlgeschlagen",
   dismissed: "entlassen",

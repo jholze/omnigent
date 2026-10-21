@@ -14,12 +14,7 @@ import { ChevronLeftIcon, XIcon } from "lucide-react";
 
 import { Link, useNavigate } from "@/lib/routing";
 import { cn } from "@/lib/utils";
-import {
-  fetchChannelMessages,
-  fetchThreadMessages,
-  teamChatQueryKeys,
-  type DirectoryEntry,
-} from "./chatApi";
+import { fetchThreadMessages, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
 import { AgentThreadStatus } from "./agent/AgentStatusChip";
 import { AgentThreadView } from "./agent/AgentThreadView";
 import {
@@ -28,6 +23,7 @@ import {
   useWatchAgentSessions,
 } from "./agent/agentThreadStore";
 import { ChatComposerCard } from "./ChatComposerCard";
+import { messageQueryOptions, shareMessagePage } from "./messagePage";
 import { MessagesError, MessagesSkeleton, messageViewOf, withOutbox } from "./ChannelView";
 import { retryChatMessage, useChatOutbox } from "./chatOutbox";
 import {
@@ -86,15 +82,11 @@ export function ThreadPane({
     () => teamChatQueryKeys.thread(channelId, threadRootId),
     [channelId, threadRootId],
   );
-  const channelMessages = useQuery({
-    queryKey: teamChatQueryKeys.messages(channelId),
-    queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
-    // Same observer as ChannelView: never trust a 30s-fresh cached page on open.
-    refetchOnMount: "always",
-  });
+  const channelMessages = useQuery(messageQueryOptions(channelId));
   const replies = useQuery({
     queryKey: threadKey,
     queryFn: ({ signal }) => fetchThreadMessages(channelId, threadRootId, signal),
+    structuralSharing: shareMessagePage,
   });
   const outbox = useChatOutbox((state) => state.entries);
   const root = channelMessages.data?.items.find((message) => message.id === threadRootId);
