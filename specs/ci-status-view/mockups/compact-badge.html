@@ -1,0 +1,56 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><title>Kompakte Badges · Omnigent CI-Status</title>
+<meta name="viewport" content="width=1440"><link rel="stylesheet" href="ci.css"></head><body><style>
+table.g{width:100%;border-collapse:collapse} .g th{text-align:left;font:600 11px/16px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--tx-3);padding:0 16px 10px;border-bottom:1px solid var(--line)}
+.g td{padding:14px 16px;border-bottom:1px solid var(--line);vertical-align:middle} .g tr:last-child td{border-bottom:0}
+</style><div class="page" id="shot" style="min-height:0;width:1200px;padding:32px">
+ <div class="page-h"><div><div class="eyebrow">Variante 5 · compact-badge</div><h1>Status-Badges · Zustandsgalerie</h1>
+  <p>Für Session-Listen, PR-Header und Team-Chat. Farbe nie allein: jede Variante hat eigenes Icon + Text.</p></div></div>
+ <div class="card" style="padding:16px 0 4px"><table class="g"><thead><tr><th>Zustand</th><th>Pill · Standard (24 px)</th><th>Pill · kompakt (20 px)</th><th>Punkt</th><th>Check-Chips</th><th>Mini-Balken</th></tr></thead><tbody><tr><td><div class="row gap-8"><span class="st  pass" aria-hidden="true"></span><span style="color:var(--tx);font-weight:500">Alle grün</span></div><div class="subtle" style="font-size:11.5px;margin-top:2px">Alle Checks erfolgreich</div></td>
+     <td><span class="pill pass"><span class="st sm pass" aria-hidden="true"></span>Alle grün<span class="n">· 4/4</span></span></td>
+     <td><span class="pill sm pass"><span class="st sm pass" aria-hidden="true"></span>Alle grün</span></td>
+     <td><span class="dotb pass"></span></td>
+     <td><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip pass">PY</span><span class="chip pass">E2E</span></span></td>
+     <td style="width:120px"><div class="seg thin"><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i></div></td></tr><tr><td><div class="row gap-8"><span class="st  run" aria-hidden="true"></span><span style="color:var(--tx);font-weight:500">Läuft</span></div><div class="subtle" style="font-size:11.5px;margin-top:2px">Mind. ein Check läuft</div></td>
+     <td><span class="pill run"><span class="st sm run" aria-hidden="true"></span>Läuft<span class="n">· 2/4 · ~8 Min</span></span></td>
+     <td><span class="pill sm run"><span class="st sm run" aria-hidden="true"></span>Läuft</span></td>
+     <td><span class="dotb run"></span></td>
+     <td><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip run">PY</span><span class="chip queued">E2E</span></span></td>
+     <td style="width:120px"><div class="seg thin"><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i><i class="run" style="--p:55%"></i><i class="queued" style="--p:55%"></i></div></td></tr><tr><td><div class="row gap-8"><span class="st  queued" aria-hidden="true"></span><span style="color:var(--tx);font-weight:500">Wartet</span></div><div class="subtle" style="font-size:11.5px;margin-top:2px">Wartet auf freien Runner</div></td>
+     <td><span class="pill queued"><span class="st sm queued" aria-hidden="true"></span>Wartet<span class="n">· Queue #1</span></span></td>
+     <td><span class="pill sm queued"><span class="st sm queued" aria-hidden="true"></span>Wartet</span></td>
+     <td><span class="dotb queued"></span></td>
+     <td><span class="chips"><span class="chip queued">LINT</span><span class="chip queued">WEB</span><span class="chip queued">PY</span><span class="chip queued">E2E</span></span></td>
+     <td style="width:120px"><div class="seg thin"><i class="queued" style="--p:55%"></i><i class="queued" style="--p:55%"></i><i class="queued" style="--p:55%"></i><i class="queued" style="--p:55%"></i></div></td></tr><tr><td><div class="row gap-8"><span class="st  fail" aria-hidden="true"></span><span style="color:var(--tx);font-weight:500">Rot</span></div><div class="subtle" style="font-size:11.5px;margin-top:2px">Pflicht-Check fehlgeschlagen – blockiert Merge</div></td>
+     <td><span class="pill fail"><span class="st sm fail" aria-hidden="true"></span>Rot<span class="n">· Pytest</span></span></td>
+     <td><span class="pill sm fail"><span class="st sm fail" aria-hidden="true"></span>Rot</span></td>
+     <td><span class="dotb fail"></span></td>
+     <td><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip fail">PY</span><span class="chip queued">E2E</span></span></td>
+     <td style="width:120px"><div class="seg thin"><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i><i class="fail" style="--p:55%"></i><i class="queued" style="--p:55%"></i></div></td></tr><tr><td><div class="row gap-8"><span class="st  soft" aria-hidden="true"></span><span style="color:var(--tx);font-weight:500">Rot · nicht blockierend</span></div><div class="subtle" style="font-size:11.5px;margin-top:2px">Nur E2E rot – Merge möglich</div></td>
+     <td><span class="pill soft"><span class="st sm soft" aria-hidden="true"></span>Rot · nicht blockierend<span class="n">· E2E</span></span></td>
+     <td><span class="pill sm soft"><span class="st sm soft" aria-hidden="true"></span>E2E rot</span></td>
+     <td><span class="dotb soft"></span></td>
+     <td><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip pass">PY</span><span class="chip soft">E2E</span></span></td>
+     <td style="width:120px"><div class="seg thin"><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i><i class="pass" style="--p:55%"></i><i class="soft" style="--p:55%"></i></div></td></tr></tbody></table></div>
+ <div style="display:grid;grid-template-columns:320px 1fr;gap:24px;margin-top:24px">
+  <div><div class="state-label">Im Kontext · Session-Liste</div><div class="surface" style="padding:8px;width:100%">
+  <div class="sb-sess active"><span class="ellipsis">remove session human chat</span><span class="pill xs run"><span class="st sm run"></span>~8 Min</span></div>
+  <div class="sb-sess"><span class="ellipsis">docs: import omnigent specs</span><span class="pill xs run"><span class="st sm run"></span>~11 Min</span></div>
+  <div class="sb-sess"><span class="ellipsis">CI merge fixes</span><span class="pill xs queued"><span class="st sm queued"></span>Wartet</span></div>
+  <div class="sb-sess"><span class="ellipsis">Rebind an idle session's…</span><span class="pill xs soft"><span class="st sm soft"></span>E2E</span></div>
+  <div class="sb-sess"><span class="ellipsis">host heartbeat backoff</span><span class="pill xs pass"><span class="st sm pass"></span>Grün</span></div>
+  <div class="sb-sess"><span class="ellipsis">pyrefly config cleanup</span><span class="faint" style="font-size:11px">kein PR</span></div></div></div>
+  <div><div class="state-label">Im Kontext · PR-Header</div><div class="col gap-8">
+   <div class="surface" style="padding:12px 16px;display:flex;align-items:center;gap:12px">
+  <span style="color:var(--run);display:flex"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span><div class="grow"><div style="font-weight:600" class="ellipsis">remove session human chat <span class="subtle" style="font-weight:500">#30</span></div>
+  <div class="mono subtle ellipsis" style="font-size:11px">cursor/remove-session-human-chat-f216 → main</div></div><span class="pill run"><span class="st sm run"></span>Läuft<span class="n">· 2/4 · ~8 Min</span></span><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip run">PY</span><span class="chip queued">E2E</span></span></div>
+   <div class="surface" style="padding:12px 16px;display:flex;align-items:center;gap:12px">
+  <span style="color:var(--fail);display:flex"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span><div class="grow"><div style="font-weight:600" class="ellipsis">CI merge fixes <span class="subtle" style="font-weight:500">#29</span></div>
+  <div class="mono subtle ellipsis" style="font-size:11px">cursor/ci-merge-fixes-7d20 → main</div></div><span class="pill fail"><span class="st sm fail"></span>Rot<span class="n">· Pytest</span></span><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip fail">PY</span><span class="chip queued">E2E</span></span></div>
+   <div class="surface" style="padding:12px 16px;display:flex;align-items:center;gap:12px">
+  <span style="color:var(--ok);display:flex"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span><div class="grow"><div style="font-weight:600" class="ellipsis">Rebind an idle session's workspace and host <span class="subtle" style="font-weight:500">#34</span></div>
+  <div class="mono subtle ellipsis" style="font-size:11px">cursor/rebind-idle-session-0c3e → main</div></div><span class="pill soft"><span class="st sm soft"></span>Rot · nicht blockierend<span class="n">· E2E</span></span><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip pass">PY</span><span class="chip soft">E2E</span></span></div>
+  </div>
+  <div class="row gap-16" style="margin-top:16px;font-size:11.5px;color:var(--tx-3)"><span class="row gap-4"><span class="kbd">gestreift</span> = läuft (statisch für Animation)</span><span class="row gap-4"><span class="kbd">gestrichelt</span> = wartet / nicht blockierend</span></div></div>
+ </div>
+ <div class="demo-flag inline">Beispieldaten</div>
+</div></body></html>
