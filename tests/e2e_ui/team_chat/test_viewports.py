@@ -338,6 +338,35 @@ def test_t007b_thread_close_returns_to_the_channel(
         _assert_no_horizontal_scroll(page)
 
 
+def _border_box_height(element: Locator) -> float:
+    return element.evaluate("el => el.getBoundingClientRect().height")
+
+
+def test_t007b_phone_390_composer_input_is_44px(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 390x844 the focused chat composer input is at least 44px tall."""
+    page = page_as(ANNA, viewport=PHONE)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    composer_input = page.get_by_test_id(CHAT_TEST_IDS["composerInput"])
+    expect(composer_input).to_be_visible(timeout=30_000)
+    composer_input.focus()
+    expect(composer_input).to_be_focused()
+    height = _border_box_height(composer_input)
+    assert height >= _MIN_TOUCH_TARGET_PX, f"composer input is {height}px tall"
+    _assert_no_horizontal_scroll(page)
+
+
+def test_t007b_desktop_1280_composer_input_fits(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 1280x800 the chat composer input shows and the page does not scroll sideways."""
+    page = page_as(ANNA, viewport=DESKTOP)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    expect(page.get_by_test_id(CHAT_TEST_IDS["composerInput"])).to_be_visible(timeout=30_000)
+    _assert_no_horizontal_scroll(page)
+
+
 def test_ac021_phone_390_thread_back_clear_of_open_sidebar(
     team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
 ) -> None:

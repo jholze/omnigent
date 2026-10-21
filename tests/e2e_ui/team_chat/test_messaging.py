@@ -15,6 +15,7 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+import httpx
 from playwright.sync_api import Dialog, Locator, Page, Route, expect
 
 from tests.e2e_ui.team_chat.conftest import (
@@ -23,6 +24,7 @@ from tests.e2e_ui.team_chat.conftest import (
     JENS,
     TeamChatServer,
     fetch_bootstrap,
+    identity_headers,
     join_channel,
     list_messages,
     seed_channel,
@@ -32,6 +34,9 @@ from tests.e2e_ui.team_chat.conftest import (
 _UPDATES_SOCKET_PATH = "/v1/sessions/updates"
 _MESSAGES_URL = re.compile(r"/v1/chat/channels/[^/]+/messages(\?.*)?$")
 _DM_URL = re.compile(r"/v1/chat/dms$")
+_BOOTSTRAP_URL = re.compile(r"/v1/chat/bootstrap(\?.*)?$")
+# Longer than the new-channel bootstrap retries (400 ms + 800 ms) and one 2 s changes poll.
+_BOOTSTRAP_QUIET_MS = 3_000
 _CHANNEL_ROUTE = re.compile(r"/chat/([^/?#]+)$")
 _CLOCK = re.compile(r"^\d{2}:\d{2}$")
 _LOAD_TIMEOUT_MS = 30_000
@@ -246,6 +251,42 @@ def test_ac_021a_dm_opens_once_and_appears_for_jens_after_first_message(
     expect(dm_link).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
     dm_link.click()
     expect(_message_row(jens, "Hallo Jens, kurze Frage")).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+
+
+def test_t007b_message_in_listed_dm_does_not_refetch_bootstrap(
+    team_chat_server: TeamChatServer, page_as
+) -> None:
+    """A message in a DM that bootstrap already lists sends no further bootstrap GET."""
+    jens_id = fetch_bootstrap(team_chat_server, as_user=JENS)["me"]
+    opened = httpx.post(
+        f"{team_chat_server.base_url}/v1/chat/dms",
+        json={"principals": [jens_id]},
+        headers=identity_headers(ANNA),
+        timeout=10.0,
+        trust_env=False,
+    )
+    opened.raise_for_status()
+    dm_id = opened.json()["id"]
+    seed_message(team_chat_server, as_user=ANNA, channel_id=dm_id, body="DM steht schon")
+    assert dm_id in {dm["id"] for dm in fetch_bootstrap(team_chat_server, as_user=JENS)["dms"]}
+
+    jens = page_as(JENS)
+    _open_channel(jens, team_chat_server, dm_id)
+    expect(_message_row(jens, "DM steht schon")).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+    bootstrap_gets: list[str] = []
+    jens.on(
+        "request",
+        lambda request: (
+            bootstrap_gets.append(request.url)
+            if request.method == "GET" and _BOOTSTRAP_URL.search(request.url)
+            else None
+        ),
+    )
+
+    seed_message(team_chat_server, as_user=ANNA, channel_id=dm_id, body="Noch eine Frage")
+    expect(_message_row(jens, "Noch eine Frage")).to_be_visible(timeout=_LIVE_TIMEOUT_MS)
+    jens.wait_for_timeout(_BOOTSTRAP_QUIET_MS)
+    assert bootstrap_gets == []
 
 
 def test_ac_023a_thread_reply_shows_live_count_and_reply(

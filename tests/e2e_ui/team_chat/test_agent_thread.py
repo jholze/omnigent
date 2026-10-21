@@ -504,6 +504,45 @@ def test_ac_045a_read_viewer_sees_streamed_text_grow_without_reload(
     assert page.evaluate("() => window.__t008NoReload === true"), "the page reloaded"
 
 
+def _assert_agent_reply_shown(
+    pane: Locator, server: TeamChatServer, thread: AgentThread, text: str
+) -> None:
+    """The pane shows *text* in the row of the stored reply the agent authored."""
+
+    def _stored() -> list[dict[str, Any]]:
+        return [reply for reply in _thread_replies(server, thread) if reply["body"] == text]
+
+    _wait_until(lambda: bool(_stored()), timeout_s=_SERVER_TIMEOUT_S, what="the stored reply")
+    stored = _stored()
+    assert [reply.get("author_kind") for reply in stored] == ["omnigent_agent"], stored
+    row = pane.locator(
+        f'[data-testid="{CHAT_TEST_IDS["message"]}"][data-message-id="{stored[0]["id"]}"]'
+    )
+    expect(row).to_have_count(1, timeout=_LOAD_TIMEOUT_MS)
+    expect(row).to_contain_text(text)
+
+
+def test_ac_046a_assistant_text_survives_reload(team_chat_server: TeamChatServer, page_as) -> None:
+    """A finished turn's "Tests grün, PR #42 offen" shows from the agent, also after reload."""
+    text = "Tests grün, PR #42 offen"
+    channel = _agent_channel(team_chat_server)
+    page = page_as(ANNA)
+    _open_channel(page, team_chat_server, channel["id"])
+    thread = _start_agent_thread(team_chat_server, channel["id"])
+    pane = _open_live_thread(page, thread)
+    expect(_thread_chip(pane)).to_have_text("fertig", timeout=_LOAD_TIMEOUT_MS)
+
+    _set_status(team_chat_server, thread, "running", response_id="resp_turn")
+    _answer(team_chat_server, thread, text, "resp_turn")
+    expect(pane).to_contain_text(text, timeout=_LOAD_TIMEOUT_MS)
+    _assert_agent_reply_shown(pane, team_chat_server, thread, text)
+
+    page.reload()
+    pane = page.get_by_test_id(CHAT_TEST_IDS["threadPane"])
+    expect(pane).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+    _assert_agent_reply_shown(pane, team_chat_server, thread, text)
+
+
 def test_ac_047a_channel_root_chip_shows_braucht_antwort_within_5s(
     team_chat_server: TeamChatServer, page_as
 ) -> None:
