@@ -147,3 +147,17 @@ Fork-only section; keep it when syncing from upstream.
 Leads follow agents/lead/config.yaml (R1–R4). Spawn helpers only via
 sys_session_create with an agent_id from that file. Pin the commit SHA in
 every brief and read results with sys_read_inbox.
+
+## Approvals
+
+Fork-only section; keep it when syncing from upstream.
+
+When a session you spawned has a pending approval or elicitation, notify Spec, then keep working on other tasks. Do not wait on that session, and do not send it another message while the elicitation is pending.
+
+Call:
+
+    ~/.config/grokbot/notify-spec.sh "<session-id>" "approval" "<elicitation-id>"
+
+The script posts JSON fields session, ticket, and message. Pass the waiting session id, the literal ticket approval, and the elicitation id as the message. There is no separate type flag.
+
+Do not use $(...) command substitutions in git or gh shell commands, including a command a human must approve. Write fixed arguments so the approval card shows the real command.
