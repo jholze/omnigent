@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as ComposerSendShortcutPreferences from "@/lib/composerSendShortcutPreferences";
 
 import { ChatComposerCard } from "./ChatComposerCard";
+import { teamChatQueryKeys, type ChannelMember, type DirectoryEntry } from "./chatApi";
 import { CHAT_TEST_IDS } from "./testids";
 
 const sendChatMessageMock = vi.hoisted(() => vi.fn(() => true));
@@ -86,5 +87,127 @@ describe("ChatComposerCard send key", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Senden" }));
     expect(sendChatMessageMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+const ANNA = "anna@team-chat.test";
+const JENS = "jens@team-chat.test";
+const BOB = "bob@team-chat.test";
+
+/** Card with members already cached, so no members request runs. */
+function renderMentionCard() {
+  const client = new QueryClient();
+  const members: ChannelMember[] = [
+    { principal_id: ANNA, kind: "human", display: "Anna" },
+    { principal_id: JENS, kind: "human", display: "Jens" },
+    { principal_id: BOB, kind: "human", display: "Bob" },
+  ];
+  client.setQueryData(teamChatQueryKeys.members("c-general"), members);
+  const directory = new Map<string, DirectoryEntry>(
+    members.map((member) => [
+      member.principal_id,
+      { id: member.principal_id, kind: "user", display_name: member.display },
+    ]),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <ChatComposerCard
+        channelId="c-general"
+        me={ANNA}
+        placeholder="Nachricht an #general"
+        label="Nachricht an #general"
+        directory={directory}
+      />
+    </QueryClientProvider>,
+  );
+  return screen.getByTestId(CHAT_TEST_IDS.composerInput) as HTMLTextAreaElement;
+}
+
+function optionLabels(): string[] {
+  return screen.queryAllByTestId(CHAT_TEST_IDS.mentionOption).map((row) => row.textContent ?? "");
+}
+
+function chipTokens(): (string | null)[] {
+  return screen
+    .queryAllByTestId(CHAT_TEST_IDS.composerMentionChip)
+    .map((chip) => chip.getAttribute("data-mention-token"));
+}
+
+describe("ChatComposerCard mentions", () => {
+  it("AC-026c the list is in the document on the same turn as the @ keystroke", () => {
+    const input = renderMentionCard();
+    fireEvent.change(input, { target: { value: "@" } });
+    expect(screen.getByTestId(CHAT_TEST_IDS.mentionList)).toBeInTheDocument();
+  });
+
+  it("AC-026c Anna types @je and sees Jens only", () => {
+    const input = renderMentionCard();
+    fireEvent.change(input, { target: { value: "@je" } });
+    expect(optionLabels()).toEqual(["Jens"]);
+  });
+
+  it("AC-026e @zz shows Niemand gefunden and Enter inserts no chip and does not send", () => {
+    const input = renderMentionCard();
+    fireEvent.change(input, { target: { value: "@zz" } });
+    expect(screen.getByTestId(CHAT_TEST_IDS.mentionEmpty)).toHaveTextContent("Niemand gefunden");
+    expect(optionLabels()).toEqual([]);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(chipTokens()).toEqual([]);
+    expect(sendChatMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("AC-026f ArrowDown then Enter inserts the highlighted chip and does not send", () => {
+    const input = renderMentionCard();
+    fireEvent.change(input, { target: { value: "@" } });
+    const rows = screen.getAllByTestId(CHAT_TEST_IDS.mentionOption);
+    expect(rows.map((row) => row.getAttribute("data-mention-id"))).toEqual(["agent", BOB, JENS]);
+    expect(rows[0]).toHaveAttribute("aria-selected", "true");
+    expect(rows[1]).toHaveAttribute("aria-selected", "false");
+    expect(rows[2]).toHaveAttribute("aria-selected", "false");
+    // Selected-row meta text switches to text-foreground to clear 4.5:1 on bg-muted.
+    expect(rows[0]).toHaveClass("group");
+    const agentMeta = within(rows[0]).getByText("Omnigent-Agent");
+    expect(agentMeta).toHaveClass("text-muted-foreground", "group-aria-selected:text-foreground");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const movedRows = screen.getAllByTestId(CHAT_TEST_IDS.mentionOption);
+    expect(movedRows[1]).toHaveAttribute("aria-selected", "true");
+    // The agent row is no longer selected, so its subtitle stays muted.
+    expect(movedRows[0]).toHaveAttribute("aria-selected", "false");
+    expect(within(movedRows[0]).getByText("Omnigent-Agent")).toHaveClass("text-muted-foreground");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(chipTokens()).toEqual([`<@user:${BOB}>`]);
+    expect(input.value).toBe("@Bob ");
+    expect(screen.queryByTestId(CHAT_TEST_IDS.mentionList)).not.toBeInTheDocument();
+    expect(sendChatMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("AC-026f Escape closes the list without inserting a chip", () => {
+    const input = renderMentionCard();
+    fireEvent.change(input, { target: { value: "@je" } });
+    expect(screen.getByTestId(CHAT_TEST_IDS.mentionList)).toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByTestId(CHAT_TEST_IDS.mentionList)).not.toBeInTheDocument();
+    expect(chipTokens()).toEqual([]);
+    expect(input.value).toBe("@je");
+  });
+
+  it("AC-026g send serializes chips to tokens and keeps the rest literal", () => {
+    const input = renderMentionCard();
+    fireEvent.change(input, { target: { value: "@je" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "@Jens frag @ag" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(chipTokens()).toEqual([`<@user:${JENS}>`, "<@omnigent_agent:agent>"]);
+    expect(sendChatMessageMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Senden" }));
+    expect(sendChatMessageMock).toHaveBeenCalledTimes(1);
+    const [, sent] = sendChatMessageMock.mock.calls[0] as unknown as [unknown, { body: string }];
+    expect(sent.body.trim()).toBe(`<@user:${JENS}> frag <@omnigent_agent:agent>`);
+    expect(chipTokens()).toEqual([]);
   });
 });

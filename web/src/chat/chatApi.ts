@@ -33,6 +33,16 @@ export interface DirectoryEntry {
   kind: string;
   display_name?: string | null;
   handle?: string | null;
+  /** Owning human of an agent account. */
+  owner_id?: string | null;
+}
+
+/** One row of `GET /v1/chat/channels/{id}/members`. */
+export interface ChannelMember {
+  principal_id: string;
+  /** `human` or `agent_account`. */
+  kind: string;
+  display: string;
 }
 
 /** `GET /v1/chat/bootstrap`. `agents_hint` is not on this server build. */
@@ -245,6 +255,31 @@ export async function fetchThreadMessages(
     { signal },
   );
   return readJson(response, "Invalid chat thread response", isMessagePageResponse);
+}
+
+function isChannelMember(value: unknown): value is ChannelMember {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.principal_id === "string" &&
+    typeof value.kind === "string" &&
+    typeof value.display === "string"
+  );
+}
+
+function isChannelMemberList(value: unknown): value is ChannelMember[] {
+  return Array.isArray(value) && value.every(isChannelMember);
+}
+
+/** Members of one channel, for mention autocomplete. */
+export async function fetchChannelMembers(
+  channelId: string,
+  signal?: AbortSignal,
+): Promise<ChannelMember[]> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/members`,
+    { signal },
+  );
+  return readJson(response, "Invalid chat members response", isChannelMemberList);
 }
 
 export interface PostMessageInput {

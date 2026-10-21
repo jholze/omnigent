@@ -429,6 +429,41 @@ async def test_ac_033b_second_mention_does_not_create_another_session(
     assert _conversation_count(db_uri) == before + 1
 
 
+async def test_ac_026i_active_thread_mention_forwards_to_the_same_session(
+    chat_client: httpx.AsyncClient, db_uri: str, runner_202: None
+) -> None:
+    agent_id = _create_agent(db_uri)
+    channel_id, project_id = await _prepared_channel(
+        chat_client, db_uri, project_name="billing", config={"agent_id": agent_id}
+    )
+    assert project_id is not None
+    before = _conversation_count(db_uri)
+    first = await _post(chat_client, ANNA, channel_id, f"{MENTION} schau mal")
+    assert first.status_code == 201, first.text
+    root_id = first.json()["id"]
+    await _wait_for_start()
+    session_id = _assert_active_session(
+        db_uri,
+        channel_id=channel_id,
+        root_id=root_id,
+        agent_id=agent_id,
+        project_id=project_id,
+        before=before,
+    )
+
+    second_body = f"{MENTION} nochmal"
+    second = await _post(chat_client, ANNA, channel_id, second_body, thread_root_id=root_id)
+    assert second.status_code == 201, second.text
+    await _wait_for_start()
+
+    assert _conversation_count(db_uri) == before + 1
+    turns = _user_texts(db_uri, session_id)
+    assert len(turns) == 2
+    forwarded = _unwrap_chat_turn(turns[1])
+    assert forwarded.startswith("[")
+    assert forwarded.endswith(f"] {second_body}")
+
+
 async def test_ac_034a_read_grant_for_other_human_members(
     chat_client: httpx.AsyncClient, db_uri: str, runner_202: None
 ) -> None:

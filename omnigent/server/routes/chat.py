@@ -110,6 +110,8 @@ class DirectoryEntry(BaseModel):
     kind: str
     display_name: str | None = None
     handle: str | None = None
+    owner_id: str | None = None
+    """Owning human of an agent account; ``None`` for users."""
 
 
 class BootstrapResponse(BaseModel):
@@ -615,6 +617,7 @@ def create_chat_router(
                 kind="agent_account",
                 display_name=account.display_name,
                 handle=account.handle,
+                owner_id=account.owner_id,
             )
             for account in accounts
         )
