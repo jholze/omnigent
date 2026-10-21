@@ -2286,6 +2286,17 @@
           "kind": {
             "title": "Kind",
             "type": "string"
+          },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
           }
         },
         "required": [

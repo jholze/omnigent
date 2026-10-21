@@ -279,6 +279,7 @@ export function ThreadPane({
         me={me}
         placeholder="Im Thread antworten…"
         label={`Antwort im Thread in ${channelLabel}`}
+        directory={directory}
       />
     </section>
   );

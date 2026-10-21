@@ -245,6 +245,7 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
         me={me}
         placeholder={`Nachricht an ${label}`}
         label={`Nachricht an ${label}`}
+        directory={directory}
       />
     </div>
   );

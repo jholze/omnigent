@@ -1030,6 +1030,64 @@ async def _maybe_forward_bot_reply(
     await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
 
 
+async def _maybe_forward_mention(
+    request: Any,
+    chat_store: ChatStore,
+    message: ChatMessage,
+    caller: str,
+) -> None:
+    """Send an agent mention in an active thread to that thread's session.
+
+    *caller* is the human author or the bot's owner; below EDIT the message
+    stays in chat only and is marked ``not_forwarded``.
+    """
+    if message.thread_root_id is None:
+        return
+    session_id = await asyncio.to_thread(_active_session_id, chat_store, message.thread_root_id)
+    if session_id is None:
+        return
+    from omnigent.server.auth import LEVEL_EDIT
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    level = await asyncio.to_thread(
+        SqlAlchemyPermissionStore(chat_store.storage_location).get_permission_level,
+        caller,
+        session_id,
+    )
+    if not isinstance(level, int) or level < LEVEL_EDIT:
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return
+    if caller == message.author_id:
+        name = await asyncio.to_thread(
+            _read,
+            chat_store,
+            "select_author_display",
+            lambda session: _display_in(session, caller),
+        )
+        acting = request
+    else:
+        account = await asyncio.to_thread(
+            chat_store.get_agent_account_by_principal, message.author_id
+        )
+        if account is None:
+            return
+        owner_name = await asyncio.to_thread(
+            _read,
+            chat_store,
+            "select_owner_display",
+            lambda session: _display_in(session, caller),
+        )
+        name = f"{account.display_name} ({owner_name})"
+        acting = _request_as_owner(request)
+    try:
+        await _post_first_message(acting, session_id, f"[{name}] {message.body}")
+    except Exception:
+        _logger.exception("agent mention forward failed session=%s", session_id)
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return
+    await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
+
+
 async def schedule_after_human_post(
     request: Any,
     chat_store: ChatStore,
@@ -1040,8 +1098,9 @@ async def schedule_after_human_post(
 
     A human mention starts as that human. An agent-account mention starts as
     the account's owner and records the account as initiator. A bot reply in
-    an active thread is forwarded when the owner has edit access. A thread
-    that is already starting or active is left alone.
+    an active thread is forwarded when the owner has edit access. An agent
+    mention in an active thread goes to that same session; a thread that is
+    still starting is left alone.
     """
     try:
         _bind_store(chat_store)
@@ -1072,6 +1131,7 @@ async def schedule_after_human_post(
             _claim, chat_store, channel.id, root_id, caller, started_by
         )
         if not claimed:
+            await _maybe_forward_mention(request, chat_store, message, caller)
             return
         await asyncio.to_thread(_publish_thread, chat_store, channel.id, root_id)
         task = asyncio.create_task(

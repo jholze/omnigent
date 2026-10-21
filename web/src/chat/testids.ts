@@ -27,6 +27,10 @@ export const CHAT_TEST_IDS = {
   newDmPerson: "chat-new-dm-person",
   newDmError: "chat-new-dm-error",
   mentionChip: "chat-mention-chip",
+  mentionList: "chat-mention-list",
+  mentionOption: "chat-mention-option",
+  mentionEmpty: "chat-mention-empty",
+  composerMentionChip: "chat-composer-mention-chip",
   agentStatusChip: "agent-status-chip",
   approvalCard: "approval-card",
 } as const;
