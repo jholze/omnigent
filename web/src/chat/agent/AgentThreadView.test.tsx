@@ -512,6 +512,21 @@ describe("Approval cards in the thread", () => {
     expect(screen.getByText("Genehmigt von u_carla")).toBeInTheDocument();
   });
 
+  it("AC-068a a bot decider shows the directory name with its owner", () => {
+    withAccess(2);
+    seedEntry([userInput, card()], "running");
+    const bot = "agent:acct_grok";
+    renderView({
+      directory: new Map([
+        ...directory,
+        [bot, { id: bot, kind: "agent_account", display_name: "Grok (Jens)" }],
+      ]),
+    });
+    resolveElsewhere("accept", bot);
+    const approval = screen.getByTestId(CHAT_TEST_IDS.approvalCard);
+    expect(within(approval).getByText("Genehmigt von Grok (Jens)")).toBeInTheDocument();
+  });
+
   it("a stale click uses the verdict and decider the GET reports, no toast", async () => {
     withAccess(2);
     seedEntry([userInput, card()], "running");

@@ -150,6 +150,12 @@ def _mentions_agent(body: str) -> bool:
     return any(token.kind == "omnigent_agent" for token in parse_mentions(body))
 
 
+def _human_label(principal_id: str) -> str:
+    """Email local-part label for a human principal, e.g. ``jens@…`` → ``Jens``."""
+    local = principal_id.split("@", 1)[0].strip() or principal_id
+    return local[:1].upper() + local[1:]
+
+
 def _display_in(session: Session, principal_id: str) -> str:
     """Display name for a context prefix or the sharing notice."""
     if principal_id.startswith("agent:"):
@@ -162,8 +168,7 @@ def _display_in(session: Session, principal_id: str) -> str:
         ).scalar_one_or_none()
         if isinstance(name, str) and name.strip():
             return name.strip()
-    local = principal_id.split("@", 1)[0].strip() or principal_id
-    return local[:1].upper() + local[1:]
+    return _human_label(principal_id)
 
 
 def _record(
