@@ -804,6 +804,173 @@ def test_nfr032_long_decided_by_wraps(
         assert box["x"] + box["width"] <= client_width, "approval card overflows the viewport"
 
 
+_CODER_NAME = "coder"
+_MENTION_BODY = "<@omnigent_agent:agent> bitte Tests für billing fixen"
+_STARTING_CHIP = re.compile(r"^(startet…|arbeitet)$")
+
+
+def _register_coder(server: TeamChatServer) -> str:
+    """Store the hello_world bundle as agent ``coder``; return its UUID hex id."""
+    from pathlib import Path
+
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
+    from tests.e2e_ui.conftest import _TEST_AGENT_YAML
+
+    # isolated_local_server puts --artifact-location next to the database.
+    artifacts = Path(server.database_uri.removeprefix("sqlite:///")).parent / "artifacts"
+    assert artifacts.is_dir(), f"server artifact directory not found: {artifacts}"
+    agent_id = uuid.uuid4().hex
+    agent_yaml = _TEST_AGENT_YAML.replace("name: hello_world", f"name: {_CODER_NAME}", 1)
+    key = f"agents/{agent_id}/bundle.tar.gz"
+    LocalArtifactStore(str(artifacts)).put(key, _tar_gz("coder.yaml", agent_yaml.encode()))
+    SqlAlchemyAgentStore(server.database_uri).create(agent_id, _CODER_NAME, key)
+    return agent_id
+
+
+def _tar_gz(name: str, data: bytes) -> bytes:
+    import gzip
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w") as tar,
+    ):
+        info = tarfile.TarInfo(name=name)
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _billing_channel(server: TeamChatServer, agent_id: str) -> dict[str, Any]:
+    """Project ``billing`` for Anna's coder, and channel ``billing`` bound to it."""
+    from sqlalchemy import update
+    from sqlalchemy.orm import Session
+
+    from omnigent.db.db_models import SqlChatChannel
+    from omnigent.db.utils import get_or_create_engine
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    fetch_bootstrap(server, as_user=ANNA)
+    SqlAlchemyProjectStore(server.database_uri).create(
+        uuid.uuid4().hex, "billing", ANNA, config={"agent_id": agent_id}
+    )
+    channel = seed_channel(server, as_user=ANNA, name="billing")
+    # POST /v1/chat/channels takes no project name; set it as the server test does.
+    with Session(get_or_create_engine(server.database_uri)) as session:
+        session.execute(
+            update(SqlChatChannel)
+            .where(SqlChatChannel.id == channel["id"])
+            .values(project_name="billing")
+        )
+        session.commit()
+    return channel
+
+
+def _started_thread(server: TeamChatServer, channel_id: str) -> tuple[str, str]:
+    """Wait for the mention's start; return (root id, session id) or fail on a system line."""
+    found: dict[str, str] = {}
+
+    def _settled() -> bool:
+        roots = [
+            item
+            for item in list_messages(server, as_user=ANNA, channel_id=channel_id)
+            if item["body"] == _MENTION_BODY
+        ]
+        if not roots:
+            return False
+        root_id = roots[0]["id"]
+        replies = list_messages(
+            server, as_user=ANNA, channel_id=channel_id, thread_root_id=root_id
+        )
+        system = [reply["body"] for reply in replies if reply.get("author_kind") == "system"]
+        assert not system, f"agent start posted a system line: {system}"
+        session_id = _thread_session_id(server, root_id)
+        if session_id:
+            found.update(root_id=root_id, session_id=session_id)
+        return bool(session_id)
+
+    _wait_until(_settled, timeout_s=60.0, what="the mention to start a session")
+    return found["root_id"], found["session_id"]
+
+
+def _thread_session_id(server: TeamChatServer, root_id: str) -> str | None:
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from omnigent.db.db_models import SqlChatThread
+    from omnigent.db.utils import get_or_create_engine
+
+    with Session(get_or_create_engine(server.database_uri)) as session:
+        return session.execute(
+            select(SqlChatThread.session_id).where(SqlChatThread.root_message_id == root_id)
+        ).scalar_one_or_none()
+
+
+def _first_user_text(server: TeamChatServer, session_id: str) -> str:
+    """The chat text inside the first user message's untrusted-content wrapper."""
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    page = SqlAlchemyConversationStore(server.database_uri).list_items(
+        session_id, limit=20, order="asc"
+    )
+    for item in page.data:
+        data = item.data
+        if getattr(item, "type", None) == "message" and getattr(data, "role", None) == "user":
+            wrapped = "\n".join(
+                block["text"]
+                for block in data.content
+                if isinstance(block, dict) and "text" in block
+            )
+            start = wrapped.index("<untrusted_chat_content>") + len("<untrusted_chat_content>")
+            return str(
+                json.loads(wrapped[start : wrapped.index("</untrusted_chat_content>")])["text"]
+            )
+    raise AssertionError(f"session {session_id} has no user message")
+
+
+def test_ac_033a_mention_starts_annas_coder_session(
+    team_chat_server: TeamChatServer, page_as
+) -> None:
+    """Anna mentions the agent in #billing: her runner starts a coder session in billing."""
+    from omnigent.server.auth import LEVEL_OWNER
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    agent_id = _register_coder(team_chat_server)
+    channel = _billing_channel(team_chat_server, agent_id)
+    page = page_as(ANNA)
+    _open_channel(page, team_chat_server, channel["id"])
+    composer_input = page.get_by_test_id(CHAT_TEST_IDS["composerInput"]).first
+    composer_input.fill(_MENTION_BODY)
+    composer_input.press("Enter")
+
+    root_id, session_id = _started_thread(team_chat_server, channel["id"])
+    chip = _root_chip(page, "bitte Tests für billing fixen")
+    expect(chip).to_have_text(_STARTING_CHIP, timeout=_LOAD_TIMEOUT_MS)
+
+    conversation = SqlAlchemyConversationStore(team_chat_server.database_uri).get_conversation(
+        session_id
+    )
+    assert conversation is not None
+    assert conversation.agent_id == agent_id
+    agent = SqlAlchemyAgentStore(team_chat_server.database_uri).get(agent_id)
+    assert agent is not None and agent.name == _CODER_NAME
+    project = SqlAlchemyProjectStore(team_chat_server.database_uri).get(
+        str(conversation.project_id), user_id=ANNA
+    )
+    assert project is not None and project.name == "billing"
+    level = SqlAlchemyPermissionStore(team_chat_server.database_uri).get_permission_level(
+        ANNA, session_id
+    )
+    assert level == LEVEL_OWNER
+    assert _first_user_text(team_chat_server, session_id).startswith("[Anna]"), root_id
+
+
 def _push_root_out_of_tail(server: TeamChatServer, channel_id: str, count: int = 51) -> None:
     """Post *count* newer top-level messages, so the root leaves the tail of 50.
 

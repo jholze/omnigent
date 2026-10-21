@@ -45,6 +45,7 @@ from omnigent.server.auth import (
 from omnigent.server.chat_access import principal_kind
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.server.chat_realtime import publish_chat, publish_message_created
+from omnigent.server.principals import same_account
 from omnigent.stores.chat_store import ChatChannel, ChatMessage, ChatStore, PostStatus
 
 _logger = logging.getLogger("omnigent.chat")
@@ -524,6 +525,39 @@ def _live_host_id(host_store: Any, caller: str, project: Any) -> str | None:
     return host_id
 
 
+def _caller_runner_id(app: Any, caller: str) -> str | None:
+    """First online runner the caller owns; None when no runner is online.
+
+    Online runners that all belong to someone else, or to no one, fail the start.
+    """
+    registry = getattr(app.state, "tunnel_registry", None)
+    runner_router = getattr(app.state, "runner_router", None)
+    if registry is None or runner_router is None:
+        return None
+    online = registry.online_runner_ids()
+    if not online:
+        return None
+    for runner_id in online:
+        if same_account(caller, runner_router.runner_owner(runner_id)):
+            return runner_id
+    raise _StartFailure("host_offline")
+
+
+def _pin_caller_runner(
+    app: Any, conversation_store: Any, caller: str, session_id: str, runner_id: str
+) -> None:
+    """Pin the new session to the caller's runner, or fail when another runner won."""
+    if conversation_store.set_runner_id(session_id, runner_id):
+        return
+    conversation = conversation_store.get_conversation(session_id)
+    pinned = getattr(conversation, "runner_id", None)
+    runner_router = getattr(app.state, "runner_router", None)
+    if pinned is None or runner_router is None:
+        raise _StartFailure("host_offline")
+    if not same_account(caller, runner_router.runner_owner(pinned)):
+        raise _StartFailure("host_offline")
+
+
 def _host_is_live(host: Any) -> bool:
     from omnigent.stores.host_store import host_is_live
 
@@ -763,6 +797,7 @@ async def _start_impl(
     if project is None:
         raise _StartFailure("no_project")
     host_id = _live_host_id(host_store, caller, project)
+    runner_id = _caller_runner_id(request.app, caller) if host_id is None else None
     label = json.dumps(
         {"channel_id": channel.id, "thread_root_id": root_id},
         separators=(",", ":"),
@@ -806,6 +841,10 @@ async def _start_impl(
             channel.id,
             caller,
             session_id,
+        )
+    if runner_id is not None:
+        await asyncio.to_thread(
+            _pin_caller_runner, request.app, conversation_store, caller, session_id, runner_id
         )
     text = await asyncio.to_thread(_context_text, chat_store, channel.id, root_id, message)
     await _post_first_message(acting, session_id, text)

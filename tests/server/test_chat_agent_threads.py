@@ -22,6 +22,7 @@ from omnigent.db.db_models import (
     SqlChatThread,
     SqlChatUserPref,
     SqlConversation,
+    SqlConversationMetadata,
     SqlUser,
 )
 from omnigent.db.utils import get_or_create_engine, now_epoch_us
@@ -562,6 +563,174 @@ async def test_ac_035b_host_offline_posts_system_line_and_creates_no_session(
     assert _conversation_count(db_uri) == before
     assert _thread(db_uri, root_id).agent_state == "start_failed"
     assert _thread(db_uri, root_id).session_id is None
+    assert (HOST_OFFLINE, "host_offline") in _system_rows(db_uri, root_id)
+    items = await _thread_items(chat_client, ANNA, channel_id, root_id)
+    assert HOST_OFFLINE in [item["body"] for item in items]
+
+
+@pytest_asyncio.fixture()
+async def tunnel_chat(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[httpx.AsyncClient, Any]]:
+    """Chat client plus its app, so a test can register tunnel runners."""
+    monkeypatch.setenv(FEATURES_ENV_VAR, "team_chat")
+    app = _build_app(db_uri, tmp_path)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client, app
+
+
+@contextlib.asynccontextmanager
+async def _answering_runner(
+    app: Any, runner_id: str, owner: str
+) -> AsyncIterator[list[tuple[str, str]]]:
+    """Register a tunnel runner that answers every request with 202.
+
+    Yields the (method, path) of each request the server tunneled to it.
+    """
+    from omnigent.runner.transports.ws_tunnel.frames import (
+        HelloFrame,
+        RequestFrame,
+        ResponseBodyFrame,
+        ResponseEndFrame,
+        ResponseHeadFrame,
+        decode_frame,
+    )
+    from tests.server.helpers import FakeRunnerWebSocket
+
+    registry = app.state.tunnel_registry
+    session = registry.register(
+        runner_id,
+        FakeRunnerWebSocket(),
+        HelloFrame(
+            runner_version="0.1.0-test",
+            frame_protocol_version=1,
+            harnesses=["default"],
+            envs=["os_sandbox"],
+        ),
+        owner=owner,
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def answer() -> None:
+        while True:
+            outbound = await session.outbound_queue.get()
+            if outbound is None:
+                return
+            frame = decode_frame(outbound.data)
+            if not isinstance(frame, RequestFrame):
+                continue
+            seen.append((frame.method, frame.path))
+            if frame.method == "GET" and frame.path.endswith("/stream"):
+                # The relay waits for a heartbeat; the stream stays open.
+                registry.route_response_frame(
+                    runner_id,
+                    ResponseHeadFrame(
+                        id=frame.id, status=200, headers=[["content-type", "text/event-stream"]]
+                    ),
+                )
+                registry.route_response_frame(
+                    runner_id,
+                    ResponseBodyFrame(id=frame.id, body='data: {"type":"session.heartbeat"}\n\n'),
+                )
+                continue
+            registry.route_response_frame(
+                runner_id,
+                ResponseHeadFrame(
+                    id=frame.id, status=202, headers=[["content-type", "application/json"]]
+                ),
+            )
+            registry.route_response_frame(runner_id, ResponseBodyFrame(id=frame.id, body="{}"))
+            registry.route_response_frame(runner_id, ResponseEndFrame(id=frame.id))
+
+    task = asyncio.create_task(answer())
+    try:
+        yield seen
+    finally:
+        registry.deregister(runner_id, session)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def _runner_ids(db_uri: str) -> list[str | None]:
+    with _session(db_uri) as session:
+        return list(session.scalars(select(SqlConversationMetadata.runner_id)).all())
+
+
+async def test_ac_033a_no_host_binds_the_callers_online_runner(
+    tunnel_chat: tuple[httpx.AsyncClient, Any], db_uri: str
+) -> None:
+    client, app = tunnel_chat
+    agent_id = _create_agent(db_uri)
+    channel_id, project_id = await _prepared_channel(
+        client, db_uri, project_name="billing", config={"agent_id": agent_id}
+    )
+    assert project_id is not None
+    before = _conversation_count(db_uri)
+
+    async with (
+        _answering_runner(app, "runner_jens", JENS) as jens_seen,
+        _answering_runner(app, "runner_anna", ANNA) as anna_seen,
+    ):
+        posted = await _post(client, ANNA, channel_id, f"{MENTION} schau mal")
+        assert posted.status_code == 201, posted.text
+        root_id = posted.json()["id"]
+        await _wait_for_start()
+
+        session_id = _assert_active_session(
+            db_uri,
+            channel_id=channel_id,
+            root_id=root_id,
+            agent_id=agent_id,
+            project_id=project_id,
+            before=before,
+        )
+        conversation = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+        assert conversation is not None
+        assert conversation.runner_id == "runner_anna"
+        assert ("POST", f"/v1/sessions/{session_id}/events") in anna_seen
+        assert jens_seen == []
+
+
+async def test_ac_033a_no_host_refuses_a_foreign_online_runner(
+    tunnel_chat: tuple[httpx.AsyncClient, Any], db_uri: str
+) -> None:
+    client, app = tunnel_chat
+    agent_id = _create_agent(db_uri)
+    channel_id, _project_id = await _prepared_channel(
+        client, db_uri, project_name="billing", config={"agent_id": agent_id}
+    )
+
+    async with _answering_runner(app, "runner_jens", JENS) as jens_seen:
+        posted = await _post(client, ANNA, channel_id, f"{MENTION} schau mal")
+        assert posted.status_code == 201, posted.text
+        root_id = posted.json()["id"]
+        await _wait_for_start()
+
+    assert _thread(db_uri, root_id).agent_state == "start_failed"
+    assert (HOST_OFFLINE, "host_offline") in _system_rows(db_uri, root_id)
+    assert "runner_jens" not in _runner_ids(db_uri)
+    assert jens_seen == []
+
+
+async def test_ac_033a_no_host_and_no_online_runner_is_host_offline(
+    chat_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    agent_id = _create_agent(db_uri)
+    channel_id, _project_id = await _prepared_channel(
+        chat_client, db_uri, project_name="billing", config={"agent_id": agent_id}
+    )
+
+    posted = await _post(chat_client, ANNA, channel_id, f"{MENTION} schau mal")
+    assert posted.status_code == 201, posted.text
+    root_id = posted.json()["id"]
+    await _wait_for_start()
+
+    assert _thread(db_uri, root_id).agent_state == "start_failed"
     assert (HOST_OFFLINE, "host_offline") in _system_rows(db_uri, root_id)
     items = await _thread_items(chat_client, ANNA, channel_id, root_id)
     assert HOST_OFFLINE in [item["body"] for item in items]
