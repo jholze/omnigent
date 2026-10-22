@@ -2864,7 +2864,7 @@ Then läuft `alembic upgrade head` fehlerfrei, `team_chat` ist an und der Smoke-
 
 ### T-134: Projekt-Allowlist für Agentenkonten
 **Release:** R1   **Phase / wave:** nach T-103 und T-104   **Parallel:** nein   **Depends on:** T-103   **Rolle:** omnigent-coder (Auth, Store, Migration) · ux-builder (Settings-Picker, danach) · test_author · tester (Gate) · deepseek_review · gpt_review (Security, Migration + Auth) · omnigent-reviewer   **Aufwand:** 8 h
-**Implements:** FR-105, FR-106, FR-107, FR-108, FR-109, FR-110, FR-111; NFR-033, NFR-034, NFR-035; ADR-0011. ACs: AC-105a–d, AC-106a–c, AC-107a/b, AC-108a–c, AC-109a, AC-110a–c, AC-111a–e, AC-033a, AC-034a, AC-035a in jholze/omnigent#114
+**Implements:** FR-105, FR-106, FR-107, FR-108, FR-109, FR-110, FR-111; NFR-033, NFR-034, NFR-035; ADR-0011. ACs: AC-105a–d, AC-106a–c, AC-107a/b, AC-108a–c, AC-109a, AC-110a–c, AC-111a–e, AC-033a, AC-034a, AC-035a, AC-112a [NEW v0.8 2026-10-22: owner retry must 404 outside the allow-list], AC-112b [NEW v0.8 2026-10-22: direct test that a scoped mention outside the allow-list starts nothing] in jholze/omnigent#114
 **Labels:** `spec:omnigent-chat`, `release:R1`, `type:feature`, `security`
 
 **Context**
@@ -2891,7 +2891,23 @@ Ein scoped Agentenkonto hat die Owner-Rechte geschnitten mit den Sessions, deren
 - Out of scope: Projekt-Sharing für Menschen, Anlegen der beiden Bots, Scope nach Session oder read-only, Epic-Merge nach `main`, Deploy, Migration auf Produktivdaten
 
 **Acceptance criteria**
-Die Gherkin-Blöcke stehen wörtlich in jholze/omnigent#114 (AC-105a bis AC-035a). Keine zusätzlichen Fälle erfinden. Testnamen enthalten die AC-ID.
+Die Gherkin-Blöcke stehen wörtlich in jholze/omnigent#114 (AC-105a bis AC-035a, plus AC-112a und AC-112b). Keine weiteren Fälle erfinden. Testnamen enthalten die AC-ID.
+
+*AC-112a (FR-054, NFR-033) [NEW v0.8 2026-10-22: owner retry of a failed scoped forward wrote into a session outside the allow-list]*
+```gherkin
+Given a scoped agent account authored a thread reply whose forward_state is failed
+And the thread session's project is outside that account's allow-list
+When the account's owner calls POST /v1/chat/messages/{id}/forward
+Then the response is 404
+And no session event and no conversation item are written
+And forward_state stays failed
+```
+*AC-112b (FR-106) [NEW v0.8 2026-10-22: the start refusal had no direct test]*
+```gherkin
+Given a scoped agent account mentions an Omnigent agent in a channel whose project is outside the allow-list
+When the server handles that mention
+Then no session is created
+```
 
 **Verification**
 - Session-Start: `hindsight_diagnose` (Bank `coding-agent::omnigent`)
@@ -3198,9 +3214,18 @@ Hinweis (Stand 16.10. 23:30): Die Rohantwort aus der OKR-PM-Session liegt in `re
 | #2 | Nightly-E2E rot | nicht Teil dieser Spec; blockiert die Chat-Suite nicht, weil `team_chat_server` eigenständig ist | – |
 
 ## Changelog
+- v0.8 (2026-10-22) T-134 follow-up: AC-112a and AC-112b [NEW]. FR-054 [CHANGED]: owner retry of a scoped bot forward is 404 outside the allow-list and writes nothing. Approved by Jens.
 - v0.7 (2026-10-22) T-134 / ADR-0011: Projekt-Allowlist für Agentenkonten (FR-105…FR-111, NFR-033…NFR-035). Priorität direkt nach T-103 und T-104. Security-Review Pflicht. Epic nach `main` und Deploy nur mit OK von Jens. Anwendungsfälle: PM - FT Max nur Fishing Tackle Max, ProductOS PM Bot nur ProductOS.
 - v0.5 (2026-10-17) Spec v0.6 – Entscheidung Jens 20:11 „Bots dürfen alles, was der Owner darf.“ (ADR-0010): T-104 (FR-077 Bot-Weiterleitung bei EDIT des Owners, AC-077a neu, AC-077b; +1 h), T-105 (FR-102 Owner aktiv, AC-102a; +1 h), T-106 (FR-068 Owner-Rechtecheck statt Verbotsliste, AC-068a neu, AC-068b–e), T-107 (FR-070 ohne Allowlist, FR-101 Owner als effektiver Principal, AC-070a/b neu, AC-101a/b; +1 h), T-109 (FR-036 Bot-Start als Owner, FR-104 Kontingent, AC-036a neu, AC-036b, AC-104a/b; +1 h), T-128 (Owner-Äquivalenztests statt Allowlist-Negativtests, AC-070c/d neu, AC-070e), T-129 (AC-069c: `tools/list` = Owner-Liste), T-131 (FR-100 Must + `owner_id`, FR-103, AC-100a neu, AC-100c, AC-103a/b; +1 h); Block-Tabelle, Arbeitsweise, Coverage, AGENTS.md-Vorschlag; R1 141 h.
 - v0.4 (2026-10-17) MCP-Bot-Pfad nach Gap-Analyse PR #14 (Freigabe Jens 17.10. 19:19): neue Tasks T-125 (unread-Route, aus T-107 gelöst), T-126 (Protokollhygiene), T-127 (Struktur/Annotationen/Fehlercodes), T-128 (Allowlist-Negativtests, Untrusted, Beschreibungen), T-129 (Grok-Bot-Smoke), T-130 (Messung/Changes-Reset, aus T-119 gelöst), T-131 (MCP-Audit, `last_seen_at`); T-119 umgebaut (Rate-Limits inkl. `rate_limited`, No-Body); FR-077/AC-077a von T-109 nach T-104; Abhängigkeiten T-101/T-105 → T-003, T-109 → T-005+T-106, T-107 → +T-125/T-126, T-121 → +Bot-Pfad, T-123 → +T-129; Waves neu, Abschnitt „MCP-Bot-Pfad“; Coverage auf 04 v0.5; R1 30 Tasks / 136 h.
 - v0.3 (2026-10-16) T-115 auf interior.dev TaskSteps ausgerichtet (FR-089/090, Q-20: kein Copy-in vor Lizenzklärung); T-121 um `test_agent_steps.py`; Q-19 gelöst → D-1.
 - v0.2 (2026-10-16) Q-18 entschieden: T-108 (Outbox/Webhook) und neue T-116b nach R1.1; T-107 um Polling-Weckweg `chat_unread` (FR-088) erweitert; React 19 (#16) als Abhängigkeit von T-006/T-007/T-008; Abschnitt „Arbeitsweise“ (laufende Sessions bleiben, Hindsight `coding-agent::omnigent` + `hindsight_diagnose`); FR-085 nach T-113.
 - v0.1 (2026-10-16) Erste Fassung (intern, nicht veröffentlicht).
+
+## AC changelog
+
+| Version | Date | AC | Change | Reason | Approved by |
+|---|---|---|---|---|---|
+| 0.8 | 2026-10-22 | AC-112a | NEW. Owner retry of a failed forward by a scoped agent account returns 404 when the thread session is outside that account's allow-list, and writes nothing. `forward_state` stays `failed`. | The owner retry posted the bot text into a session the account may not reach. | Jens |
+| 0.8 | 2026-10-22 | AC-112b | NEW. A scoped mention whose channel project is outside the allow-list does not start a session. | The start path existed and had no direct test. | Jens |
+| 0.8 | 2026-10-22 | FR-054 | CHANGED. Humans and unscoped accounts retry as before. A scoped author is refused as in AC-112a. | Same hole as AC-112a. | Jens |

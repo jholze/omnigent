@@ -24,6 +24,8 @@ from omnigent.db.db_models import (
     SqlChatAgentAccount,
     SqlChatChannel,
     SqlChatMember,
+    SqlChatMessage,
+    SqlChatThread,
     SqlConversationItem,
 )
 from omnigent.db.utils import get_or_create_engine, now_epoch_us
@@ -36,6 +38,7 @@ from omnigent.server.feature_flags import FEATURES_ENV_VAR
 from omnigent.server.routes._sessions.helpers import _HostLaunchAttempt
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
+from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
@@ -51,6 +54,14 @@ from tests.server.chat_testkit import (
     headers_for,
     rpc,
     tools_call,
+)
+from tests.server.test_chat_agent_threads import (  # noqa: F401 - autouse teardown
+    MENTION,
+    _set_project_name,
+    _stop_agent_threads,
+    _system_rows,
+    _thread,
+    _wait_for_start,
 )
 from tests.server.test_mcp_agent_owner_equivalence import (
     _conversation_count,
@@ -684,3 +695,92 @@ async def test_ac_034a_account_read_list_and_update_hide_secrets(world) -> None:
         assert secret not in serialized
     for key in ("token", "token_hash", "webhook_secret"):
         assert f'"{key}"' not in serialized
+
+
+def _failed_bot_reply(world: _World, session_id: str) -> str:
+    """A bot reply with ``forward_state`` failed in an active thread on *session_id*."""
+    channel = _session_channel(world.db_uri, session_id, JENS)
+    root_id = uuid.uuid4().hex
+    reply_id = uuid.uuid4().hex
+    now = now_epoch_us()
+    with Session(get_or_create_engine(world.db_uri)) as session:
+        session.add(
+            SqlChatMessage(
+                id=root_id, channel_id=channel, author_id=JENS, created_at=now, body="root"
+            )
+        )
+        session.add(
+            SqlChatMessage(
+                id=reply_id,
+                channel_id=channel,
+                thread_root_id=root_id,
+                author_id=world.account["principal_id"],
+                author_kind="agent_account",
+                created_at=now + 1,
+                body="bot reply",
+                forward_state="failed",
+            )
+        )
+        session.add(
+            SqlChatThread(
+                root_message_id=root_id,
+                channel_id=channel,
+                reply_count=1,
+                participants="[]",
+                bot_streak=0,
+                agent_state="active",
+                session_id=session_id,
+                updated_at=now,
+            )
+        )
+        session.commit()
+    return reply_id
+
+
+def _forward_state(db_uri: str, message_id: str) -> str | None:
+    with Session(get_or_create_engine(db_uri)) as session:
+        return session.scalar(
+            select(SqlChatMessage.forward_state).where(SqlChatMessage.id == message_id)
+        )
+
+
+async def test_ac_112a_owner_retry_outside_allow_list_is_404(world) -> None:
+    outside = _failed_bot_reply(world, world.pos_session)
+    inside = _failed_bot_reply(world, world.ft_session)
+
+    refused = await world.client.post(
+        f"/v1/chat/messages/{outside}/forward", headers=headers_for(JENS)
+    )
+    control = await world.client.post(
+        f"/v1/chat/messages/{inside}/forward", headers=headers_for(JENS)
+    )
+
+    assert refused.status_code == 404, refused.text
+    assert _item_count(world.db_uri, world.pos_session) == 0
+    assert _forward_state(world.db_uri, outside) == "failed"
+    assert control.status_code != 404, control.text
+
+
+async def test_ac_112b_scoped_mention_outside_allow_list_starts_no_session(world) -> None:
+    channel = await world.client.post(
+        "/v1/chat/channels", json={"name": "productos"}, headers=headers_for(JENS)
+    )
+    assert channel.status_code == 201, channel.text
+    channel_id = channel.json()["id"]
+    _set_project_name(world.db_uri, channel_id, PRODUCT_OS)
+    SqlAlchemyChatStore(world.db_uri).add_member(channel_id, world.account["principal_id"])
+    before = _conversation_count(world.db_uri)
+
+    posted = await world.client.post(
+        f"/v1/chat/channels/{channel_id}/messages",
+        json={"body": f"{MENTION} start in ProductOS"},
+        headers=headers_for(token=world.token),
+    )
+    assert posted.status_code == 201, posted.text
+    root_id = posted.json()["id"]
+    await _wait_for_start()
+
+    thread = _thread(world.db_uri, root_id)
+    assert not thread.session_id
+    assert _conversation_count(world.db_uri) == before
+    assert [code for _body, code in _system_rows(world.db_uri, root_id)] == ["forbidden"]
