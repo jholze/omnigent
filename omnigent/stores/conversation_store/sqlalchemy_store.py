@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextlib import suppress
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
@@ -2811,6 +2811,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        root_project_ids: Collection[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -2878,6 +2879,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             can access but does NOT own — i.e. sessions shared with them
             by another user. Requires ``accessible_by`` to be set.
             ``False`` (default) disables the filter.
+        :param root_project_ids: When set, restrict to conversations whose
+            root session is filed in one of these projects. Empty matches
+            nothing. ``None`` disables the filter.
         :returns: A :class:`PagedList` of :class:`Conversation`
             objects.
         """
@@ -3045,6 +3049,20 @@ class SqlAlchemyConversationStore(ConversationStore):
                 stmt = stmt.where(
                     SqlConversation.root_conversation_id == root_conversation_id,
                 )
+            if root_project_ids is not None:
+                # Project membership lives on the root's metadata row; children
+                # follow their root.
+                filed_roots_stmt = select(SqlConversationMetadata.id).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.project_id.in_(list(root_project_ids)),
+                )
+                filed_roots: Any
+                if self._conv_engine is self._engine:
+                    filed_roots = filed_roots_stmt
+                else:
+                    with self._session("list_conversations") as meta_sess:
+                        filed_roots = list(meta_sess.execute(filed_roots_stmt).scalars())
+                stmt = stmt.where(SqlConversation.root_conversation_id.in_(filed_roots))
             if has_agent_id is True:
                 stmt = stmt.where(SqlConversation.agent_id.is_not(None))
             if agent_name is not None:

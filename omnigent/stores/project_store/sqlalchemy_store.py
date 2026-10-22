@@ -313,6 +313,13 @@ class SqlAlchemyProjectStore(ProjectStore):
             if row is None or row.user_id != user_id:
                 return False
             session.delete(row)
+            # Agent allow-lists drop the project in the same commit; an emptied
+            # list fails closed rather than becoming unscoped.
+            from omnigent.stores.chat_store.sqlalchemy_store import (
+                remove_project_from_agent_scopes,
+            )
+
+            remove_project_from_agent_scopes(session, project_id)
             return True
 
         return run_write_transaction(self._session_immediate, "delete_project", write)

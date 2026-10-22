@@ -865,6 +865,27 @@ async def _post_first_message(request: Any, session_id: str, text: str) -> None:
         raise _StartFailure("internal")
 
 
+def _bot_project_allowed(chat_store: ChatStore, account_id: str, project_id: str) -> bool:
+    """Whether a bot may start a session in *project_id* (ADR-0011).
+
+    An unscoped account follows its owner. A scoped account needs the project
+    in its allow-list; a missing or revoked account is refused.
+    """
+    account = chat_store.get_agent_account_by_principal(f"agent:{account_id}")
+    if account is None:
+        return False
+    project_ids = getattr(account, "project_ids", None)
+    if project_ids is None or project_id in project_ids:
+        return True
+    from omnigent.server.agent_project_scope import ProjectScope, record_scope_denial
+
+    record_scope_denial(
+        "project_out_of_scope",
+        ProjectScope(account_id=account.id, project_ids=frozenset(project_ids)),
+    )
+    return False
+
+
 def _request_as_owner(request: Any) -> Any:
     """Clone the request so in-process auth acts as the bot's owner.
 
@@ -912,6 +933,10 @@ async def _start_impl(
     project = _resolve_project(project_store, chat_store, caller, channel)
     if project is None:
         raise _StartFailure("no_project")
+    if started_by is not None and not await asyncio.to_thread(
+        _bot_project_allowed, chat_store, started_by, project.id
+    ):
+        raise _StartFailure("forbidden")
     handles = _agent_handle_mentions(message.body)
     if handles and not await asyncio.to_thread(_visible_handle, request, caller, handles):
         raise _StartFailure("agent_not_found")

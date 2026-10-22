@@ -22,6 +22,7 @@ from fastapi import APIRouter, Request
 
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server.agent_project_scope import current_project_scope, record_scope_denial
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes.sessions import announce_projects_changed
@@ -98,10 +99,15 @@ def create_projects_router(
         :raises OmnigentError: 401 if unauthenticated in multi-user mode.
         """
         user_id = require_user(request, auth_provider)
+        project_scope = current_project_scope()
 
         def read_projects() -> list[Project]:
+            owned = project_store.list(user_id=user_id)
+            if project_scope is not None:
+                # A scoped agent account sees only its allowed projects.
+                owned = [p for p in owned if p.id in project_scope.project_ids]
             return apply_project_order(
-                project_store.list(user_id=user_id),
+                owned,
                 project_store.get_order(user_id=user_id),
                 project_id=lambda p: p.id,
                 project_name=lambda p: p.name,
@@ -143,6 +149,10 @@ def create_projects_router(
             owned by the caller.
         """
         user_id = require_user(request, auth_provider)
+        project_scope = current_project_scope()
+        if project_scope is not None and project_id not in project_scope.project_ids:
+            record_scope_denial("project_out_of_scope", project_scope)
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         project = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
         if project is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)

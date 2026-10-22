@@ -796,7 +796,8 @@ def _agent_account_principal(request: HTTPConnection) -> str | None | object:
     From outside the process it authenticates only on ``/mcp`` and
     ``/v1/chat/*``. An in-process call marked on the ASGI scope (never via a
     header) authenticates on any path and returns the owner as the effective
-    principal. The actor and owner are re-read from the account row on every
+    principal, narrowed by the account's project allow-list when it has one.
+    The actor, owner, and allow-list are re-read from the account row on every
     call. A deactivated or deleted owner, or an unknown or revoked token,
     is ``None`` (401).
     """
@@ -831,6 +832,10 @@ def _agent_account_principal(request: HTTPConnection) -> str | None | object:
     request.scope["mcp_actor"] = account.principal_id
     request.scope["mcp_owner_id"] = account.owner_id
     request.scope["mcp_account_id"] = account.id
+    # ADR-0011: a non-NULL allow-list narrows the owner's rights below. It is
+    # enforced per request by AgentProjectScopeMiddleware and the session checks.
+    project_ids = getattr(account, "project_ids", None)
+    request.scope["mcp_project_scope"] = tuple(project_ids) if project_ids is not None else None
     if inprocess:
         request.scope["mcp_effective_principal"] = account.owner_id
         return account.owner_id

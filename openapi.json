@@ -59,6 +59,20 @@
             "title": "Handle",
             "type": "string"
           },
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Ids"
+          },
           "webhook_url": {
             "anyOf": [
               {
@@ -136,6 +150,20 @@
             "title": "Principal Id",
             "type": "string"
           },
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Ids"
+          },
           "secret_version": {
             "format": "int64",
             "title": "Secret Version",
@@ -179,6 +207,30 @@
           "webhook_secret"
         ],
         "title": "AgentAccountRotatedResponse",
+        "type": "object"
+      },
+      "AgentAccountScopeBody": {
+        "description": "`PATCH /v1/chat/agent-accounts/{id}`.\n\n`project_ids` is required. A list scopes the account; an explicit\n`null` removes the scope; an empty list is 400.",
+        "properties": {
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Ids"
+          }
+        },
+        "required": [
+          "project_ids"
+        ],
+        "title": "AgentAccountScopeBody",
         "type": "object"
       },
       "AgentConfigObject": {
@@ -11746,6 +11798,57 @@
           }
         },
         "summary": "Delete Agent Account",
+        "tags": [
+          "chat"
+        ]
+      },
+      "patch": {
+        "description": "Replace the project allow-list (FR-111). Every refusal leaves it unchanged.\n\n`[]` is 400. A project the caller does not own is 404. `null`\nreturns the account to unscoped owner rights.",
+        "operationId": "update_agent_account_scope_v1_chat_agent_accounts__account_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAccountScopeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Agent Account Scope",
         "tags": [
           "chat"
         ]

@@ -2239,6 +2239,11 @@ def create_app(
     # caller for SandboxHostLauncher.keep_alive); no-op without a sandbox config.
     managed_host_keepalive.configure(conversation_store, host_store, sandbox_config)
     pending_elicitations.set_count_persist_hook(session_live_state.persist_pending_count)
+    # Project-scoped agent accounts (ADR-0011). Registered before the metrics
+    # middleware so it runs inside it and denials land in the request audit row.
+    from omnigent.server.agent_project_scope import AgentProjectScopeMiddleware
+
+    app.add_middleware(AgentProjectScopeMiddleware, conversation_store=conversation_store)
 
     @app.middleware("http")
     async def _record_server_metrics(
