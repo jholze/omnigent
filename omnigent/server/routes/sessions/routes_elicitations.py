@@ -132,12 +132,17 @@ def register_elicitations_routes(
             if conv is None:
                 raise _session_not_found()
         _resolve_data = {"elicitation_id": elicitation_id, **body.model_dump(exclude_none=True)}
+        # The EDIT gate above ran as the effective principal (the owner for an
+        # in-process bot call). The card still names who decided, so an agent
+        # answer records the bot principal rather than its owner.
+        actor = request.scope.get("mcp_actor")
+        decided_by = actor if isinstance(actor, str) and actor.startswith("agent:") else user_id
         await _resolve_elicitation(
             session_id,
             _resolve_data,
             runner_router,
             conversation_store,
-            decided_by=user_id,
+            decided_by=decided_by,
         )
         # Apply any policy writes deferred by the relay tool-call ASK gate
         # (e.g. a cost-budget checkpoint) now that the verdict is in.

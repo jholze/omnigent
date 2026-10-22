@@ -365,6 +365,13 @@ function MentionList({
   );
 }
 
+/** Owner once: a bootstrap name may already end with ` (${owner})`. */
+function agentAccountPickerLabel(label: string, owner: string | null): string {
+  if (!owner) return label;
+  const suffix = ` (${owner})`;
+  return label.endsWith(suffix) ? label : `${label}${suffix}`;
+}
+
 function MentionOptionLabel({ candidate }: { candidate: MentionCandidate }) {
   if (candidate.kind === "omnigent_agent") {
     return (
@@ -380,7 +387,7 @@ function MentionOptionLabel({ candidate }: { candidate: MentionCandidate }) {
     return (
       <>
         <span className="min-w-0 flex-1 truncate">
-          {candidate.owner ? `${candidate.label} (${candidate.owner})` : candidate.label}
+          {agentAccountPickerLabel(candidate.label, candidate.owner)}
         </span>
         <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-border px-1 text-xs text-foreground">
           <BotIcon className="size-3" aria-hidden="true" />

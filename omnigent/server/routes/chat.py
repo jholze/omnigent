@@ -31,6 +31,7 @@ from omnigent.server.chat_access import (
     require_post,
     require_read,
 )
+from omnigent.server.chat_agent_threads import _human_label
 from omnigent.server.chat_rate_limit import consume_agent_request, consume_channel_post
 from omnigent.server.chat_realtime import publish_message_created, publish_read_updated
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
@@ -615,7 +616,7 @@ def create_chat_router(
             DirectoryEntry(
                 id=account.principal_id,
                 kind="agent_account",
-                display_name=account.display_name,
+                display_name=f"{account.display_name} ({_human_label(account.owner_id)})",
                 handle=account.handle,
                 owner_id=account.owner_id,
             )
