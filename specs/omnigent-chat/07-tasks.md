@@ -1,4 +1,4 @@
-# Tasks: Omnigent Chat – R0, R1 (+ R1.1) · aus `04-requirements.md` v0.6 / `05-design.md` v0.6 · Tasks v0.5 (2026-10-17)
+# Tasks: Omnigent Chat – R0, R1 (+ R1.1) · aus `04-requirements.md` v0.7 / `05-design.md` v0.6 · Tasks v0.6 (2026-10-20)
 
 Status: Entwurf zur Freigabe durch Jens. Es werden **keine** Issues angelegt, bevor Jens zustimmt (Skill `spec-to-agent-tasks`, Schritt 9). Labels je Task: `spec:omnigent-chat`, `release:R0|R1|R1.1`, `type:feature|chore|test`, `agent-ready`.
 
@@ -33,9 +33,11 @@ Fett = MCP-Bot-Pfad (Release R1, zeitlich vorgezogen; reine Server-Arbeit, kolli
 | R1 | 12 | T-123 | Sa 24.10. (Launch) |
 | R1.1 | 13 | T-108 [P], T-116b [P] | nach Launch (R1.1) |
 
+v0.7: T-007b und T-133 hängen an der Demo (nach T-007 bzw. am Seed aus PR #49). T-132 ist R1 und nicht in die Terminzeilen gezogen [OFFEN Q-36].
+
 **Aufwand (Schätzung, Agent-Stunden inkl. Review):** R0 82 h · R1 141 h (v0.4: 136 h; v0.6-Spec: +1 h je T-104, T-105, T-107, T-109, T-131; v0.3: 118 h; +21 h neue Tasks T-125…T-131, −2 h T-119, −1 h T-107) · R1.1 11 h. Must-Anteil R0+R1 nach Aufwand weiterhin ≈ 80 % (v0.4 nicht exakt neu gerechnet: neue Must-FRs FR-091/092/095–099 ≈ 15 h, neue Should-FRs FR-093/094/100 ≈ 5 h). Liegt über dem 60-%-Richtwert; Jens hat den Umfang mit Q-18 und am 17.10. 19:19 bewusst so entschieden. Puffer schafft nur die Cut-Line (05 §Rollout; v0.6: FR-094, FR-104, FR-093; FR-100 ist jetzt Must und nicht mehr streichbar).
 
-Anzahl: R0 10 Tasks · R1 30 Tasks (v0.3: 23; neu T-125…T-131) · R1.1 2 Tasks · R2 Epic-Skizze.
+Anzahl: R0 12 Tasks (v0.5: 10; neu T-007b, T-133) · R1 31 Tasks (v0.5: 30; neu T-132) · R1.1 2 Tasks · R2 Epic-Skizze. v0.7 Aufwand grob +8 h T-007b, +3 h T-133, +8 h T-132; der 80-%-Must-Anteil ist nicht neu gerechnet.
 
 ## MCP-Bot-Pfad (Priorität direkt nach React 19)
 Ziel: Bevor die Chat-UI fertig ist, kann ein realer Grok Bot über `/mcp` lesen, schreiben und (v0.6) mit den Rechten seines Owners arbeiten (maschinenlesbare Grenzen, Inhalte als untrusted markiert, jede Aktion mit Bot + Owner auditiert), nachgewiesen durch den Smoke-Test T-129. Der Block ist rein serverseitig; Querabhängigkeiten zu R0 nur über T-003 (REST-Basis) und T-005 (Orchestrator, für T-109). T-121 (R1-Playwright Agenten/Bots) und T-123 (Launch) hängen von ihm ab.
@@ -558,11 +560,11 @@ Then erscheint sie genau einmal
 
 ### T-005: Agent-Thread-Orchestrator: Session als Aufrufer starten, READ-Grants, Kontext, Spiegeln, Start-Timeout
 **Release:** R0   **Phase / wave:** Story ST-3.1.1/3.2.1 / 4   **Parallel:** [P] ja   **Depends on:** T-003   **Rolle:** coder_grok (modulübergreifend) · reviewer   **Aufwand:** 10 h
-**Implements:** FR-033, FR-034, FR-035, FR-037, FR-038, FR-046, FR-087, NFR-004, NFR-020, NFR-028; ACs: AC-033a, AC-033b, AC-034a, AC-034b, AC-035a, AC-035b, AC-037a, AC-038a, AC-046a, AC-046b, AC-087a
+**Implements:** FR-033, FR-034, FR-035, FR-037, FR-038, FR-046, FR-087, NFR-004, NFR-020, NFR-028; ACs: AC-033a, AC-033b, AC-033c, AC-034a, AC-034b, AC-035a, AC-035b, AC-037a, AC-038a, AC-046a, AC-046b, AC-087a
 **Labels:** `spec:omnigent-chat`, `release:R0`, `type:feature`, `agent-ready`
 
 **Context**
-Kern von G-2 (ADR-0005). Bei `<@omnigent_agent:agent>` von einem Menschen: Projekt nach A-8 auflösen (Channel-`project_name` → Projekt des Aufrufers, sonst `chat_user_prefs.default_project_id`), `resolve_project_session_create` (`omnigent/server/routes/_session_create_validation.py:39`) + `_create_session_from_existing_agent` (`omnigent/server/routes/_sessions/orchestration.py:10365`) mit `user_id=Aufrufer`; `host_id` nur wenn in der Projekt-Config gesetzt. Label `omnigent.chat.v1`. READ-Grants über den Permission-Store, SharingMode beachten. Hook in `_publish_status` (`omnigent/server/routes/_sessions/helpers.py`, dort hängt PR #15 seinen Hook an) → bei `idle` letzten Assistant-Text via `summary_lookup` (`omnigent/server/manager_webhook_context.py`, PR #15) als Thread-Nachricht spiegeln (max 32 000 Zeichen, idempotent über `session_ref`/`response_ref`). Threads in `starting` > 120 s → `start_failed/timeout`.
+Kern von G-2 (ADR-0005). Bei `<@omnigent_agent:agent>` von einem Menschen: Projekt nach A-8 auflösen (Channel-`project_name` → Projekt des Aufrufers, sonst `chat_user_prefs.default_project_id`), `resolve_project_session_create` (`omnigent/server/routes/_session_create_validation.py:39`) + `_create_session_from_existing_agent` (`omnigent/server/routes/_sessions/orchestration.py:10365`) mit `user_id=Aufrufer`; `host_id` nur wenn in der Projekt-Config gesetzt. Label `omnigent.chat.v1`. READ-Grants über den Permission-Store, SharingMode beachten. Hook in `_publish_status` (`omnigent/server/routes/_sessions/helpers.py`, dort hängt PR #15 seinen Hook an) → bei `idle` letzten Assistant-Text via `summary_lookup` (`omnigent/server/manager_webhook_context.py`, PR #15) als Thread-Nachricht spiegeln (max 32 000 Zeichen, idempotent über `session_ref`/`response_ref`). Threads in `starting` > 120 s → `start_failed/timeout`. v0.7 Demo: nennt das Projekt ein lebendes `host_id` des Aufrufers, darf der Start nicht als `internal` / „Agent-Start fehlgeschlagen (internal)“ enden (AC-033c). Der Pfad reicht `host_id` heute schon durch (`chat_agent_threads.py`); der Fehler ist eine nicht zugeordnete Exception.
 
 **Requirements (zitiert)**
 - FR-033 (Must, R0): When a human posts a message containing an `<@omnigent_agent:HANDLE>` token in a Channel or DM (top-level or in a Thread without active agent), the Server shall create a session as the caller via the existing create path, send the Thread context as first `message` event, and link the Thread (`chat_threads.session_id`, `agent_state=active`).
@@ -592,6 +594,13 @@ Then entsteht ein Thread an der Nachricht mit Chip "startet…" oder "arbeitet",
 Given der Thread von m1 hat bereits agent_state "active"
 When Anna darin erneut den Agenten erwähnt
 Then wird keine zweite Session angelegt
+```
+*AC-033c (FR-033, A-8)*
+```gherkin
+Given Annas Projekt "billing" nennt host_id eines Hosts, der Anna gehört und live ist
+When Anna in "#billing" "<@omnigent_agent:agent> bitte Tests fixen" sendet
+Then entsteht die Session mit dieser host_id
+And der Thread zeigt nicht "Agent-Start fehlgeschlagen (internal)"
 ```
 *AC-034a (FR-034)*
 ```gherkin
@@ -735,6 +744,99 @@ Then zeigt die Nachricht "nicht gesendet" mit "erneut senden", und nach Erholung
 - [ ] Keine Änderungen außerhalb des Scopes; keine Nachrichtentexte in Logs/Frames
 - [ ] Spec/Traceability aktualisiert, falls Verhalten abweicht (melden, nicht selbst entscheiden)
 - [ ] Lokales Review (Claude Code + lokale Modelle) ohne offene Major-Befunde
+
+### T-007b: Web: Demo-Feedback an Sidebar, Thread-Leiste, DMs und Lesbarkeit
+**Release:** R0   **Phase / wave:** nach T-007/T-008, Demo 21.10.   **Parallel:** nein   **Depends on:** T-007, T-008   **Rolle:** coder_grok · ux · reviewer   **Aufwand:** 8 h
+**Implements:** FR-105, FR-106, FR-107, FR-108, FR-109, FR-044 (AC-044d/e), FR-008/FR-009 (AC-009c), NFR-032; ACs: AC-105a, AC-106a, AC-107a, AC-044d, AC-108a, AC-009c, AC-044e, AC-109a
+**Labels:** `spec:omnigent-chat`, `release:R0`, `type:feature`, `agent-ready` · **Status:** neu (Demo-Defekte)
+
+**Context**
+Demo-Feedback Jens 20.10.2026 an der gebauten Chat-Oberfläche. Acht ACs, an der Obergrenze, aber eine Fläche (die Ansicht, die Jens in der Demo gesehen hat). Nicht gesplittet nach T-007c: Channel-Verwaltung, Host-Start und Demo-Seed liegen auf T-132, T-005 und T-133. Der Ungelesen-Zähler ist FR-008/FR-009. AC-009c verlangt, dass er in der Sidebar ohne Reload steigt. Liegt der Badge aus T-111 noch nicht, zeigt T-007b denselben `unread_count`; T-111 baut keinen zweiten Zähler daneben. Der Status-Chip bleibt in T-008; AC-044d/e sind die Demo-Defekte an Kopfzeile und Aktualisierung.
+
+**Requirements (zitiert)**
+- FR-105 (Must, R0, adapt): When a DM is listed or opened, the Web-App shall show the other participants' display names in the sidebar and in the header, and shall show the DM's members; it shall not show only „Direktnachricht“.
+- FR-106 (Must, R0, adapt): When the user activates the thread pane's close control, the Web-App shall close the pane and leave the channel open without the thread.
+- FR-107 (Must, R0, new): While an agent request that needs an answer is unresolved, the Web-App shall keep it visible in the channel or re-surface it until it is resolved, including after the message list scrolls.
+- FR-108 (Must, R0, adapt): The chat UI shall render message bodies, the channel header and sidebar entries at least at the interface font step (`text-ui`) and with looser spacing than `text-xs` and the desktop sidebar padding `md:py-1.5`, at both viewports of NFR-032.
+- FR-109 (Must, R0, exists): Where an Appearance theme is selected (mode light/dark/system and the color theme), the chat UI shall follow it through the existing semantic tokens, including a switch without reload.
+- FR-044, Zusatz v0.7: die Kopfzeile zeigt nicht das alleinstehende Wort „fertig“; Chip ohne Reload (AC-044d, AC-044e). Wortlaut [OFFEN Q-34].
+
+**Scope**
+- `web/src/chat/ChatSidebar.tsx`, `ChatPage.tsx`, `ThreadPane.tsx`, `ChannelView.tsx`, `MessageList.tsx`, `agent/AgentStatusChip.tsx` (adapt)
+- Out of scope: kein i18n (C-12, Q-35); keine Channel-Verwaltung (T-132); kein zweiter Zähler neben T-111; Host-Start (T-005).
+
+**Acceptance criteria**
+*AC-105a (FR-105) – E2E*
+```gherkin
+When Anna eine DM mit Bob anlegt und sie öffnet
+Then steht in der Sidebar und in der Kopfzeile Bobs Anzeigename, nicht nur "Direktnachricht"
+And Anna sieht die Mitglieder dieser DM mit Anzeigenamen
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-106a (FR-106) – E2E*
+```gherkin
+Given Anna hat einen Thread in der Seitenleiste offen
+When sie das X „Thread schließen“ aktiviert
+Then ist die Thread-Leiste zu und der Channel bleibt offen
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-107a (FR-107) – E2E*
+```gherkin
+Given im Channel liegt eine offene Agent-Anfrage, die eine Antwort braucht
+When Anna in der Nachrichtenliste so weit scrollt, dass die ursprüngliche Karte aus dem Blick gerät
+Then bleibt die Anfrage sichtbar oder wird erneut eingeblendet, bis sie beantwortet ist
+And nach dem Beantworten verschwindet diese Hervorhebung
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-044d (FR-044) – E2E*
+```gherkin
+Given Anna hat einen Agent-Thread offen und die Session ist idle
+Then zeigt die Kopfzeile nicht das alleinstehende Wort "fertig"
+And entweder nennt das Label, wer fertig ist, oder der Idle-Chip fehlt
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-108a (FR-108) – E2E*
+```gherkin
+Given die Interface-Schrift ist die Appearance-Voreinstellung
+When Anna einen Channel mit Nachrichten öffnet
+Then sind Nachrichtentext, Kopfzeile und Sidebar-Einträge mindestens auf der Stufe text-ui
+And der Abstand der Sidebar-Zeilen ist größer als die heutige Desktop-Polsterung md:py-1.5
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-009c (FR-008, FR-009) – E2E*
+```gherkin
+Given Anna hat die Sidebar offen und "#billing" zeigt einen Ungelesen-Zähler
+When Jens in "#billing" eine Nachricht schreibt und Anna nicht neu lädt
+Then steigt der Zähler in der Sidebar, ohne dass Anna die Seite neu lädt
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-044e (FR-044, FR-047) – E2E*
+```gherkin
+Given Anna hat den Channel offen und der Chip zeigt "arbeitet"
+When die Session nach waiting mit einer offenen Freigabe wechselt und Anna nicht neu lädt
+Then zeigt der Chip in der Kopfzeile und an der Thread-Wurzel binnen 1 s bzw. 5 s "braucht Antwort"
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+*AC-109a (FR-109) – E2E*
+```gherkin
+Given Anna stellt unter Einstellungen > Darstellung das Thema auf Dunkel und eine Farbpalette, die nicht die Voreinstellung ist
+When sie /chat öffnet
+Then nutzen Sidebar, Kopfzeile, Nachrichten und Composer dieselben semantischen Flächen- und Schriftfarben wie die übrige Shell
+When sie ohne Neuladen auf Hell wechselt
+Then wechseln dieselben Chat-Flächen mit der Shell
+And dasselbe gilt bei 1280×800 und bei 390×844
+```
+
+**Verification**
+- Session-Start: `hindsight_diagnose` (Bank `coding-agent::omnigent`)
+- Run: `pnpm --filter web run test -- src/chat` → grün
+- E2E der neuen ACs bei beiden Viewports aus NFR-032
+
+**Definition of done**
+- [ ] ACs laufen als automatisierte Tests grün (Testname enthält AC-ID)
+- [ ] UX-Review-Notiz gegen `docs/ux/chat-review-checklist.md` im PR
+- [ ] Keine Änderungen außerhalb des Scopes
+- [ ] Lokales Review ohne offene Major-Befunde
 
 ### T-008: Web: Agent-Thread-Ansicht mit Status-Chip, Live-Streaming und Freigabe-Karten
 **Release:** R0   **Phase / wave:** Story ST-3.2.1/4.1.1 / 5   **Parallel:** nein   **Depends on:** T-005, T-007, #16 React 19 gemergt   **Rolle:** coder_grok · ux · reviewer   **Aufwand:** 10 h
@@ -973,6 +1075,37 @@ Then zeigt die Nachricht "nicht gesendet" mit "erneut senden", und nach Erholung
 - [ ] Keine Änderungen außerhalb des Scopes; keine Nachrichtentexte in Logs/Frames
 - [ ] Spec/Traceability aktualisiert, falls Verhalten abweicht (melden, nicht selbst entscheiden)
 - [ ] Lokales Review (Claude Code + lokale Modelle) ohne offene Major-Befunde
+
+### T-133: Chore: Demo-Seed mit laufenden Projekten und Agenten (PR #49)
+**Release:** R0   **Phase / wave:** Demo 21.10.   **Parallel:** [P] ja   **Depends on:** T-003, T-005   **Rolle:** coder_grok · reviewer   **Aufwand:** 3 h
+**Implements:** C-13; ACs: AC-133a, AC-133b
+**Labels:** `spec:omnigent-chat`, `release:R0`, `type:chore`, `agent-ready` · **Status:** neu
+
+**Context**
+In `07-tasks.md` gibt es kein Demo-Seed-Ticket. PR #49 (`feat/team-chat-demo-seed`, offen) legt `scripts/seed_team_chat_demo.py` an; auf `epic/team-chat` liegt das Skript noch nicht. Dieser Chore erweitert dieses Seed: aktive Demo-Projekte mit laufenden Sessions, lebende Agenten in Channels. Opus ist für Projekt-Sessions erlaubt, Chat-Agenten nutzen Haiku oder Sonnet. [ANNAHME A-35] Das ist Seed-Konfiguration, keine Modellpolitik des Produkts. T-004 bleibt das Test-Fixture und ist nicht dieses Seed.
+
+**Acceptance criteria**
+*AC-133a (C-13)*
+```gherkin
+Given ein leerer Accounts-Server und das Demo-Seed aus PR #49
+When das Seed läuft
+Then gibt es aktive Demo-Projekte mit laufenden Sessions und in den Channels lebende Agenten
+And Projekt-Sessions dürfen Opus nutzen
+And Chat-Agenten nutzen Haiku oder Sonnet
+```
+*AC-133b (C-13)*
+```gherkin
+When das Seed ein zweites Mal auf derselben Instanz läuft
+Then legt es dieselben Channels und Sessions nicht doppelt an
+```
+
+**Verification**
+- Das Skript zweimal gegen eine wegwerfbare Instanz; zweiter Lauf ohne Doppelte
+- Keine Produkt-UI in diesem Ticket
+
+**Definition of done**
+- [ ] AC-133a/b sind am Skript nachvollziehbar
+- [ ] Keine Modellregel im Produktcode
 
 ## Tasks R1 – Launch (Sa/So 24./25.10.2026)
 
@@ -2367,7 +2500,7 @@ Then ist agent_state "dismissed", der Chip zeigt "entlassen" und Annas nächste 
 ```gherkin
 Given die Session läuft
 When Anna "/interrupt" sendet
-Then wird ein Event type "interrupt" gesendet und der Chip wechselt binnen 1 s auf "fertig"
+Then wird ein Event type "interrupt" gesendet und der Chip wechselt binnen 1 s in den Idle-Zustand, ohne das alleinstehende Wort "fertig" (AC-044d)
 ```
 *AC-049b (FR-049)*
 ```gherkin
@@ -2754,7 +2887,7 @@ Then zeigen "Tests lesen" und "Fix schreiben" ein Häkchen mit Dauer (z. B. "3.4
 ```gherkin
 Given die Session läuft
 When Anna "/interrupt" sendet
-Then wird ein Event type "interrupt" gesendet und der Chip wechselt binnen 1 s auf "fertig"
+Then wird ein Event type "interrupt" gesendet und der Chip wechselt binnen 1 s in den Idle-Zustand, ohne das alleinstehende Wort "fertig" (AC-044d)
 ```
 *AC-050a (FR-050) – E2E*
 ```gherkin
@@ -2955,6 +3088,66 @@ Then zeigt Jens' Einstellungsseite "Webhook fehlerhaft" und "Erneut zustellen" s
 - [ ] Keine Änderungen außerhalb des Scopes; keine Nachrichtentexte in Logs/Frames
 - [ ] Spec/Traceability aktualisiert, falls Verhalten abweicht (melden, nicht selbst entscheiden)
 - [ ] Lokales Review (Claude Code + lokale Modelle) ohne offene Major-Befunde
+### T-132: Web und API: öffentliche Channels anlegen, benennen, schließen, einstellen, Mitglieder
+**Release:** R1   **Phase / wave:** nicht terminiert [OFFEN Q-36]   **Parallel:** [P] ja   **Depends on:** T-003, T-007   **Rolle:** coder_grok · reviewer   **Aufwand:** 8 h
+**Implements:** FR-110; ACs: AC-110a, AC-110b, AC-110c, AC-110d, AC-110e
+**Labels:** `spec:omnigent-chat`, `release:R1`, `type:feature`, `agent-ready` · **Status:** neu
+
+**Context**
+Demo-Feedback: Channel-Verwaltung fehlt. Befund, was schon da ist und kein neues Ticket braucht: FR-005 legt einen öffentlichen Channel per API an (Should, R0, T-003), FR-006 ist join/leave (T-003), das Design hat `PATCH` für `topic`/`project_name` und die Spalte `archived_at`, `GET /v1/chat/channels/{id}/members` existiert. Eine Route zum Ändern, Schließen oder Mitglieder-Verwalten und eine Oberfläche dafür gibt es nicht. ST-6.1.2 / E-R2-4 bleibt bei privaten Channels und wird hier nicht vorgezogen [OFFEN Q-32]. Berechtigungen nicht entscheiden: Anlegen Q-16, alles andere Q-29. Schließen = `archived_at` [ANNAHME A-36], Bestätigung und `#general` [OFFEN Q-30]. Weitere Einstellungen [OFFEN Q-31].
+
+**Requirements (zitiert)**
+- FR-110 (Should, R1, new): The Web-App shall let a permitted human create a public channel, edit its name and topic, archive it, change its channel settings (at least topic and `project_name`) and add or remove members.
+
+**Scope**
+- `omnigent/server/routes/chat.py`, Chat-Store (adapt: Ändern, Archiv, Mitglieder)
+- `web/src/chat/` (new: Oberfläche dafür)
+- Out of scope: private Channels (E-R2-4); keine Entscheidung zu Q-16/Q-29/Q-30/Q-31/Q-32.
+
+**Acceptance criteria**
+*AC-110a (FR-110) – E2E*
+```gherkin
+Given die noch offene Regel Q-16 lässt Anna Channels anlegen
+When Anna aus der Chat-Oberfläche einen öffentlichen Channel "demo-feedback" anlegt
+Then erscheint "#demo-feedback" in ihrer Sidebar und sie ist Mitglied
+```
+*AC-110b (FR-110) – E2E*
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna den Channel bearbeiten
+When Anna Name und Thema von "#demo-feedback" ändert
+Then zeigen Sidebar und Kopfzeile den neuen Namen und das neue Thema
+```
+*AC-110c (FR-110) – E2E*
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna "#demo-feedback" schließen
+When Anna den Channel schließt
+Then verschwindet er aus der aktiven Sidebar und ein neuer Post wird nicht gespeichert (409)
+And ob "#general" geschlossen werden darf, bleibt [OFFEN Q-30]
+```
+*AC-110d (FR-110)*
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna die Channel-Einstellungen ändern
+When Anna topic und project_name von "#demo-feedback" speichert
+Then liefert das nächste Lesen des Channels beide Werte
+And welche weiteren Einstellungen es gibt, bleibt [OFFEN Q-31]
+```
+*AC-110e (FR-110) – E2E*
+```gherkin
+Given die noch offene Regel Q-29 lässt Anna Mitglieder von "#demo-feedback" verwalten
+When Anna Bob hinzufügt und später wieder entfernt
+Then sieht sie Bob mit Anzeigenamen in der Mitgliederliste und nach dem Entfernen nicht mehr
+And Bob sieht den Channel nach dem Hinzufügen in der Sidebar und nach dem Entfernen nicht mehr
+```
+
+**Verification**
+- pytest für Archiv und Mitglieder; Vitest/Playwright für die Oberfläche
+- Offene Fragen im PR wiederholen, nicht beantworten
+
+**Definition of done**
+- [ ] ACs grün, soweit die offene Berechtigung im Test gesetzt ist
+- [ ] Q-29…Q-32 stehen unverändert offen
+- [ ] UX-Review-Notiz, sobald die Oberfläche gebaut wird
+
 ## R2 – Epic-Skizze (keine Tasks, eigener Spec-Durchlauf vor Start)
 | Epic | Stories | Inhalt | Abhängigkeiten |
 |---|---|---|---|
@@ -2967,7 +3160,7 @@ Then zeigt Jens' Einstellungsseite "Webhook fehlerhaft" und "Erneut zustellen" s
 | E-R2-7 Mehr-Instanz-Betrieb | ST-5.4.1, ST-5.4.2 | Bus statt In-Process (C-2) | – |
 
 ## Coverage
-Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede AC aus `04-requirements.md` v0.6 ist mindestens einem Task zugeordnet. Lücken: keine.
+Automatisch geprüft (v0.6, 2026-10-20): jede FR (R0/R1/R1.1), jede NFR und jede AC aus `04-requirements.md` v0.7 ist mindestens einem Task zugeordnet. AC-133a/b hängen an C-13, nicht an einer FR. Lücken: keine.
 
 | FR | Prio | Rel | Tasks |
 |---|---|---|---|
@@ -2978,8 +3171,8 @@ Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede
 | FR-005 | Should | R0 | T-003 |
 | FR-006 | Must | R0 | T-003 |
 | FR-007 | Must | R1 | T-101, T-125 |
-| FR-008 | Must | R1 | T-101 |
-| FR-009 | Must | R1 | T-101 |
+| FR-008 | Must | R1 | T-101, T-007b |
+| FR-009 | Must | R1 | T-101, T-007b |
 | FR-010 | Must | R1 | T-112 |
 | FR-011 | Should | R1 | T-112 |
 | FR-012 | Should | R1 | T-112 |
@@ -3014,10 +3207,10 @@ Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede
 | FR-041 | Must | R1 | T-104 |
 | FR-042 | Must | R1 | T-104 |
 | FR-043 | Should | R1 | T-104 |
-| FR-044 | Must | R0 | T-008 |
+| FR-044 | Must | R0 | T-008, T-007b |
 | FR-045 | Must | R0 | T-008 |
 | FR-046 | Must | R0 | T-005 |
-| FR-047 | Must | R0 | T-008 |
+| FR-047 | Must | R0 | T-008, T-007b |
 | FR-048 | Should | R1 | T-115 |
 | FR-049 | Must | R1 | T-114 |
 | FR-050 | Must | R1 | T-114 |
@@ -3075,6 +3268,12 @@ Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede
 | FR-102 | Must | R1 | T-105 |
 | FR-103 | Must | R1 | T-131 |
 | FR-104 | Should | R1 | T-109 |
+| FR-105 | Must | R0 | T-007b |
+| FR-106 | Must | R0 | T-007b |
+| FR-107 | Must | R0 | T-007b |
+| FR-108 | Must | R0 | T-007b |
+| FR-109 | Must | R0 | T-007b |
+| FR-110 | Should | R1 | T-132 |
 
 | NFR | Tasks |
 |---|---|
@@ -3109,6 +3308,7 @@ Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede
 | NFR-029 | T-109, T-119 |
 | NFR-030 | T-007, T-114, T-122 |
 | NFR-031 | T-126, T-129 |
+| NFR-032 | T-007b |
 
 AC → Task: jede AC ist im Abschnitt „Acceptance criteria“ des zuständigen Tasks wörtlich zitiert; E2E-markierte ACs zusätzlich in T-009 (R0), T-120 (R1 Menschen) oder T-121 (R1 Agenten/Bots).
 
@@ -3145,6 +3345,7 @@ Hinweis (Stand 16.10. 23:30): Die Rohantwort aus der OKR-PM-Session liegt in `re
 | #2 | Nightly-E2E rot | nicht Teil dieser Spec; blockiert die Chat-Suite nicht, weil `team_chat_server` eigenständig ist | – |
 
 ## Changelog
+- v0.6 (2026-10-20) Spec v0.7 – Demo-Feedback Jens 20.10., erster Schnitt. Neu: T-007b (8 ACs, nicht nach T-007c gesplittet: eine Demo-Fläche; Channel-Verwaltung, Host-Start und Seed liegen woanders), T-132 (FR-110, ein Ticket, Berechtigungen [OFFEN]), T-133 (Chore am Seed aus PR #49; kein Seed-Ticket vorher). T-005 um AC-033c (Host-Start nicht `internal`). AC-049a an den Idle-Wortlaut von AC-044d angepasst. Coverage FR-105…FR-110, NFR-032, AC-009c/AC-044d/e.
 - v0.5 (2026-10-17) Spec v0.6 – Entscheidung Jens 20:11 „Bots dürfen alles, was der Owner darf.“ (ADR-0010): T-104 (FR-077 Bot-Weiterleitung bei EDIT des Owners, AC-077a neu, AC-077b; +1 h), T-105 (FR-102 Owner aktiv, AC-102a; +1 h), T-106 (FR-068 Owner-Rechtecheck statt Verbotsliste, AC-068a neu, AC-068b–e), T-107 (FR-070 ohne Allowlist, FR-101 Owner als effektiver Principal, AC-070a/b neu, AC-101a/b; +1 h), T-109 (FR-036 Bot-Start als Owner, FR-104 Kontingent, AC-036a neu, AC-036b, AC-104a/b; +1 h), T-128 (Owner-Äquivalenztests statt Allowlist-Negativtests, AC-070c/d neu, AC-070e), T-129 (AC-069c: `tools/list` = Owner-Liste), T-131 (FR-100 Must + `owner_id`, FR-103, AC-100a neu, AC-100c, AC-103a/b; +1 h); Block-Tabelle, Arbeitsweise, Coverage, AGENTS.md-Vorschlag; R1 141 h.
 - v0.4 (2026-10-17) MCP-Bot-Pfad nach Gap-Analyse PR #14 (Freigabe Jens 17.10. 19:19): neue Tasks T-125 (unread-Route, aus T-107 gelöst), T-126 (Protokollhygiene), T-127 (Struktur/Annotationen/Fehlercodes), T-128 (Allowlist-Negativtests, Untrusted, Beschreibungen), T-129 (Grok-Bot-Smoke), T-130 (Messung/Changes-Reset, aus T-119 gelöst), T-131 (MCP-Audit, `last_seen_at`); T-119 umgebaut (Rate-Limits inkl. `rate_limited`, No-Body); FR-077/AC-077a von T-109 nach T-104; Abhängigkeiten T-101/T-105 → T-003, T-109 → T-005+T-106, T-107 → +T-125/T-126, T-121 → +Bot-Pfad, T-123 → +T-129; Waves neu, Abschnitt „MCP-Bot-Pfad“; Coverage auf 04 v0.5; R1 30 Tasks / 136 h.
 - v0.3 (2026-10-16) T-115 auf interior.dev TaskSteps ausgerichtet (FR-089/090, Q-20: kein Copy-in vor Lizenzklärung); T-121 um `test_agent_steps.py`; Q-19 gelöst → D-1.
