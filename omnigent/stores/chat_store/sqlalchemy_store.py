@@ -319,6 +319,67 @@ class SqlAlchemyChatStore(ChatStore):
             row = session.get(SqlChatChannel, (current_workspace_id(), channel_id))
             return _to_channel(row) if row is not None else None
 
+    def get_session_channel(self, session_root_id: str) -> ChatChannel | None:
+        """Return a session channel by root id. See the base class."""
+        with self._session("get_session_chat_channel") as session:
+            row = session.execute(
+                select(SqlChatChannel).where(
+                    SqlChatChannel.workspace_id == current_workspace_id(),
+                    SqlChatChannel.kind == "session",
+                    SqlChatChannel.session_root_id == session_root_id,
+                )
+            ).scalar_one_or_none()
+            return _to_channel(row) if row is not None else None
+
+    def get_or_create_session_channel(self, session_root_id: str) -> ChatChannel:
+        """Return or create a session channel. See the base class."""
+
+        def _write(session: Session) -> ChatChannel:
+            existing = session.execute(
+                select(SqlChatChannel).where(
+                    SqlChatChannel.workspace_id == current_workspace_id(),
+                    SqlChatChannel.kind == "session",
+                    SqlChatChannel.session_root_id == session_root_id,
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return _to_channel(existing)
+            channel_id = uuid.uuid4().hex
+            created_at = now_epoch_us()
+            row = SqlChatChannel(
+                id=channel_id,
+                kind="session",
+                name=None,
+                topic=None,
+                project_name=None,
+                visibility="public",
+                dm_key=None,
+                session_root_id=session_root_id,
+                created_by=None,
+                created_at=created_at,
+                archived_at=None,
+            )
+            session.add(row)
+            return _to_channel(row)
+
+        try:
+            return run_write_transaction(
+                self._session_immediate, "open_session_chat_channel", _write
+            )
+        except IntegrityError:
+            # Lost the unique (workspace_id, session_root_id) race.
+            with self._session("read_session_chat_channel") as session:
+                existing = session.execute(
+                    select(SqlChatChannel).where(
+                        SqlChatChannel.workspace_id == current_workspace_id(),
+                        SqlChatChannel.kind == "session",
+                        SqlChatChannel.session_root_id == session_root_id,
+                    )
+                ).scalar_one_or_none()
+                if existing is None:
+                    raise
+                return _to_channel(existing)
+
     def get_channel_by_name(self, name: str) -> ChatChannel | None:
         """Return a public channel by name. See the base class."""
         with self._session("get_chat_channel_by_name") as session:

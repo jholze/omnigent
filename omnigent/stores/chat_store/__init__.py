@@ -297,6 +297,22 @@ class ChatStore(ABC):
         ...
 
     @abstractmethod
+    def get_session_channel(self, session_root_id: str) -> ChatChannel | None:
+        """Return the ``kind="session"`` channel for a root session, or ``None``."""
+        ...
+
+    @abstractmethod
+    def get_or_create_session_channel(self, session_root_id: str) -> ChatChannel:
+        """Return the ``kind="session"`` channel for a root session, creating it.
+
+        Idempotent: a repeated or concurrent call returns the one existing
+        channel instead of failing on the unique ``(workspace_id,
+        session_root_id)`` index. Membership of a session channel is derived
+        from the root session's grants, so no ``chat_members`` rows are added.
+        """
+        ...
+
+    @abstractmethod
     def add_member(self, channel_id: str, principal_id: str, role: str = "member") -> ChatMember:
         """Add *principal_id* to *channel_id*, keeping an existing row.
 

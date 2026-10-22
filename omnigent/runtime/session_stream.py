@@ -371,6 +371,17 @@ def has_subscribers(conversation_id: str) -> bool:
         return bool(_subscribers.get(conversation_id))
 
 
+def subscriber_count(conversation_id: str) -> int:
+    """Return how many live subscriber slots are registered.
+
+    :param conversation_id: The conversation to check.
+    :returns: The number of registered slots. ``0`` when nobody is listening.
+    """
+    with _lock:
+        subs = _subscribers.get(conversation_id)
+        return 0 if not subs else len(subs)
+
+
 def close(conversation_id: str) -> None:
     """
     Broadcast an end-of-stream sentinel to every active subscriber

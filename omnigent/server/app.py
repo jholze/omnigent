@@ -3596,6 +3596,19 @@ def create_app(
             prefix="/v1",
             tags=["chat"],
         )
+        from omnigent.server.routes.session_chat import create_session_chat_router
+
+        app.include_router(
+            create_session_chat_router(
+                team_chat_store,
+                conversation_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+                feature_flags=resolved_feature_flags,
+            ),
+            prefix="/v1",
+            tags=["session_chat"],
+        )
     if policy_store is not None:
         app.include_router(
             create_session_policies_router(
