@@ -54,3 +54,29 @@ async def test_ac_088c_agent_unread_then_read_then_human_403(chat_client, db_uri
 
     human = await chat_client.get("/v1/chat/unread", headers=headers_for(ANNA))
     assert human.status_code == 403, human.text
+
+
+async def test_ac_088b_owner_leave_drops_channel_from_rest_unread(
+    chat_client, db_uri: str
+) -> None:
+    from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
+
+    created = await create_account(chat_client, JENS, "grok-jens")
+    token = created.json()["token"]
+    principal = created.json()["account"]["principal_id"]
+    billing = await channel_id(chat_client, JENS, "billing")
+    await join(chat_client, ANNA, billing)
+    add_member(db_uri, billing, principal)
+    posted = await post_message(
+        chat_client, ANNA, billing, f"<@agent_account:{principal}> fass zusammen"
+    )
+    assert posted.status_code == 201, posted.text
+    before = await chat_client.get("/v1/chat/unread", headers=headers_for(token=token))
+    assert [item["channel_id"] for item in before.json()["items"]] == [billing]
+
+    left = await chat_client.post(f"/v1/chat/channels/{billing}/leave", headers=headers_for(JENS))
+    assert left.status_code == 204, left.text
+    assert SqlAlchemyChatStore(db_uri).is_member(billing, principal)
+    after = await chat_client.get("/v1/chat/unread", headers=headers_for(token=token))
+    assert after.status_code == 200, after.text
+    assert all(item["channel_id"] != billing for item in after.json()["items"])
