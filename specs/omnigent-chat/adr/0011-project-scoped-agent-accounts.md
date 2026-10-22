@@ -11,7 +11,7 @@ Wir werden
 5. scoped Accounts auf Admin, Projektverwaltung, Host-Verwaltung, Sharing, globale Policies und die Agentenkonto-Verwaltung mit 403 `out_of_scope` ablehnen. Metadaten der erlaubten Projekte sind lesbar. Host-Nutzung nur, um Sessions in erlaubten Projekten zu starten oder zu treiben (FR-110). `session_workspace` Shell bleibt owner-only.
 6. Sessions und Projekte außerhalb des Scopes mit 404 verbergen. Verbotene Endpoint-Klassen antworten 403 `out_of_scope`. Jede Ablehnung wird mit Account-Id, Route und Grund auditiert, nie mit Token, `token_hash` oder Webhook-Secret (NFR-033, NFR-034).
 7. die Allowlist in Settings → Agenten pflegen (FR-111). Ein Projekt, das der Owner nicht besitzt, ist 404 und ändert das Konto nicht. Löschen eines Projekts entfernt es aus jeder Liste. Wird eine Liste dadurch leer, fail closed: das Konto wird nicht unscoped.
-8. die Migration umkehrbar halten. Bestehende Konten bleiben unscoped (NFR-035). Der Alembic-Parent auf `epic/team-chat` bei Aufnahme ist `ar1b2c3d4e5f`. Genau ein Head.
+8. die Migration umkehrbar halten. Bestehende Konten bleiben unscoped (NFR-035). Der Alembic-Parent ist der aktuelle einzige Head `dx1a2b3c4d5e`. `ar1b2c3d4e5f` ist kein Head: `hi1b2c3d4e5f` hängt bereits daran, und `chat_agent_accounts` entsteht erst später in `tc1a2b3c4d5e`. Genau ein Head.
 ## Consequences
 + PM - FT Max und ProductOS PM Bot können mit Owner-Rechten arbeiten, ohne die anderen Projekte des Owners zu sehen.
 + Unscoped Konten und die T-103-Tests bleiben unverändert (FR-109).

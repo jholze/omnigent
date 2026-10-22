@@ -2868,7 +2868,7 @@ Then läuft `alembic upgrade head` fehlerfrei, `team_chat` ist an und der Smoke-
 **Labels:** `spec:omnigent-chat`, `release:R1`, `type:feature`, `security`
 
 **Context**
-Ein scoped Agentenkonto hat die Owner-Rechte geschnitten mit den Sessions, deren `project_id` in der Allowlist liegt. `NULL` bleibt ADR-0010. Leere Liste ist 400. Anwendungsfälle, nicht hart im Code: **PM - FT Max** nur Projekt **Fishing Tackle Max** (`ad2bc03dae8f47b98ce1bf5197881f7a`); **ProductOS PM Bot** nur Projekt **ProductOS**. Kein Ersatz-Account. Konten legt Jens nach Merge und Deploy an. Epic nach `main` und jedes Deploy brauchen Jens' OK. Alembic-Parent: `ar1b2c3d4e5f`.
+Ein scoped Agentenkonto hat die Owner-Rechte geschnitten mit den Sessions, deren `project_id` in der Allowlist liegt. `NULL` bleibt ADR-0010. Leere Liste ist 400. Anwendungsfälle, nicht hart im Code: **PM - FT Max** nur Projekt **Fishing Tackle Max** (`ad2bc03dae8f47b98ce1bf5197881f7a`); **ProductOS PM Bot** nur Projekt **ProductOS**. Kein Ersatz-Account. Konten legt Jens nach Merge und Deploy an. Epic nach `main` und jedes Deploy brauchen Jens' OK. Alembic-Parent: `dx1a2b3c4d5e` (einziger Head; `ar1b2c3d4e5f` nicht verwenden).
 
 **Requirements (zitiert)**
 - FR-105 (Must): Allowlist schneidet die Owner-Rechte auf Sessions mit `project_id` in der Liste.

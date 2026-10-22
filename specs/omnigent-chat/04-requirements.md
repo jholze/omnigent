@@ -1330,7 +1330,7 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 - Migration kopiert `session_chat_messages` (PR #4, Revision `sc1a2b3c4d5e`) in `chat_messages`; alte Tabelle bleibt bis R2 lesbar, wird nicht mehr beschrieben.
 - Aufbewahrung: unbegrenzt bis Löschung [OFFEN Q-3]. Session-Chat-Zeilen werden mit der Root-Session gelöscht (Bestand-Spec §3.5).
 - Account-Löschung: Autor bleibt opaker Principal-String; Scrubbing gehört zu `designs/ACCOUNT_REVOCATION.md` (Bestand-Spec S-11).
-- T-134: Allowlist-Speicher für Agentenkonten (Tabelle oder gleichwertige Spalte). Parent auf `epic/team-chat` bei Aufnahme: `ar1b2c3d4e5f`. Bestehende Zeilen bleiben unscoped. Epic nach `main` und Deploy nur mit ausdrücklichem OK von Jens.
+- T-134: Allowlist-Speicher für Agentenkonten (Tabelle oder gleichwertige Spalte). Parent ist der einzige Head `dx1a2b3c4d5e`. Bestehende Zeilen bleiben unscoped. Epic nach `main` und Deploy nur mit ausdrücklichem OK von Jens.
 
 ## 10. Traceability
 | Goal | Story | FR/NFR | AC / test | Task |
