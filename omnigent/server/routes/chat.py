@@ -34,8 +34,11 @@ from omnigent.server.chat_access import (
 )
 from omnigent.server.chat_agent_threads import (
     _human_label,
+    dismiss_agent_thread,
     grant_join_read,
+    is_dismiss_command,
     request_agent_store,
+    retry_forward,
     visible_agent_handles,
 )
 from omnigent.server.chat_rate_limit import consume_agent_request, consume_channel_post
@@ -157,6 +160,13 @@ class ChannelAgentThreadResponse(BaseModel):
     agent_state: str
     session_id: str | None = None
     body: str | None = None
+
+
+class ForwardResponse(BaseModel):
+    """``POST /v1/chat/messages/{id}/forward``: the reply's stored forward state."""
+
+    id: str
+    forward_state: str
 
 
 class ChangeItem(BaseModel):
@@ -921,6 +931,11 @@ def create_chat_router(
         retry_after = consume_channel_post(caller, channel.id)
         if retry_after is not None:
             _raise_rate_limited(retry_after)
+        if body.thread_root_id is not None and is_dismiss_command(trimmed):
+            # Refused before storing, so a READ member's /dismiss leaves no row.
+            await dismiss_agent_thread(
+                chat_store, body.thread_root_id, caller, channel_id=channel.id
+            )
 
         result = await asyncio.to_thread(
             chat_store.post_message,
@@ -975,6 +990,56 @@ def create_chat_router(
             "message could not be stored",
             code=ErrorCode.INTERNAL_ERROR,
         )
+
+    @router.post(
+        "/chat/threads/{root_message_id}/dismiss",
+        response_model=ChannelAgentThreadResponse,
+        response_model_exclude_unset=True,
+    )
+    async def dismiss_thread_agent(
+        request: Request, root_message_id: str
+    ) -> ChannelAgentThreadResponse:
+        """Stop forwarding thread replies to the agent; the session keeps running (FR-042)."""
+        caller = _resolve_caller(request, auth_provider)
+        thread = await asyncio.to_thread(chat_store.get_thread, root_message_id)
+        if thread is None:
+            raise OmnigentError("Thread not found", code=ErrorCode.NOT_FOUND)
+        channel = await asyncio.to_thread(chat_store.get_channel, thread.channel_id)
+        if channel is None:
+            raise OmnigentError("Thread not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_read, chat_store, channel, caller)
+        link = await dismiss_agent_thread(chat_store, root_message_id, caller)
+        if link is None:
+            raise OmnigentError("thread has no agent to dismiss", code=ErrorCode.CONFLICT)
+        _audit_bot(
+            request,
+            caller,
+            chat_store,
+            action="chat.thread.dismiss",
+            outcome="ok",
+            channel_id=channel.id,
+        )
+        response = ChannelAgentThreadResponse(
+            root_message_id=root_message_id, agent_state=link.agent_state
+        )
+        if link.session_id:
+            response.session_id = link.session_id
+        return response
+
+    @router.post("/chat/messages/{message_id}/forward", response_model=ForwardResponse)
+    async def retry_message_forward(request: Request, message_id: str) -> ForwardResponse:
+        """Retry a failed forward of one thread reply, at most once (FR-054)."""
+        caller = _resolve_caller(request, auth_provider)
+        state = await retry_forward(request, chat_store, message_id, caller)
+        _audit_bot(
+            request,
+            caller,
+            chat_store,
+            action="chat.message.forward",
+            outcome=state,
+            message_id=message_id,
+        )
+        return ForwardResponse(id=message_id, forward_state=state)
 
     @router.post("/chat/dms", response_model=ChannelResponse)
     async def open_dm(
