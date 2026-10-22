@@ -43,7 +43,7 @@ from omnigent.server.auth import (
     SharingMode,
     workspace_sharing_blocked,
 )
-from omnigent.server.chat_access import principal_kind
+from omnigent.server.chat_access import principal_kind, require_read
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.server.chat_realtime import publish_chat, publish_message_created
 from omnigent.server.principals import same_account
@@ -52,6 +52,7 @@ from omnigent.stores.chat_store import ChatChannel, ChatMessage, ChatStore, Post
 _logger = logging.getLogger("omnigent.chat")
 
 _HANDLE = "agent"
+_DISMISS_COMMAND = "/dismiss"
 _LABEL_KEY = "omnigent.chat.v1"
 _CONTEXT_MESSAGES = 20
 _CONTEXT_CHARS = 12_000
@@ -1115,132 +1116,324 @@ def _post_quota_notice(chat_store: ChatStore, channel: ChatChannel, message: Cha
         publish_message_created(chat_store, channel, result.message)
 
 
-def _set_forward_state(chat_store: ChatStore, message_id: str, state: str) -> None:
-    """Remember whether a bot reply was copied into the session."""
+def _set_forward_state(
+    chat_store: ChatStore,
+    message_id: str,
+    state: str,
+    *,
+    expected: str | None = None,
+) -> bool:
+    """Store a reply's forward state; with *expected*, only from that state."""
 
-    def write(session: Session) -> None:
-        session.execute(
-            update(SqlChatMessage)
-            .where(
-                SqlChatMessage.workspace_id == current_workspace_id(),
-                SqlChatMessage.id == message_id,
-            )
-            .values(forward_state=state)
+    def write(session: Session) -> bool:
+        statement = update(SqlChatMessage).where(
+            SqlChatMessage.workspace_id == current_workspace_id(),
+            SqlChatMessage.id == message_id,
         )
+        if expected is not None:
+            statement = statement.where(SqlChatMessage.forward_state == expected)
+        changed = cast(CursorResult[Any], session.execute(statement.values(forward_state=state)))
+        return changed.rowcount == 1
 
-    _write(chat_store, "set_chat_forward_state", write)
+    return bool(_write(chat_store, "set_chat_forward_state", write))
 
 
-def _active_session_id(chat_store: ChatStore, root_id: str) -> str | None:
-    """Session linked to an active thread, if any."""
+@dataclass(frozen=True)
+class _ThreadLink:
+    """The agent columns of one thread row."""
 
-    def read(session: Session) -> str | None:
+    channel_id: str
+    agent_state: str
+    session_id: str | None
+    caller_id: str | None
+
+
+def _thread_link(chat_store: ChatStore, root_id: str) -> _ThreadLink | None:
+    """Read the agent state and session link of a thread."""
+
+    def read(session: Session) -> _ThreadLink | None:
         row = session.get(SqlChatThread, (current_workspace_id(), root_id))
-        if row is None or row.agent_state != "active" or not row.session_id:
+        if row is None:
             return None
-        return row.session_id
-
-    session_id = _read(chat_store, "select_active_agent_session", read)
-    return session_id if isinstance(session_id, str) else None
-
-
-async def _maybe_forward_bot_reply(
-    request: Any,
-    chat_store: ChatStore,
-    message: ChatMessage,
-) -> None:
-    """Copy a bot reply into the session when the owner may edit it."""
-    if message.thread_root_id is None:
-        return
-    account = await asyncio.to_thread(chat_store.get_agent_account_by_principal, message.author_id)
-    if account is None:
-        return
-    session_id = await asyncio.to_thread(_active_session_id, chat_store, message.thread_root_id)
-    if session_id is None:
-        return
-    from omnigent.server.auth import LEVEL_EDIT
-    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
-
-    level = await asyncio.to_thread(
-        SqlAlchemyPermissionStore(chat_store.storage_location).get_permission_level,
-        account.owner_id,
-        session_id,
-    )
-    if not isinstance(level, int) or level < LEVEL_EDIT:
-        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
-        return
-    owner_name = await asyncio.to_thread(
-        _read,
-        chat_store,
-        "select_owner_display",
-        lambda session: _display_in(session, account.owner_id),
-    )
-    text = f"[{account.display_name} ({owner_name})] {message.body}"
-    try:
-        await _post_first_message(_request_as_owner(request), session_id, text)
-    except Exception:
-        _logger.exception("bot reply forward failed session=%s", session_id)
-        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
-        return
-    await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
-
-
-async def _maybe_forward_mention(
-    request: Any,
-    chat_store: ChatStore,
-    message: ChatMessage,
-    caller: str,
-) -> None:
-    """Send an agent mention in an active thread to that thread's session.
-
-    *caller* is the human author or the bot's owner; below EDIT the message
-    stays in chat only and is marked ``not_forwarded``.
-    """
-    if message.thread_root_id is None:
-        return
-    session_id = await asyncio.to_thread(_active_session_id, chat_store, message.thread_root_id)
-    if session_id is None:
-        return
-    from omnigent.server.auth import LEVEL_EDIT
-    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
-
-    level = await asyncio.to_thread(
-        SqlAlchemyPermissionStore(chat_store.storage_location).get_permission_level,
-        caller,
-        session_id,
-    )
-    if not isinstance(level, int) or level < LEVEL_EDIT:
-        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
-        return
-    if caller == message.author_id:
-        name = await asyncio.to_thread(
-            _read,
-            chat_store,
-            "select_author_display",
-            lambda session: _display_in(session, caller),
+        return _ThreadLink(
+            channel_id=row.channel_id,
+            agent_state=row.agent_state,
+            session_id=row.session_id,
+            caller_id=row.caller_id,
         )
-        acting = request
-    else:
+
+    link = _read(chat_store, "select_agent_thread_link", read)
+    return link if isinstance(link, _ThreadLink) else None
+
+
+def _set_agent_state(chat_store: ChatStore, root_id: str, source: str, target: str) -> bool:
+    """Move a thread from *source* to *target* state, once."""
+
+    def write(session: Session) -> bool:
+        changed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(SqlChatThread)
+                .where(
+                    SqlChatThread.workspace_id == current_workspace_id(),
+                    SqlChatThread.root_message_id == root_id,
+                    SqlChatThread.agent_state == source,
+                )
+                .values(agent_state=target, updated_at=now_epoch_us())
+            ),
+        )
+        return changed.rowcount == 1
+
+    return bool(_write(chat_store, "set_agent_thread_state", write))
+
+
+async def _acting_principal(chat_store: ChatStore, principal_id: str) -> str | None:
+    """The human whose session level governs *principal_id*; a bot acts as its owner."""
+    if principal_kind(principal_id) != "agent_account":
+        return principal_id
+    account = await asyncio.to_thread(chat_store.get_agent_account_by_principal, principal_id)
+    return account.owner_id if account is not None else None
+
+
+async def _session_level(chat_store: ChatStore, principal_id: str, session_id: str) -> int:
+    """Effective level of *principal_id* on *session_id*; 0 when none."""
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    level = await asyncio.to_thread(
+        SqlAlchemyPermissionStore(chat_store.storage_location).get_permission_level,
+        principal_id,
+        session_id,
+    )
+    return level if isinstance(level, int) else 0
+
+
+async def _forward_reply(
+    request: Any,
+    chat_store: ChatStore,
+    message: ChatMessage,
+    session_id: str,
+    requester: str,
+) -> str:
+    """Forward one thread reply to *session_id* and store the outcome.
+
+    A human reply is sent as ``[Name] text``, a bot reply as
+    ``[Bot (Owner)] text`` with the owner's rights. Below EDIT the reply is
+    ``not_forwarded``; a failed delivery is ``failed`` so it can be retried.
+    *requester* made *request*. Returns the stored state.
+    """
+    from omnigent.server.auth import LEVEL_EDIT
+
+    account = None
+    principal = message.author_id
+    if principal_kind(message.author_id) == "agent_account":
         account = await asyncio.to_thread(
             chat_store.get_agent_account_by_principal, message.author_id
         )
         if account is None:
-            return
-        owner_name = await asyncio.to_thread(
-            _read,
-            chat_store,
-            "select_owner_display",
-            lambda session: _display_in(session, caller),
-        )
-        name = f"{account.display_name} ({owner_name})"
+            await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+            return "not_forwarded"
+        principal = account.owner_id
+    if await _session_level(chat_store, principal, session_id) < LEVEL_EDIT:
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return "not_forwarded"
+    name = await asyncio.to_thread(
+        _read,
+        chat_store,
+        "select_forward_display",
+        lambda session: _display_in(session, principal),
+    )
+    if account is not None:
+        name = f"{account.display_name} ({name})"
+    acting = request
+    if principal_kind(requester) == "agent_account":
         acting = _request_as_owner(request)
     try:
         await _post_first_message(acting, session_id, f"[{name}] {message.body}")
     except Exception:
-        _logger.exception("agent mention forward failed session=%s", session_id)
-        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
-        return
+        _logger.exception(
+            "thread reply forward failed session=%s message=%s", session_id, message.id
+        )
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "failed")
+        return "failed"
     await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
+    return "forwarded"
+
+
+async def _follow_reply(request: Any, chat_store: ChatStore, message: ChatMessage) -> None:
+    """Forward a reply in an active thread to that thread's session."""
+    if message.thread_root_id is None:
+        return
+    link = await asyncio.to_thread(_thread_link, chat_store, message.thread_root_id)
+    if link is None or link.agent_state != "active" or not link.session_id:
+        return
+    await _forward_reply(request, chat_store, message, link.session_id, message.author_id)
+
+
+async def _follow_mention(request: Any, chat_store: ChatStore, message: ChatMessage) -> None:
+    """Send an agent mention to the thread's session, reactivating a dismissed thread.
+
+    Only a human with EDIT reactivates. Any other mention in a dismissed
+    thread stays in chat and is marked ``not_forwarded``.
+    """
+    from omnigent.server.auth import LEVEL_EDIT
+
+    root_id = message.thread_root_id
+    if root_id is None:
+        return
+    link = await asyncio.to_thread(_thread_link, chat_store, root_id)
+    if link is None or not link.session_id:
+        return
+    if link.agent_state == "dismissed":
+        allowed = principal_kind(message.author_id) == "user" and (
+            await _session_level(chat_store, message.author_id, link.session_id) >= LEVEL_EDIT
+        )
+        if not allowed:
+            await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+            return
+        if await asyncio.to_thread(_set_agent_state, chat_store, root_id, "dismissed", "active"):
+            _audit_thread_state("agent_thread_reactivate", link, root_id, message.author_id)
+            await asyncio.to_thread(_publish_thread, chat_store, link.channel_id, root_id)
+        link = await asyncio.to_thread(_thread_link, chat_store, root_id)
+    if link is None or link.agent_state != "active" or not link.session_id:
+        return
+    await _forward_reply(request, chat_store, message, link.session_id, message.author_id)
+
+
+def _audit_thread_state(action: str, link: _ThreadLink, root_id: str, actor: str) -> None:
+    """Record a dismiss or reactivation without any message body."""
+    add_audit_attrs(
+        action=action,
+        channel_id=link.channel_id,
+        root_message_id=root_id,
+        actor_id=actor,
+        outcome="ok",
+    )
+    _logger.info(
+        "%s thread=%s session=%s",
+        action,
+        root_id,
+        link.session_id,
+        extra=debug_event(
+            action,
+            session_id=link.session_id,
+            user_id=actor,
+            channel_id=link.channel_id,
+        ),
+    )
+
+
+def is_dismiss_command(body: str) -> bool:
+    """Whether a thread reply is the ``/dismiss`` command."""
+    return body.strip().lower() == _DISMISS_COMMAND
+
+
+async def dismiss_agent_thread(
+    chat_store: ChatStore,
+    root_id: str,
+    principal_id: str,
+    *,
+    channel_id: str | None = None,
+) -> _ThreadLink | None:
+    """Dismiss the agent of an active thread without stopping its session.
+
+    The thread caller and any principal with EDIT on the session may
+    dismiss; a bot acts as its owner. Returns ``None`` when the thread (in
+    *channel_id*, if given) has no agent to dismiss. An already dismissed
+    thread is returned unchanged.
+
+    :raises OmnigentError: 403 ``forbidden`` for anyone else.
+    """
+    from omnigent.server.auth import LEVEL_EDIT
+
+    link = await asyncio.to_thread(_thread_link, chat_store, root_id)
+    if link is None or (channel_id is not None and link.channel_id != channel_id):
+        return None
+    if link.agent_state not in ("active", "dismissed") or not link.session_id:
+        return None
+    acting = await _acting_principal(chat_store, principal_id)
+    allowed = acting is not None and (
+        acting == link.caller_id
+        or await _session_level(chat_store, acting, link.session_id) >= LEVEL_EDIT
+    )
+    if not allowed:
+        raise OmnigentError(
+            "only the caller or an editor of the session may dismiss the agent",
+            code=ErrorCode.FORBIDDEN,
+        )
+    if link.agent_state == "active" and await asyncio.to_thread(
+        _set_agent_state, chat_store, root_id, "active", "dismissed"
+    ):
+        _audit_thread_state("agent_thread_dismiss", link, root_id, principal_id)
+        await asyncio.to_thread(_publish_thread, chat_store, link.channel_id, root_id)
+    return await asyncio.to_thread(_thread_link, chat_store, root_id)
+
+
+def _load_message(chat_store: ChatStore, message_id: str) -> tuple[ChatMessage, str | None] | None:
+    """Return a live message and its forward state."""
+
+    def read(session: Session) -> tuple[ChatMessage, str | None] | None:
+        row = session.get(SqlChatMessage, (current_workspace_id(), message_id))
+        if row is None or row.deleted_at is not None:
+            return None
+        message = ChatMessage(
+            id=row.id,
+            channel_id=row.channel_id,
+            thread_root_id=row.thread_root_id,
+            author_id=row.author_id,
+            author_kind=row.author_kind,
+            created_at=row.created_at,
+            body=row.body,
+            client_id=row.client_id,
+        )
+        return message, row.forward_state
+
+    found = _read(chat_store, "select_chat_message_forward", read)
+    return found if isinstance(found, tuple) else None
+
+
+async def retry_forward(
+    request: Any,
+    chat_store: ChatStore,
+    message_id: str,
+    principal_id: str,
+) -> str:
+    """Retry one failed forward and return the stored ``forward_state``.
+
+    Only the author, or a bot author's owner, may retry. A message that is
+    already ``forwarded`` is returned as is and never sent again.
+
+    :raises OmnigentError: 404 when the message is missing or unreadable,
+        403 for other callers, 409 when it is not awaiting a retry or the
+        thread agent is no longer active.
+    """
+    found = await asyncio.to_thread(_load_message, chat_store, message_id)
+    if found is None:
+        raise OmnigentError("Message not found", code=ErrorCode.NOT_FOUND)
+    message, state = found
+    channel = await asyncio.to_thread(chat_store.get_channel, message.channel_id)
+    if channel is None:
+        raise OmnigentError("Message not found", code=ErrorCode.NOT_FOUND)
+    await asyncio.to_thread(require_read, chat_store, channel, principal_id)
+    acting = await _acting_principal(chat_store, principal_id)
+    author_owner = await _acting_principal(chat_store, message.author_id)
+    if principal_id != message.author_id and (acting is None or acting != author_owner):
+        raise OmnigentError("only the author may retry this forward", code=ErrorCode.FORBIDDEN)
+    if state == "forwarded":
+        return state
+    if state != "failed" or message.thread_root_id is None:
+        raise OmnigentError("message is not awaiting a forward retry", code=ErrorCode.CONFLICT)
+    link = await asyncio.to_thread(_thread_link, chat_store, message.thread_root_id)
+    if link is None or link.agent_state != "active" or not link.session_id:
+        raise OmnigentError("thread agent is not active", code=ErrorCode.CONFLICT)
+    claimed = await asyncio.to_thread(
+        _set_forward_state, chat_store, message.id, "forwarding", expected="failed"
+    )
+    if not claimed:
+        current = await asyncio.to_thread(_load_message, chat_store, message.id)
+        if current is not None and current[1] == "forwarded":
+            return "forwarded"
+        raise OmnigentError("message is not awaiting a forward retry", code=ErrorCode.CONFLICT)
+    return await _forward_reply(request, chat_store, message, link.session_id, principal_id)
 
 
 async def schedule_after_human_post(
@@ -1254,17 +1447,16 @@ async def schedule_after_human_post(
     A human mention starts as that human. An agent-account mention starts as
     the account's owner and records the account as initiator. A mention whose
     handle the caller cannot see fails as ``agent_not_found`` without starting
-    a session (FR-039). A bot reply in an active thread is forwarded when the
-    owner has edit access. An agent mention in an active thread goes to that
-    same session; a thread that is still starting is left alone.
+    a session (FR-039). Any reply in an active thread is forwarded when its
+    author (or a bot's owner) has edit access. An agent mention reactivates a
+    dismissed thread; a thread that is still starting is left alone.
     """
     try:
         _bind_store(chat_store)
         _ensure_timeout_loop(chat_store)
         handles = _agent_handle_mentions(message.body)
         if not handles:
-            if principal_kind(message.author_id) == "agent_account":
-                await _maybe_forward_bot_reply(request, chat_store, message)
+            await _follow_reply(request, chat_store, message)
             return
         kind = principal_kind(message.author_id)
         started_by: str | None = None
@@ -1288,7 +1480,7 @@ async def schedule_after_human_post(
             _claim, chat_store, channel.id, root_id, caller, started_by
         )
         if not claimed:
-            await _maybe_forward_mention(request, chat_store, message, caller)
+            await _follow_mention(request, chat_store, message)
             return
         await asyncio.to_thread(_publish_thread, chat_store, channel.id, root_id)
         task = asyncio.create_task(

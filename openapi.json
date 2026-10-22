@@ -3478,6 +3478,25 @@
         "title": "FailedResponseObject",
         "type": "object"
       },
+      "ForwardResponse": {
+        "description": "`POST /v1/chat/messages/{id}/forward`: the reply's stored forward state.",
+        "properties": {
+          "forward_state": {
+            "title": "Forward State",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "forward_state"
+        ],
+        "title": "ForwardResponse",
+        "type": "object"
+      },
       "FunctionCallData": {
         "description": "Data for a function_call item.\n\n**Parameters**\n\n- `agent` \u2014 Agent name. Serialized as `\"model\"` in JSON.",
         "properties": {
@@ -12393,6 +12412,92 @@
           }
         },
         "summary": "Open Dm",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/messages/{message_id}/forward": {
+      "post": {
+        "description": "Retry a failed forward of one thread reply, at most once (FR-054).",
+        "operationId": "retry_message_forward_v1_chat_messages__message_id__forward_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForwardResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Message Forward",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/threads/{root_message_id}/dismiss": {
+      "post": {
+        "description": "Stop forwarding thread replies to the agent; the session keeps running (FR-042).",
+        "operationId": "dismiss_thread_agent_v1_chat_threads__root_message_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "root_message_id",
+            "required": true,
+            "schema": {
+              "title": "Root Message Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelAgentThreadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Thread Agent",
         "tags": [
           "chat"
         ]
