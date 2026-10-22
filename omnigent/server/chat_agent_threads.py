@@ -1232,6 +1232,35 @@ async def _session_level(chat_store: ChatStore, principal_id: str, session_id: s
     return level if isinstance(level, int) else 0
 
 
+def _author_session_allowed(
+    request: Any, chat_store: ChatStore, account: Any, session_id: str
+) -> bool:
+    """Whether a bot author's allow-list reaches *session_id* (ADR-0011).
+
+    An unscoped account follows its owner. A scoped account, even with an
+    empty list, needs the session's root in an allowed project.
+    """
+    from omnigent.server.agent_project_scope import (
+        ProjectScope,
+        record_scope_denial,
+        session_in_scope,
+    )
+
+    project_ids = getattr(account, "project_ids", None)
+    if project_ids is None:
+        return True
+    conversation_store = _stores(request, chat_store)[0]
+    scope = ProjectScope(
+        account_id=account.id,
+        project_ids=frozenset(project_ids),
+        conversation_store=conversation_store,
+    )
+    if session_in_scope(scope, session_id, conversation_store):
+        return True
+    record_scope_denial("session_out_of_scope", scope)
+    return False
+
+
 async def _forward_reply(
     request: Any,
     chat_store: ChatStore,
@@ -1258,6 +1287,11 @@ async def _forward_reply(
             await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
             return "not_forwarded"
         principal = account.owner_id
+        if not await asyncio.to_thread(
+            _author_session_allowed, request, chat_store, account, session_id
+        ):
+            await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+            return "not_forwarded"
     if await _session_level(chat_store, principal, session_id) < LEVEL_EDIT:
         await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
         return "not_forwarded"
@@ -1427,7 +1461,8 @@ async def retry_forward(
     Only the author, or a bot author's owner, may retry. A message that is
     already ``forwarded`` is returned as is and never sent again.
 
-    :raises OmnigentError: 404 when the message is missing or unreadable,
+    :raises OmnigentError: 404 when the message is missing or unreadable, or
+        a scoped bot author's allow-list does not reach the session,
         403 for other callers, 409 when it is not awaiting a retry or the
         thread agent is no longer active.
     """
@@ -1450,6 +1485,14 @@ async def retry_forward(
     link = await asyncio.to_thread(_thread_link, chat_store, message.thread_root_id)
     if link is None or link.agent_state != "active" or not link.session_id:
         raise OmnigentError("thread agent is not active", code=ErrorCode.CONFLICT)
+    if principal_kind(message.author_id) == "agent_account":
+        author = await asyncio.to_thread(
+            chat_store.get_agent_account_by_principal, message.author_id
+        )
+        if author is not None and not await asyncio.to_thread(
+            _author_session_allowed, request, chat_store, author, link.session_id
+        ):
+            raise OmnigentError("Conversation not found", code=ErrorCode.NOT_FOUND)
     claimed = await asyncio.to_thread(
         _set_forward_state, chat_store, message.id, "forwarding", expected="failed"
     )
