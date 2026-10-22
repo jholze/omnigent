@@ -765,7 +765,7 @@ Then antwortet der Server 409
 **AC-062a (FR-062)**
 ```gherkin
 When grok-jens in "#general" postet
-Then zeigt die Nachricht den Autor "Grok (Jens Holze)" mit Badge "Bot"
+Then zeigt die Nachricht den Autor "Grok (Jens)" mit Badge "Bot"
 ```
 **AC-063a (FR-063)**
 ```gherkin
@@ -1064,7 +1064,7 @@ And Anna hat in "#bot-smoke" "<@agent_account:{grok-smoke-id}> sag Hallo" gepost
 When ein realer Grok-Bot-MCP-Client sich mit dem Testtoken per Streamable HTTP an /mcp verbindet und initialize und tools/list aufruft
 Then ist eine Protokollversion aus FR-097 ausgehandelt und tools/list enthält genau dieselben Tool-Namen wie tools/list mit Jens' User-JWT (darunter die sieben chat_*-Tools)
 And chat_unread liefert Annas Nachricht mit author.kind "human" in der Untrusted-Hülle
-And chat_post mit confirm true im Thread dieser Nachricht erscheint in "#bot-smoke" als "Grok Smoke (Jens Holze)" mit Badge "Bot"
+And chat_post mit confirm true im Thread dieser Nachricht erscheint in "#bot-smoke" als "Grok Smoke (Jens)" mit Badge "Bot"
 And nach dem Test ist das Testtoken widerrufen
 ```
 **AC-070c (FR-070, FR-101) – entzogenes Owner-Recht gilt sofort für den Bot**

@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 import threading
 import uuid
 from collections.abc import Callable
@@ -142,13 +143,71 @@ def _bind_store(chat_store: ChatStore) -> None:
     _bound_chat_store = chat_store
 
 
-def _mentions_agent(body: str) -> bool:
-    """Whether the body addresses an Omnigent agent.
+def slugify_agent_handle(name: str) -> str:
+    """Slugify an agent name for its handle (FR-039).
 
-    The project agent is still the one that starts. The token may name that
-    agent (``agent``) or the agent's display handle (for example ``coder``).
+    Lowercases, collapses runs of non-alphanumerics to one hyphen, and trims
+    leading/trailing hyphens. Unlike the ACP slug, an empty result does not
+    fall back to ``agent``: that handle is reserved for the project-agent
+    alias (FR-038).
     """
-    return any(token.kind == "omnigent_agent" for token in parse_mentions(body))
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug or "unnamed"
+
+
+def visible_agent_handles(agent_store: Any, caller: str) -> list[tuple[str, str, str]]:
+    """Return ``(handle, agent_id, name)`` for every agent the caller sees.
+
+    Visibility matches ``GET /v1/agents``: server agents from
+    ``agent_store.list()`` plus the caller's own user agents. Handles are
+    unique and assigned in ``created_at`` ascending order; the oldest agent
+    keeps the bare slug and later collisions get ``-2``, ``-3`` … (FR-039).
+    The reserved ``agent`` handle is never taken (FR-038).
+    """
+    agents: list[Any] = list(agent_store.list(limit=1000).data)
+    if getattr(agent_store, "supports_user_agents", False):
+        agents.extend(agent_store.list_user_agents(caller, limit=50).data)
+    ordered = sorted(agents, key=lambda agent: (agent.created_at, agent.id))
+    used: set[str] = {_HANDLE}
+    entries: list[tuple[str, str, str]] = []
+    for agent in ordered:
+        base = slugify_agent_handle(agent.name)
+        candidate = base
+        suffix = 1
+        while candidate in used:
+            suffix += 1
+            candidate = f"{base}-{suffix}"
+        used.add(candidate)
+        entries.append((candidate, agent.id, agent.name))
+    return entries
+
+
+def request_agent_store(request: Any) -> Any:
+    """Return the request's agent store, falling back to the runtime store."""
+    from omnigent.runtime import get_agent_store
+
+    agent_store = getattr(request.app.state, "agent_store", None)
+    if agent_store is None:
+        agent_store = get_agent_store()
+    return agent_store
+
+
+def _agent_handle_mentions(body: str) -> list[str]:
+    """Return the ``omnigent_agent`` handles mentioned in *body*, in order."""
+    return [token.target_id for token in parse_mentions(body) if token.kind == "omnigent_agent"]
+
+
+def _visible_handle(request: Any, caller: str, handles: list[str]) -> bool:
+    """Whether one of *handles* is addressable by *caller*.
+
+    ``agent`` is the project-agent alias (FR-038) and is always addressable.
+    Any other handle is addressable only when it appears in the caller's
+    ``GET /v1/chat/agents`` listing (FR-039).
+    """
+    if any(handle == _HANDLE for handle in handles):
+        return True
+    visible = {entry[0] for entry in visible_agent_handles(request_agent_store(request), caller)}
+    return any(handle in visible for handle in handles)
 
 
 def _human_label(principal_id: str) -> str:
@@ -652,6 +711,13 @@ def _sharing_mode(request: Any) -> SharingMode:
     return SharingMode.ON
 
 
+def _sharing_forbids_grants(sharing: SharingMode, workspace: str | None) -> bool:
+    """Whether the sharing mode blocks a new session grant (FR-034, FR-086)."""
+    return sharing == SharingMode.OFF or (
+        sharing == SharingMode.RESTRICTED_READ_ONLY and workspace_sharing_blocked(workspace)
+    )
+
+
 def _grant_owner(permission_store: Any, caller: str, session_id: str) -> None:
     permission_store.ensure_user(caller)
     permission_store.grant(caller, session_id, LEVEL_OWNER)
@@ -677,6 +743,50 @@ def _grant_readers(
                 "agent thread read grant failed session=%s member=%s",
                 session_id,
                 principal_id,
+            )
+
+
+def grant_join_read(
+    request: Any,
+    chat_store: ChatStore,
+    channel_id: str,
+    caller: str,
+) -> None:
+    """Grant READ to a joining human on this channel's agent-thread sessions.
+
+    Reuses the sharing-mode gate from session start (FR-034): no grant when
+    sharing is OFF, or when RESTRICTED_READ_ONLY and the session's workspace
+    is blocked (FR-086). Leaving withdraws nothing (A-20), so this grant is
+    never revoked here. One failure does not abort the rest.
+    """
+    if principal_kind(caller) != "user":
+        return
+    sharing = _sharing_mode(request)
+    if sharing == SharingMode.OFF:
+        return
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    permission_store = SqlAlchemyPermissionStore(chat_store.storage_location)
+    conversation_store = SqlAlchemyConversationStore(chat_store.storage_location)
+    for thread in chat_store.list_channel_agent_threads(channel_id):
+        session_id = thread.session_id
+        if not session_id:
+            continue
+        try:
+            if sharing == SharingMode.RESTRICTED_READ_ONLY:
+                conversation = conversation_store.get_conversation(session_id)
+                workspace = conversation.workspace if conversation is not None else None
+                if workspace_sharing_blocked(workspace):
+                    continue
+            if permission_store.get_permission_level(caller, session_id) is None:
+                permission_store.ensure_user(caller)
+                permission_store.grant(caller, session_id, LEVEL_READ)
+        except Exception:
+            _logger.exception(
+                "agent thread join read grant failed session=%s member=%s",
+                session_id,
+                caller,
             )
 
 
@@ -802,6 +912,9 @@ async def _start_impl(
     project = _resolve_project(project_store, chat_store, caller, channel)
     if project is None:
         raise _StartFailure("no_project")
+    handles = _agent_handle_mentions(message.body)
+    if handles and not await asyncio.to_thread(_visible_handle, request, caller, handles):
+        raise _StartFailure("agent_not_found")
     host_id = _live_host_id(host_store, caller, project)
     runner_id = _caller_runner_id(request.app, caller) if host_id is None else None
     label = json.dumps(
@@ -835,9 +948,7 @@ async def _start_impl(
     await asyncio.to_thread(_grant_owner, permission_store, caller, session_id)
     workspace = conversation.workspace if conversation is not None else None
     sharing = _sharing_mode(request)
-    if sharing == SharingMode.OFF or (
-        sharing == SharingMode.RESTRICTED_READ_ONLY and workspace_sharing_blocked(workspace)
-    ):
+    if _sharing_forbids_grants(sharing, workspace):
         await asyncio.to_thread(_post_sharing_notice, chat_store, channel.id, root_id, caller)
     else:
         await asyncio.to_thread(
@@ -1334,15 +1445,17 @@ async def schedule_after_human_post(
     """Claim and start an agent thread after a mention, as the human owner.
 
     A human mention starts as that human. An agent-account mention starts as
-    the account's owner and records the account as initiator. Any reply in
-    an active thread is forwarded when its author (or a bot's owner) has
-    edit access. An agent mention reactivates a dismissed thread; a thread
-    that is still starting is left alone.
+    the account's owner and records the account as initiator. A mention whose
+    handle the caller cannot see fails as ``agent_not_found`` without starting
+    a session (FR-039). Any reply in an active thread is forwarded when its
+    author (or a bot's owner) has edit access. An agent mention reactivates a
+    dismissed thread; a thread that is still starting is left alone.
     """
     try:
         _bind_store(chat_store)
         _ensure_timeout_loop(chat_store)
-        if not _mentions_agent(message.body):
+        handles = _agent_handle_mentions(message.body)
+        if not handles:
             await _follow_reply(request, chat_store, message)
             return
         kind = principal_kind(message.author_id)
