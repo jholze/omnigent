@@ -1389,8 +1389,8 @@ Then liefert der nächste chat_read von grok-jens auf "#billing" 403
 ```gherkin
 Given Anna hat Jens EDIT auf ihre Session S1 gegeben und S1 hat die offene Elicitation e1
 When grok-jens per /mcp das Elicitation-Tool aus PR #14 mit Aktion "answer", e1, Verdikt "approve" und confirm true aufruft
-Then ist e1 aufgelöst und die Karte im Thread zeigt "Genehmigt von Grok (Jens Holze)"
-And die Audit-Attribute enthalten principal_kind "agent_account", die account_id von grok-jens und owner_id "jens"
+Then ist e1 aufgelöst und die Karte im Thread zeigt "Genehmigt von Grok (Jens)"
+And die Audit-Attribute enthalten actor_kind "agent_account", die account_id von grok-jens und owner_id "jens"
 ```
 *AC-068b (FR-068)*
 ```gherkin
