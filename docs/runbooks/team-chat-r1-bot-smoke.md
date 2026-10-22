@@ -138,3 +138,7 @@ Pre-flight on this tree: `tests/server/test_mcp_chat_tools.py` and
 post, bot badge, mark-read, and revocation 401 all matched the checks above.
 The caller was not the Grok Bot product, and the token never entered that
 product's secret config. The on-screen author label is `Grok Smoke (Jens)`.
+
+## Follow-up
+
+Product-client run (Grok Bot itself as the MCP client, with a fresh ogc_ token in its secret config) is still open and must happen before the T-123 launch go. The orchestrator will arrange it.

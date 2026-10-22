@@ -2096,7 +2096,7 @@ And Anna hat in "#bot-smoke" "<@agent_account:{grok-smoke-id}> sag Hallo" gepost
 When ein realer Grok-Bot-MCP-Client sich mit dem Testtoken per Streamable HTTP an /mcp verbindet und initialize und tools/list aufruft
 Then ist eine Protokollversion aus FR-097 ausgehandelt und tools/list enthält genau dieselben Tool-Namen wie tools/list mit Jens' User-JWT (darunter die sieben chat_*-Tools)
 And chat_unread liefert Annas Nachricht mit author.kind "human" in der Untrusted-Hülle
-And chat_post mit confirm true im Thread dieser Nachricht erscheint in "#bot-smoke" als "Grok Smoke (Jens Holze)" mit Badge "Bot"
+And chat_post mit confirm true im Thread dieser Nachricht erscheint in "#bot-smoke" als "Grok Smoke (Jens)" mit Badge "Bot"
 And nach dem Test ist das Testtoken widerrufen
 ```
 
@@ -2251,7 +2251,7 @@ Then werden ein Token mit Präfix "ogc_" und ein Secret genau einmal angezeigt u
 *AC-062a (FR-062)*
 ```gherkin
 When grok-jens in "#general" postet
-Then zeigt die Nachricht den Autor "Grok (Jens Holze)" mit Badge "Bot"
+Then zeigt die Nachricht den Autor "Grok (Jens)" mit Badge "Bot"
 ```
 *AC-062b (FR-062)*
 ```gherkin
