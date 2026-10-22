@@ -1285,6 +1285,35 @@
         "title": "ChannelResponse",
         "type": "object"
       },
+      "ChatAgentAccountPublicResponse": {
+        "description": "Reduced public agent-account shape for `GET /v1/chat/agents`.\n\nDeliberately excludes the credential metadata that\n`GET /v1/chat/agent-accounts` still returns (token prefix, secret\nversion, principal id, last-seen timestamp).",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "handle": {
+            "title": "Handle",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "owner_label": {
+            "title": "Owner Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "handle",
+          "display_name",
+          "owner_label"
+        ],
+        "title": "ChatAgentAccountPublicResponse",
+        "type": "object"
+      },
       "ChatAgentHandleResponse": {
         "description": "One omnigent agent handle in `GET /v1/chat/agents` (FR-039).",
         "properties": {
@@ -1314,7 +1343,7 @@
         "properties": {
           "agent_accounts": {
             "items": {
-              "$ref": "#/components/schemas/AgentAccountResponse"
+              "$ref": "#/components/schemas/ChatAgentAccountPublicResponse"
             },
             "title": "Agent Accounts",
             "type": "array"

@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
+import pytest
+import pytest_asyncio
 from sqlalchemy import update
 
 from omnigent.db.db_models import SqlAgent
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ
+from omnigent.server.feature_flags import FEATURES_ENV_VAR
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from tests.server.chat_testkit import (
     ANNA,
     CARLA,
     JENS,
+    build_chat_app,
     channel_id,
     chat_client,
     create_account,
@@ -33,9 +40,10 @@ from tests.server.test_chat_agent_threads import (
     _thread,
     _wait_for_start,
     runner_202,
+    sharing_off_client,
 )
 
-_ = (chat_client, runner_202, _stop_agent_threads)
+_ = (chat_client, runner_202, _stop_agent_threads, sharing_off_client)
 
 MENTION = "<@omnigent_agent:agent>"
 
@@ -75,6 +83,26 @@ async def _chat_agents(client: httpx.AsyncClient, user: str) -> dict:
 
 def _handle_by_agent_id(payload: dict) -> dict[str, str]:
     return {row["agent_id"]: row["handle"] for row in payload["omnigent_agents"]}
+
+
+@pytest_asyncio.fixture()
+async def restricted_sharing_client(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[httpx.AsyncClient]:
+    """Chat client whose join grant checks the session workspace first."""
+    del runtime_init
+    monkeypatch.setattr(
+        "omnigent.server.sharing_settings.read_sharing_mode_override",
+        lambda: None,
+    )
+    monkeypatch.setenv(FEATURES_ENV_VAR, "team_chat")
+    monkeypatch.setenv("OMNIGENT_SHARING_MODE", "restricted_read_only")
+    transport = httpx.ASGITransport(app=build_chat_app(db_uri, tmp_path))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 async def _billing_agent_session(client: httpx.AsyncClient, db_uri: str) -> tuple[str, str]:
@@ -214,3 +242,62 @@ async def test_ac_086a_rejoin_does_not_lower_existing_owner_grant(
     await join(chat_client, ANNA, billing)
 
     assert permissions.get_permission_level(ANNA, s7) == LEVEL_OWNER
+
+
+async def test_ac_039a_public_agent_accounts_omit_credential_fields(
+    chat_client: httpx.AsyncClient,
+) -> None:
+    created = await create_account(chat_client, JENS, "grok-jens")
+    assert created.status_code == 201, created.text
+
+    payload = await _chat_agents(chat_client, ANNA)
+
+    row = next(row for row in payload["agent_accounts"] if row["handle"] == "grok-jens")
+    assert set(row) == {"id", "handle", "display_name", "owner_label"}
+    assert row["owner_label"] == "Jens"
+    owned = await chat_client.get("/v1/chat/agent-accounts", headers=headers_for(JENS))
+    assert owned.status_code == 200, owned.text
+    owned_row = next(item for item in owned.json() if item["handle"] == "grok-jens")
+    assert owned_row["token_prefix"]
+
+
+async def test_ac_086a_sharing_off_join_grants_no_read(
+    sharing_off_client: httpx.AsyncClient, db_uri: str, runner_202: None
+) -> None:
+    billing, s7 = await _billing_agent_session(sharing_off_client, db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    assert permissions.get_permission_level(CARLA, s7) is None
+
+    joined = await sharing_off_client.post(
+        f"/v1/chat/channels/{billing}/join", headers=headers_for(CARLA)
+    )
+
+    assert joined.status_code == 204, joined.text
+    assert SqlAlchemyChatStore(db_uri).is_member(billing, CARLA)
+    assert permissions.get_permission_level(CARLA, s7) is None
+
+
+async def test_ac_086a_join_stays_204_when_the_workspace_lookup_fails(
+    restricted_sharing_client: httpx.AsyncClient,
+    db_uri: str,
+    runner_202: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    billing, s7 = await _billing_agent_session(restricted_sharing_client, db_uri)
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("conversation store unavailable")
+
+    monkeypatch.setattr(
+        "omnigent.stores.conversation_store.sqlalchemy_store."
+        "SqlAlchemyConversationStore.get_conversation",
+        fail,
+    )
+
+    joined = await restricted_sharing_client.post(
+        f"/v1/chat/channels/{billing}/join", headers=headers_for(CARLA)
+    )
+
+    assert joined.status_code == 204, joined.text
+    assert SqlAlchemyChatStore(db_uri).is_member(billing, CARLA)
+    assert SqlAlchemyPermissionStore(db_uri).get_permission_level(CARLA, s7) is None

@@ -772,12 +772,12 @@ def grant_join_read(
         session_id = thread.session_id
         if not session_id:
             continue
-        if sharing == SharingMode.RESTRICTED_READ_ONLY:
-            conversation = conversation_store.get_conversation(session_id)
-            workspace = conversation.workspace if conversation is not None else None
-            if workspace_sharing_blocked(workspace):
-                continue
         try:
+            if sharing == SharingMode.RESTRICTED_READ_ONLY:
+                conversation = conversation_store.get_conversation(session_id)
+                workspace = conversation.workspace if conversation is not None else None
+                if workspace_sharing_blocked(workspace):
+                    continue
             if permission_store.get_permission_level(caller, session_id) is None:
                 permission_store.ensure_user(caller)
                 permission_store.grant(caller, session_id, LEVEL_READ)

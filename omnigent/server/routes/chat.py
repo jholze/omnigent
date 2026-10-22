@@ -9,6 +9,7 @@ speaks typed results, not status codes.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -65,6 +66,8 @@ _HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _UNREAD_LIMIT = 50
 _ACTIVE_WINDOW_US = 10 * 60 * 1_000_000
+
+_logger = logging.getLogger("omnigent.chat")
 
 
 class ChannelResponse(BaseModel):
@@ -298,11 +301,25 @@ class ChatAgentHandleResponse(BaseModel):
     name: str
 
 
+class ChatAgentAccountPublicResponse(BaseModel):
+    """Reduced public agent-account shape for ``GET /v1/chat/agents``.
+
+    Deliberately excludes the credential metadata that
+    ``GET /v1/chat/agent-accounts`` still returns (token prefix, secret
+    version, principal id, last-seen timestamp).
+    """
+
+    id: str
+    handle: str
+    display_name: str
+    owner_label: str
+
+
 class ChatAgentsResponse(BaseModel):
     """``GET /v1/chat/agents``: addressable agents plus active agent accounts."""
 
     omnigent_agents: list[ChatAgentHandleResponse]
-    agent_accounts: list[AgentAccountResponse]
+    agent_accounts: list[ChatAgentAccountPublicResponse]
 
 
 def _resolve_caller(request: Request, auth_provider: AuthProvider | None) -> str:
@@ -539,6 +556,16 @@ def _agent_account_response(account: ChatAgentAccount) -> AgentAccountResponse:
     )
 
 
+def _agent_account_public_response(account: ChatAgentAccount) -> ChatAgentAccountPublicResponse:
+    """Reduced public shape: identity and owner label, no credential metadata."""
+    return ChatAgentAccountPublicResponse(
+        id=account.id,
+        handle=account.handle,
+        display_name=account.display_name,
+        owner_label=_human_label(account.owner_id),
+    )
+
+
 def _require_agent_secret() -> None:
     """Refuse account minting when the HMAC secret is unset (FR-061)."""
     if agent_account_secret() is None:
@@ -703,7 +730,12 @@ def create_chat_router(
             raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
         await asyncio.to_thread(require_owner_membership, chat_store, channel, caller)
         await asyncio.to_thread(chat_store.add_member, channel.id, caller)
-        await asyncio.to_thread(grant_join_read, request, chat_store, channel.id, caller)
+        try:
+            await asyncio.to_thread(grant_join_read, request, chat_store, channel.id, caller)
+        except Exception:
+            _logger.exception(
+                "chat join read grant failed channel=%s member=%s", channel.id, caller
+            )
 
     @router.post("/chat/channels/{channel_id}/leave", status_code=204)
     async def leave_channel(request: Request, channel_id: str) -> None:
@@ -1094,7 +1126,7 @@ def create_chat_router(
                 ChatAgentHandleResponse(handle=handle, agent_id=agent_id, name=name)
                 for handle, agent_id, name in entries
             ],
-            agent_accounts=[_agent_account_response(account) for account in accounts],
+            agent_accounts=[_agent_account_public_response(account) for account in accounts],
         )
 
     @router.get("/chat/agent-accounts", response_model=list[AgentAccountResponse])
