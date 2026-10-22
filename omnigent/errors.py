@@ -267,6 +267,8 @@ class ErrorCode:
     TOO_MANY_DM_PRINCIPALS = "too_many_dm_principals"
     NOT_A_MEMBER = "not_a_member"
     AGENT_OWNER_REQUIRED = "agent_owner_required"
+    # A project-scoped agent account reached an endpoint class outside its scope.
+    OUT_OF_SCOPE = "out_of_scope"
     CLIENT_ID_CONFLICT = "client_id_conflict"
     # Agent-account bot path. ``rate_limited`` is the stable code for both the
     # MCP request cap and the chat-post cap. ``bot_streak_limit`` stops a run
@@ -346,6 +348,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     ErrorCode.TOO_MANY_DM_PRINCIPALS: 422,
     ErrorCode.NOT_A_MEMBER: 403,
     ErrorCode.AGENT_OWNER_REQUIRED: 403,
+    ErrorCode.OUT_OF_SCOPE: 403,
     ErrorCode.CLIENT_ID_CONFLICT: 409,
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.BOT_STREAK_LIMIT: 409,
@@ -406,6 +409,7 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     ErrorCode.TOO_MANY_DM_PRINCIPALS: ErrorCategory.USER,
     ErrorCode.NOT_A_MEMBER: ErrorCategory.USER,
     ErrorCode.AGENT_OWNER_REQUIRED: ErrorCategory.USER,
+    ErrorCode.OUT_OF_SCOPE: ErrorCategory.USER,
     ErrorCode.CLIENT_ID_CONFLICT: ErrorCategory.USER,
     ErrorCode.RATE_LIMITED: ErrorCategory.USER,
     ErrorCode.BOT_STREAK_LIMIT: ErrorCategory.USER,
@@ -469,6 +473,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.TOO_MANY_DM_PRINCIPALS: ErrorImpact.BENIGN,
     ErrorCode.NOT_A_MEMBER: ErrorImpact.BENIGN,
     ErrorCode.AGENT_OWNER_REQUIRED: ErrorImpact.BENIGN,
+    ErrorCode.OUT_OF_SCOPE: ErrorImpact.BENIGN,
     ErrorCode.CLIENT_ID_CONFLICT: ErrorImpact.BENIGN,
     # The caller waits and retries; nothing in the conversation is lost.
     ErrorCode.RATE_LIMITED: ErrorImpact.TRANSIENT,
@@ -529,6 +534,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.TOO_MANY_DM_PRINCIPALS: ErrorPhase.REQUEST,
     ErrorCode.NOT_A_MEMBER: ErrorPhase.REQUEST,
     ErrorCode.AGENT_OWNER_REQUIRED: ErrorPhase.REQUEST,
+    ErrorCode.OUT_OF_SCOPE: ErrorPhase.REQUEST,
     ErrorCode.CLIENT_ID_CONFLICT: ErrorPhase.REQUEST,
     ErrorCode.RATE_LIMITED: ErrorPhase.REQUEST,
     ErrorCode.BOT_STREAK_LIMIT: ErrorPhase.REQUEST,

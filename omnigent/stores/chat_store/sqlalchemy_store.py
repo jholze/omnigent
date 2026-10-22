@@ -19,6 +19,7 @@ from omnigent.db.db_models import (
     SqlChatMessage,
     SqlChatRead,
     SqlChatThread,
+    SqlProject,
     SqlUser,
     current_workspace_id,
 )
@@ -131,7 +132,69 @@ def _to_agent_account(row: SqlChatAgentAccount) -> ChatAgentAccount:
         secret_version=row.secret_version,
         last_seen_at=row.last_seen_at,
         revoked_at=row.revoked_at,
+        project_ids=decode_project_ids(row.project_ids),
     )
+
+
+def encode_project_ids(project_ids: Collection[str] | None) -> str | None:
+    """Store an allow-list as a JSON array. ``None`` stays NULL (unscoped)."""
+    if project_ids is None:
+        return None
+    return json.dumps(sorted(set(project_ids)), separators=(",", ":"))
+
+
+def decode_project_ids(raw: str | None) -> tuple[str, ...] | None:
+    """Read a stored allow-list. A malformed value fails closed as empty."""
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return ()
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def remove_project_from_agent_scopes(session: Session, project_id: str) -> None:
+    """Drop *project_id* from every allow-list in the workspace.
+
+    A list that becomes empty stays an empty list, so the account fails
+    closed instead of becoming unscoped. Runs in the caller's transaction.
+    """
+    rows = session.execute(
+        select(SqlChatAgentAccount).where(
+            SqlChatAgentAccount.workspace_id == current_workspace_id(),
+            SqlChatAgentAccount.project_ids.is_not(None),
+            SqlChatAgentAccount.project_ids.contains(project_id),
+        )
+    ).scalars()
+    for row in rows:
+        current = decode_project_ids(row.project_ids) or ()
+        row.project_ids = encode_project_ids([item for item in current if item != project_id])
+
+
+def _owner_has_projects(session: Session, owner_id: str, project_ids: Collection[str]) -> bool:
+    """Whether every id in *project_ids* is a project *owner_id* owns."""
+    from omnigent.server.auth import RESERVED_USER_LOCAL
+
+    wanted = set(project_ids)
+    if not wanted:
+        return True
+    owner_match = SqlProject.user_id == owner_id
+    if owner_id == RESERVED_USER_LOCAL:
+        # Single-user projects are stored without an owner.
+        owner_match = or_(owner_match, SqlProject.user_id.is_(None))
+    found = set(
+        session.execute(
+            select(SqlProject.id).where(
+                SqlProject.workspace_id == current_workspace_id(),
+                SqlProject.id.in_(wanted),
+                owner_match,
+            )
+        ).scalars()
+    )
+    return found == wanted
 
 
 def _after_predicate(cursor: tuple[int, str]):
@@ -740,6 +803,7 @@ class SqlAlchemyChatStore(ChatStore):
         handle: str,
         *,
         webhook_url: str = "",
+        project_ids: tuple[str, ...] | None = None,
     ) -> AccountWriteResult:
         """Mint an agent account. See the base class."""
         raw, token_hash, token_prefix = mint_agent_token()
@@ -759,6 +823,8 @@ class SqlAlchemyChatStore(ChatStore):
             )
             if active is not None and int(active) >= _AGENT_ACCOUNT_LIMIT:
                 return AccountWriteResult(AccountStatus.LIMIT)
+            if project_ids is not None and not _owner_has_projects(session, owner_id, project_ids):
+                return AccountWriteResult(AccountStatus.PROJECT_NOT_FOUND)
             row = SqlChatAgentAccount(
                 id=account_id,
                 principal_id=principal_id,
@@ -770,6 +836,7 @@ class SqlAlchemyChatStore(ChatStore):
                 secret_version=1,
                 webhook_url=webhook_url,
                 created_at=created_at,
+                project_ids=encode_project_ids(project_ids),
             )
             session.add(row)
             session.flush()
@@ -829,6 +896,30 @@ class SqlAlchemyChatStore(ChatStore):
             return AccountWriteResult(AccountStatus.REVOKED, None)
 
         return run_write_transaction(self._session_immediate, "revoke_chat_agent_account", _write)
+
+    def set_agent_account_projects(
+        self,
+        account_id: str,
+        owner_id: str,
+        project_ids: tuple[str, ...] | None,
+    ) -> AccountWriteResult:
+        """Replace the project allow-list. See the base class."""
+
+        def _write(session: Session) -> AccountWriteResult:
+            row = _owned_account(session, account_id, owner_id)
+            if row is None:
+                return AccountWriteResult(AccountStatus.NOT_FOUND)
+            if row.revoked_at is not None:
+                return AccountWriteResult(AccountStatus.REVOKED_ACCOUNT)
+            if project_ids is not None and not _owner_has_projects(session, owner_id, project_ids):
+                return AccountWriteResult(AccountStatus.PROJECT_NOT_FOUND)
+            row.project_ids = encode_project_ids(project_ids)
+            session.flush()
+            return AccountWriteResult(AccountStatus.UPDATED, account=_to_agent_account(row))
+
+        return run_write_transaction(
+            self._session_immediate, "set_chat_agent_account_projects", _write
+        )
 
     def principal_for_token_hash(self, token_hash: str) -> str | None:
         """Resolve a live token hash. See the base class."""

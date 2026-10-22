@@ -9,6 +9,11 @@ this single function.
 from __future__ import annotations
 
 from omnigent.entities import Conversation, ResolvedAccess
+from omnigent.server.agent_project_scope import (
+    current_project_scope,
+    record_scope_denial,
+    session_in_scope,
+)
 from omnigent.server.auth import LEVEL_MANAGE, LEVEL_OWNER
 from omnigent.server.sharing_settings import effective_public_level
 from omnigent.stores.conversation_store import ConversationStore
@@ -32,6 +37,9 @@ def check_session_access(
     3. Sub-agent → delegate to parent conversation
     4. Delegate grant check to ``permission_store.check_access``
 
+    A project-scoped agent account is first held to sessions whose root is
+    in its allow-list (ADR-0011); the owner grant then applies unchanged.
+
     :param user_id: The authenticated user, e.g.
         ``"alice@example.com"``. ``None`` if unauthenticated.
     :param conversation_id: The session to check, e.g.
@@ -49,6 +57,32 @@ def check_session_access(
     if conversation is not None and conversation.id != conversation_id:
         return False
 
+    scope = current_project_scope()
+    if scope is not None and not session_in_scope(
+        scope, conversation_id, conversation_store, conversation
+    ):
+        record_scope_denial("session_out_of_scope", scope)
+        return False
+
+    return _check_owner_rights(
+        user_id,
+        conversation_id,
+        required_level,
+        permission_store,
+        conversation_store,
+        conversation,
+    )
+
+
+def _check_owner_rights(
+    user_id: str | None,
+    conversation_id: str,
+    required_level: int,
+    permission_store: PermissionStore,
+    conversation_store: ConversationStore,
+    conversation: Conversation | None = None,
+) -> bool:
+    """Grant resolution of :func:`check_session_access`, without the project scope."""
     if user_id is not None and permission_store.is_admin(user_id):
         return True
 
@@ -57,7 +91,7 @@ def check_session_access(
         return False
 
     if conv.parent_conversation_id is not None:
-        return check_session_access(
+        return _check_owner_rights(
             user_id,
             conv.parent_conversation_id,
             required_level,
