@@ -127,6 +127,51 @@ function optionLabels(): string[] {
   return screen.queryAllByTestId(CHAT_TEST_IDS.mentionOption).map((row) => row.textContent ?? "");
 }
 
+const GROK = "grok@team-chat.test";
+
+/** Directory agent whose owner is the human Jens. */
+function renderAgentMentionCard(agentDisplayName: string) {
+  const client = new QueryClient();
+  const members: ChannelMember[] = [
+    { principal_id: ANNA, kind: "human", display: "Anna" },
+    { principal_id: JENS, kind: "human", display: "Jens" },
+  ];
+  client.setQueryData(teamChatQueryKeys.members("c-general"), members);
+  const directory = new Map<string, DirectoryEntry>([
+    [ANNA, { id: ANNA, kind: "user", display_name: "Anna" }],
+    [JENS, { id: JENS, kind: "user", display_name: "Jens" }],
+    [
+      GROK,
+      {
+        id: GROK,
+        kind: "agent_account",
+        display_name: agentDisplayName,
+        owner_id: JENS,
+      },
+    ],
+  ]);
+  render(
+    <QueryClientProvider client={client}>
+      <ChatComposerCard
+        channelId="c-general"
+        me={ANNA}
+        placeholder="Nachricht an #general"
+        label="Nachricht an #general"
+        directory={directory}
+      />
+    </QueryClientProvider>,
+  );
+  return screen.getByTestId(CHAT_TEST_IDS.composerInput) as HTMLTextAreaElement;
+}
+
+function agentAccountOptionText(): string {
+  const row = screen
+    .getAllByTestId(CHAT_TEST_IDS.mentionOption)
+    .find((option) => option.getAttribute("data-mention-kind") === "agent_account");
+  if (!row) throw new Error("agent_account mention option missing");
+  return row.textContent ?? "";
+}
+
 function chipTokens(): (string | null)[] {
   return screen
     .queryAllByTestId(CHAT_TEST_IDS.composerMentionChip)
@@ -209,5 +254,21 @@ describe("ChatComposerCard mentions", () => {
     const [, sent] = sendChatMessageMock.mock.calls[0] as unknown as [unknown, { body: string }];
     expect(sent.body.trim()).toBe(`<@user:${JENS}> frag <@omnigent_agent:agent>`);
     expect(chipTokens()).toEqual([]);
+  });
+
+  it("FR-026 an agent account shows its owner once", () => {
+    const suffixed = renderAgentMentionCard("Grok (Jens)");
+    fireEvent.change(suffixed, { target: { value: "@" } });
+    const suffixedText = agentAccountOptionText();
+    expect(suffixedText).toContain("Grok (Jens)");
+    expect(suffixedText).not.toContain("Grok (Jens) (Jens)");
+
+    cleanup();
+
+    const raw = renderAgentMentionCard("Grok");
+    fireEvent.change(raw, { target: { value: "@" } });
+    const rawText = agentAccountOptionText();
+    expect(rawText).toContain("Grok (Jens)");
+    expect(rawText.match(/\(Jens\)/g)).toEqual(["(Jens)"]);
   });
 });
