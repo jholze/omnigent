@@ -125,6 +125,42 @@ describe("MessageItem", () => {
     expect(screen.getByRole("button", { name: "erneut senden" })).toHaveClass("min-h-11");
   });
 
+  it("AC-062a shows the author Grok (Jens) with a Bot badge", () => {
+    const botDirectory = new Map<string, DirectoryEntry>([
+      ...directory,
+      [
+        "agent:grok",
+        {
+          id: "agent:grok",
+          kind: "agent_account",
+          display_name: "Grok (Jens)",
+          handle: "grok-jens",
+          owner_id: "jens@bloopark.de",
+        },
+      ],
+    ]);
+    render(
+      <MemoryRouter>
+        <ul>
+          <MessageItem
+            message={view({
+              authorId: "agent:grok",
+              authorKind: "agent_account",
+              body: "Hallo aus dem Bot",
+            })}
+            directory={botDirectory}
+          />
+        </ul>
+      </MemoryRouter>,
+    );
+    const row = screen.getByTestId(CHAT_TEST_IDS.message);
+    expect(within(row).getByText("Grok (Jens)")).toBeInTheDocument();
+    expect(within(row).getByText("Bot")).toBeInTheDocument();
+    expect(within(row).queryByText("Agent")).not.toBeInTheDocument();
+    expect(within(row).queryByText("Grok (Jens Holze)")).not.toBeInTheDocument();
+    expect(row.textContent?.match(/\(Jens\)/g)).toEqual(["(Jens)"]);
+  });
+
   it("links the reply count and the reply action to the thread route", () => {
     render(
       <MemoryRouter>

@@ -86,6 +86,32 @@ async def test_missing_secret_is_503_agent_accounts_unconfigured(
     assert resp.json()["error"]["code"] == "agent_accounts_unconfigured"
 
 
+async def test_create_without_webhook_stores_an_empty_url(chat_client, db_uri) -> None:
+    created = await chat_client.post(
+        "/v1/chat/agent-accounts",
+        headers=headers_for(JENS),
+        json={"display_name": "Grok", "handle": "grok-plain"},
+    )
+    assert created.status_code == 201, created.text
+    with Session(get_or_create_engine(db_uri)) as session:
+        row = session.query(SqlChatAgentAccount).filter_by(handle="grok-plain").one()
+        assert row.webhook_url == ""
+
+
+async def test_list_returns_only_the_callers_accounts(chat_client) -> None:
+    jens = await create_account(chat_client, JENS, "grok-jens")
+    anna = await create_account(chat_client, ANNA, "grok-anna")
+    assert jens.status_code == 201, jens.text
+    assert anna.status_code == 201, anna.text
+
+    listed = await chat_client.get("/v1/chat/agent-accounts", headers=headers_for(JENS))
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [row["handle"] for row in body] == ["grok-jens"]
+    assert body[0]["owner_id"] == JENS
+    assert body[0]["last_seen_at"] is None
+
+
 async def test_create_audit_omits_token_and_webhook(chat_client, monkeypatch, db_uri) -> None:
     seen: list[dict] = []
 

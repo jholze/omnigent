@@ -43,6 +43,50 @@ export interface ChannelMember {
   /** `human` or `agent_account`. */
   kind: string;
   display: string;
+  /**
+   * Agent presence from the members route (`aktiv` or `inaktiv`).
+   * Humans omit it. Kept so the mention row can show it.
+   */
+  status?: string | null;
+}
+
+/** One owned agent account from `GET /v1/chat/agent-accounts`. */
+export interface AgentAccountRecord {
+  id: string;
+  principal_id: string;
+  owner_id: string;
+  display_name: string;
+  handle: string;
+  token_prefix: string;
+  secret_version: number;
+  last_seen_at: number | null;
+}
+
+/** Create or rotate response. The token and secret are shown once. */
+export interface AgentAccountIssued {
+  account: AgentAccountRecord;
+  token: string;
+  webhook_secret: string;
+}
+
+const AGENT_ACTIVE_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * `aktiv` when `last_seen_at` falls inside the last 10 minutes.
+ * Accepts epoch microseconds, milliseconds, or seconds.
+ */
+export function agentAccountActivity(
+  lastSeenAt: number | null | undefined,
+  nowMs = Date.now(),
+): "aktiv" | "inaktiv" {
+  if (lastSeenAt == null) return "inaktiv";
+  const seenMs =
+    lastSeenAt > 1e14
+      ? Math.floor(lastSeenAt / 1000)
+      : lastSeenAt < 1e11
+        ? lastSeenAt * 1000
+        : lastSeenAt;
+  return nowMs - seenMs <= AGENT_ACTIVE_WINDOW_MS ? "aktiv" : "inaktiv";
 }
 
 /** `GET /v1/chat/bootstrap`. `agents_hint` is not on this server build. */
@@ -280,6 +324,70 @@ export async function fetchChannelMembers(
     { signal },
   );
   return readJson(response, "Invalid chat members response", isChannelMemberList);
+}
+
+function isAgentAccountRecord(value: unknown): value is AgentAccountRecord {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.principal_id === "string" &&
+    typeof value.owner_id === "string" &&
+    typeof value.display_name === "string" &&
+    typeof value.handle === "string" &&
+    typeof value.token_prefix === "string" &&
+    typeof value.secret_version === "number" &&
+    (value.last_seen_at === null || typeof value.last_seen_at === "number")
+  );
+}
+
+function isAgentAccountList(value: unknown): value is AgentAccountRecord[] {
+  return Array.isArray(value) && value.every(isAgentAccountRecord);
+}
+
+function isAgentAccountIssued(value: unknown): value is AgentAccountIssued {
+  if (!isRecord(value)) return false;
+  return (
+    isAgentAccountRecord(value.account) &&
+    typeof value.token === "string" &&
+    typeof value.webhook_secret === "string"
+  );
+}
+
+/** Active agent accounts owned by the caller. Other owners are not listed. */
+export async function fetchAgentAccounts(signal?: AbortSignal): Promise<AgentAccountRecord[]> {
+  const response = await authenticatedFetch("/v1/chat/agent-accounts", { signal });
+  return readJson(response, "Invalid agent accounts response", isAgentAccountList);
+}
+
+/** Create an account. The body is the display name and handle only. */
+export async function createAgentAccount(input: {
+  display_name: string;
+  handle: string;
+}): Promise<AgentAccountIssued> {
+  const response = await authenticatedFetch("/v1/chat/agent-accounts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: input.display_name, handle: input.handle }),
+  });
+  return readJson(response, "Invalid agent account response", isAgentAccountIssued);
+}
+
+/** Rotate the token. The previous token stops working. */
+export async function rotateAgentAccount(accountId: string): Promise<AgentAccountIssued> {
+  const response = await authenticatedFetch(
+    `/v1/chat/agent-accounts/${encodeURIComponent(accountId)}/rotate`,
+    { method: "POST" },
+  );
+  return readJson(response, "Invalid agent account response", isAgentAccountIssued);
+}
+
+/** Revoke the account and drop it from the caller's list. */
+export async function revokeAgentAccount(accountId: string): Promise<void> {
+  const response = await authenticatedFetch(
+    `/v1/chat/agent-accounts/${encodeURIComponent(accountId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) throw new ChatApiError(response.status);
 }
 
 export interface PostMessageInput {

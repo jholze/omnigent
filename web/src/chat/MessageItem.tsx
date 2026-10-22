@@ -14,6 +14,7 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
+import { AgentBotBadge } from "./BotBadge";
 import type { DirectoryEntry } from "./chatApi";
 import { CHAT_TEST_IDS } from "./testids";
 
@@ -352,7 +353,11 @@ function MessageRow({
         ) : (
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
             <span className="min-w-0 text-sm font-medium break-words">{author}</span>
-            {agent ? <span className="text-xs text-muted-foreground">Agent</span> : null}
+            {message.authorKind === "agent_account" ? (
+              <AgentBotBadge />
+            ) : agent ? (
+              <span className="text-xs text-muted-foreground">Agent</span>
+            ) : null}
             <time
               dateTime={dateTime}
               title={fullTime}

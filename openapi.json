@@ -116,6 +116,18 @@
             "title": "Id",
             "type": "string"
           },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
           "owner_id": {
             "title": "Owner Id",
             "type": "string"
@@ -11541,6 +11553,30 @@
       }
     },
     "/v1/chat/agent-accounts": {
+      "get": {
+        "description": "List active agent accounts owned by the caller.\n\nAnother human's accounts are not included. `last_seen_at` is\nepoch microseconds, or null when the account has never called.",
+        "operationId": "list_agent_accounts_v1_chat_agent_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentAccountResponse"
+                  },
+                  "title": "Response List Agent Accounts V1 Chat Agent Accounts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Agent Accounts",
+        "tags": [
+          "chat"
+        ]
+      },
       "post": {
         "description": "Mint an agent account. The raw `ogc_` token is returned once.",
         "operationId": "create_agent_account_v1_chat_agent_accounts_post",

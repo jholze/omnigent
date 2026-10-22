@@ -265,6 +265,8 @@ class AgentAccountResponse(BaseModel):
     handle: str
     token_prefix: str
     secret_version: int
+    # Epoch microseconds of the last authenticated call. Null if never seen.
+    last_seen_at: int | None = None
 
 
 class AgentAccountCreatedResponse(BaseModel):
@@ -513,6 +515,7 @@ def _agent_account_response(account: ChatAgentAccount) -> AgentAccountResponse:
         handle=account.handle,
         token_prefix=account.token_prefix,
         secret_version=account.secret_version,
+        last_seen_at=account.last_seen_at,
     )
 
 
@@ -1051,6 +1054,19 @@ def create_chat_router(
             },
         )
 
+    @router.get("/chat/agent-accounts", response_model=list[AgentAccountResponse])
+    async def list_agent_accounts(request: Request) -> list[AgentAccountResponse]:
+        """List active agent accounts owned by the caller.
+
+        Another human's accounts are not included. ``last_seen_at`` is
+        epoch microseconds, or null when the account has never called.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        accounts = await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        owned = [account for account in accounts if account.owner_id == caller]
+        return [_agent_account_response(account) for account in owned]
+
     @router.post(
         "/chat/agent-accounts", response_model=AgentAccountCreatedResponse, status_code=201
     )
@@ -1063,8 +1079,10 @@ def create_chat_router(
         _require_agent_secret()
         display_name = _validate_display_name(body.display_name)
         handle = _validate_handle(body.handle)
-        webhook = body.webhook_url or ""
-        if await asyncio.to_thread(webhook_url_rejected, webhook):
+        # The R1 client sends no webhook. Blank is stored; a URL that is
+        # present still has to be public https.
+        webhook = (body.webhook_url or "").strip()
+        if webhook and await asyncio.to_thread(webhook_url_rejected, webhook):
             raise OmnigentError("webhook_url is invalid", code=ErrorCode.INVALID_WEBHOOK)
         result = await asyncio.to_thread(
             chat_store.create_agent_account,
