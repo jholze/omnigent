@@ -1,0 +1,67 @@
+name: Team-Chat task
+description: Ticket from the team-chat spec on the fork. Tickets in English. The lead reads the review mode at start.
+title: "T-XXX: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Tickets in English.** The title, the body and the acceptance criteria are English.
+        Keep stable IDs, the values `prototyping` and `polish`, links, and quoted product UI strings.
+        See `specs/team-chat/review-stages.md` (RS-FR-013).
+
+  - type: input
+    id: stable-id
+    attributes:
+      label: Stable ID
+      description: For example T-007b or T-005-AC-033c. The same ID as in specs/omnigent-chat/07-tasks.md.
+      placeholder: T-007b
+    validations:
+      required: true
+
+  - type: dropdown
+    id: review-modus
+    attributes:
+      label: Review mode
+      description: >
+        prototyping or polish. The lead session reads this field at start
+        (specs/team-chat/review-mode.md). An extension of a finished feature
+        is always polish. prototyping checks ACs, tests, CI, lint and code
+        review (DeepSeek, then Opus). polish is the full gate and, for UI,
+        adds the UX review, NFR-032 (1280x800 and 390x844) and contrast.
+      options:
+        - prototyping
+        - polish
+    validations:
+      required: true
+
+  - type: dropdown
+    id: marker
+    attributes:
+      label: Marker
+      description: exists, adapt or new, for the code this ticket changes.
+      options:
+        - new
+        - adapt
+        - exists
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: English EARS or Given/When/Then. One AC per block. Polish UI ACs name 1280x800 and 390x844. Keep quoted product strings in the product language.
+      placeholder: |
+        Given …
+        When …
+        Then …
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: A short English note. Link open product questions. Do not decide them.
+    validations:
+      required: false
