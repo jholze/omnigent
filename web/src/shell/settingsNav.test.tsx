@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   customAgentsEnabled: false as boolean | undefined,
   agentInstall: false,
   enabledConnections: [] as string[],
+  teamChat: false,
 }));
 
 vi.mock("@/lib/CapabilitiesContext", () => ({
@@ -34,6 +35,7 @@ vi.mock("@/lib/CapabilitiesContext", () => ({
     single_user: mocks.singleUser,
     features: {
       custom_agents_settings_ui: mocks.customAgentsEnabled,
+      team_chat: mocks.teamChat,
     },
     agent_install: mocks.agentInstall,
     enabled_connections: mocks.enabledConnections,
@@ -73,6 +75,7 @@ beforeEach(() => {
   mocks.customAgentsEnabled = false;
   mocks.agentInstall = false;
   mocks.enabledConnections = [];
+  mocks.teamChat = false;
 });
 afterEach(cleanup);
 
@@ -171,6 +174,28 @@ describe("settingsNavGroups", () => {
         .find((i) => i.id === "integrations");
     expect(item(false)).toBeUndefined();
     expect(item(true)).toMatchObject({ id: "integrations", label: "Sandbox Integrations" });
+  });
+
+  it("lists Agenten only while team chat is on", () => {
+    const ids = (teamChat: boolean) =>
+      settingsNavGroups(false, false, false, false, false, false, false, teamChat)
+        .flatMap((group) => group.items)
+        .filter((item) => item.id === "agent-accounts");
+    expect(ids(false)).toEqual([]);
+    expect(ids(true)).toMatchObject([{ id: "agent-accounts", label: "Agenten" }]);
+
+    renderBody();
+    expect(screen.queryByTestId("settings-nav-agent-accounts")).toBeNull();
+    expect(routeHook("/settings/agent-accounts").section).toBe("general");
+
+    cleanup();
+    mocks.teamChat = true;
+    renderBody();
+    expect(screen.getByTestId("settings-nav-agent-accounts")).toHaveTextContent("Agenten");
+    expect(routeHook("/settings/agent-accounts")).toEqual({
+      inSettings: true,
+      section: "agent-accounts",
+    });
   });
 });
 

@@ -23,6 +23,8 @@ export interface MentionCandidate {
   /** Owner's name, for agent accounts. */
   owner: string | null;
   handle: string | null;
+  /** `aktiv` or `inaktiv` for an agent account that is a channel member. */
+  status: "aktiv" | "inaktiv" | null;
 }
 
 /** A picked mention in the draft. */
@@ -45,6 +47,10 @@ function ownerLabel(ownerId: string, directory: Map<string, DirectoryEntry>): st
   return local.slice(0, 1).toUpperCase() + local.slice(1);
 }
 
+function memberPresence(member: ChannelMember): "aktiv" | "inaktiv" | null {
+  return member.status === "aktiv" || member.status === "inaktiv" ? member.status : null;
+}
+
 /** Every mentionable principal except *me*, one row per id. */
 export function mentionCandidates(
   members: ChannelMember[],
@@ -52,7 +58,12 @@ export function mentionCandidates(
   me: string,
 ): MentionCandidate[] {
   const byId = new Map<string, MentionCandidate>();
-  const add = (id: string, kind: MentionKind, fallbackLabel: string) => {
+  const add = (
+    id: string,
+    kind: MentionKind,
+    fallbackLabel: string,
+    status: "aktiv" | "inaktiv" | null = null,
+  ) => {
     if (id === "" || id === me || byId.has(id)) return;
     const entry = directory.get(id);
     const label = entry ? principalLabel(id, directory) : fallbackLabel.trim() || id;
@@ -63,14 +74,17 @@ export function mentionCandidates(
       label,
       owner: ownerId ? ownerLabel(ownerId, directory) : null,
       handle: entry?.handle?.trim() || null,
+      status: kind === "agent_account" ? status : null,
     });
   };
   for (const member of members) {
-    add(
-      member.principal_id,
-      member.kind === "agent_account" ? "agent_account" : "user",
-      member.display,
-    );
+    const kind: MentionKind = member.kind === "agent_account" ? "agent_account" : "user";
+    // A revoked account is removed from the active directory, so a stale
+    // member row must not stay in the @ list.
+    if (kind === "agent_account" && directory.get(member.principal_id)?.kind !== "agent_account") {
+      continue;
+    }
+    add(member.principal_id, kind, member.display, memberPresence(member));
   }
   for (const entry of directory.values()) {
     if (entry.kind === "user" || entry.kind === "agent_account") {
@@ -84,6 +98,7 @@ export function mentionCandidates(
     label: OMNIGENT_AGENT_HANDLE,
     owner: null,
     handle: OMNIGENT_AGENT_HANDLE,
+    status: null,
   };
   return [agent, ...people];
 }

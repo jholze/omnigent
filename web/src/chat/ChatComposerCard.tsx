@@ -23,6 +23,7 @@ import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { cn } from "@/lib/utils";
+import { AgentBotBadge } from "./BotBadge";
 import { fetchChannelMembers, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
 import { sendChatMessage } from "./chatOutbox";
 import {
@@ -389,10 +390,12 @@ function MentionOptionLabel({ candidate }: { candidate: MentionCandidate }) {
         <span className="min-w-0 flex-1 truncate">
           {agentAccountPickerLabel(candidate.label, candidate.owner)}
         </span>
-        <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-border px-1 text-xs text-foreground">
-          <BotIcon className="size-3" aria-hidden="true" />
-          Bot
-        </span>
+        {candidate.status ? (
+          <span className="shrink-0 text-xs text-muted-foreground group-aria-selected:text-foreground">
+            {candidate.status}
+          </span>
+        ) : null}
+        <AgentBotBadge />
       </>
     );
   }

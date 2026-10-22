@@ -24,6 +24,7 @@
  *   standalone `/members` and `/policies` pages linked from Account) so
  *   entering them stays inside settings — the sidebar keeps the section nav
  *   instead of snapping back to the conversation list.
+ * - **Agenten** — team-chat agent accounts, only when `team_chat` is on.
  * - **Archived sessions** — archived sessions, moved out of the sidebar
  *   list. Not clickable; each row reveals Delete / Unarchive on hover, and
  *   Unarchive opens the restored session.
@@ -118,6 +119,8 @@ import {
 } from "@/lib/databricksIntegration";
 import { getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
+import { AgentAccountsSection } from "@/chat/settings/AgentAccountsSection";
 import { useOmnigentAnalytics, useOmnigentPageView } from "@/lib/analytics";
 import {
   type Conversation,
@@ -339,6 +342,9 @@ export function SettingsPage() {
       {section === "general" && <GeneralSection />}
       {section === "harnesses" && <SettingsHarnessesSection />}
       {section === "custom-agents" && <SettingsCustomAgentsSection />}
+      {section === "agent-accounts" && isFeatureEnabled(info, "team_chat") && (
+        <AgentAccountsSection />
+      )}
       {section === "git" && <GitSection />}
       {section === "integrations" && <IntegrationsSection />}
       {section === "mcp" && (

@@ -271,4 +271,67 @@ describe("ChatComposerCard mentions", () => {
     expect(rawText).toContain("Grok (Jens)");
     expect(rawText.match(/\(Jens\)/g)).toEqual(["(Jens)"]);
   });
+
+  it("AC-076a an agent row shows aktiv and a revoked account is absent", () => {
+    const client = new QueryClient();
+    const grok = "agent:grok-jens";
+    const sleepy = "agent:sleepy";
+    const broken = "agent:broken";
+    const revoked = "agent:revoked";
+    const members: ChannelMember[] = [
+      { principal_id: ANNA, kind: "human", display: "Anna" },
+      { principal_id: grok, kind: "agent_account", display: "Grok (Jens)", status: "aktiv" },
+      { principal_id: sleepy, kind: "agent_account", display: "Sleepy", status: "inaktiv" },
+      {
+        principal_id: broken,
+        kind: "agent_account",
+        display: "Broken",
+        status: "Webhook fehlerhaft",
+      },
+      { principal_id: revoked, kind: "agent_account", display: "Revoked Bot", status: "aktiv" },
+    ];
+    client.setQueryData(teamChatQueryKeys.members("c-general"), members);
+    const directory = new Map<string, DirectoryEntry>([
+      [ANNA, { id: ANNA, kind: "user", display_name: "Anna" }],
+      [JENS, { id: JENS, kind: "user", display_name: "Jens" }],
+      [grok, { id: grok, kind: "agent_account", display_name: "Grok (Jens)", owner_id: JENS }],
+      [sleepy, { id: sleepy, kind: "agent_account", display_name: "Sleepy", owner_id: JENS }],
+      [broken, { id: broken, kind: "agent_account", display_name: "Broken", owner_id: JENS }],
+    ]);
+    render(
+      <QueryClientProvider client={client}>
+        <ChatComposerCard
+          channelId="c-general"
+          me={ANNA}
+          placeholder="Nachricht an #general"
+          label="Nachricht an #general"
+          directory={directory}
+        />
+      </QueryClientProvider>,
+    );
+    fireEvent.change(screen.getByTestId(CHAT_TEST_IDS.composerInput), { target: { value: "@" } });
+
+    const rowFor = (id: string) => {
+      const row = screen
+        .getAllByTestId(CHAT_TEST_IDS.mentionOption)
+        .find((option) => option.getAttribute("data-mention-id") === id);
+      if (!row) throw new Error(`mention option ${id} missing`);
+      return row;
+    };
+
+    const grokRow = rowFor(grok);
+    expect(within(grokRow).getByText("aktiv")).toBeInTheDocument();
+    expect(within(grokRow).getByText("Bot")).toBeInTheDocument();
+    expect(grokRow.textContent).toContain("Grok (Jens)");
+    expect(grokRow.textContent).not.toContain("Grok (Jens) (Jens)");
+    expect(within(rowFor(sleepy)).getByText("inaktiv")).toBeInTheDocument();
+    expect(rowFor(broken).textContent).not.toContain("Webhook fehlerhaft");
+    expect(screen.queryByText("Webhook fehlerhaft")).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByTestId(CHAT_TEST_IDS.mentionOption)
+        .some((option) => option.getAttribute("data-mention-id") === revoked),
+    ).toBe(false);
+    expect(screen.queryByText("Revoked Bot")).not.toBeInTheDocument();
+  });
 });

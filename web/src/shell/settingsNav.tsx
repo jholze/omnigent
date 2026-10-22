@@ -28,7 +28,11 @@ import {
 import { Link, useLocation } from "@/lib/routing";
 import { Button } from "@/components/ui/button";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
-import { customAgentsSettingsEnabled, isSingleUserMode } from "@/lib/capabilities";
+import {
+  customAgentsSettingsEnabled,
+  isFeatureEnabled,
+  isSingleUserMode,
+} from "@/lib/capabilities";
 import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { isElectronShell } from "@/lib/nativeBridge";
 import { cn } from "@/lib/utils";
@@ -38,6 +42,7 @@ export type SettingsSectionId =
   | "appearance"
   | "harnesses"
   | "custom-agents"
+  | "agent-accounts"
   | "general"
   | "git"
   | "integrations"
@@ -56,6 +61,7 @@ const SECTION_IDS: readonly SettingsSectionId[] = [
   "appearance",
   "harnesses",
   "custom-agents",
+  "agent-accounts",
   "general",
   "git",
   "integrations",
@@ -101,6 +107,7 @@ export function settingsNavGroups(
   integrationsEnabled = false,
   customAgentsEnabled = false,
   mcpEnabled = false,
+  teamChatEnabled = false,
 ): SettingsNavGroup[] {
   const harnesses: SettingsNavItem = {
     id: "harnesses",
@@ -130,6 +137,10 @@ export function settingsNavGroups(
     // Account leads the group when present — it's the most-visited section
     // on a deploy with sign-in.
     general.unshift({ id: "account", label: "Account", icon: UserCogIcon });
+  }
+  // Team-chat agent accounts. Hidden until the release flag is on.
+  if (teamChatEnabled) {
+    general.push({ id: "agent-accounts", label: "Agenten", icon: BotIcon });
   }
   const groups: SettingsNavGroup[] = [{ title: "General", items: general }];
   if (customAgentsEnabled) {
@@ -203,7 +214,8 @@ export function useSettingsRoute(): {
   const isValidSection =
     (SECTION_IDS as readonly string[]).includes(next) &&
     !(singleUser && (next === "members" || next === "sharing")) &&
-    !(next === "custom-agents" && !customAgentsSettingsEnabled(info));
+    !(next === "custom-agents" && !customAgentsSettingsEnabled(info)) &&
+    !(next === "agent-accounts" && !isFeatureEnabled(info, "team_chat"));
   const section = isValidSection ? (next as SettingsSectionId) : defaultSection;
   const harness = section === "harnesses" ? segments[idx + 2] : undefined;
   if (section === "custom-agents" && segments[idx + 2]) {
@@ -266,6 +278,7 @@ export function SettingsSidebarBody({
     integrationsEnabled,
     customAgentsSettingsEnabled(info),
     mcpEnabled,
+    isFeatureEnabled(info, "team_chat"),
   );
 
   return (
