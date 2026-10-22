@@ -1285,6 +1285,55 @@
         "title": "ChannelResponse",
         "type": "object"
       },
+      "ChatAgentHandleResponse": {
+        "description": "One omnigent agent handle in `GET /v1/chat/agents` (FR-039).",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "handle": {
+            "title": "Handle",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle",
+          "agent_id",
+          "name"
+        ],
+        "title": "ChatAgentHandleResponse",
+        "type": "object"
+      },
+      "ChatAgentsResponse": {
+        "description": "`GET /v1/chat/agents`: addressable agents plus active agent accounts.",
+        "properties": {
+          "agent_accounts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentAccountResponse"
+            },
+            "title": "Agent Accounts",
+            "type": "array"
+          },
+          "omnigent_agents": {
+            "items": {
+              "$ref": "#/components/schemas/ChatAgentHandleResponse"
+            },
+            "title": "Omnigent Agents",
+            "type": "array"
+          }
+        },
+        "required": [
+          "omnigent_agents",
+          "agent_accounts"
+        ],
+        "title": "ChatAgentsResponse",
+        "type": "object"
+      },
       "ChildSessionList": {
         "description": "Paginated list of child sessions; `data` is a page of `ChildSessionSummary`.",
         "properties": {
@@ -11728,6 +11777,28 @@
           }
         },
         "summary": "Rotate Agent Account",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/agents": {
+      "get": {
+        "description": "List every agent the caller may address by handle (FR-039).\n\n`omnigent_agents` carries the same visibility as `GET /v1/agents`\n(server agents plus the caller's own user agents), each with a unique\nslugified handle. `agent_accounts` carries every active agent\naccount, regardless of owner.",
+        "operationId": "list_chat_agents_v1_chat_agents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatAgentsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Chat Agents",
         "tags": [
           "chat"
         ]

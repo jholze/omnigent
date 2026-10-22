@@ -31,7 +31,12 @@ from omnigent.server.chat_access import (
     require_post,
     require_read,
 )
-from omnigent.server.chat_agent_threads import _human_label
+from omnigent.server.chat_agent_threads import (
+    _human_label,
+    grant_join_read,
+    request_agent_store,
+    visible_agent_handles,
+)
 from omnigent.server.chat_rate_limit import consume_agent_request, consume_channel_post
 from omnigent.server.chat_realtime import publish_message_created, publish_read_updated
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
@@ -283,6 +288,21 @@ class AgentAccountRotatedResponse(BaseModel):
     account: AgentAccountResponse
     token: str
     webhook_secret: str
+
+
+class ChatAgentHandleResponse(BaseModel):
+    """One omnigent agent handle in ``GET /v1/chat/agents`` (FR-039)."""
+
+    handle: str
+    agent_id: str
+    name: str
+
+
+class ChatAgentsResponse(BaseModel):
+    """``GET /v1/chat/agents``: addressable agents plus active agent accounts."""
+
+    omnigent_agents: list[ChatAgentHandleResponse]
+    agent_accounts: list[AgentAccountResponse]
 
 
 def _resolve_caller(request: Request, auth_provider: AuthProvider | None) -> str:
@@ -683,6 +703,7 @@ def create_chat_router(
             raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
         await asyncio.to_thread(require_owner_membership, chat_store, channel, caller)
         await asyncio.to_thread(chat_store.add_member, channel.id, caller)
+        await asyncio.to_thread(grant_join_read, request, chat_store, channel.id, caller)
 
     @router.post("/chat/channels/{channel_id}/leave", status_code=204)
     async def leave_channel(request: Request, channel_id: str) -> None:
@@ -1052,6 +1073,28 @@ def create_chat_router(
                 "cursor": {"created_at": cursor.last_read_at, "id": cursor.last_read_id},
                 "advanced": result.status is ReadStatus.ADVANCED,
             },
+        )
+
+    @router.get("/chat/agents", response_model=ChatAgentsResponse)
+    async def list_chat_agents(request: Request) -> ChatAgentsResponse:
+        """List every agent the caller may address by handle (FR-039).
+
+        ``omnigent_agents`` carries the same visibility as ``GET /v1/agents``
+        (server agents plus the caller's own user agents), each with a unique
+        slugified handle. ``agent_accounts`` carries every active agent
+        account, regardless of owner.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        entries = await asyncio.to_thread(
+            visible_agent_handles, request_agent_store(request), caller
+        )
+        accounts = await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        return ChatAgentsResponse(
+            omnigent_agents=[
+                ChatAgentHandleResponse(handle=handle, agent_id=agent_id, name=name)
+                for handle, agent_id, name in entries
+            ],
+            agent_accounts=[_agent_account_response(account) for account in accounts],
         )
 
     @router.get("/chat/agent-accounts", response_model=list[AgentAccountResponse])
