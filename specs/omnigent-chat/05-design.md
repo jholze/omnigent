@@ -122,6 +122,20 @@ Alle Routen: Flag-Gate (404), Auth wie `/v1` (User) bzw. Agentenkonto-Token (§S
 | `DELETE /v1/chat/agent-accounts/{id}` | – | 204 | FR-064 | R1 |
 | `POST /v1/chat/agent-accounts/{id}/redeliver` | – | 202 (dead_letter → pending) | FR-073 | R1.1 |
 
+`/v1/chat/agent-accounts*` is the gated alias of `/v1/agent-accounts*` (FR-112): same handlers, same bodies and status codes, 404 while team_chat is off.
+
+### REST `/v1/agent-accounts` (ungated management, `omnigent/server/routes/agent_accounts.py`)
+Agent-account management for MCP access. No team_chat gate (FR-112). Human auth only: an `ogc_` bearer is 401 here, because it authenticates only `/mcp` and `/v1/chat/*` (FR-113). Mounted whenever the chat store exists.
+
+| Methode & Pfad | Body / Query | Antwort | FR | Rel |
+|---|---|---|---|---|
+| `GET /v1/agent-accounts` | – | own active accounts | FR-112 | R1 |
+| `POST /v1/agent-accounts` | `{display_name, handle, webhook_url?, project_ids?}` | 201 `{account, token, webhook_secret}` (einmalig) | FR-061, FR-111, FR-112 | R1 |
+| `PATCH /v1/agent-accounts/{id}` | `{project_ids}` (`[]` → 400, `null` → unscoped) | 200 account | FR-111, FR-112 | R1 |
+| `POST /v1/agent-accounts/{id}/rotate` | – | 200 `{account, token, webhook_secret}`; old token 401 | FR-064, FR-112 | R1 |
+| `POST /v1/agent-accounts/{id}/revoke` | – | 204 | FR-064, FR-112 | R1 |
+| `DELETE /v1/agent-accounts/{id}` | – | 204 | FR-064, FR-112 | R1 |
+
 Bestehend (adapt): `GET/POST /v1/sessions/{id}/chat` (PR #4) als Adapter; `GET /v1/sessions/{id}/stream`, `POST /v1/sessions/{id}/events`, `…/elicitations/{eid}/resolve` unverändert genutzt.
 
 ### WS-Frames (adapt `WS /v1/sessions/updates`)

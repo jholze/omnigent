@@ -49,7 +49,7 @@
         "type": "object"
       },
       "AgentAccountBody": {
-        "description": "`POST /v1/chat/agent-accounts`.",
+        "description": "`POST /v1/agent-accounts`.",
         "properties": {
           "display_name": {
             "title": "Display Name",
@@ -93,7 +93,7 @@
         "type": "object"
       },
       "AgentAccountCreatedResponse": {
-        "description": "`POST /v1/chat/agent-accounts`. Token and webhook secret are shown once.",
+        "description": "`POST /v1/agent-accounts`. Token and webhook secret are shown once.",
         "properties": {
           "account": {
             "$ref": "#/components/schemas/AgentAccountResponse"
@@ -175,7 +175,7 @@
         "type": "object"
       },
       "AgentAccountRotatedResponse": {
-        "description": "`POST /v1/chat/agent-accounts/{id}/rotate`. The previous token is dead.",
+        "description": "`POST /v1/agent-accounts/{id}/rotate`. The previous token is dead.",
         "properties": {
           "account": {
             "$ref": "#/components/schemas/AgentAccountResponse"
@@ -198,7 +198,7 @@
         "type": "object"
       },
       "AgentAccountScopeBody": {
-        "description": "`PATCH /v1/chat/agent-accounts/{id}`.\n\n`project_ids` is required. A list scopes the account; an explicit\n`null` removes the scope; an empty list is 400.",
+        "description": "`PATCH /v1/agent-accounts/{id}`.\n\n`project_ids` is required. A list scopes the account; an explicit\n`null` removes the scope; an empty list is 400.",
         "properties": {
           "project_ids": {
             "anyOf": [
@@ -11021,6 +11021,238 @@
         "summary": "Health",
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/v1/agent-accounts": {
+      "get": {
+        "description": "List active agent accounts owned by the caller.",
+        "operationId": "list_agent_accounts_v1_agent_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentAccountResponse"
+                  },
+                  "title": "Response List Agent Accounts V1 Agent Accounts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Agent Accounts",
+        "tags": [
+          "agent_accounts"
+        ]
+      },
+      "post": {
+        "description": "Mint an agent account. The raw `ogc_` token is returned once.",
+        "operationId": "create_agent_account_v1_agent_accounts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAccountBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountCreatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Agent Account",
+        "tags": [
+          "agent_accounts"
+        ]
+      }
+    },
+    "/v1/agent-accounts/{account_id}": {
+      "delete": {
+        "description": "Revoke the account (FR-064). A non-owner receives 404.",
+        "operationId": "delete_agent_account_v1_agent_accounts__account_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Agent Account",
+        "tags": [
+          "agent_accounts"
+        ]
+      },
+      "patch": {
+        "description": "Replace the project allow-list (FR-111). Every refusal leaves it unchanged.\n\n`[]` is 400. A project the caller does not own is 404. `null`\nreturns the account to unscoped owner rights.",
+        "operationId": "update_agent_account_scope_v1_agent_accounts__account_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAccountScopeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Agent Account Scope",
+        "tags": [
+          "agent_accounts"
+        ]
+      }
+    },
+    "/v1/agent-accounts/{account_id}/revoke": {
+      "post": {
+        "description": "Revoke the account. Its current token returns 401.",
+        "operationId": "revoke_agent_account_v1_agent_accounts__account_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Agent Account",
+        "tags": [
+          "agent_accounts"
+        ]
+      }
+    },
+    "/v1/agent-accounts/{account_id}/rotate": {
+      "post": {
+        "description": "Rotate the token. The previous `ogc_` value returns 401.",
+        "operationId": "rotate_agent_account_v1_agent_accounts__account_id__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountRotatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotate Agent Account",
+        "tags": [
+          "agent_accounts"
         ]
       }
     },

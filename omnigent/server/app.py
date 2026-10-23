@@ -3585,8 +3585,15 @@ def create_app(
             tags=["comments"],
         )
     if team_chat_store is not None:
+        from omnigent.server.routes.agent_accounts import create_agent_accounts_router
         from omnigent.server.routes.chat import create_chat_router
 
+        # Agent accounts serve /mcp, so management is not behind team_chat.
+        app.include_router(
+            create_agent_accounts_router(team_chat_store, auth_provider=auth_provider),
+            prefix="/v1",
+            tags=["agent_accounts"],
+        )
         app.include_router(
             create_chat_router(
                 team_chat_store,
