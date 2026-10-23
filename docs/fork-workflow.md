@@ -58,12 +58,17 @@ with `launchctl kickstart -k` while interrupting live sessions.
 
 ## 2. PR path
 
-1. Branch from `origin/main`, push to `origin`, open a PR against `main`.
+1. Branch from the PR base (`origin/main`, or `origin/epic/<name>` when the
+   work stays on an epic), push to `origin`, and open a ready PR against that
+   base. Drafts do not run Fork CI.
 2. Review runs through Omnigent (PM HUB spawns the reviewers): DeepSeek V4
-   Pro, then Claude Opus via claude-sdk. Opus has the final word. Review is
-   pinned to a commit SHA. A `BLOCK` stops the merge; nits do not. Commits that
-   only merge `main` into the branch (plus regenerated `openapi.json`) do not
-   need a new review.
+   Pro, then Claude Opus via claude-sdk. Opus has the final word. The tester
+   gate and the reviewers start only after required CI is green on the pinned
+   SHA. A `BLOCK` stops the merge; nits do not. A commit that only merges the
+   PR base into the branch is a delta review of the conflict resolution and of
+   files both sides changed, not a second full review. A clean merge carries
+   the previous Opus PASS forward. If that delta touches product code, the
+   tester gate still runs. CI is never skipped.
 3. Fork CI (`.github/workflows/fork-ci.yml`, the only enabled workflow) runs on
    the two self-hosted Mac runners. Required: `Python lint (ruff, pyrefly)`,
    `Web (lint, typecheck, vitest, build)`, `Pytest (SQLite)`. `E2E UI` is

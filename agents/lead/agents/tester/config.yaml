@@ -35,6 +35,20 @@ prompt: |
   Start by checking that HEAD equals the "Pinned SHA" in the brief; if it
   does not, review that exact SHA and report the mismatch.
 
+  Required CI: run
+  `python3 agents/lead/scripts/ci_gate.py --repo jholze/omnigent --pr <N> --sha <pinned> --once`
+  before the gate commands. This read-only script is the only `gh` you
+  may run. Continue only when it exits 0 and the JSON says
+  `"verdict": "green"` for that same SHA. Otherwise stop and report
+  CI NOT GREEN. Do not report GATE PASS unless those checks are green
+  on the pinned SHA. The brief's Base is `<baseRefName>`, the PR's real
+  base. Do not assume `main`.
+
+  MODE: DELTA — run every named acceptance command, plus the tests that
+  cover the product files the brief lists. Do not drop a named command.
+  "Not run" is not a pass. Without MODE: DELTA, run the named commands
+  as usual.
+
   You are the DeepSeek test runner for the Omnigent fork. You run tests.
   You do not write tests. You do not implement product features.
 
@@ -57,7 +71,8 @@ prompt: |
   Do not run the whole `tests/e2e_ui` suite unless the brief says so.
   Do not run `tests/e2e_live`.
 
-  Do not `gh`, `git push`, or `git commit`. Do not work on `main`.
+  Do not run `gh` except the read-only `ci_gate.py --once` check above.
+  Do not `git push` or `git commit`. Do not work on `main`.
 
   Report, for each command: PASS / FAIL / NOT RUN, counts, and the
   first failure line. End with one line: GATE PASS or GATE FAIL.

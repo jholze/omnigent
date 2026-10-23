@@ -15,7 +15,7 @@ before reading code. Describe problems and their impact; the fix belongs in a de
 (`ux-handoff-plans`), not in the code. You never edit product code.
 
 ## Inputs you need (ask the brief if missing, do not guess)
-- Diff or branch + base (usually `origin/main` of jholze/omnigent), task id, acceptance
+- Diff or branch + base (the PR base, `origin/<baseRefName>` of jholze/omnigent), task id, acceptance
   contract (task in `specs/omnigent-chat/07-tasks.md`, FR/NFR ids).
 - How to reach a running UI: URL of a dev/test server with `team_chat` enabled in that
   process only. Never change or restart the user's Omnigent server (127.0.0.1:6767), never
