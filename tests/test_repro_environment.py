@@ -11,6 +11,7 @@ import pytest
 from dev.repro_env.runtime import isolated_env
 from dev.repro_env.transport import Relay
 from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
+from tests.budgets import budget
 
 
 def test_isolates_inherited_native_state(tmp_path):
@@ -125,6 +126,21 @@ def test_relay_requires_private_socket_directory(tmp_path):
 
 
 def test_relay_preserves_half_closed_connection_during_collection():
+    import gc
+
+    # Freeze objects left by earlier tests so this collect only walks the
+    # relay and its tasks. On a full worker heap the unfrozen collect
+    # spends the hang-guard budget and the half-close check never runs.
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+    try:
+        _assert_half_closed_connection_survives_collection()
+    finally:
+        gc.unfreeze()
+
+
+def _assert_half_closed_connection_survives_collection():
     import asyncio
     import gc
 
@@ -132,21 +148,22 @@ def test_relay_preserves_half_closed_connection_during_collection():
     received = []
     request_received = threading.Event()
     respond_now = threading.Event()
+    hang_guard = budget(5)
     with socket.socket() as service:
         service.bind(("127.0.0.1", 0))
         service.listen()
-        service.settimeout(5)
+        service.settimeout(hang_guard)
 
         def respond():
             conn, _ = service.accept()
             with conn:
-                conn.settimeout(5)
+                conn.settimeout(hang_guard)
                 request = b""
                 while data := conn.recv(65536):
                     request += data
                 received.append(request)
                 request_received.set()
-                if respond_now.wait(5):
+                if respond_now.wait(hang_guard):
                     conn.sendall(payload)
 
         async def collect():
@@ -159,11 +176,15 @@ def test_relay_preserves_half_closed_connection_during_collection():
         thread.start()
         try:
             with Relay(tcp_target=service.getsockname()) as relay:
-                with socket.create_connection(("127.0.0.1", relay.port), timeout=5) as client:
+                with socket.create_connection(
+                    ("127.0.0.1", relay.port), timeout=hang_guard
+                ) as client:
                     client.sendall(b"request")
                     client.shutdown(socket.SHUT_WR)
-                    assert request_received.wait(5)
-                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(timeout=5)
+                    assert request_received.wait(hang_guard)
+                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(
+                        timeout=hang_guard
+                    )
                     respond_now.set()
                     response = b""
                     while data := client.recv(65536):
@@ -171,7 +192,7 @@ def test_relay_preserves_half_closed_connection_during_collection():
                     assert response == payload
         finally:
             respond_now.set()
-            thread.join(timeout=5)
+            thread.join(timeout=hang_guard)
         assert not thread.is_alive()
         assert received == [b"request"]
 

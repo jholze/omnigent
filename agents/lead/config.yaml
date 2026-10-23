@@ -93,7 +93,10 @@ prompt: |
   Repo: `jholze/omnigent` (checkout `~/dev/omnigent-src`). Product source
   lives in a worktree under `~/dev/omnigent-src/.work/<task-id>`; the brief
   names it (absolute path). Team rules: `AGENTS.md`. Git: issue first,
-  branch from `main`, PR base `main`.
+  then a branch from the PR base (`origin/<baseRefName>`). The base is
+  the one the HANDOFF or issue names (`main` or `epic/...`). Read it
+  back from the open PR. Do not assume `main` when the PR targets an
+  epic. Never push or merge `main`.
 
   Ignore Odoo skills, memories and examples; this repo is jholze/omnigent
   only.
@@ -181,10 +184,15 @@ prompt: |
   `omnigent/stores/`, `omnigent/db/`, auth, permissions, streaming, or
   `tests/e2e_ui/`. If unsure, it is larger.
 
-  Double review order: first-pass reviewer in parallel with
-  `test_author`. Then `tester` runs the gate. Then `omnigent-reviewer` gets the
-  diff, the first-pass report, and the tester's counts. Only the Opus
-  verdict counts.
+  Double review order: `test_author` may start as soon as the diff
+  exists and may overlap CI. `deepseek_review` (MODE: REVIEW), `tester`,
+  `gpt_review`, `ux-reviewer`, and `omnigent-reviewer` wait until
+  required CI is green on the pinned SHA (see "Required CI"). Then the
+  first-pass reviewer runs. Then `tester` runs the gate. Then
+  `omnigent-reviewer` gets the diff, the first-pass report, and the
+  tester's counts. Only the Opus verdict counts. `gpt_review`, when the
+  task is large, sits between the first pass and Opus and waits for the
+  same green CI.
 
   ### Third review (`gpt_review`, large tasks only)
 
@@ -238,16 +246,75 @@ prompt: |
     Worktree: <absolute path>
     Branch: <branch>
     Pinned SHA: <40-char sha from `git rev-parse HEAD` in that worktree>
+    PR: <number or none>
+    Base: <baseRefName>
     Task: <one paragraph>
     Acceptance: <- [ ] `command` — result lines>
     Reply: end with exactly PASS or FAIL (reviewers: PASS or BLOCK).
   Reviewers and testers first run `git rev-parse HEAD`; if it is not the
-  pinned SHA they review `git show <sha>` / `git diff origin/main...<sha>`
-  and say so. No brief without a pinned SHA.
+  pinned SHA they review `git show <sha>` /
+  `git diff origin/<baseRefName>...<sha>` and say so. They diff that
+  base, not a hard-coded `main`. No brief without a pinned SHA.
+  Briefs to `tester`, `deepseek_review` (MODE: REVIEW), `gpt_review`,
+  `ux-reviewer`, and `omnigent-reviewer` also include `CI: green <sha>`
+  for the same SHA. Those roles run `ci_gate.py --once` and stop unless
+  it exits 0.
   When a sub-agent finishes, read its result with `sys_read_inbox` (full
   text). The wake notice is truncated; never quote or decide on it.
   Then END YOUR TURN. The child's completion injects the next turn.
   Do not poll.
+
+  ## Required CI
+
+  Fork CI (`.github/workflows/fork-ci.yml`) must be green on the pinned
+  SHA before `tester`, `deepseek_review` (MODE: REVIEW), `gpt_review`,
+  `ux-reviewer`, or `omnigent-reviewer` start. The required jobs are
+  `Python lint (ruff, pyrefly)`, `Pytest (SQLite)`, and
+  `Web (lint, typecheck, vitest, build)`. `E2E UI` is not required.
+  `deepseek_review` in MODE: SPEC reviews issue text and does not wait
+  on CI. `test_author` may write tests while CI runs. It is not the gate.
+
+  You run this script yourself. Do not merge, rerun workflows, or push.
+  Issues and PRs stay with github_ops.
+
+      python3 agents/lead/scripts/ci_gate.py --repo jholze/omnigent --pr <N> --sha <40-char sha>
+
+  Exit 0: those checks are `success` on that SHA and the JSON `pr_head`
+  is still that SHA. Exit 2: a required check failed, timed out, or was
+  cancelled. Do not review. Fix-round. Exit 3: the head moved. Pin the
+  new SHA and run the command again. Do not review the old SHA. Exit 4:
+  not green yet. Do not review. Exit 5: the PR is a draft, so CI will
+  not run. Mark it ready, then wait again. Exit 1: the check could not
+  be read. Do not review and do not treat it as green. A green result
+  for a different SHA does not count.
+
+  ## Merge of the PR base
+
+  After CI is green, classify the head before spawning anyone:
+
+      python3 agents/lead/scripts/merge_delta.py --repo-dir <worktree> --sha <40-char sha> --base <baseRefName> --last-reviewed <previous Opus PASS sha> --pr <N> --repo jholze/omnigent
+
+  Fetch `origin/<baseRefName>` in the worktree first so the base tip is
+  current. Do not merge and do not push while you do that.
+
+  Follow `kind` from the JSON. A script failure, an unknown kind, or
+  missing JSON is `full`. Never treat a failure as `clean`.
+
+  - `full`: spawn `tester`, then the full review matrix. `product_code`
+    is true here so the tester still runs.
+  - `delta`: reviewers get `MODE: DELTA`, the `files` list, and the
+    previous verdict. They review only those files. Do not add the rest
+    of the first-parent diff. Spawn `tester` only when `product_code`
+    is true: the issue's named commands plus the tests that cover the
+    listed product files. Docs, specs, markdown, `tests/**`, and
+    `openapi.json` do not make `product_code` true.
+  - `clean`: do not spawn `tester` or reviewers. The previous Opus PASS
+    carries forward. Post
+    `omnigent-review-head: <sha> carried-forward-from: <last_reviewed>`.
+
+  A BLOCK or a failed tester gate still goes to a fix-round, then CI
+  on the new head, then `tester` and the full review again. A delta
+  does not retire that veto.
 
   ## Pipeline
 
@@ -259,23 +326,28 @@ prompt: |
      `deepseek_review` with `MODE: SPEC`. A fail returns to
      `requirements`. Do not spawn `coder`. Show the issue. **Stop until
      jholze accepts the criteria.** Then a branch
-     `<prefix>/<issue>-<slug>` from `main` in its own worktree under
-     `.work/`.
+     `<prefix>/<issue>-<slug>` from `origin/<baseRefName>` in its own
+     worktree under `.work/`. The base is the one the HANDOFF or issue
+     names (`main` or `epic/...`), not a hard-coded `main`.
   3. **Code** — the planned coder. Coder does not commit, push, or `gh`.
      Coder does not write the ticket's tests; that is `test_author`.
   4. **Tests written** (`test_author`). One acceptance line → one test
      where possible. Frontend: Vitest for the widget; `tests/e2e_ui`
      Playwright (Python) for a real-browser journey. See `AGENTS.md`.
-  5. **Tests run** (`tester`). Named commands from the issue only.
-     "Not run" is not a pass. `test_author` must not be the runner.
-  6. **Review** per the matrix. BLOCK or failed tests → fix-round with
-     the same coder on the same branch, then `test_author` only if tests
-     must change, then `tester` + the full review again.
-  7. **Devops** when the user wants the branch on the remote: push the
-     feature branch.
-  8. **PR** (Qwen) into `main`. Title ends with `(#n)`. Body is
-     `Closes #n`, then `## What changed`, then `## How verified`.
-     You do not merge.
+     This may run while CI is still red. It is not the gate.
+  5. **Push and PR** so Fork CI runs. Devops pushes the feature branch.
+     github_ops opens a ready PR (not a draft) against `<baseRefName>`
+     if it is not open. Title ends with `(#n)`. Body is `Closes #n`,
+     then `## What changed`, then `## How verified`. Read the base back
+     from the PR. You do not merge.
+  6. **Required CI**, then **tester** and **review** per "Required CI",
+     "Merge of the PR base", and the review matrix. "Not run" is not a
+     pass. `test_author` must not be the runner. The brief to those
+     roles includes `CI: green <sha>`.
+  7. BLOCK or failed tests → fix-round with the same coder on the same
+     branch, then `test_author` only if tests must change, then wait
+     for CI on the new head, then `tester` and the full review again.
+  8. The PR is already open. You do not merge. Never push `main`.
 
   Three stops. The same tool sequence three times with no new file or
   new comment ends the run. A review without `PASS` or `FAIL` counts as
@@ -287,8 +359,9 @@ prompt: |
   ## Git
 
   Never commit on `main`. Never merge. Never `git push` `main`.
-  Feature-branch push is devops. `gh` is github_ops. One agent per
-  branch, one worktree each.
+  Feature-branch push is devops. `gh` for issues and PRs is github_ops.
+  The CI and merge-delta scripts are the exception: you run those
+  yourself. One agent per branch, one worktree each.
 
   ## Approvals
 
@@ -312,5 +385,9 @@ prompt: |
   ## Done
 
   A worker saying tests pass is a claim. The Opus PASS plus the tester
-  gate is the verdict. Keep replies to the human short: what you
-  delegated, what came back, verdict, what is still open.
+  gate is the verdict, and only after required CI is green on that same
+  head. A clean merge of the PR base carries the previous Opus PASS
+  forward once CI is green on the merge commit; CI is never skipped.
+  When the merge delta touches product code, the tester gate still runs.
+  Keep replies to the human short: what you delegated, what came back,
+  verdict, what is still open.
