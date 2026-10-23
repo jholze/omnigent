@@ -27,6 +27,7 @@ from omnigent.db.utils import shared_read_scope
 from omnigent.entities import Conversation
 from omnigent.entities.agent import Agent
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server.agent_project_scope import require_session_in_scope
 from omnigent.server.auth import (
     LEVEL_OWNER,
     RESERVED_USER_LOCAL,
@@ -120,6 +121,7 @@ def _require_access_sync(
     :raises OmnigentError: 403 if insufficient level, 404 if no
         access at all.
     """
+    require_session_in_scope(conversation_id, conversation_store)
     if permission_store is None:
         return
     if user_id is None:
@@ -285,6 +287,9 @@ def _require_access_and_level_sync(
     :raises OmnigentError: 401 unauthenticated, 403 insufficient level,
         404 no access at all / conversation not found.
     """
+    # A scoped agent account sees only sessions in its projects, even when
+    # the owner is an admin (ADR-0011).
+    require_session_in_scope(conversation_id, conversation_store)
     if permission_store is None:
         return SessionAccess(level=None, conversation=None)
     if user_id is None:

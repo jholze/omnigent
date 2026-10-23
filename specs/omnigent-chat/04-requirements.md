@@ -114,7 +114,9 @@ Begriffe laut Glossar `03-domain.md`. „Server“ = Omnigent-Server, „Web-App
 | FR-051 | The stop control shall send `stop_session` only for the session OWNER. | ST-3.3.2 | Must | R1 | exists (Owner-Gate serverseitig) | |
 | FR-052 | The Thread header shall contain „Session öffnen“ linking to `/c/{session_id}`. | ST-3.4.1 | Must | R1 | new | |
 | FR-053 | While a session is `running` and no stream event arrived for 120 s, the Web-App shall show a run-stuck banner in the Thread with „Unterbrechen“ and „Session öffnen“. | ST-3.3.1 | Should | R1 | new (Muster agent-native) | |
-| FR-054 | If forwarding a Thread reply to the session fails, then the Server shall set `forward_state=failed`, and the Web-App shall show „nicht zugestellt – erneut senden“, which retries via `POST /v1/chat/messages/{id}/forward`. | ST-3.1.3 | Should | R1 | new | |
+| FR-054 | FR-054 [CHANGED v0.8 2026-10-22: a scoped bot author's failed forward is refused on retry when the session is outside that account's allow-list]. If forwarding a Thread reply to the session fails, then the Server shall set `forward_state=failed`, and the Web-App shall show „nicht zugestellt – erneut senden“, which retries via `POST /v1/chat/messages/{id}/forward`. When the author is a scoped Agentenkonto and the thread session is outside that account's allow-list, the retry returns 404 and writes nothing. | ST-3.1.3 | Should | R1 | new | AC-112a |
+
+~~If forwarding a Thread reply to the session fails, then the Server shall set `forward_state=failed`, and the Web-App shall show „nicht zugestellt – erneut senden“, which retries via `POST /v1/chat/messages/{id}/forward`.~~
 
 ### Activity A4: Auf Agenten reagieren
 | ID | Requirement (EARS) | Story | Prio | Rel | Status | Notes |
@@ -170,6 +172,13 @@ Grundlage: Gap-Analyse des gemergten MCP-Endpoints (PR #14): zustandsloses Strea
 | FR-102 | If the owner of an Agentenkonto is deactivated or deleted, then the Server shall reject every subsequent request carrying that Agentenkonto's token with 401 and execute nothing. | ST-7.1.1 | Must | R1 | adapt (`omnigent/server/auth.py`, Auth-Zweig aus FR-066) | neu v0.6; Widerruf/Rotation des Tokens selbst: FR-064; Erkennung „deaktiviert“ [ANNAHME A-30] |
 | FR-103 | When the Server executes an action for an Agentenkonto (a `/v1/chat/*` request or an in-process `/v1` call from an MCP tool), the Server shall record audit attributes via `add_audit_attrs` with `actor_kind=agent_account`, `account_id`, `owner_id`, action, target IDs and outcome, and no arguments or message bodies. | ST-7.1.1 | Must | R1 | new (`add_audit_attrs` in `routes/chat.py` und im In-Process-Pfad von `_Api.call`) | neu v0.6; konkretisiert NFR-028; NFR-014 |
 | FR-104 | Where a per-Agentenkonto quota is configured (maximum sessions created and maximum runs started by that Agentenkonto within 24 h, maximum concurrently running sessions started by it), if a session start or run by the Agentenkonto (FR-036, FR-077 or MCP) would exceed it, then the Server shall start nothing and return code `bot_session_quota` (HTTP 409; via MCP as tool error per FR-091; in a Thread additionally the system line „Bot-Kontingent erschöpft“). | ST-7.1.5 | Should | R1 | new (`omnigent/server/chat_rate_limit.py` bzw. `chat_agent_threads.py`) | neu v0.6, Kostenbremse über Grenzen statt Verbot; ohne Konfiguration kein Kontingent (nur FR-092/FR-074); Grenzwerte und Konfigurationsweg [OFFEN Q-28] |
+| FR-105 | Where an Agentenkonto has a non-empty project allow-list, the Server shall authorize it with the owner's rights intersected with sessions whose `project_id` is in that allow-list. | ST-7.1.1 | Must | R1 | new (ADR-0011, T-134) | Unscoped (`NULL`) bleibt ADR-0010 (FR-109). Anwendungsfälle: PM - FT Max nur Fishing Tackle Max; ProductOS PM Bot nur ProductOS. Konten legt Jens nach Deploy an. |
+| FR-106 | Where an Agentenkonto has a project allow-list, the Server shall create a session only when `project_id` is in that list, and shall refuse a create without `project_id` or with any other project without creating a session. | ST-7.1.1 | Must | R1 | new (T-134) | Verschieben einer erlaubten Session in ein anderes Projekt oder auf leer ist ebenfalls abgelehnt; die Session bleibt im erlaubten Projekt. AC-112b [NEW v0.8 2026-10-22: direct test that a scoped mention whose channel project is outside the allow-list starts no session]. |
+| FR-107 | When a session is a sub-agent, the Server shall apply the allow-list decision of its root session. | ST-7.1.1 | Must | R1 | new (T-134) | Lesen und Spawnen eines Kindes einer erlaubten Root gelingen; ein Kind einer fremden Root ist 404. |
+| FR-108 | The Server shall evaluate the allow-list on every request, with no cache beyond that request. | ST-7.1.1 | Must | R1 | new (T-134) | Projektwechsel, Listenänderung, Widerruf und Rotation gelten beim nächsten Request. |
+| FR-109 | Where an Agentenkonto has no project allow-list (`NULL`), the Server shall keep the ADR-0010 behavior unchanged. | ST-7.1.1 | Must | R1 | adapt (T-134) | Bestehende T-103-Tests bleiben grün. |
+| FR-110 | Where an Agentenkonto has a project allow-list, the Server shall deny admin, project create/update/delete/order, host management, sharing, global policy and agent-account management with 403 `out_of_scope`, allow read of allowed projects' metadata, and allow host use only to launch or run sessions in allowed projects. | ST-7.1.1 | Must | R1 | new (T-134) | `session_workspace` Shell bleibt owner-only. |
+| FR-111 | When the owner creates or edits an Agentenkonto, the Web-App shall let them pick the project allow-list in Settings → Agenten. An explicit empty list is rejected (400). Clearing the scope back to unscoped requires an explicit confirmation. | ST-7.1.2 | Must | R1 | new (`web/src/chat/settings/AgentAccountsSection.tsx`, T-134) | Ein Projekt, das der Owner nicht besitzt, ist 404. Löschen eines Projekts entfernt es aus jeder Liste; eine dadurch leere Liste fail closed, nicht unscoped. |
 
 ### Activity UX: Erlebnis
 | ID | Requirement (EARS) | Story | Prio | Rel | Status | Notes |
@@ -1300,6 +1309,9 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 | NFR-029 | Safety | Kostenbremse Bots über Grenzen statt Verbot | Agentenkonten dürfen Sessions starten und steuern (FR-036, FR-077, FR-070); begrenzt durch 120 Requests/60 s (FR-092), Bot-Streak ≤ 5 je Thread (FR-074) und optionales Kontingent je Agentenkonto (FR-104, Zahlen [OFFEN Q-28]) | pytest (AC-074a/b, AC-092a, AC-104a/b) | new (v0.6 umgestellt) |
 | NFR-030 | Interaction capability | Wahrgenommene Reaktion | jede Klick-Aktion zeigt ≤ 100 ms sichtbares Feedback (Pressed-State, Spinner oder optimistische Änderung) | UX-Review + Playwright-Stichprobe | new |
 | NFR-031 | Compatibility | MCP-Client-Kompatibilität Bot-Pfad | Protokollversionen 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 aushandelbar (FR-097); ein realer Grok-Bot-MCP-Client (Streamable HTTP, Bearer `ogc_`) besteht vor dem R1-Launch den Smoke-Test AC-069c ohne Abweichung (v0.6: `tools/list` = Tool-Menge des Owners) | pytest AC-097a + Smoke-Protokoll in `docs/runbooks/team-chat-r1.md` (T-129) | new (v0.5, v0.6 angepasst) |
+| NFR-033 | Security | Scope-Ablehnung ohne Existenzpreis | Sessions und Projekte außerhalb der Allowlist antworten 404. Verbotene Endpoint-Klassen antworten 403 `out_of_scope`. Jede Ablehnung schreibt Account-Id, Route und Grund ins Audit, nie Token, `token_hash` oder Webhook-Secret. | pytest AC-105b, AC-110a, AC-033a, AC-112a (T-134) | new (ADR-0011) |
+| NFR-034 | Security | Keine Token-Reste | Read-, List- und Update-Antworten und Settings → Agenten enthalten weder Roh-Token noch `token_hash` noch Webhook-Secret. `token_prefix` nur dort, wo es heute schon steht. Die einmalige Anzeige beim Anlegen bleibt. | pytest AC-034a (T-134) | new |
+| NFR-035 | Compatibility | Scope-Migration | Up, Down, Up gelingen. Bestehende Konten bleiben unscoped. Down entfernt nur den Scope-Speicher. Genau ein Alembic-Head. | pytest AC-035a (T-134) | new |
 
 ## 8. Constraints & interfaces
 - C-1 Stack unverändert: FastAPI, SQLAlchemy 2/Alembic, React 19 (Issue #16 vor UI-Arbeit gemergt), Vite, Tailwind 4, shadcn/Radix, zustand, TanStack Query, Tiptap 3.30.5, lucide. Neue Web-Dependencies nur `motion`, `@tiptap/extension-mention`, `@tiptap/suggestion` (3.30.5). Neue Test-Dependency `axe-playwright-python`.
@@ -1320,6 +1332,7 @@ Referenzumgebung „REF“: eine Server-Instanz (Docker, 2 vCPU, 4 GB RAM, SQLit
 - Migration kopiert `session_chat_messages` (PR #4, Revision `sc1a2b3c4d5e`) in `chat_messages`; alte Tabelle bleibt bis R2 lesbar, wird nicht mehr beschrieben.
 - Aufbewahrung: unbegrenzt bis Löschung [OFFEN Q-3]. Session-Chat-Zeilen werden mit der Root-Session gelöscht (Bestand-Spec §3.5).
 - Account-Löschung: Autor bleibt opaker Principal-String; Scrubbing gehört zu `designs/ACCOUNT_REVOCATION.md` (Bestand-Spec S-11).
+- T-134: Allowlist-Speicher für Agentenkonten (Tabelle oder gleichwertige Spalte). Parent ist der einzige Head `dx1a2b3c4d5e`. Bestehende Zeilen bleiben unscoped. Epic nach `main` und Deploy nur mit ausdrücklichem OK von Jens.
 
 ## 10. Traceability
 | Goal | Story | FR/NFR | AC / test | Task |
@@ -1454,3 +1467,12 @@ Lücken: Erfolgsmessung G-1/G-2 ohne Telemetrie (bewusst, Q-6). Keine Story ohne
 | 0.4 | 2026-10-16 | interior.dev TaskSteps als Referenz für Agent-Schritte: FR-048 präzisiert, neu FR-089 (Should), FR-090 (Must, a11y/Reduced Motion), AC-048b, AC-089a, AC-090a/b; NFR-007 um TaskSteps-Werte ergänzt; Q-20 (Lizenz) neu; Q-19 gelöst → Abhängigkeit D-1. |
 | 0.3 | 2026-10-16 | Entscheidungen Jens 23:25: Q-18 entschieden (Webhook-Wecken FR-071…073/NFR-019 → Should/R1.1; neu FR-088 Polling über `chat_unread`, AC-088a/b, A-23); React 19 (#16) als Voraussetzung der Chat-UI (C-1, NFR-021, Non-goal geändert, R-15, Q-19); R-16. |
 | 0.2 | 2026-10-16 | Review-Fixes (06-review.md #1–#9): FR-029 schließt Agent-Thread-Sessions aus + Sidebar-Abschnitt; FR-021 Bot-Owner-Regel; Host optional (A-8, FR-035); FR-071 ohne Thread-Folgen (A-22); neue FR-085…FR-087; Downgrades FR-043/054/063/083 auf Should; 15 neue ACs; A-19…A-22, Q-18. |
+| 0.8 | 2026-10-22 | FR-054 [CHANGED]: retry of a scoped bot forward is 404 outside the allow-list. AC-112a, AC-112b [NEW]. |
+
+## AC changelog
+
+| Version | Date | AC | Change | Reason | Approved by |
+|---|---|---|---|---|---|
+| 0.8 | 2026-10-22 | AC-112a | NEW. Owner retry of a failed forward by a scoped agent account returns 404 when the thread session is outside that account's allow-list, and writes nothing. `forward_state` stays `failed`. | The owner retry posted the bot text into a session the account may not reach. The first attempt already returned 404. | Jens |
+| 0.8 | 2026-10-22 | AC-112b | NEW. A scoped mention whose channel project is outside the allow-list does not start a session. | The start path existed and had no direct test. | Jens |
+| 0.8 | 2026-10-22 | FR-054 | CHANGED. Retry is unchanged for humans and unscoped accounts. A scoped author is refused as in AC-112a. | Same hole as AC-112a. | Jens |

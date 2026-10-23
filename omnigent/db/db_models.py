@@ -2147,6 +2147,8 @@ class SqlChatAgentAccount(OmnigentBase):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_seen_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     revoked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # JSON list of allowed project ids. NULL is unscoped; an empty list denies all.
+    project_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(

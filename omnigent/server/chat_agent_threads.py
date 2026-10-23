@@ -42,7 +42,7 @@ from omnigent.server.auth import (
     SharingMode,
     workspace_sharing_blocked,
 )
-from omnigent.server.chat_access import principal_kind
+from omnigent.server.chat_access import principal_kind, require_read
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.server.chat_realtime import publish_chat, publish_message_created
 from omnigent.stores.chat_store import ChatChannel, ChatMessage, ChatStore, PostStatus
@@ -715,6 +715,27 @@ async def _post_first_message(request: Any, session_id: str, text: str) -> None:
         raise _StartFailure("internal")
 
 
+def _bot_project_allowed(chat_store: ChatStore, account_id: str, project_id: str) -> bool:
+    """Whether a bot may start a session in *project_id* (ADR-0011).
+
+    An unscoped account follows its owner. A scoped account needs the project
+    in its allow-list; a missing or revoked account is refused.
+    """
+    account = chat_store.get_agent_account_by_principal(f"agent:{account_id}")
+    if account is None:
+        return False
+    project_ids = getattr(account, "project_ids", None)
+    if project_ids is None or project_id in project_ids:
+        return True
+    from omnigent.server.agent_project_scope import ProjectScope, record_scope_denial
+
+    record_scope_denial(
+        "project_out_of_scope",
+        ProjectScope(account_id=account.id, project_ids=frozenset(project_ids)),
+    )
+    return False
+
+
 def _request_as_owner(request: Any) -> Any:
     """Clone the request so in-process auth acts as the bot's owner.
 
@@ -762,6 +783,10 @@ async def _start_impl(
     project = _resolve_project(project_store, chat_store, caller, channel)
     if project is None:
         raise _StartFailure("no_project")
+    if started_by is not None and not await asyncio.to_thread(
+        _bot_project_allowed, chat_store, started_by, project.id
+    ):
+        raise _StartFailure("forbidden")
     host_id = _live_host_id(host_store, caller, project)
     label = json.dumps(
         {"channel_id": channel.id, "thread_root_id": root_id},
@@ -1003,6 +1028,11 @@ async def _maybe_forward_bot_reply(
     session_id = await asyncio.to_thread(_active_session_id, chat_store, message.thread_root_id)
     if session_id is None:
         return
+    if not await asyncio.to_thread(
+        _author_session_allowed, request, chat_store, account, session_id
+    ):
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return
     from omnigent.server.auth import LEVEL_EDIT
     from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
@@ -1028,6 +1058,180 @@ async def _maybe_forward_bot_reply(
         await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
         return
     await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
+
+
+def _author_session_allowed(
+    request: Any, chat_store: ChatStore, account: Any, session_id: str
+) -> bool:
+    """Whether a bot author's allow-list reaches *session_id* (ADR-0011).
+
+    An unscoped account follows its owner. A scoped account, even with an
+    empty list, needs the session's root in an allowed project.
+    """
+    from omnigent.server.agent_project_scope import (
+        ProjectScope,
+        record_scope_denial,
+        session_in_scope,
+    )
+
+    project_ids = getattr(account, "project_ids", None)
+    if project_ids is None:
+        return True
+    conversation_store = _stores(request, chat_store)[0]
+    scope = ProjectScope(
+        account_id=account.id,
+        project_ids=frozenset(project_ids),
+        conversation_store=conversation_store,
+    )
+    if session_in_scope(scope, session_id, conversation_store):
+        return True
+    record_scope_denial("session_out_of_scope", scope)
+    return False
+
+
+def _load_message(chat_store: ChatStore, message_id: str) -> tuple[ChatMessage, str | None] | None:
+    """Return a live message and its stored forward state."""
+
+    def read(session: Session) -> tuple[ChatMessage, str | None] | None:
+        row = session.get(SqlChatMessage, (current_workspace_id(), message_id))
+        if row is None or row.deleted_at is not None:
+            return None
+        message = ChatMessage(
+            id=row.id,
+            channel_id=row.channel_id,
+            thread_root_id=row.thread_root_id,
+            author_id=row.author_id,
+            author_kind=row.author_kind,
+            created_at=row.created_at,
+            body=row.body,
+            client_id=row.client_id,
+        )
+        return message, row.forward_state
+
+    found = _read(chat_store, "select_chat_message_forward", read)
+    return found if isinstance(found, tuple) else None
+
+
+async def _acting_principal(chat_store: ChatStore, principal_id: str) -> str | None:
+    """The human whose session level governs *principal_id*; a bot acts as its owner."""
+    if principal_kind(principal_id) != "agent_account":
+        return principal_id
+    account = await asyncio.to_thread(chat_store.get_agent_account_by_principal, principal_id)
+    return account.owner_id if account is not None else None
+
+
+async def _session_level(chat_store: ChatStore, principal_id: str, session_id: str) -> int:
+    """Effective level of *principal_id* on *session_id*; 0 when none."""
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    level = await asyncio.to_thread(
+        SqlAlchemyPermissionStore(chat_store.storage_location).get_permission_level,
+        principal_id,
+        session_id,
+    )
+    return level if isinstance(level, int) else 0
+
+
+async def _forward_reply(
+    request: Any,
+    chat_store: ChatStore,
+    message: ChatMessage,
+    session_id: str,
+    requester: str,
+) -> str:
+    """Forward one thread reply to *session_id* and store the outcome.
+
+    A human reply is sent as ``[Name] text``, a bot reply as
+    ``[Bot (Owner)] text`` with the owner's rights. Below EDIT the reply is
+    ``not_forwarded``; a failed delivery is ``failed`` so it can be retried.
+    """
+    from omnigent.server.auth import LEVEL_EDIT
+
+    account = None
+    principal = message.author_id
+    if principal_kind(message.author_id) == "agent_account":
+        account = await asyncio.to_thread(
+            chat_store.get_agent_account_by_principal, message.author_id
+        )
+        if account is None:
+            await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+            return "not_forwarded"
+        principal = account.owner_id
+        if not await asyncio.to_thread(
+            _author_session_allowed, request, chat_store, account, session_id
+        ):
+            await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+            return "not_forwarded"
+    if await _session_level(chat_store, principal, session_id) < LEVEL_EDIT:
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "not_forwarded")
+        return "not_forwarded"
+    name = await asyncio.to_thread(
+        _read,
+        chat_store,
+        "select_forward_display",
+        lambda session: _display_in(session, principal),
+    )
+    if account is not None:
+        name = f"{account.display_name} ({name})"
+    acting = request
+    if principal_kind(requester) == "agent_account":
+        acting = _request_as_owner(request)
+    try:
+        await _post_first_message(acting, session_id, f"[{name}] {message.body}")
+    except Exception:
+        _logger.exception(
+            "thread reply forward failed session=%s message=%s", session_id, message.id
+        )
+        await asyncio.to_thread(_set_forward_state, chat_store, message.id, "failed")
+        return "failed"
+    await asyncio.to_thread(_set_forward_state, chat_store, message.id, "forwarded")
+    return "forwarded"
+
+
+async def retry_forward(
+    request: Any,
+    chat_store: ChatStore,
+    message_id: str,
+    principal_id: str,
+) -> str:
+    """Retry one failed forward and return the stored ``forward_state``.
+
+    Only the author, or a bot author's owner, may retry. A message that is
+    already ``forwarded`` is returned as is and never sent again.
+
+    :raises OmnigentError: 404 when the message is missing or unreadable, or
+        a scoped bot author's allow-list does not reach the session,
+        403 for other callers, 409 when it is not awaiting a retry or the
+        thread agent is no longer active.
+    """
+    found = await asyncio.to_thread(_load_message, chat_store, message_id)
+    if found is None:
+        raise OmnigentError("Message not found", code=ErrorCode.NOT_FOUND)
+    message, state = found
+    channel = await asyncio.to_thread(chat_store.get_channel, message.channel_id)
+    if channel is None:
+        raise OmnigentError("Message not found", code=ErrorCode.NOT_FOUND)
+    await asyncio.to_thread(require_read, chat_store, channel, principal_id)
+    acting = await _acting_principal(chat_store, principal_id)
+    author_owner = await _acting_principal(chat_store, message.author_id)
+    if principal_id != message.author_id and (acting is None or acting != author_owner):
+        raise OmnigentError("only the author may retry this forward", code=ErrorCode.FORBIDDEN)
+    if state == "forwarded":
+        return state
+    if state != "failed" or message.thread_root_id is None:
+        raise OmnigentError("message is not awaiting a forward retry", code=ErrorCode.CONFLICT)
+    session_id = await asyncio.to_thread(_active_session_id, chat_store, message.thread_root_id)
+    if session_id is None:
+        raise OmnigentError("thread agent is not active", code=ErrorCode.CONFLICT)
+    if principal_kind(message.author_id) == "agent_account":
+        author = await asyncio.to_thread(
+            chat_store.get_agent_account_by_principal, message.author_id
+        )
+        if author is not None and not await asyncio.to_thread(
+            _author_session_allowed, request, chat_store, author, session_id
+        ):
+            raise OmnigentError("Conversation not found", code=ErrorCode.NOT_FOUND)
+    return await _forward_reply(request, chat_store, message, session_id, principal_id)
 
 
 async def schedule_after_human_post(

@@ -9,7 +9,8 @@ channel's existence is not leaked (FR-016, FR-022).
 The store is the only source of membership; these helpers map its rows
 onto the HTTP outcome the routes raise. An agent account may read or
 post in a channel or DM only where its owner is also a member. On a
-session chat the account has the same access as its owner.
+session chat the account has the same access as its owner, limited to
+sessions in its project allow-list when it has one (ADR-0011).
 """
 
 from __future__ import annotations
@@ -74,14 +75,52 @@ def _session_owner_allows(store: ChatStore, channel: ChatChannel, principal_id: 
     return store.is_member(channel.id, account.owner_id)
 
 
+def _project_scope_allows(store: ChatStore, channel: ChatChannel, principal_id: str) -> bool:
+    """Whether a project-scoped agent account may use this session chat.
+
+    Other channel kinds, humans, and unscoped accounts pass. A scoped account
+    reaches a session chat only when the session's root is in its projects.
+    """
+    if channel.kind != "session" or principal_kind(principal_id) != "agent_account":
+        return True
+    account = store.get_agent_account_by_principal(principal_id)
+    if account is None:
+        return False
+    project_ids = getattr(account, "project_ids", None)
+    if project_ids is None:
+        return True
+    from omnigent.server.agent_project_scope import (
+        ProjectScope,
+        current_project_scope,
+        record_scope_denial,
+        session_in_scope,
+    )
+
+    bound = current_project_scope()
+    scope = ProjectScope(
+        account_id=account.id,
+        project_ids=frozenset(project_ids),
+        route=bound.route if bound is not None else "",
+        conversation_store=bound.conversation_store if bound is not None else None,
+    )
+    root_id = channel.session_root_id
+    if root_id is not None and session_in_scope(scope, root_id):
+        return True
+    record_scope_denial("session_out_of_scope", scope)
+    return False
+
+
 def require_read(store: ChatStore, channel: ChatChannel, principal_id: str) -> None:
     """Raise when *principal_id* may not read *channel*.
 
     :raises OmnigentError: 403 ``not_a_member`` for a public channel, or
         404 for a DM or session chat, when the caller is not a member. An
         agent account whose owner is not a member is refused the same way.
-        On a session chat the account follows its owner's membership.
+        On a session chat the account follows its owner's membership; a
+        session outside a scoped account's projects is 404.
     """
+    if not _project_scope_allows(store, channel, principal_id):
+        raise _not_found()
     if _session_owner_allows(store, channel, principal_id):
         return
     if can_read(store, channel, principal_id) and _owner_allows(store, channel, principal_id):
@@ -97,8 +136,11 @@ def require_post(store: ChatStore, channel: ChatChannel, principal_id: str) -> N
     :raises OmnigentError: 403 ``not_a_member`` for a public channel, or
         404 for a DM or session chat, when the caller is not a member. An
         agent account whose owner is not a member is refused the same way.
-        On a session chat the account follows its owner's membership.
+        On a session chat the account follows its owner's membership; a
+        session outside a scoped account's projects is 404.
     """
+    if not _project_scope_allows(store, channel, principal_id):
+        raise _not_found()
     if _session_owner_allows(store, channel, principal_id):
         return
     if can_post(store, channel, principal_id) and _owner_allows(store, channel, principal_id):
@@ -113,6 +155,8 @@ def require_owner_membership(store: ChatStore, channel: ChatChannel, principal_i
 
     Human callers pass. A missing or revoked agent account is refused.
     """
+    if not _project_scope_allows(store, channel, principal_id):
+        raise _not_found()
     if _owner_allows(store, channel, principal_id):
         return
     if channel.kind == "channel":

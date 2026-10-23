@@ -82,6 +82,8 @@ class ChatAgentAccount:
     :param principal_id: The account's principal id (``agent:<uuid>``).
     :param owner_id: The owning human principal.
     :param token_prefix: Eight-character display hint. Never the raw token.
+    :param project_ids: Allowed project ids. ``None`` is unscoped (owner
+        rights); an empty tuple denies every scoped request.
     """
 
     id: str
@@ -93,6 +95,7 @@ class ChatAgentAccount:
     secret_version: int = 1
     last_seen_at: int | None = None
     revoked_at: int | None = None
+    project_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,8 @@ class AccountStatus(StrEnum):
     NOT_FOUND = "not_found"
     REVOKED_ACCOUNT = "revoked_account"
     LIMIT = "limit"
+    UPDATED = "updated"
+    PROJECT_NOT_FOUND = "project_not_found"
 
 
 @dataclass(frozen=True)
@@ -177,10 +182,12 @@ class AccountWriteResult:
     """Typed result of an agent-account write.
 
     :param issue: Present when a new raw token was minted.
+    :param account: The stored account after an update without a new token.
     """
 
     status: AccountStatus
     issue: AgentTokenIssue | None = None
+    account: ChatAgentAccount | None = None
 
 
 class ReadStatus(StrEnum):
@@ -406,11 +413,29 @@ class ChatStore(ABC):
         handle: str,
         *,
         webhook_url: str = "",
+        project_ids: tuple[str, ...] | None = None,
     ) -> AccountWriteResult:
         """Create an agent account and mint its first ``ogc_`` token.
 
         The raw token is on :attr:`AccountWriteResult.issue` and is not stored.
-        A duplicate handle in the workspace is ``handle_taken``.
+        A duplicate handle in the workspace is ``handle_taken``. A non-empty
+        *project_ids* scopes the account; a project the owner does not own is
+        ``project_not_found`` and nothing is created.
+        """
+        ...
+
+    @abstractmethod
+    def set_agent_account_projects(
+        self,
+        account_id: str,
+        owner_id: str,
+        project_ids: tuple[str, ...] | None,
+    ) -> AccountWriteResult:
+        """Replace the project allow-list. ``None`` makes the account unscoped.
+
+        A wrong owner or unknown id is ``not_found``. A revoked account is
+        ``revoked_account``. A project the owner does not own is
+        ``project_not_found``. Every refusal leaves the account unchanged.
         """
         ...
 

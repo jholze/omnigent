@@ -59,6 +59,20 @@
             "title": "Handle",
             "type": "string"
           },
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Ids"
+          },
           "webhook_url": {
             "anyOf": [
               {
@@ -124,6 +138,20 @@
             "title": "Principal Id",
             "type": "string"
           },
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Ids"
+          },
           "secret_version": {
             "format": "int64",
             "title": "Secret Version",
@@ -167,6 +195,30 @@
           "webhook_secret"
         ],
         "title": "AgentAccountRotatedResponse",
+        "type": "object"
+      },
+      "AgentAccountScopeBody": {
+        "description": "`PATCH /v1/chat/agent-accounts/{id}`.\n\n`project_ids` is required. A list scopes the account; an explicit\n`null` removes the scope; an empty list is 400.",
+        "properties": {
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Ids"
+          }
+        },
+        "required": [
+          "project_ids"
+        ],
+        "title": "AgentAccountScopeBody",
         "type": "object"
       },
       "AgentConfigObject": {
@@ -3321,6 +3373,25 @@
           "status"
         ],
         "title": "FailedResponseObject",
+        "type": "object"
+      },
+      "ForwardResponse": {
+        "description": "`POST /v1/chat/messages/{id}/forward`: the reply's stored forward state.",
+        "properties": {
+          "forward_state": {
+            "title": "Forward State",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "forward_state"
+        ],
+        "title": "ForwardResponse",
         "type": "object"
       },
       "FunctionCallData": {
@@ -11454,6 +11525,30 @@
       }
     },
     "/v1/chat/agent-accounts": {
+      "get": {
+        "description": "List active agent accounts owned by the caller.",
+        "operationId": "list_agent_accounts_v1_chat_agent_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentAccountResponse"
+                  },
+                  "title": "Response List Agent Accounts V1 Chat Agent Accounts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Agent Accounts",
+        "tags": [
+          "chat"
+        ]
+      },
       "post": {
         "description": "Mint an agent account. The raw `ogc_` token is returned once.",
         "operationId": "create_agent_account_v1_chat_agent_accounts_post",
@@ -11526,6 +11621,57 @@
           }
         },
         "summary": "Delete Agent Account",
+        "tags": [
+          "chat"
+        ]
+      },
+      "patch": {
+        "description": "Replace the project allow-list (FR-111). Every refusal leaves it unchanged.\n\n`[]` is 400. A project the caller does not own is 404. `null`\nreturns the account to unscoped owner rights.",
+        "operationId": "update_agent_account_scope_v1_chat_agent_accounts__account_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAccountScopeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAccountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Agent Account Scope",
         "tags": [
           "chat"
         ]
@@ -12123,6 +12269,49 @@
           }
         },
         "summary": "Open Dm",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/messages/{message_id}/forward": {
+      "post": {
+        "description": "Retry a failed forward of one thread reply, at most once (FR-054).",
+        "operationId": "retry_message_forward_v1_chat_messages__message_id__forward_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForwardResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Message Forward",
         "tags": [
           "chat"
         ]
