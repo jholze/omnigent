@@ -61,6 +61,11 @@ from omnigent.server._elicitation_registry import (
     _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
 )
+from omnigent.server.agent_project_scope import (
+    current_project_scope,
+    require_create_in_scope,
+    require_project_in_scope,
+)
 from omnigent.server.auth import (
     LEVEL_EDIT,
     LEVEL_MANAGE,
@@ -836,7 +841,13 @@ def register_core_routes(
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
         # Checked before the session exists so a rejected create leaves nothing
-        # behind.
+        # behind. Scoped agent accounts create only in allowed projects.
+        await asyncio.to_thread(
+            require_create_in_scope,
+            getattr(body, "project_id", None),
+            body.parent_session_id,
+            conversation_store,
+        )
         if body.requested_host_id is not None:
             await _check_requested_host_id(request, body.requested_host_id, user_id)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
@@ -1056,6 +1067,13 @@ def register_core_routes(
         if not isinstance(bundle, StarletteUploadFile):
             raise HTTPException(status_code=422, detail=[_multipart_missing_detail("bundle")])
         parsed_metadata = _parse_session_create_metadata(metadata)
+        # Scoped agent accounts create only in allowed projects (ADR-0011).
+        await asyncio.to_thread(
+            require_create_in_scope,
+            getattr(parsed_metadata, "project_id", None),
+            parsed_metadata.parent_session_id,
+            conversation_store,
+        )
         creation_metadata(
             parent_session_id=parsed_metadata.parent_session_id,
             host_type=parsed_metadata.host_type,
@@ -1294,11 +1312,15 @@ def register_core_routes(
         """
         user_id = _require_user(request, auth_provider)
 
+        project_scope = current_project_scope()
+
         def _list_union() -> list[SessionProjectSummary]:
             # First-class first so its id wins when a name exists in both.
             by_name: dict[str, SessionProjectSummary] = {}
             if project_store is not None:
                 for proj in project_store.list(user_id=user_id):
+                    if project_scope is not None and proj.id not in project_scope.project_ids:
+                        continue
                     icon = proj.config.get("icon")
                     by_name[proj.name] = SessionProjectSummary(
                         id=proj.id,
@@ -1306,7 +1328,11 @@ def register_core_routes(
                         icon=icon if isinstance(icon, str) else None,
                     )
             # Legacy path: label-derived projects (id=None unless already first-class).
-            for name in sorted(conversation_store.list_projects(owned_by=user_id)):
+            # A scoped agent account sees first-class allowed projects only.
+            legacy_names = (
+                conversation_store.list_projects(owned_by=user_id) if project_scope is None else []
+            )
+            for name in sorted(legacy_names):
                 by_name.setdefault(name, SessionProjectSummary(id=None, name=name))
             from omnigent.stores.project_store import apply_project_order
 
@@ -1624,8 +1650,14 @@ def register_core_routes(
             shared_only_param = False
             include_archived_param = include_archived
             archived_only_param = False
+        # A project-scoped agent account lists only sessions in its projects.
+        project_scope = current_project_scope()
+        scope_filter: dict[str, Any] = (
+            {"root_project_ids": project_scope.project_ids} if project_scope is not None else {}
+        )
         page = await asyncio.to_thread(
             conversation_store.list_conversations,
+            **scope_filter,
             limit=limit,
             after=after,
             before=before,
@@ -2491,6 +2523,10 @@ def register_core_routes(
         await _require_access(
             user_id, session_id, required_level, permission_store, conversation_store
         )
+        if set_project:
+            # Before any field is written: a scoped agent account cannot move a
+            # session out of its projects or unfile it.
+            require_project_in_scope(body.project_id)
         if body.runner_id is not None and permission_store is not None:
             if not check_session_access(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
@@ -3826,6 +3862,7 @@ def register_core_routes(
                 raise
         else:
             fork_project_id = fork_resolution.project_id
+        require_project_in_scope(fork_project_id)
 
         # The deep-copied items reference the source's session-scoped file
         # resources by raw file_id (attachment blocks are persisted

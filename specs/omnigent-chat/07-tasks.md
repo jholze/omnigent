@@ -2862,6 +2862,65 @@ Then läuft `alembic upgrade head` fehlerfrei, `team_chat` ist an und der Smoke-
 - [ ] Spec/Traceability aktualisiert, falls Verhalten abweicht (melden, nicht selbst entscheiden)
 - [ ] Lokales Review (Claude Code + lokale Modelle) ohne offene Major-Befunde
 
+### T-134: Projekt-Allowlist für Agentenkonten
+**Release:** R1   **Phase / wave:** nach T-103 und T-104   **Parallel:** nein   **Depends on:** T-103   **Rolle:** omnigent-coder (Auth, Store, Migration) · ux-builder (Settings-Picker, danach) · test_author · tester (Gate) · deepseek_review · gpt_review (Security, Migration + Auth) · omnigent-reviewer   **Aufwand:** 8 h
+**Implements:** FR-105, FR-106, FR-107, FR-108, FR-109, FR-110, FR-111; NFR-033, NFR-034, NFR-035; ADR-0011. ACs: AC-105a–d, AC-106a–c, AC-107a/b, AC-108a–c, AC-109a, AC-110a–c, AC-111a–e, AC-033a, AC-034a, AC-035a, AC-112a [NEW v0.8 2026-10-22: owner retry must 404 outside the allow-list], AC-112b [NEW v0.8 2026-10-22: direct test that a scoped mention outside the allow-list starts nothing] in jholze/omnigent#114
+**Labels:** `spec:omnigent-chat`, `release:R1`, `type:feature`, `security`
+
+**Context**
+Ein scoped Agentenkonto hat die Owner-Rechte geschnitten mit den Sessions, deren `project_id` in der Allowlist liegt. `NULL` bleibt ADR-0010. Leere Liste ist 400. Anwendungsfälle, nicht hart im Code: **PM - FT Max** nur Projekt **Fishing Tackle Max** (`ad2bc03dae8f47b98ce1bf5197881f7a`); **ProductOS PM Bot** nur Projekt **ProductOS**. Kein Ersatz-Account. Konten legt Jens nach Merge und Deploy an. Epic nach `main` und jedes Deploy brauchen Jens' OK. Alembic-Parent: `dx1a2b3c4d5e` (einziger Head; `ar1b2c3d4e5f` nicht verwenden).
+
+**Requirements (zitiert)**
+- FR-105 (Must): Allowlist schneidet die Owner-Rechte auf Sessions mit `project_id` in der Liste.
+- FR-106 (Must): Session anlegen nur mit erlaubter `project_id`. Ohne oder mit anderer Projekt-Id wird nichts angelegt. Projektwechsel weg aus der Liste ist abgelehnt.
+- FR-107 (Must): Sub-Agent erbt die Root-Entscheidung.
+- FR-108 (Must): Prüfung bei jedem Request, kein Cache darüber hinaus.
+- FR-109 (Must): `NULL` behält ADR-0010. T-103-Tests bleiben grün.
+- FR-110 (Must): Admin, Projektverwaltung, Host-Verwaltung, Sharing, globale Policy und Agentenkonto-Verwaltung sind 403 `out_of_scope`. Metadaten erlaubter Projekte sind lesbar. Host nur zum Starten und Treiben erlaubter Sessions. Shell bleibt owner-only.
+- FR-111 (Must): Settings → Agenten wählt die Liste. Leer ist 400. Unscoped nur mit Bestätigung. Fremdes Projekt ist 404. Projekt löschen entfernt den Eintrag; leere Liste fail closed.
+- NFR-033: 404 außerhalb des Scopes, 403 `out_of_scope` für verbotene Klassen. Audit mit Account-Id, Route, Grund. Nie Token.
+- NFR-034: Kein Roh-Token, `token_hash` oder Webhook-Secret in Antworten oder UI.
+- NFR-035: Migration up/down/up. Bestehende Konten unscoped. Ein Alembic-Head.
+
+**Scope**
+- Allowlist-Speicher und Migration
+- Scope-Prüfung in Auth und `check_session_access` für In-Process-`/mcp` und `/v1/chat/*`
+- Konto-API
+- Settings → Agenten (zweiter Schritt, `web/src/chat/settings/AgentAccountsSection.tsx`)
+- ADR-0011
+- Out of scope: Projekt-Sharing für Menschen, Anlegen der beiden Bots, Scope nach Session oder read-only, Epic-Merge nach `main`, Deploy, Migration auf Produktivdaten
+
+**Acceptance criteria**
+Die Gherkin-Blöcke stehen wörtlich in jholze/omnigent#114 (AC-105a bis AC-035a, plus AC-112a und AC-112b). Keine weiteren Fälle erfinden. Testnamen enthalten die AC-ID.
+
+*AC-112a (FR-054, NFR-033) [NEW v0.8 2026-10-22: owner retry of a failed scoped forward wrote into a session outside the allow-list]*
+```gherkin
+Given a scoped agent account authored a thread reply whose forward_state is failed
+And the thread session's project is outside that account's allow-list
+When the account's owner calls POST /v1/chat/messages/{id}/forward
+Then the response is 404
+And no session event and no conversation item are written
+And forward_state stays failed
+```
+*AC-112b (FR-106) [NEW v0.8 2026-10-22: the start refusal had no direct test]*
+```gherkin
+Given a scoped agent account mentions an Omnigent agent in a channel whose project is outside the allow-list
+When the server handles that mention
+Then no session is created
+```
+
+**Verification**
+- Session-Start: `hindsight_diagnose` (Bank `coding-agent::omnigent`)
+- Security-Review ist Pflicht (Auth + Migration), zusätzlich zum normalen Doppel-Review. `gpt_review` ist der dritte Pass.
+- Run: die von `test_author` benannten pytest- und Playwright-Befehle. „Nicht gelaufen“ ist kein Pass.
+- Run: `tests/db` Migrations-Test für up/down/up und genau einen Head.
+
+**Definition of done**
+- [ ] ACs laufen als automatisierte Tests grün (Testname enthält AC-ID)
+- [ ] Security-Review ohne offenen Blocker
+- [ ] Keine Token, `token_hash` oder Webhook-Secrets in Logs, Audit oder Antworten
+- [ ] Epic nicht nach `main` gemergt und nicht deployt
+
 ## R1.1 – kurz nach Launch (Q-18 entschieden 16.10.2026 23:25)
 
 In R1 wecken sich Grok Bots über ihre eigene Polling-Routine (Intervall ≥ 5 min) per MCP `chat_unread` → lesen → `chat_post` → `chat_mark_read` (FR-088, T-107). Das sofortige Wecken per Webhook (FR-071…FR-073, NFR-019, ADR-0007) und die Klärung des Webhook-Formats (Q-14) folgen in R1.1. Tabellen `chat_agent_outbox` existieren bereits seit T-001 (keine zweite Migration nötig).
@@ -3075,6 +3134,13 @@ Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede
 | FR-102 | Must | R1 | T-105 |
 | FR-103 | Must | R1 | T-131 |
 | FR-104 | Should | R1 | T-109 |
+| FR-105 | Must | R1 | T-134 |
+| FR-106 | Must | R1 | T-134 |
+| FR-107 | Must | R1 | T-134 |
+| FR-108 | Must | R1 | T-134 |
+| FR-109 | Must | R1 | T-134 |
+| FR-110 | Must | R1 | T-134 |
+| FR-111 | Must | R1 | T-134 |
 
 | NFR | Tasks |
 |---|---|
@@ -3109,6 +3175,9 @@ Automatisch geprüft (v0.5, 2026-10-17): jede FR (R0/R1/R1.1), jede NFR und jede
 | NFR-029 | T-109, T-119 |
 | NFR-030 | T-007, T-114, T-122 |
 | NFR-031 | T-126, T-129 |
+| NFR-033 | T-134 |
+| NFR-034 | T-134 |
+| NFR-035 | T-134 |
 
 AC → Task: jede AC ist im Abschnitt „Acceptance criteria“ des zuständigen Tasks wörtlich zitiert; E2E-markierte ACs zusätzlich in T-009 (R0), T-120 (R1 Menschen) oder T-121 (R1 Agenten/Bots).
 
@@ -3145,8 +3214,18 @@ Hinweis (Stand 16.10. 23:30): Die Rohantwort aus der OKR-PM-Session liegt in `re
 | #2 | Nightly-E2E rot | nicht Teil dieser Spec; blockiert die Chat-Suite nicht, weil `team_chat_server` eigenständig ist | – |
 
 ## Changelog
+- v0.8 (2026-10-22) T-134 follow-up: AC-112a and AC-112b [NEW]. FR-054 [CHANGED]: owner retry of a scoped bot forward is 404 outside the allow-list and writes nothing. Approved by Jens.
+- v0.7 (2026-10-22) T-134 / ADR-0011: Projekt-Allowlist für Agentenkonten (FR-105…FR-111, NFR-033…NFR-035). Priorität direkt nach T-103 und T-104. Security-Review Pflicht. Epic nach `main` und Deploy nur mit OK von Jens. Anwendungsfälle: PM - FT Max nur Fishing Tackle Max, ProductOS PM Bot nur ProductOS.
 - v0.5 (2026-10-17) Spec v0.6 – Entscheidung Jens 20:11 „Bots dürfen alles, was der Owner darf.“ (ADR-0010): T-104 (FR-077 Bot-Weiterleitung bei EDIT des Owners, AC-077a neu, AC-077b; +1 h), T-105 (FR-102 Owner aktiv, AC-102a; +1 h), T-106 (FR-068 Owner-Rechtecheck statt Verbotsliste, AC-068a neu, AC-068b–e), T-107 (FR-070 ohne Allowlist, FR-101 Owner als effektiver Principal, AC-070a/b neu, AC-101a/b; +1 h), T-109 (FR-036 Bot-Start als Owner, FR-104 Kontingent, AC-036a neu, AC-036b, AC-104a/b; +1 h), T-128 (Owner-Äquivalenztests statt Allowlist-Negativtests, AC-070c/d neu, AC-070e), T-129 (AC-069c: `tools/list` = Owner-Liste), T-131 (FR-100 Must + `owner_id`, FR-103, AC-100a neu, AC-100c, AC-103a/b; +1 h); Block-Tabelle, Arbeitsweise, Coverage, AGENTS.md-Vorschlag; R1 141 h.
 - v0.4 (2026-10-17) MCP-Bot-Pfad nach Gap-Analyse PR #14 (Freigabe Jens 17.10. 19:19): neue Tasks T-125 (unread-Route, aus T-107 gelöst), T-126 (Protokollhygiene), T-127 (Struktur/Annotationen/Fehlercodes), T-128 (Allowlist-Negativtests, Untrusted, Beschreibungen), T-129 (Grok-Bot-Smoke), T-130 (Messung/Changes-Reset, aus T-119 gelöst), T-131 (MCP-Audit, `last_seen_at`); T-119 umgebaut (Rate-Limits inkl. `rate_limited`, No-Body); FR-077/AC-077a von T-109 nach T-104; Abhängigkeiten T-101/T-105 → T-003, T-109 → T-005+T-106, T-107 → +T-125/T-126, T-121 → +Bot-Pfad, T-123 → +T-129; Waves neu, Abschnitt „MCP-Bot-Pfad“; Coverage auf 04 v0.5; R1 30 Tasks / 136 h.
 - v0.3 (2026-10-16) T-115 auf interior.dev TaskSteps ausgerichtet (FR-089/090, Q-20: kein Copy-in vor Lizenzklärung); T-121 um `test_agent_steps.py`; Q-19 gelöst → D-1.
 - v0.2 (2026-10-16) Q-18 entschieden: T-108 (Outbox/Webhook) und neue T-116b nach R1.1; T-107 um Polling-Weckweg `chat_unread` (FR-088) erweitert; React 19 (#16) als Abhängigkeit von T-006/T-007/T-008; Abschnitt „Arbeitsweise“ (laufende Sessions bleiben, Hindsight `coding-agent::omnigent` + `hindsight_diagnose`); FR-085 nach T-113.
 - v0.1 (2026-10-16) Erste Fassung (intern, nicht veröffentlicht).
+
+## AC changelog
+
+| Version | Date | AC | Change | Reason | Approved by |
+|---|---|---|---|---|---|
+| 0.8 | 2026-10-22 | AC-112a | NEW. Owner retry of a failed forward by a scoped agent account returns 404 when the thread session is outside that account's allow-list, and writes nothing. `forward_state` stays `failed`. | The owner retry posted the bot text into a session the account may not reach. | Jens |
+| 0.8 | 2026-10-22 | AC-112b | NEW. A scoped mention whose channel project is outside the allow-list does not start a session. | The start path existed and had no direct test. | Jens |
+| 0.8 | 2026-10-22 | FR-054 | CHANGED. Humans and unscoped accounts retry as before. A scoped author is refused as in AC-112a. | Same hole as AC-112a. | Jens |

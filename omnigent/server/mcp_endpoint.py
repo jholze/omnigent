@@ -384,6 +384,13 @@ def tool_definitions() -> list[dict[str, Any]]:
                     },
                     "host_type": {"type": "string", "enum": ["external", "managed"]},
                     "title": {"type": "string"},
+                    "project_id": {
+                        "type": "string",
+                        "description": (
+                            "Project id from list_projects to file the session in. "
+                            "A project-scoped agent account must name an allowed project."
+                        ),
+                    },
                     "parent_session_id": {
                         "type": "string",
                         "description": (
@@ -1506,6 +1513,9 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
     host_id = _optional_str(args.get("host_id"), "host_id")
     workspace = _optional_str(args.get("workspace"), "workspace")
     title = _optional_str(args.get("title"), "title")
+    project_id = _blank_to_none(_optional_str(args.get("project_id"), "project_id"))
+    if project_id is not None:
+        project_id = _require_id(project_id, "project_id")
     parent_session_id = _blank_to_none(
         _optional_str(args.get("parent_session_id"), "parent_session_id")
     )
@@ -1528,6 +1538,8 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
         body["workspace"] = workspace
     if title:
         body["title"] = title
+    if project_id:
+        body["project_id"] = project_id
     if parent_session_id:
         body["parent_session_id"] = parent_session_id
     if sub_agent_name:

@@ -55,6 +55,7 @@ _MAX_MESSAGES_LIMIT = 200
 _CHANGES_LIMIT = 1000
 _CHANNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
+_PROJECT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _UNREAD_LIMIT = 50
 _ACTIVE_WINDOW_US = 10 * 60 * 1_000_000
@@ -133,6 +134,13 @@ class ChangesResponse(BaseModel):
     items: list[ChangeItem]
     next: str | None
     reset: bool
+
+
+class ForwardResponse(BaseModel):
+    """``POST /v1/chat/messages/{id}/forward``: the reply's stored forward state."""
+
+    id: str
+    forward_state: str
 
 
 class ChannelCreateBody(BaseModel):
@@ -220,6 +228,18 @@ class AgentAccountBody(BaseModel):
     display_name: str
     handle: str
     webhook_url: str | None = None
+    # Allowed project ids. Omitted or null is unscoped; an empty list is 400.
+    project_ids: list[str] | None = None
+
+
+class AgentAccountScopeBody(BaseModel):
+    """``PATCH /v1/chat/agent-accounts/{id}``.
+
+    ``project_ids`` is required. A list scopes the account; an explicit
+    ``null`` removes the scope; an empty list is 400.
+    """
+
+    project_ids: list[str] | None
 
 
 class AgentAccountResponse(BaseModel):
@@ -232,6 +252,8 @@ class AgentAccountResponse(BaseModel):
     handle: str
     token_prefix: str
     secret_version: int
+    # Allowed project ids, or null when the account is unscoped.
+    project_ids: list[str] | None = None
 
 
 class AgentAccountCreatedResponse(BaseModel):
@@ -443,7 +465,26 @@ def _agent_account_response(account: ChatAgentAccount) -> AgentAccountResponse:
         handle=account.handle,
         token_prefix=account.token_prefix,
         secret_version=account.secret_version,
+        project_ids=list(account.project_ids) if account.project_ids is not None else None,
     )
+
+
+def _validate_project_ids(raw: list[str] | None) -> tuple[str, ...] | None:
+    """Normalize an allow-list. ``None`` stays unscoped (FR-111).
+
+    :raises OmnigentError: 400 for an empty list, 404 for a malformed id.
+    """
+    if raw is None:
+        return None
+    if not raw:
+        raise OmnigentError(
+            "project_ids must not be empty; send null to remove the scope",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    normalized = tuple(sorted({item.strip().lower() for item in raw}))
+    if any(not _PROJECT_ID_RE.fullmatch(item) for item in normalized):
+        raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+    return normalized
 
 
 def _require_agent_secret() -> None:
@@ -759,6 +800,23 @@ def create_chat_router(
             code=ErrorCode.INTERNAL_ERROR,
         )
 
+    @router.post("/chat/messages/{message_id}/forward", response_model=ForwardResponse)
+    async def retry_message_forward(request: Request, message_id: str) -> ForwardResponse:
+        """Retry a failed forward of one thread reply, at most once (FR-054)."""
+        from omnigent.server.chat_agent_threads import retry_forward
+
+        caller = _resolve_caller(request, auth_provider)
+        state = await retry_forward(request, chat_store, message_id, caller)
+        _audit_bot(
+            request,
+            caller,
+            chat_store,
+            action="chat.message.forward",
+            outcome=state,
+            message_id=message_id,
+        )
+        return ForwardResponse(id=message_id, forward_state=state)
+
     @router.post("/chat/dms", response_model=ChannelResponse)
     async def open_dm(
         request: Request,
@@ -924,6 +982,15 @@ def create_chat_router(
             },
         )
 
+    @router.get("/chat/agent-accounts", response_model=list[AgentAccountResponse])
+    async def list_agent_accounts(request: Request) -> list[AgentAccountResponse]:
+        """List active agent accounts owned by the caller."""
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        accounts = await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        owned = [account for account in accounts if account.owner_id == caller]
+        return [_agent_account_response(account) for account in owned]
+
     @router.post(
         "/chat/agent-accounts", response_model=AgentAccountCreatedResponse, status_code=201
     )
@@ -936,6 +1003,7 @@ def create_chat_router(
         _require_agent_secret()
         display_name = _validate_display_name(body.display_name)
         handle = _validate_handle(body.handle)
+        project_ids = _validate_project_ids(body.project_ids)
         webhook = body.webhook_url or ""
         if await asyncio.to_thread(webhook_url_rejected, webhook):
             raise OmnigentError("webhook_url is invalid", code=ErrorCode.INVALID_WEBHOOK)
@@ -945,9 +1013,12 @@ def create_chat_router(
             display_name,
             handle,
             webhook_url=webhook,
+            project_ids=project_ids,
         )
         if result.status is AccountStatus.HANDLE_TAKEN:
             raise OmnigentError("handle already exists", code=ErrorCode.CONFLICT)
+        if result.status is AccountStatus.PROJECT_NOT_FOUND:
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         if result.status is AccountStatus.LIMIT:
             _audit_account(
                 "chat.agent_account.create",
@@ -1004,6 +1075,39 @@ def create_chat_router(
             token=result.issue.token,
             webhook_secret=derive_webhook_secret(account.id, account.secret_version),
         )
+
+    @router.patch("/chat/agent-accounts/{account_id}", response_model=AgentAccountResponse)
+    async def update_agent_account_scope(
+        request: Request, account_id: str, body: AgentAccountScopeBody
+    ) -> AgentAccountResponse:
+        """Replace the project allow-list (FR-111). Every refusal leaves it unchanged.
+
+        ``[]`` is 400. A project the caller does not own is 404. ``null``
+        returns the account to unscoped owner rights.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        _require_human(caller)
+        project_ids = _validate_project_ids(body.project_ids)
+        if not _PROJECT_ID_RE.fullmatch(account_id):
+            raise OmnigentError("agent account not found", code=ErrorCode.NOT_FOUND)
+        result = await asyncio.to_thread(
+            chat_store.set_agent_account_projects, account_id, caller, project_ids
+        )
+        if result.status is AccountStatus.NOT_FOUND:
+            raise OmnigentError("agent account not found", code=ErrorCode.NOT_FOUND)
+        if result.status is AccountStatus.REVOKED_ACCOUNT:
+            raise OmnigentError("agent account is revoked", code=ErrorCode.CONFLICT)
+        if result.status is AccountStatus.PROJECT_NOT_FOUND:
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        if result.account is None:
+            raise OmnigentError("agent account was not updated", code=ErrorCode.INTERNAL_ERROR)
+        _audit_account(
+            "chat.agent_account.scope",
+            account_id=result.account.id,
+            owner_id=caller,
+            outcome="scoped" if project_ids is not None else "unscoped",
+        )
+        return _agent_account_response(result.account)
 
     async def _revoke(caller: str, account_id: str) -> None:
         result = await asyncio.to_thread(chat_store.revoke_agent_account, account_id, caller)

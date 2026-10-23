@@ -15,6 +15,8 @@ from alembic.script import ScriptDirectory
 from omnigent.db.utils import _build_alembic_config, clear_engine_cache
 
 _HEAD = "dx1a2b3c4d5e"
+# The agent-account project allow-list revises the drop and is the current head.
+_ALEMBIC_HEAD = "ps1a2b3c4d5e"
 _PARENT = "td1a2b3c4d5e"
 _TABLE = "session_chat_messages"
 
@@ -36,7 +38,7 @@ def _downgrade(uri: str, engine: sa.Engine, revision: str) -> None:
 def test_drop_is_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(_build_alembic_config("sqlite://"))
 
-    assert script.get_heads() == [_HEAD]
+    assert script.get_heads() == [_ALEMBIC_HEAD]
 
 
 def test_upgrade_drops_table_and_downgrade_recreates_it(tmp_path: Path) -> None:
