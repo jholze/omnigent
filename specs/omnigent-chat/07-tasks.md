@@ -2921,6 +2921,60 @@ Then no session is created
 - [ ] Keine Token, `token_hash` oder Webhook-Secrets in Logs, Audit oder Antworten
 - [ ] Epic nicht nach `main` gemergt und nicht deployt
 
+### T-136: Agent accounts are not part of team chat
+**Release:** R1   **Phase / wave:** nach T-134   **Parallel:** nein   **Depends on:** T-103, T-134   **Rolle:** omnigent-coder · test_author · tester (Gate) · omnigent-reviewer   **Aufwand:** 2 h
+**Implements:** FR-112, FR-113. ACs: AC-113a, AC-113b, AC-113c, AC-113d
+**Labels:** `spec:omnigent-chat`, `release:R1`, `type:feature`, `security`
+
+[NEW v0.9 2026-10-23: management moved off the team_chat gate so MCP access works while chat is off.]
+
+**Context**
+Agent-account CRUD, scope PATCH, and rotate lived only on `/v1/chat/agent-accounts`. Every route of the chat router is gated on team_chat, so a server with the flag off answered 404 and no `ogc_` token could be minted for MCP access. MCP/server access and the chat feature stay fully separated.
+
+**Requirements (zitiert)**
+- FR-112 (Must): When team_chat is disabled, a signed-in human can list, create, patch project scope, rotate, and revoke an agent account at `/v1/agent-accounts`. The same calls to `/v1/chat/agent-accounts` return 404. When team_chat is enabled, both paths accept the same bodies and return the same status codes.
+- FR-113 (Must): An `ogc_` bearer authenticates `POST /mcp` whether or not team_chat is enabled. Chat-only tools stay absent while the flag is off. The bearer does not authenticate `/v1/agent-accounts` or any other `/v1` path outside `/v1/chat/*`.
+
+**Scope**
+- One handler set (`omnigent/server/routes/agent_accounts.py`) registered on an ungated router at `/v1/agent-accounts` and on the chat router at `/v1/chat/agent-accounts`
+- `openapi.json` regenerated
+- Out of scope: UI, migration, project-scope enforcement, webhook SSRF, Settings picker, merge, push
+
+**Acceptance criteria**
+*AC-113a (FR-112) [NEW v0.9 2026-10-23: create, scope, and rotate were 404 while team_chat was off]*
+```gherkin
+Given team_chat is off and OMNIGENT_CHAT_AGENT_SECRET is set
+When the owner POSTs /v1/agent-accounts, PATCHes project_ids to a project they own, then POSTs /v1/agent-accounts/{id}/rotate
+Then create is 201 with an ogc_ token, the patch is 200, rotate is 200 with a new token, and the previous token is 401 on POST /mcp
+```
+*AC-113b (FR-112) [NEW v0.9 2026-10-23: the chat path stays gated]*
+```gherkin
+Given team_chat is off
+When the owner calls create, scope PATCH, or rotate on /v1/chat/agent-accounts
+Then each response is 404
+```
+*AC-113c (FR-112, FR-113) [NEW v0.9 2026-10-23: MCP reachability must not depend on the chat flag]*
+```gherkin
+Given team_chat is off and the account from AC-113a is scoped to project A
+When its current ogc_ token calls get_session and send_message via POST /mcp on a session filed in A, and the same calls on a session filed in another project
+Then the in-scope calls succeed and the out-of-scope calls are not_found and write no conversation item
+```
+*AC-113d (FR-113) [NEW v0.9 2026-10-23: the management path is not an ogc_ surface]*
+```gherkin
+Given a live ogc_ token
+When it POSTs /v1/agent-accounts
+Then the response is 401, with team_chat on and with team_chat off
+```
+
+**Verification**
+- Run: die von `test_author` benannten pytest-Befehle. „Nicht gelaufen“ ist kein Pass.
+- Run: `uv run python scripts/dump_openapi.py --check`
+
+**Definition of done**
+- [ ] ACs laufen als automatisierte Tests grün (Testname enthält AC-ID)
+- [ ] `agent_token_path_allowed` unverändert: `/v1/agent-accounts` ist kein `ogc_`-Pfad
+- [ ] Epic nicht nach `main` gemergt und nicht deployt
+
 ## R1.1 – kurz nach Launch (Q-18 entschieden 16.10.2026 23:25)
 
 In R1 wecken sich Grok Bots über ihre eigene Polling-Routine (Intervall ≥ 5 min) per MCP `chat_unread` → lesen → `chat_post` → `chat_mark_read` (FR-088, T-107). Das sofortige Wecken per Webhook (FR-071…FR-073, NFR-019, ADR-0007) und die Klärung des Webhook-Formats (Q-14) folgen in R1.1. Tabellen `chat_agent_outbox` existieren bereits seit T-001 (keine zweite Migration nötig).
@@ -3214,6 +3268,7 @@ Hinweis (Stand 16.10. 23:30): Die Rohantwort aus der OKR-PM-Session liegt in `re
 | #2 | Nightly-E2E rot | nicht Teil dieser Spec; blockiert die Chat-Suite nicht, weil `team_chat_server` eigenständig ist | – |
 
 ## Changelog
+- v0.9 (2026-10-23) T-136 [NEW]: agent-account CRUD, scope PATCH, and rotate move to `/v1/agent-accounts` and are not gated by team_chat. `/v1/chat/agent-accounts` stays a gated alias. `ogc_` auth on `POST /mcp` does not depend on the flag. FR-112, FR-113, AC-113a–d [NEW]. Approved by Jens.
 - v0.8 (2026-10-22) T-134 follow-up: AC-112a and AC-112b [NEW]. FR-054 [CHANGED]: owner retry of a scoped bot forward is 404 outside the allow-list and writes nothing. Approved by Jens.
 - v0.7 (2026-10-22) T-134 / ADR-0011: Projekt-Allowlist für Agentenkonten (FR-105…FR-111, NFR-033…NFR-035). Priorität direkt nach T-103 und T-104. Security-Review Pflicht. Epic nach `main` und Deploy nur mit OK von Jens. Anwendungsfälle: PM - FT Max nur Fishing Tackle Max, ProductOS PM Bot nur ProductOS.
 - v0.5 (2026-10-17) Spec v0.6 – Entscheidung Jens 20:11 „Bots dürfen alles, was der Owner darf.“ (ADR-0010): T-104 (FR-077 Bot-Weiterleitung bei EDIT des Owners, AC-077a neu, AC-077b; +1 h), T-105 (FR-102 Owner aktiv, AC-102a; +1 h), T-106 (FR-068 Owner-Rechtecheck statt Verbotsliste, AC-068a neu, AC-068b–e), T-107 (FR-070 ohne Allowlist, FR-101 Owner als effektiver Principal, AC-070a/b neu, AC-101a/b; +1 h), T-109 (FR-036 Bot-Start als Owner, FR-104 Kontingent, AC-036a neu, AC-036b, AC-104a/b; +1 h), T-128 (Owner-Äquivalenztests statt Allowlist-Negativtests, AC-070c/d neu, AC-070e), T-129 (AC-069c: `tools/list` = Owner-Liste), T-131 (FR-100 Must + `owner_id`, FR-103, AC-100a neu, AC-100c, AC-103a/b; +1 h); Block-Tabelle, Arbeitsweise, Coverage, AGENTS.md-Vorschlag; R1 141 h.
@@ -3229,3 +3284,10 @@ Hinweis (Stand 16.10. 23:30): Die Rohantwort aus der OKR-PM-Session liegt in `re
 | 0.8 | 2026-10-22 | AC-112a | NEW. Owner retry of a failed forward by a scoped agent account returns 404 when the thread session is outside that account's allow-list, and writes nothing. `forward_state` stays `failed`. | The owner retry posted the bot text into a session the account may not reach. | Jens |
 | 0.8 | 2026-10-22 | AC-112b | NEW. A scoped mention whose channel project is outside the allow-list does not start a session. | The start path existed and had no direct test. | Jens |
 | 0.8 | 2026-10-22 | FR-054 | CHANGED. Humans and unscoped accounts retry as before. A scoped author is refused as in AC-112a. | Same hole as AC-112a. | Jens |
+| 0.9 | 2026-10-23 | AC-113a | NEW. With team_chat off, create on `/v1/agent-accounts` is 201 with an `ogc_` token, the scope PATCH is 200, rotate is 200 with a new token, and the previous token is 401 on `POST /mcp`. | Create, scope, and rotate were 404 while team_chat was off. | Jens |
+| 0.9 | 2026-10-23 | AC-113b | NEW. With team_chat off, create, scope PATCH, and rotate on `/v1/chat/agent-accounts` are 404. | The chat path stays gated. | Jens |
+| 0.9 | 2026-10-23 | AC-113c | NEW. With team_chat off, a scoped `ogc_` token reaches `get_session` and `send_message` via `POST /mcp` in its project; the same calls outside it are `not_found` and write no conversation item. | MCP reachability must not depend on the chat flag. | Jens |
+| 0.9 | 2026-10-23 | AC-113d | NEW. A live `ogc_` token on `POST /v1/agent-accounts` is 401, with team_chat on and off. | The management path is not an `ogc_` surface. | Jens |
+| 0.9 | 2026-10-23 | FR-112 | NEW. Agent-account management is served at `/v1/agent-accounts` without the team_chat gate; `/v1/chat/agent-accounts` is a gated alias with the same behavior. | Agent accounts serve MCP access, which is separate from the chat feature. | Jens |
+| 0.9 | 2026-10-23 | FR-113 | NEW. `ogc_` auth on `POST /mcp` does not consult team_chat; chat-only tools stay hidden while it is off; the bearer stays limited to `/mcp` and `/v1/chat/*`. | Same separation as FR-112. | Jens |
+| 0.9 | 2026-10-23 | FR-110 | CHANGED. An ogc_ bearer on /v1/agent-accounts is 401 (FR-113). 403 out_of_scope still applies to agent-account management on /v1/chat/agent-accounts. | The ungated path is outside the ogc_ allowlist. | Jens |
