@@ -1,5 +1,5 @@
 import { createElement, type ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -192,6 +192,43 @@ describe("backfill", () => {
     expect(messagesOf("m9")).toHaveLength(1);
     expect(useTeamChatStore.getState().changesCursor).toBe(cursor);
     expect(useTeamChatStore.getState().pendingChannels).toContain("c1");
+  });
+
+  it("AC-083a reloads bootstrap and the open views when the changes feed sets reset", async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/v1/chat/changes")) {
+        return jsonResponse({ items: [], next: null, reset: true });
+      }
+      if (url === "/v1/chat/bootstrap") {
+        return jsonResponse({
+          me: "anna",
+          channels: [],
+          dms: [],
+          directory: [],
+          changes_cursor: "60:fresh",
+        });
+      }
+      throw new Error(url);
+    });
+    const client = queryClient();
+    const openMessages = vi.fn(async () => ({ items: [] }));
+    const openView = new QueryObserver(client, {
+      queryKey: teamChatQueryKeys.messages("c1"),
+      queryFn: openMessages,
+    });
+    const stopObserving = openView.subscribe(() => {});
+    await vi.waitFor(() => expect(openMessages).toHaveBeenCalledTimes(1));
+    client.setQueryData(teamChatQueryKeys.thread("c1", "root-1"), { items: [] });
+
+    await backfillFromCursor(client, "1:m0");
+
+    expect(fetchMock).toHaveBeenCalledWith("/v1/chat/bootstrap", expect.anything());
+    expect(useTeamChatStore.getState().changesCursor).toBe("60:fresh");
+    expect(openMessages).toHaveBeenCalledTimes(2);
+    expect(client.getQueryState(teamChatQueryKeys.thread("c1", "root-1"))?.isInvalidated).toBe(
+      true,
+    );
+    stopObserving();
   });
 });
 

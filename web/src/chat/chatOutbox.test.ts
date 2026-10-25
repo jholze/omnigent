@@ -6,6 +6,11 @@ import { teamChatQueryKeys, type MessagePageResponse } from "./chatApi";
 import { sendChatMessage, useChatOutbox } from "./chatOutbox";
 
 const postMessageMock = vi.hoisted(() => vi.fn());
+const fetchMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/identity", () => ({
+  authenticatedFetch: (...args: unknown[]) => fetchMock(...args),
+}));
 
 vi.mock("./chatApi", async (importOriginal) => ({
   ...(await importOriginal<typeof ChatApi>()),
@@ -14,6 +19,7 @@ vi.mock("./chatApi", async (importOriginal) => ({
 
 beforeEach(() => {
   postMessageMock.mockReset();
+  fetchMock.mockReset();
   useChatOutbox.setState({ entries: [] });
 });
 
@@ -32,6 +38,34 @@ describe("sendChatMessage", () => {
     expect(sent).toBe(false);
     expect(postMessageMock).not.toHaveBeenCalled();
     expect(useChatOutbox.getState().entries).toEqual([]);
+  });
+
+  it("AC-017a marks a 429 send as failed with the Retry-After seconds and stores nothing", async () => {
+    const api = await vi.importActual<typeof ChatApi>("./chatApi");
+    postMessageMock.mockImplementation(api.postMessage);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "rate_limited" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "7" },
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    sendChatMessage(client, {
+      channelId: "c-general",
+      threadRootId: null,
+      authorId: "anna",
+      body: "zu schnell",
+    });
+
+    await vi.waitFor(() => expect(useChatOutbox.getState().entries[0]?.status).toBe("failed"));
+    expect(useChatOutbox.getState().entries).toHaveLength(1);
+    expect(useChatOutbox.getState().entries[0]).toMatchObject({
+      body: "zu schnell",
+      status: "failed",
+      rateLimited: { retryAfterSeconds: 7 },
+    });
+    expect(client.getQueryData(teamChatQueryKeys.messages("c-general"))).toBeUndefined();
   });
 
   it("AC-021a keeps the sent row when an older empty page resolves afterwards", async () => {

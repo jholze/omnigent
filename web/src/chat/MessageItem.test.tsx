@@ -125,6 +125,38 @@ describe("MessageItem", () => {
     expect(screen.getByRole("button", { name: "erneut senden" })).toHaveClass("min-h-11");
   });
 
+  it("AC-017a shows nicht gesendet with the Retry-After seconds and no stored-message affordances", () => {
+    render(
+      <MemoryRouter>
+        <ul>
+          <MessageItem
+            message={view({
+              id: null,
+              key: "client:x",
+              clientId: "x",
+              status: "failed",
+              rateLimited: { retryAfterSeconds: 7 },
+            })}
+            directory={directory}
+            threadHref="/chat/c1/t/x"
+            replyCount={0}
+            onRetry={() => {}}
+          />
+        </ul>
+      </MemoryRouter>,
+    );
+    const notice = screen.getByTestId(CHAT_TEST_IDS.sendFailed);
+    expect(notice).toHaveTextContent("nicht gesendet");
+    const hint = within(notice).getByTestId(CHAT_TEST_IDS.sendRateLimited);
+    expect(hint).toHaveTextContent("erneut senden in 7 s");
+    expect(hint).toHaveAttribute("data-retry-after", "7");
+
+    const row = screen.getByTestId(CHAT_TEST_IDS.message);
+    expect(row).toHaveAttribute("data-status", "failed");
+    expect(row).not.toHaveAttribute("data-message-id");
+    expect(within(row).queryByTestId(CHAT_TEST_IDS.replyAction)).toBeNull();
+  });
+
   it("AC-062a shows the author Grok (Jens) with a Bot badge", () => {
     const botDirectory = new Map<string, DirectoryEntry>([
       ...directory,
