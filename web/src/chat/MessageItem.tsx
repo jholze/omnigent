@@ -33,6 +33,17 @@ export interface MessageView {
   createdAtMs: number;
   body: string;
   status: MessageDeliveryStatus;
+  /**
+   * A failed send answered 429 (AC-017a): nothing was stored. Seconds from
+   * `Retry-After`, or null when the server sent none.
+   */
+  rateLimited?: { retryAfterSeconds: number | null } | null;
+}
+
+/** "Zu viele Nachrichten …" hint for a 429 send. Names Retry-After when known. */
+export function rateLimitHint(retryAfterSeconds: number | null): string {
+  if (retryAfterSeconds === null) return "Zu viele Nachrichten, bitte gleich erneut senden";
+  return `Zu viele Nachrichten, erneut senden in ${retryAfterSeconds} s`;
 }
 
 export type BodySegment =
@@ -386,6 +397,16 @@ function MessageRow({
           >
             <CircleAlertIcon className="size-4 shrink-0" aria-hidden="true" />
             <span>nicht gesendet</span>
+            {message.rateLimited ? (
+              <span
+                data-testid={CHAT_TEST_IDS.sendRateLimited}
+                data-retry-after={message.rateLimited.retryAfterSeconds ?? undefined}
+                className="min-w-0 break-words tabular-nums"
+              >
+                <span aria-hidden="true">· </span>
+                {rateLimitHint(message.rateLimited.retryAfterSeconds)}
+              </span>
+            ) : null}
             {onRetry && message.clientId ? (
               <Button
                 type="button"
