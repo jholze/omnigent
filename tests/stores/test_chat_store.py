@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from omnigent.db.db_models import SqlChatAgentAccount, SqlChatChannel, SqlChatMention
-from omnigent.db.utils import get_or_create_engine
+from omnigent.db.utils import get_or_create_engine, now_epoch_us
 from omnigent.stores.chat_store import (
     ChatChannel,
     DmStatus,
@@ -329,6 +329,53 @@ def test_paging_tail_is_bounded(
     assert [item.body for item in tail.items] == ["m7", "m8", "m9"]
     assert tail.has_more is False
     assert tail.has_older is True
+
+
+_DAY_US = 24 * 60 * 60 * 1_000_000
+_ZERO_MESSAGE_ID = "0" * 32
+
+
+def test_ac_083a_changes_cursor_older_than_7_days_resets(
+    chat_store: SqlAlchemyChatStore,
+) -> None:
+    channel = chat_store.bootstrap_channel("general", "jens@bloopark.de")
+    chat_store.post_message(channel.id, "jens@bloopark.de", "pending")
+
+    page = chat_store.list_changes(
+        "jens@bloopark.de", after=(now_epoch_us() - 8 * _DAY_US, _ZERO_MESSAGE_ID)
+    )
+
+    assert page.reset is True
+    assert page.items == ()
+    assert page.next_after is None
+
+
+def test_ac_083a_recent_changes_cursor_returns_pending_message(
+    chat_store: SqlAlchemyChatStore,
+) -> None:
+    channel = chat_store.bootstrap_channel("general", "jens@bloopark.de")
+    cursor = (now_epoch_us() - 60_000_000, _ZERO_MESSAGE_ID)
+    posted = chat_store.post_message(channel.id, "jens@bloopark.de", "pending")
+    assert posted.message is not None
+
+    page = chat_store.list_changes("jens@bloopark.de", after=cursor)
+
+    assert page.reset is False
+    assert [item.id for item in page.items] == [posted.message.id]
+    assert page.next_after == (posted.message.created_at, posted.message.id)
+
+
+def test_ac_083a_more_than_1000_pending_changes_resets(
+    chat_store: SqlAlchemyChatStore,
+) -> None:
+    channel = chat_store.bootstrap_channel("general", "jens@bloopark.de")
+    for index in range(1001):
+        chat_store.post_message(channel.id, "jens@bloopark.de", f"m{index}")
+
+    page = chat_store.list_changes("jens@bloopark.de")
+
+    assert page.reset is True
+    assert len(page.items) == 1000
 
 
 def test_dm_reuses_existing_set(chat_store: SqlAlchemyChatStore) -> None:

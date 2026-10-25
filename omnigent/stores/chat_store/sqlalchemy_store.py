@@ -59,6 +59,7 @@ _MAX_PARTICIPANTS = 5
 _BOT_STREAK_LIMIT = 5
 _AGENT_ACCOUNT_LIMIT = 5
 _LAST_SEEN_INTERVAL_US = 60_000_000
+_CHANGES_MAX_AGE_US = 7 * 24 * 60 * 60 * 1_000_000
 _BRAKE_BODY = "Bots warten auf einen Menschen"
 _BRAKE_CODE = "bot_streak_limit"
 _BOT_AUTHOR_KINDS = frozenset({"agent_account", "agent", "omnigent_agent"})
@@ -753,6 +754,10 @@ class SqlAlchemyChatStore(ChatStore):
         limit: int = 1000,
     ) -> ChangesPage:
         """Return a caller's change feed. See the base class."""
+        if after is not None and now_epoch_us() - after[0] > _CHANGES_MAX_AGE_US:
+            # A cursor older than 7 days must reset without replaying the
+            # backlog, so the caller reloads bootstrap with a fresh cursor.
+            return ChangesPage(items=(), next_after=None, reset=True)
         with self._session("list_chat_changes") as session:
             member_channel_ids = select(SqlChatMember.channel_id).where(
                 SqlChatMember.workspace_id == current_workspace_id(),

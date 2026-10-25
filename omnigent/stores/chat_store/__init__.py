@@ -256,8 +256,9 @@ class ChangesPage:
         ``(created_at, id)`` ascending.
     :param next_after: The ``(created_at, id)`` cursor of the last item,
         or ``None`` when the page is empty.
-    :param reset: ``True`` when more than the page limit is pending, so
-        the caller should reload bootstrap instead of paging further.
+    :param reset: ``True`` when more than the page limit is pending or the
+        ``after`` cursor is older than 7 days, so the caller should reload
+        bootstrap instead of paging further.
     """
 
     items: tuple[ChatMessage, ...]
@@ -431,7 +432,8 @@ class ChatStore(ABC):
 
         Only messages in channels where *principal_id* is a member are
         included, in ascending ``(created_at, id)`` order. When more than
-        *limit* rows are pending the result sets :attr:`ChangesPage.reset`.
+        *limit* rows are pending, or *after* is older than 7 days, the
+        result sets :attr:`ChangesPage.reset`.
         """
         ...
 
