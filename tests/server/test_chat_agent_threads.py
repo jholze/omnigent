@@ -766,6 +766,58 @@ async def test_ac_033a_no_host_and_no_online_runner_is_host_offline(
     assert HOST_OFFLINE in [item["body"] for item in items]
 
 
+async def test_ac_033c_project_host_without_workspace_starts_on_that_host(
+    tunnel_chat: tuple[httpx.AsyncClient, Any],
+    db_uri: str,
+    runner_202: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from omnigent.host.frames import HostHelloFrame
+    from omnigent.stores.host_store import HostStore
+
+    client, app = tunnel_chat
+    host_id = uuid.uuid4().hex
+    HostStore(db_uri).upsert_on_connect(host_id, "anna-mac", ANNA)
+    app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="anna-mac"),
+        owner=ANNA,
+    )
+
+    async def home_stat(**_kwargs: object) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "exists": True,
+            "type": "directory",
+            "canonical_path": "/Users/anna",
+            "error": None,
+        }
+
+    monkeypatch.setattr("omnigent.server.routes._workspace_validation._ask_host_stat", home_stat)
+    agent_id = _create_agent(db_uri)
+    project_id = _create_project(
+        db_uri, ANNA, "billing", {"agent_id": agent_id, "host_id": host_id}
+    )
+    channel_id = await _create_channel(client, ANNA, "billing")
+    _set_project_name(db_uri, channel_id, "billing")
+
+    posted = await _post(client, ANNA, channel_id, f"{MENTION} bitte Tests fixen")
+    assert posted.status_code == 201, posted.text
+    root_id = posted.json()["id"]
+    await _wait_for_start()
+
+    thread = _thread(db_uri, root_id)
+    conversation = SqlAlchemyConversationStore(db_uri).get_conversation(thread.session_id or "")
+    assert conversation is not None and conversation.project_id == project_id
+    assert conversation.host_id == host_id
+    assert thread.agent_state == "active"
+    bodies = [body for body, _code in _system_rows(db_uri, root_id)]
+    assert "Agent-Start fehlgeschlagen (internal)" not in bodies
+
+
 async def test_ac_037a_first_message_keeps_newest_context_within_char_cap(
     chat_client: httpx.AsyncClient, db_uri: str, runner_202: None
 ) -> None:

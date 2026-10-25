@@ -590,6 +590,31 @@ def _live_host_id(host_store: Any, caller: str, project: Any) -> str | None:
     return host_id
 
 
+async def _host_home_workspace(app: Any, host_id: str) -> str:
+    """Resolve the host's home directory as the workspace for a host-bound start.
+
+    A host session needs an absolute workspace; only the host knows its ``~``.
+    """
+    from omnigent.server.routes import _workspace_validation
+
+    registry = getattr(app.state, "host_registry", None)
+    if registry is None:
+        raise _StartFailure("host_offline")
+    host_conn = registry.get(host_id)
+    if host_conn is None:
+        raise _StartFailure("host_offline")
+    try:
+        stat = await _workspace_validation._ask_host_stat(
+            host_registry=registry, host_conn=host_conn, path="~"
+        )
+    except _workspace_validation.WorkspaceValidationError as exc:
+        raise _StartFailure("host_offline") from exc
+    canonical = stat.get("canonical_path")
+    if not stat.get("exists") or not isinstance(canonical, str):
+        raise _StartFailure("host_offline")
+    return canonical
+
+
 def _caller_runner_id(app: Any, caller: str) -> str | None:
     """First online runner the caller owns; None when no runner is online.
 
@@ -918,6 +943,7 @@ async def _start_impl(
     A bot mention passes the owner as *caller* and the account id as
     *started_by*. The session owner is that human.
     """
+    from omnigent.runtime import get_agent_cache
     from omnigent.server.routes._sessions.orchestration import _create_session_from_existing_agent
     from omnigent.server.schemas import ProjectSessionCreateRequest
 
@@ -955,6 +981,10 @@ async def _start_impl(
         create_kwargs["git"] = None
     else:
         create_kwargs["host_id"] = host_id
+        if not (isinstance(project.config, dict) and project.config.get("workspace")):
+            create_kwargs["workspace"] = await _host_home_workspace(request.app, host_id)
+    # Host workspace validation reads the agent's os_env boundary from the cache.
+    agent_cache = get_agent_cache() if host_id is not None else None
     body = ProjectSessionCreateRequest(**create_kwargs)
     response, conversation = await _create_session_from_existing_agent(
         conversation_store,
@@ -962,6 +992,7 @@ async def _start_impl(
         getattr(acting.app.state, "runner_router", None),
         body,
         acting,
+        agent_cache=agent_cache,
         user_id=caller,
         permission_store=permission_store,
         project_store=project_store,
