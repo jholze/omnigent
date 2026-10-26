@@ -245,6 +245,41 @@ class UnreadResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class NeedsYouMentionResponse(BaseModel):
+    """One unread message that mentions the caller (FR-010 a).
+
+    Carries no body: the view and OS notifications name only the place
+    and the author (FR-011, NFR-014).
+    """
+
+    channel_id: str
+    channel_kind: str
+    channel_name: str | None
+    thread_root_id: str | None
+    message_id: str
+    author_id: str
+    author_label: str
+    created_at: int
+
+
+class NeedsYouApprovalResponse(BaseModel):
+    """One agent thread whose session waits on an answer the caller may give (FR-010 b)."""
+
+    channel_id: str
+    channel_kind: str
+    channel_name: str | None
+    root_message_id: str
+    session_id: str
+    pending_count: int
+
+
+class NeedsYouResponse(BaseModel):
+    """``GET /v1/chat/needs-you``."""
+
+    mentions: list[NeedsYouMentionResponse]
+    approvals: list[NeedsYouApprovalResponse]
+
+
 class ReadBody(BaseModel):
     """``POST /v1/chat/channels/{id}/read``.
 
@@ -1009,6 +1044,84 @@ def create_chat_router(
                 )
             )
         return UnreadResponse(items=rendered, next_cursor=None)
+
+    @router.get("/chat/needs-you", response_model=NeedsYouResponse)
+    async def needs_you(request: Request) -> NeedsYouResponse:
+        """Unread mentions of the caller and agent approvals the caller may answer (FR-010).
+
+        Approvals come from active agent threads in conversations the caller
+        sees, whose session has a pending elicitation and on which the caller
+        (a bot: its owner) holds at least EDIT. READ alone is not enough
+        (AC-010b). No message body leaves this route.
+        """
+        from omnigent.runtime import pending_elicitations
+        from omnigent.server.auth import LEVEL_EDIT
+        from omnigent.server.chat_agent_threads import _acting_principal, _session_level
+
+        caller = _resolve_caller(request, auth_provider)
+        channels, dms = await _channels_visible_to(chat_store, caller)
+        by_id = {row.id: row for row in [*channels, *dms]}
+        accounts = {
+            account.principal_id: account.display_name
+            for account in await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        }
+
+        unread_items = await asyncio.to_thread(
+            chat_store.list_unread, caller, limit=_UNREAD_LIMIT, channel_ids=list(by_id)
+        )
+        mentions: list[NeedsYouMentionResponse] = []
+        for item in unread_items:
+            if item.reason != "mention":
+                continue
+            message = item.message
+            channel = by_id.get(message.channel_id)
+            if channel is None:
+                continue
+            mentions.append(
+                NeedsYouMentionResponse(
+                    channel_id=channel.id,
+                    channel_kind=channel.kind,
+                    channel_name=channel.name,
+                    thread_root_id=message.thread_root_id,
+                    message_id=message.id,
+                    author_id=message.author_id,
+                    author_label=accounts.get(message.author_id)
+                    or _human_label(message.author_id),
+                    created_at=message.created_at,
+                )
+            )
+        mentions.sort(key=lambda row: (row.created_at, row.message_id), reverse=True)
+
+        threads = []
+        for channel in by_id.values():
+            threads.extend(
+                await asyncio.to_thread(chat_store.list_channel_agent_threads, channel.id)
+            )
+        with_session = [thread for thread in threads if thread.session_id]
+        counts = pending_elicitations.counts_for(
+            [thread.session_id for thread in with_session if thread.session_id]
+        )
+        acting = await _acting_principal(chat_store, caller)
+        approvals: list[NeedsYouApprovalResponse] = []
+        for thread in with_session:
+            session_id = thread.session_id or ""
+            pending = counts.get(session_id, 0)
+            if pending <= 0 or acting is None:
+                continue
+            if await _session_level(chat_store, acting, session_id) < LEVEL_EDIT:
+                continue
+            channel = by_id[thread.channel_id]
+            approvals.append(
+                NeedsYouApprovalResponse(
+                    channel_id=channel.id,
+                    channel_kind=channel.kind,
+                    channel_name=channel.name,
+                    root_message_id=thread.root_message_id,
+                    session_id=session_id,
+                    pending_count=pending,
+                )
+            )
+        return NeedsYouResponse(mentions=mentions, approvals=approvals)
 
     @router.post("/chat/channels/{channel_id}/read")
     async def mark_read(request: Request, channel_id: str, body: ReadBody) -> JSONResponse:

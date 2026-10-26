@@ -35,9 +35,13 @@ export function getNotificationPermission(): NotificationPermission | null {
  * Safari historically only supported the callback form of
  * `requestPermission`; we feature-detect by function arity (the callback
  * form declares one argument) and adapt it to a Promise.
+ *
+ * Only a `default` grant prompts. After a grant or a denial this returns the
+ * stored answer and never calls `requestPermission` again (FR-012).
  */
 export async function requestNotificationPermission(): Promise<NotificationPermission | null> {
   if (!isNotificationSupported()) return null;
+  if (Notification.permission !== "default") return Notification.permission;
   if (Notification.requestPermission.length === 1) {
     return new Promise((resolve) => {
       Notification.requestPermission((perm) => resolve(perm));
@@ -105,4 +109,61 @@ export function showNotification({
     notification.close();
   };
   return notification;
+}
+
+/** What woke the caller in team chat. Carries names only, never message text. */
+export type ChatNotificationEvent =
+  | { kind: "mention"; channelName: string }
+  | { kind: "dm"; authorName: string }
+  | { kind: "approval" };
+
+/** Title of every team-chat OS notification. */
+export const CHAT_NOTIFICATION_TITLE = "Team-Chat";
+
+/**
+ * Generic notification body (FR-011): "Neue Erwähnung in #billing",
+ * "Neue Direktnachricht von Jens", "Agent braucht eine Antwort".
+ * A channel name without `#` gets one.
+ */
+export function chatNotificationBody(event: ChatNotificationEvent): string {
+  switch (event.kind) {
+    case "mention": {
+      const name = event.channelName.trim();
+      if (!name) return "Neue Erwähnung";
+      return `Neue Erwähnung in ${name.startsWith("#") ? name : `#${name}`}`;
+    }
+    case "dm": {
+      const name = event.authorName.trim();
+      return name ? `Neue Direktnachricht von ${name}` : "Neue Direktnachricht";
+    }
+    case "approval":
+      return "Agent braucht eine Antwort";
+  }
+}
+
+export interface ShowChatNotificationOptions {
+  /** Dedupe key, e.g. the message or session id. */
+  tag?: string;
+  /** In-app path the click opens, e.g. `"/chat/abc/t/def"`. */
+  navigatePath?: string;
+  onClick?: () => void;
+}
+
+/**
+ * Show one team-chat notification with the generic body.
+ *
+ * Never prompts: with permission `default` or `denied` this is a no-op and
+ * only in-app badges change (FR-012). Returns the Notification or null.
+ */
+export function showChatNotification(
+  event: ChatNotificationEvent,
+  { tag, navigatePath, onClick }: ShowChatNotificationOptions = {},
+): Notification | null {
+  return showNotification({
+    title: CHAT_NOTIFICATION_TITLE,
+    body: chatNotificationBody(event),
+    tag,
+    onClick,
+    navigatePath,
+  });
 }
