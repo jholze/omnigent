@@ -12,7 +12,12 @@ name: Fork CI
 # watchdog cannot leak into the rest of the suite. The runner disk persists:
 # uv and pnpm caches live in the runner user's home. Playwright browsers
 # live in each runner's tool cache so the two runners do not share one
-# install lock. Neither uses actions/cache (the token is contents:read only).
+# install lock. Neither uses actions/cache (no actions:write on the token).
+#
+# Docs-only PRs skip the pytest suite, vitest, and E2E. Python lint and the
+# web lint/typecheck/build still run. The Pytest (SQLite) job itself is not
+# skipped: a skipped required check can block merging. The allowlist lives
+# in scripts/fork/ci_pytest_skip.py (*.md outside tests/ and specs/).
 #
 # The repo is public. Every job is gated so only jholze's same-repo pull
 # requests and his manual dispatches are queued. A cloud-agent push keeps the
@@ -33,6 +38,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   OMNIGENT_SKIP_WEB_UI: "true"
@@ -80,12 +86,30 @@ jobs:
 
   pytest:
     name: Pytest (SQLite)
+    # Required check. Docs-only skips the suite steps and still reports success.
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Classify changed files
+        id: classify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "python3 is missing; pytest will run"
+            exit 0
+          fi
+          python3 scripts/fork/ci_pytest_skip.py classify
       - name: Use the Mac toolchain on PATH
+        if: ${{ steps.classify.outputs.docs_only != 'true' }}
         # Node is required by the local relay tests that used to be the misc shard.
         run: |
           {
@@ -103,8 +127,10 @@ jobs:
           command -v rg >/dev/null || echo "::warning::ripgrep (rg) is not on PATH; Grep-tool tests may fail."
           command -v tmux >/dev/null || echo "::warning::tmux is not on PATH; terminal tests may fail."
       - name: Install dependencies
+        if: ${{ steps.classify.outputs.docs_only != 'true' }}
         run: uv sync --locked --extra all --extra postgres --group test
       - name: Run pytest (SQLite, not databricks)
+        if: ${{ steps.classify.outputs.docs_only != 'true' }}
         shell: bash
         env:
           PYTHONFAULTHANDLER: "1"
@@ -177,7 +203,7 @@ jobs:
           run_suite inner tests/inner -n 4 --dist=worksteal
           run_suite integration tests/integration
       - name: Upload pytest artifacts
-        if: always()
+        if: ${{ always() && steps.classify.outputs.docs_only != 'true' }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -209,6 +235,20 @@ jobs:
           pnpm_major="$(pnpm --version | cut -d. -f1)"
           test "$node_major" = "26"
           test "$pnpm_major" = "11"
+      - name: Classify changed files
+        id: classify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "python3 is missing; vitest will run"
+            exit 0
+          fi
+          python3 scripts/fork/ci_pytest_skip.py classify
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --filter web
       - name: Format check (prettier)
@@ -218,6 +258,7 @@ jobs:
       - name: Typecheck (tsc -b)
         run: pnpm --filter web run type-check
       - name: Unit tests (vitest run)
+        if: ${{ steps.classify.outputs.docs_only != 'true' }}
         env:
           # Node 26 turns on a global localStorage that stays undefined unless
           # --localstorage-file is set, and that getter shadows jsdom. Upstream
@@ -233,9 +274,10 @@ jobs:
     # continue-on-error keeps a red run from failing the workflow.
     # Waits for pytest so Chromium and the xdist workers do not share the
     # Mac at the same time. !cancelled() still runs this job when pytest fails.
+    # docs_only skips it after the suite job reports success without tests.
     name: E2E UI (Playwright, non-blocking)
     needs: [pytest]
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
+    if: ${{ !cancelled() && needs.pytest.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true }}
     continue-on-error: true
     runs-on: [self-hosted, macOS, ARM64, omnigent-ci]
     timeout-minutes: 180
