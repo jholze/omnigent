@@ -39,6 +39,7 @@ import { toEpochMs, type MessageView } from "./MessageItem";
 import { MessageList } from "./MessageList";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
+import { newestTopLevel, useReadCursor } from "./useReadCursor";
 
 export function messageViewOf(message: ChatMessage): MessageView {
   return {
@@ -67,6 +68,7 @@ function outboxViewOf(entry: OutboxEntry): MessageView {
     createdAtMs: entry.createdAtMs,
     body: entry.body,
     status: entry.status,
+    rateLimited: entry.status === "failed" ? (entry.rateLimited ?? null) : null,
   };
 }
 
@@ -302,6 +304,10 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
   });
   const outbox = useChatOutbox((state) => state.entries);
   const replyCounts = useReplyCounts(channelId);
+  // The newest stored message on screen moves the read cursor (FR-007).
+  const viewRef = useRef<HTMLDivElement>(null);
+  const newestStored = useMemo(() => newestTopLevel(messages.data?.items), [messages.data]);
+  useReadCursor(channelId, newestStored, viewRef);
   const views = useMemo(
     () => withOutbox(messages.data?.items ?? [], outbox, channelId, null),
     [messages.data, outbox, channelId],
@@ -364,7 +370,7 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div ref={viewRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <PendingAgentRequests roots={requestRoots} directory={directory} />
       {body}
       <ChatComposerCard

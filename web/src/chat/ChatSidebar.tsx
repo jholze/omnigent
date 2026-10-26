@@ -2,7 +2,8 @@
  * Joined channels and direct messages.
  *
  * Direct messages stay on screen when the list is empty. A channel name
- * renders with one leading `#`.
+ * renders with one leading `#`. Unread and mention counts come from
+ * bootstrap, which is refetched after `read.updated` (FR-008, FR-009).
  */
 import type { ReactNode } from "react";
 
@@ -46,6 +47,23 @@ export function dmLabel(channel: ChatChannel): string {
   return "Direktnachricht";
 }
 
+function count(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** Badge text. Large counts stay one short pill. */
+export function badgeCount(value: number): string {
+  return value > 99 ? "99+" : String(value);
+}
+
+/** "#general, 3 ungelesen, 1 Erwähnung". Plain label when nothing is unread. */
+export function entryAccessibleName(label: string, unread: number, mentions: number): string {
+  const parts = [label];
+  if (unread > 0) parts.push(`${unread} ungelesen`);
+  if (mentions > 0) parts.push(`${mentions} ${mentions === 1 ? "Erwähnung" : "Erwähnungen"}`);
+  return parts.join(", ");
+}
+
 function EntryLink({
   channel,
   label,
@@ -57,19 +75,44 @@ function EntryLink({
   active: boolean;
   componentId: string;
 }) {
+  const unread = count(channel.unread_count);
+  const mentions = count(channel.mention_count);
+  const hasUnread = unread > 0 || mentions > 0;
   return (
     <li>
       <Link
         to={`/chat/${encodeURIComponent(channel.id)}`}
         componentId={componentId}
         aria-current={active ? "page" : undefined}
+        aria-label={hasUnread ? entryAccessibleName(label, unread, mentions) : undefined}
+        data-unread={unread}
+        data-mentions={mentions}
         className={cn(
-          "flex min-h-11 min-w-0 items-center break-words rounded-md px-3 py-3 text-sm hover:bg-muted md:block md:min-h-0 md:py-1.5",
+          "flex min-h-11 min-w-0 items-center gap-2 break-words rounded-md px-3 py-3 text-sm hover:bg-muted md:min-h-0 md:py-1.5",
+          hasUnread && !active && "font-medium text-foreground",
           active && "bg-[var(--sidebar-active)] text-[var(--sidebar-active-foreground)]",
         )}
       >
         {/* A flex item's min-content ignores `break-words`; the span lets one long word wrap too. */}
-        <span className="min-w-0 break-words">{label}</span>
+        <span className="min-w-0 flex-1 break-words">{label}</span>
+        {mentions > 0 ? (
+          <span
+            aria-hidden="true"
+            data-testid={CHAT_TEST_IDS.mentionBadge}
+            className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-xs font-medium text-primary-foreground tabular-nums"
+          >
+            @{badgeCount(mentions)}
+          </span>
+        ) : null}
+        {unread > 0 ? (
+          <span
+            aria-hidden="true"
+            data-testid={CHAT_TEST_IDS.unreadBadge}
+            className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-muted-foreground/15 px-1.5 text-xs font-medium text-foreground tabular-nums"
+          >
+            {badgeCount(unread)}
+          </span>
+        ) : null}
       </Link>
     </li>
   );

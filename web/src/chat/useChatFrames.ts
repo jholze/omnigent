@@ -3,7 +3,11 @@
  *
  * Frames carry ids only. After the updates socket drops and reconnects,
  * `GET /v1/chat/changes?after=<cursor>` is merged by id. `reset` refetches
- * bootstrap and replaces the cursor.
+ * bootstrap, replaces the cursor and reloads open views (FR-083).
+ *
+ * Badge counts live in bootstrap. A new `read.updated` change, or a message
+ * from someone else, refetches bootstrap once per short window (FR-008,
+ * FR-009), so another tab's read clears the badge here too.
  */
 import { useEffect } from "react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
@@ -14,9 +18,16 @@ import {
   fetchChannelMessages,
   fetchChanges,
   teamChatQueryKeys,
+  type BootstrapResponse,
 } from "./chatApi";
 import { fetchLatest } from "./freshQuery";
-import { applyChatFrame, normalizeChangeItem, useTeamChatStore } from "./teamChatStore";
+import {
+  applyChatFrame,
+  normalizeChangeItem,
+  teamChatChangeKey,
+  type TeamChatChange,
+  useTeamChatStore,
+} from "./teamChatStore";
 import { applyAgentThreadFrame } from "./agent/agentThreadStore";
 import type {
   ChatChangeFrame,
@@ -117,6 +128,23 @@ function cursorAfter(next: string | null): string | null {
 }
 
 /**
+ * Query prefixes an open view renders from. A reset means changes were
+ * skipped, so every one of them is stale. Inactive ones refetch on mount.
+ */
+const OPEN_VIEW_PREFIXES = [
+  ["team-chat", "messages"],
+  ["team-chat", "thread"],
+  ["team-chat", "agent-threads"],
+  ["team-chat", "members"],
+] as const;
+
+export function reloadOpenChatViews(queryClient: QueryClient): Promise<void> {
+  return Promise.all(
+    OPEN_VIEW_PREFIXES.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+  ).then(() => undefined);
+}
+
+/**
  * Merge one changes page, then the next cursor.
  *
  * A blank or repeated cursor stops. `reset` drops the rest of the feed,
@@ -147,6 +175,7 @@ async function mergeChangesPage(
         ...fresh.channels.map((channel) => channel.id),
         ...fresh.dms.map((channel) => channel.id),
       ]);
+    await reloadOpenChatViews(queryClient);
     return;
   }
   const next = cursorAfter(page.next);
@@ -230,6 +259,67 @@ export function watchChatSocketReconnect(
   });
 }
 
+/** Coalesce badge refreshes. Keeps AC-009a (badge gone within 1 s) with room for the fetch. */
+export const BADGE_REFRESH_DELAY_MS = 250;
+
+/**
+ * True when this new change can move a listed sidebar count. My own messages
+ * do not. A channel bootstrap does not list yet is left to the new-channel
+ * refetch in `ChatPage`, which brings its counts along.
+ */
+export function changeMovesBadges(
+  change: TeamChatChange,
+  me: string | undefined,
+  listed: ReadonlySet<string>,
+): boolean {
+  if (!listed.has(change.channel_id)) return false;
+  if (change.kind === "read") return true;
+  if (change.thread_root_id !== null) return false;
+  return change.author_id === undefined || me === undefined || change.author_id !== me;
+}
+
+/**
+ * Refetch bootstrap shortly after a change that can move unread or mention
+ * counts. Waits for an in-flight bootstrap so its stale answer is not the
+ * last word, then refetches once.
+ */
+function useBadgeRefresh(enabled: boolean): void {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const run = (): void => {
+      timer = null;
+      if (queryClient.isFetching({ queryKey: teamChatQueryKeys.bootstrap, exact: true }) > 0) {
+        timer = setTimeout(run, BADGE_REFRESH_DELAY_MS);
+        return;
+      }
+      void queryClient.invalidateQueries(
+        { queryKey: teamChatQueryKeys.bootstrap, exact: true },
+        { cancelRefetch: false },
+      );
+    };
+    let known = new Set(Object.keys(useTeamChatStore.getState().changes));
+    const unsubscribe = useTeamChatStore.subscribe((state, previous) => {
+      if (state.changes === previous.changes) return;
+      const data = queryClient.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+      const listed = new Set([...(data?.channels ?? []), ...(data?.dms ?? [])].map((c) => c.id));
+      let moves = false;
+      for (const change of Object.values(state.changes)) {
+        const key = teamChatChangeKey(change);
+        if (known.has(key)) continue;
+        if (changeMovesBadges(change, data?.me, listed)) moves = true;
+      }
+      known = new Set(Object.keys(state.changes));
+      if (moves && timer === null) timer = setTimeout(run, BADGE_REFRESH_DELAY_MS);
+    });
+    return () => {
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [enabled, queryClient]);
+}
+
 /**
  * Fill the message cache for channels that gained a message.
  *
@@ -240,6 +330,7 @@ export function watchChatSocketReconnect(
 export function useChatFrames(enabled: boolean): void {
   const queryClient = useQueryClient();
   const pendingChannels = useTeamChatStore((state) => state.pendingChannels);
+  useBadgeRefresh(enabled);
   useEffect(() => {
     if (!enabled || pendingChannels.length === 0) return;
     const channelIds = useTeamChatStore.getState().takePendingChannels();

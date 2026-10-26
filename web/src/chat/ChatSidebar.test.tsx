@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatChannel } from "./chatApi";
 import { ChatSidebar, isTeamChatPathname } from "./ChatSidebar";
+import { CHAT_TEST_IDS } from "./testids";
 
 function channel(overrides: Partial<ChatChannel> & Pick<ChatChannel, "id" | "name">): ChatChannel {
   return {
@@ -43,5 +44,26 @@ describe("ChatSidebar", () => {
     const dms = screen.getByRole("region", { name: "Direktnachrichten" });
     expect(within(dms).getByRole("heading", { name: "Direktnachrichten" })).toBeVisible();
     expect(within(dms).queryAllByRole("link")).toHaveLength(0);
+  });
+
+  it("AC-008a shows unread_count as the badge and mention_count as @n from bootstrap", () => {
+    render(
+      <MemoryRouter>
+        <ChatSidebar
+          channels={[
+            channel({ id: "c-general", name: "general", unread_count: 3, mention_count: 1 }),
+            channel({ id: "c-random", name: "random" }),
+          ]}
+          dms={[]}
+        />
+      </MemoryRouter>,
+    );
+    const general = screen.getByRole("link", { name: "#general, 3 ungelesen, 1 Erwähnung" });
+    expect(within(general).getByTestId(CHAT_TEST_IDS.unreadBadge)).toHaveTextContent(/^3$/);
+    expect(within(general).getByTestId(CHAT_TEST_IDS.mentionBadge)).toHaveTextContent(/^@1$/);
+
+    const random = screen.getByRole("link", { name: "#random" });
+    expect(within(random).queryByTestId(CHAT_TEST_IDS.unreadBadge)).toBeNull();
+    expect(within(random).queryByTestId(CHAT_TEST_IDS.mentionBadge)).toBeNull();
   });
 });

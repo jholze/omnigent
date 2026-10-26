@@ -7,12 +7,32 @@ import { authenticatedFetch } from "@/lib/identity";
 
 export class ChatApiError extends Error {
   readonly status: number;
+  /** Whole seconds from a `Retry-After` header (429), else null. */
+  readonly retryAfterSeconds: number | null;
 
-  constructor(status: number) {
+  constructor(status: number, retryAfterSeconds: number | null = null) {
     super(`chat request failed (${status})`);
     this.name = "ChatApiError";
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+/** `Retry-After` as whole seconds. Delta-seconds and HTTP dates are accepted. */
+export function parseRetryAfter(value: string | null, nowMs = Date.now()): number | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  if (/^\d+$/.test(trimmed)) return Math.max(1, Number.parseInt(trimmed, 10));
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return null;
+  return Math.max(1, Math.ceil((at - nowMs) / 1000));
+}
+
+function apiError(response: Response): ChatApiError {
+  const retryAfter =
+    response.status === 429 ? parseRetryAfter(response.headers.get("Retry-After")) : null;
+  return new ChatApiError(response.status, retryAfter);
 }
 
 export interface ChatChannel {
@@ -218,7 +238,7 @@ async function readJson<T>(
   invalidMessage: string,
   accept: (value: unknown) => value is T,
 ): Promise<T> {
-  if (!response.ok) throw new ChatApiError(response.status);
+  if (!response.ok) throw apiError(response);
   const payload: unknown = await response.json();
   if (!accept(payload)) throw new Error(invalidMessage);
   return payload;
@@ -387,7 +407,7 @@ export async function revokeAgentAccount(accountId: string): Promise<void> {
     `/v1/chat/agent-accounts/${encodeURIComponent(accountId)}`,
     { method: "DELETE" },
   );
-  if (!response.ok) throw new ChatApiError(response.status);
+  if (!response.ok) throw apiError(response);
 }
 
 export interface PostMessageInput {
@@ -418,6 +438,30 @@ export async function postMessage(
     },
   );
   return readJson(response, "Invalid chat message response", isChatMessage);
+}
+
+/** Channel read cursor: one stored top-level message. */
+export interface ReadCursor {
+  id: string;
+  created_at: number;
+}
+
+/**
+ * `POST /v1/chat/channels/{id}/read` for the channel cursor (FR-007).
+ *
+ * The server keeps the newer of the stored and the sent cursor, so a late
+ * or repeated call never moves it back. The response body is not needed.
+ */
+export async function postReadCursor(channelId: string, cursor: ReadCursor): Promise<void> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/read`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: cursor.id, created_at: cursor.created_at }),
+    },
+  );
+  if (!response.ok) throw apiError(response);
 }
 
 /**
