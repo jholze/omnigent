@@ -36,6 +36,11 @@
  * to "Unread" (comments + unread sessions) or "Awaiting response"
  * (approvals); the pick persists per device.
  *
+ * With team chat on, the "Braucht dich" section (`NeedsYouView`, FR-010)
+ * sits above the tabs: unread chat mentions and agent-thread approvals the
+ * caller may answer, each linking to its thread. The team-chat OS
+ * notifications (FR-011, FR-012) are mounted app-wide in `AppShell`.
+ *
  * Deliberately NOT here: dismissing approvals and mentions — neither
  * exists as a server concept. Resolving (or the prompt timing out) is
  * what clears an approval.
@@ -57,6 +62,7 @@ import {
 } from "lucide-react";
 import { ApprovalCard, type SubmitApprovalFn } from "@/components/blocks/ApprovalCard";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
+import { NeedsYouView, needsYouRows, useNeedsYou } from "@/chat/NeedsYouView";
 import { PageScroll } from "@/components/PageScroll";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -86,6 +92,8 @@ import { latestOutputPreview } from "@/lib/lastAssistantText";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link } from "@/lib/routing";
 import { useOmnigentAnalytics } from "@/lib/analytics";
+import { isFeatureEnabled } from "@/lib/capabilities";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { approve, fetchSessionItemsPage, getSession } from "@/lib/sessionsApi";
 import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
@@ -152,6 +160,8 @@ export function InboxPage() {
     inboxRows: allRows,
     comments: commentInbox,
   } = useSidebarData();
+  const teamChatEnabled = isFeatureEnabled(useServerInfo(), "team_chat");
+  const needsYouCount = needsYouRows(useNeedsYou(teamChatEnabled).data).length;
   const [filter, setFilter] = useState<InboxFilter>(readInboxFilter);
   const [responded, setResponded] = useState<RespondedMap>({});
   // Manual expand/collapse toggles keyed by entry key. Anything not in
@@ -213,8 +223,9 @@ export function InboxPage() {
   const visibleComments = showUnread ? commentInbox.items : [];
   const visibleUnread = showUnread ? unreadItems : [];
   const visibleCount = visibleApprovals.length + visibleComments.length + visibleUnread.length;
-  const totalCount = items.length + commentInbox.items.length + unreadItems.length;
+  const totalCount = items.length + commentInbox.items.length + unreadItems.length + needsYouCount;
   const summary = [
+    needsYouCount > 0 && `${needsYouCount} need you`,
     items.length > 0 && (items.length === 1 ? "1 approval" : `${items.length} approvals`),
     commentInbox.items.length > 0 &&
       (commentInbox.items.length === 1 ? "1 comment" : `${commentInbox.items.length} comments`),
@@ -524,6 +535,8 @@ export function InboxPage() {
         )}
       </div>
 
+      <NeedsYouView enabled={teamChatEnabled} />
+
       <Tabs
         value={filter}
         onValueChange={(value) => {
@@ -575,7 +588,7 @@ export function InboxPage() {
         </div>
       )}
 
-      {!assembling && failedSessionCount === 0 && visibleCount === 0 && (
+      {!assembling && failedSessionCount === 0 && visibleCount === 0 && needsYouCount === 0 && (
         <div className="flex flex-col items-center gap-2 py-16 text-center">
           <InboxIcon className="size-8 text-muted-foreground/50" />
           <p className="text-ui font-medium">
