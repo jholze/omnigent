@@ -22,9 +22,12 @@ unlike the Google builtin — there is no session_state round-trip layer.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from omnigent.policies.builtins._shell import (
     SHELL_TOOLS,
@@ -1216,6 +1219,97 @@ def test_force_push_plus_refspec_allowed_when_opt_out() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Layer 1c — unparseable_action (here-documents / substitutions)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+_UNPARSEABLE_BENIGN = [
+    "cat <<DATA\nplain text\nDATA\necho done",
+    "echo $(echo ready)",
+    "python3 <<'PY'\nprint(1)\nPY",
+]
+
+_UNPARSEABLE_GITHUB_WRITES = [
+    "cat <<EOF\ngit push origin main\nEOF",
+    "python3 <<'PY'\nimport os\nos.system(\"git push origin main\")\nPY",
+    "echo $(git push origin main)",
+    "cat <<EOF\ngh pr merge 1\nEOF",
+    "echo $(gh pr create --title x)",
+]
+
+
+def _agent_cel_guard(agent: str, policy_name: str) -> Callable[[PolicyEvent], Any]:
+    """
+    Compile the CEL guard *policy_name* exactly as shipped in *agent*'s config.
+
+    :param agent: Directory under ``agent-configs/``, e.g. ``"ux-builder"``.
+    :param policy_name: Guardrail policy key, e.g. ``"ux_builder_git"``.
+    :returns: The compiled ``cel_policy`` callable.
+    """
+    pytest.importorskip("celpy", reason="cel-python not installed")
+    from omnigent.policies.builtins.cel import cel_policy
+
+    config_path = _REPO_ROOT / "agent-configs" / agent / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    policy_spec = config["guardrails"]["policies"][policy_name]
+    return cel_policy(expression=policy_spec["function"]["arguments"]["expression"])
+
+
+@pytest.mark.parametrize("command", _UNPARSEABLE_BENIGN)
+def test_ac_ap1_01_unparseable_allow_abstains_on_benign_commands(command: str) -> None:
+    policy = github_policy(unparseable_action="allow")
+    assert policy(_sh(command)) is None
+
+
+@pytest.mark.parametrize("command", [*_UNPARSEABLE_BENIGN, "echo `echo ready`"])
+def test_ac_ap1_02_unparseable_default_still_asks(command: str) -> None:
+    assert _action(github_policy()(_sh(command))) == "ASK"
+
+
+@pytest.mark.parametrize("command", _UNPARSEABLE_GITHUB_WRITES)
+def test_ac_ap1_03_unparseable_allow_removes_card_for_hidden_writes(command: str) -> None:
+    policy = github_policy(unparseable_action="allow")
+    assert policy(_sh(command)) is None
+
+
+@pytest.mark.parametrize("command", _UNPARSEABLE_GITHUB_WRITES)
+def test_ac_ap1_03_ux_builder_cel_denies_hidden_github_writes(command: str) -> None:
+    ux_builder_git = _agent_cel_guard("ux-builder", "ux_builder_git")
+    assert _action(ux_builder_git(_sh(command))) == "DENY"
+
+
+def test_ac_ap1_03_ux_reviewer_cel_denies_heredoc_pr_merge() -> None:
+    ux_reviewer_git = _agent_cel_guard("ux-reviewer", "ux_reviewer_git")
+    assert _action(ux_reviewer_git(_sh("cat <<EOF\ngh pr merge 1\nEOF"))) == "DENY"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push --force https://github.com/octo/hello main",
+        "git push https://github.com/octo/hello --tags",
+        "git push https://github.com/octo/hello refs/tags/v1.0:refs/tags/v1.0",
+    ],
+)
+def test_ac_ap1_04_unparseable_allow_keeps_force_and_tag_push_denied(command: str) -> None:
+    policy = github_policy(
+        write_repos=["octo/hello"], write_branches=["main"], unparseable_action="allow"
+    )
+    assert _action(policy(_sh(command))) == "DENY"
+
+
+def test_ac_ap1_04_invalid_unparseable_action_raises() -> None:
+    with pytest.raises(ValueError, match="unparseable_action"):
+        github_policy(unparseable_action="maybe")
+
+
+def test_unparseable_deny_blocks_benign_heredoc() -> None:
+    policy = github_policy(unparseable_action="deny")
+    assert _action(policy(_sh("cat <<DATA\nplain text\nDATA\necho done"))) == "DENY"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Layer 2 — spec resolution through resolve_function_policy
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1293,3 +1387,8 @@ def test_registry_validates_factory_params() -> None:
     err_unknown = validate_factory_params(_HANDLER, {"bogus": 1})
     assert err_unknown is not None and "bogus" in err_unknown
     assert validate_factory_params(_HANDLER, {"read_all": "yes"}) is not None
+
+
+def test_registry_accepts_unparseable_action_param() -> None:
+    load_registry()
+    assert validate_factory_params(_HANDLER, {"unparseable_action": "allow"}) is None

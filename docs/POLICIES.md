@@ -352,8 +352,9 @@ Shell comments, here-documents (including here-strings), line continuations, and
 command substitutions are not classified. Completed command segments before
 and after these regions retain their policy decisions when the parser can
 determine their boundaries, including commands surrounding a comment. Unsupported
-syntax adds an ASK decision; DENY takes precedence over ASK, which takes
-precedence over ALLOW. Substitutions inside double quotes
+syntax adds an ASK decision by default; the action is configurable via
+`unparseable_action` (default `ask`). DENY takes precedence over ASK, which
+takes precedence over ALLOW. Substitutions inside double quotes
 also require approval, as do ANSI-C (`$'...'`) and locale-specific (`$"..."`)
 quoting. Ordinary single-quoted or escaped literal delimiters remain arguments.
 
@@ -365,6 +366,7 @@ quoting. Ordinary single-quoted or escaped literal delimiters remain arguments.
 | `write_branches` | string[] | `[]` | Branches writable within allowed repos (empty = any) |
 | `mcp_tool_prefixes` | string[] | `["mcp__github__", "github__"]` | Tool-name prefixes to match |
 | `shell_tools` | string[] | `["sys_os_shell"]` | Shell tools whose commands are parsed for git/gh |
+| `unparseable_action` | string | `"ask"` | Action for unparseable git/gh shell commands: `ask` (ASK), `allow` (abstain), or `deny` |
 
 ```yaml
 github_access:
