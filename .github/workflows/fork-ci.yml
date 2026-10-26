@@ -12,12 +12,12 @@ name: Fork CI
 # watchdog cannot leak into the rest of the suite. The runner disk persists:
 # uv and pnpm caches live in the runner user's home. Playwright browsers
 # live in each runner's tool cache so the two runners do not share one
-# install lock. Neither uses actions/cache (no actions:write on the token).
+# install lock. Neither uses actions/cache (the token is contents:read only).
 #
 # Docs-only PRs skip the pytest suite, vitest, and E2E. Python lint and the
 # web lint/typecheck/build still run. The Pytest (SQLite) job itself is not
 # skipped: a skipped required check can block merging. The allowlist lives
-# in scripts/fork/ci_pytest_skip.py (*.md outside tests/ and specs/).
+# in scripts/fork/ci_pytest_skip.py (*.md outside tests/ and specs/, via git diff).
 #
 # The repo is public. Every job is gated so only jholze's same-repo pull
 # requests and his manual dispatches are queued. A cloud-agent push keeps the
@@ -38,7 +38,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
 
 env:
   OMNIGENT_SKIP_WEB_UI: "true"
@@ -97,9 +96,7 @@ jobs:
       - name: Classify changed files
         id: classify
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
           if ! command -v python3 >/dev/null 2>&1; then
@@ -238,9 +235,7 @@ jobs:
       - name: Classify changed files
         id: classify
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
           if ! command -v python3 >/dev/null 2>&1; then

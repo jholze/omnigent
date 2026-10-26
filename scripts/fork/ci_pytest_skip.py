@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
 """Allowlist for skipping the fork pytest suite on a documentation PR.
 
-Pytest (and the web vitest step) may be skipped only when the pull request
-file list is complete and every path is a ``*.md`` file outside ``tests/``
-and outside ``specs/``. ``docs/**/*.md`` is included. Anything else — config,
-YAML/JSON/TOML, specs, fixtures, workflow files, paths under ``tests/``, an
-empty list, a truncated list — keeps the suite. A rename counts both paths.
+Pytest (and the web vitest step) may be skipped only when ``git diff`` of the
+pull request base against HEAD lists at least one path and every path is a
+``*.md`` file outside ``tests/`` and outside ``specs/``. ``docs/**/*.md`` is
+included. Anything else — config, YAML/JSON/TOML, specs, fixtures, workflow
+files, paths under ``tests/``, an empty diff, a failed diff — keeps the suite.
+``--no-renames`` counts both sides of a rename.
 
-The caller must not fail the CI job when this command cannot decide: it
-prints ``docs_only=false`` and exits 0 so the suite still runs.
+The command prints ``docs_only=false`` and exits 0 when it cannot decide, so
+the CI job still runs the suite.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
+import subprocess
 import sys
-import urllib.error
-import urllib.request
-from collections.abc import Mapping
-from typing import Any
 
-_MAX_LISTED_FILES = 3000
-_MAX_PAGES = 40
-_NEXT_LINK = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
-_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-
-
-class FileListError(Exception):
-    """The pull request file list could not be read completely."""
+_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def is_allowlisted_doc(path: str) -> bool:
@@ -50,99 +40,47 @@ def is_allowlisted_doc(path: str) -> bool:
     return True
 
 
-def paths_from_entries(entries: list[Mapping[str, Any]]) -> list[str]:
-    """Return current and pre-rename paths from a pulls files payload."""
-    paths: list[str] = []
-    for entry in entries:
-        filename = str(entry.get("filename") or "")
-        paths.append(filename)
-        previous = str(entry.get("previous_filename") or "")
-        if previous and previous != filename:
-            paths.append(previous)
-    return paths
+def pytest_suite_should_run(paths: list[str]) -> bool:
+    """Return False only for a non-empty allowlisted path list."""
+    if not paths:
+        return True
+    return not all(is_allowlisted_doc(path) for path in paths)
 
 
-def is_docs_only(entries: list[Mapping[str, Any]], changed_files: int | None) -> bool:
-    """Return True only for a complete allowlisted file list.
+def changed_paths(base_sha: str) -> list[str]:
+    """List paths changed between ``base_sha`` and HEAD, including renames.
 
-    ``changed_files`` is the pull request's reported count. A mismatch or a
-    list at the API cap is treated as incomplete, so pytest runs.
+    Fetches ``base_sha`` from origin when the shallow checkout does not have
+    it. Raises ``RuntimeError`` when git cannot produce the list.
     """
-    if (
-        changed_files is None
-        or changed_files <= 0
-        or changed_files >= _MAX_LISTED_FILES
-        or len(entries) != changed_files
-    ):
-        return False
-    paths = paths_from_entries(entries)
-    if len(paths) < changed_files:
-        return False
-    return all(is_allowlisted_doc(path) for path in paths)
-
-
-def fetch_pr_files(
-    repo: str,
-    number: str,
-    token: str,
-    opener: Any = None,
-) -> list[dict[str, Any]]:
-    """GET ``/pulls/{number}/files``, following ``Link: rel=next``."""
-    open_url = opener or urllib.request.urlopen
-    if not _REPO.fullmatch(repo):
-        raise FileListError("unexpected repository")
-    if not re.fullmatch(r"[0-9]+", number):
-        raise FileListError("unexpected pull request number")
-    if not token:
-        raise FileListError("missing token")
-    url: str | None = f"https://api.github.com/repos/{repo}/pulls/{number}/files?per_page=100"
-    entries: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    while url:
-        if url in seen or len(seen) >= _MAX_PAGES or not url.startswith("https://api.github.com/"):
-            raise FileListError("files api pagination did not finish")
-        seen.add(url)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "omnigent-fork-ci",
-            },
-        )
-        try:
-            with open_url(request, timeout=30) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-                link = response.headers.get("Link")
-        except urllib.error.HTTPError as exc:
-            raise FileListError(f"files api status {exc.code}") from exc
-        except urllib.error.URLError as exc:
-            raise FileListError("files api unreachable") from exc
-        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
-            raise FileListError("files api returned an unexpected list")
-        entries.extend(payload)
-        url = _next_link(link)
-    return entries
+    if not _SHA.fullmatch(base_sha):
+        raise RuntimeError("base sha missing")
+    if not _commit_exists(base_sha) and not _fetch(base_sha):
+        raise RuntimeError("base commit unavailable")
+    if not _commit_exists(base_sha):
+        raise RuntimeError("base commit unavailable")
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", "-z", base_sha, "HEAD"],
+        check=False,
+        capture_output=True,
+    )
+    if diff.returncode != 0:
+        raise RuntimeError("git diff failed")
+    return [part.decode("utf-8", "surrogateescape") for part in diff.stdout.split(b"\0") if part]
 
 
 def decide_from_environment() -> tuple[bool, str, list[str]]:
-    """Return ``(docs_only, reason, paths)`` from the workflow environment."""
+    """Return ``(docs_only, reason, paths)`` for this Actions run."""
     if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
         return False, "not a pull request; pytest runs", []
-    changed = _parse_count(os.environ.get("PR_CHANGED_FILES", ""))
-    if changed is None:
-        return False, "changed-file count missing; pytest runs", []
-    entries = fetch_pr_files(
-        os.environ.get("GITHUB_REPOSITORY", ""),
-        os.environ.get("PR_NUMBER", ""),
-        os.environ.get("GITHUB_TOKEN", ""),
-    )
-    paths = paths_from_entries(entries)
-    docs_only = is_docs_only(entries, changed)
-    if docs_only:
-        return True, f"all {changed} changed file(s) are allowlisted markdown", paths
-    return False, f"{changed} changed file(s); pytest runs", paths
+    base = os.environ.get("BASE_SHA", "").strip()
+    try:
+        paths = changed_paths(base)
+    except (RuntimeError, OSError) as exc:
+        return False, f"{exc}; pytest runs", []
+    if pytest_suite_should_run(paths):
+        return False, f"{len(paths)} changed path(s); pytest runs", paths
+    return True, f"all {len(paths)} changed path(s) are allowlisted markdown", paths
 
 
 def classify_main() -> int:
@@ -150,18 +88,36 @@ def classify_main() -> int:
     try:
         docs_only, reason, paths = decide_from_environment()
     except Exception as exc:  # noqa: BLE001 - a classify bug must not skip pytest or fail the job
-        docs_only, reason, paths = False, f"file list unavailable ({exc.__class__.__name__})", []
+        docs_only, reason, paths = (
+            False,
+            f"classify failed ({exc.__class__.__name__}); pytest runs",
+            [],
+        )
     _log(docs_only, reason, paths)
     _write_output(docs_only)
     _write_summary(docs_only, reason, paths)
     return 0
 
 
-def _parse_count(raw: str) -> int | None:
-    stripped = raw.strip()
-    if not re.fullmatch(r"[0-9]+", stripped):
-        return None
-    return int(stripped)
+def _commit_exists(sha: str) -> bool:
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+        check=False,
+        capture_output=True,
+    )
+    return probe.returncode == 0
+
+
+def _fetch(sha: str) -> bool:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    fetched = subprocess.run(
+        ["git", "fetch", "--no-tags", "--depth=1", "origin", sha],
+        check=False,
+        capture_output=True,
+        env=env,
+    )
+    return fetched.returncode == 0
 
 
 def _parts(path: str) -> list[str] | None:
@@ -184,21 +140,12 @@ def _parts(path: str) -> list[str] | None:
     return parts
 
 
-def _next_link(header: str | None) -> str | None:
-    if not header:
-        return None
-    match = _NEXT_LINK.search(header)
-    if match is None:
-        return None
-    return match.group(1)
-
-
 def _log(docs_only: bool, reason: str, paths: list[str]) -> None:
     print(f"docs_only={'true' if docs_only else 'false'} ({reason})")
-    newline = "\\n"
+    escaped_newline = "\\" + "n"
     for path in paths:
         marker = "allow" if is_allowlisted_doc(path) else "keep"
-        print(f"  {marker} {path.replace(chr(10), newline)}")
+        print(f"  {marker} {path.replace(chr(10), escaped_newline)}")
 
 
 def _write_output(docs_only: bool) -> None:

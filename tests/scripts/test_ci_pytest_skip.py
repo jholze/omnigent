@@ -7,7 +7,6 @@ outside ``specs/``. The same decision skips vitest. Lint is not gated.
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import subprocess
 import sys
@@ -67,41 +66,15 @@ def _ids(case: tuple[list[str], bool]) -> str:
     return ("run:" if pytest_runs else "skip:") + label
 
 
-def _docs_only(entries: list[dict[str, str]], changed_files: int | None) -> bool:
-    return ci_pytest_skip.is_docs_only(entries, changed_files)
-
-
 @pytest.mark.parametrize("paths,pytest_runs", _CASES, ids=[_ids(case) for case in _CASES])
 def test_allowlist_cases(paths: list[str], pytest_runs: bool) -> None:
-    entries = [{"filename": path} for path in paths]
-    assert _docs_only(entries, len(entries)) is (not pytest_runs)
+    assert ci_pytest_skip.pytest_suite_should_run(paths) is pytest_runs
 
 
-def test_rename_from_python_keeps_pytest() -> None:
-    entries = [
-        {"filename": "docs/a.md", "previous_filename": "omnigent/a.py", "status": "renamed"}
-    ]
-    assert _docs_only(entries, 1) is False
-
-
-def test_rename_between_allowlisted_markdown_skips_pytest() -> None:
-    entries = [
-        {"filename": "docs/guide.md", "previous_filename": "README.md", "status": "renamed"}
-    ]
-    assert _docs_only(entries, 1) is True
-
-
-def test_rename_out_of_specs_keeps_pytest() -> None:
-    entries = [{"filename": "docs/a.md", "previous_filename": "specs/a.md", "status": "renamed"}]
-    assert _docs_only(entries, 1) is False
-
-
-def test_incomplete_or_capped_list_keeps_pytest() -> None:
-    readme = [{"filename": "README.md"}]
-    assert _docs_only(readme, 2) is False
-    assert _docs_only(readme, None) is False
-    capped = [{"filename": "README.md"} for _ in range(3000)]
-    assert _docs_only(capped, 3000) is False
+def test_rename_paths_keep_or_skip_pytest() -> None:
+    assert ci_pytest_skip.pytest_suite_should_run(["docs/a.md", "omnigent/a.py"]) is True
+    assert ci_pytest_skip.pytest_suite_should_run(["docs/guide.md", "README.md"]) is False
+    assert ci_pytest_skip.pytest_suite_should_run(["docs/a.md", "specs/a.md"]) is True
 
 
 def test_parent_directory_escape_keeps_pytest() -> None:
@@ -109,61 +82,91 @@ def test_parent_directory_escape_keeps_pytest() -> None:
     assert ci_pytest_skip.is_allowlisted_doc("/README.md") is False
 
 
-class _Response:
-    def __init__(self, payload: list[dict[str, str]], link: str | None = None) -> None:
-        self._body = json.dumps(payload).encode()
-        self.headers = {"Link": link} if link else {}
-
-    def read(self) -> bytes:
-        return self._body
-
-    def __enter__(self) -> _Response:
-        return self
-
-    def __exit__(self, *_args: object) -> bool:
-        return False
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
-def test_fetch_follows_next_link_and_stops_on_github_host() -> None:
-    pages = {
-        "https://api.github.com/repos/jholze/omnigent/pulls/7/files?per_page=100": _Response(
-            [{"filename": "README.md"}],
-            '<https://api.github.com/repos/jholze/omnigent/pulls/7/files?page=2>; rel="next"',
-        ),
-        "https://api.github.com/repos/jholze/omnigent/pulls/7/files?page=2": _Response(
-            [{"filename": "docs/a.md", "previous_filename": "docs/b.md"}]
-        ),
+def _commit(repo: Path, message: str) -> str:
+    _git(
+        repo, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-m", message
+    )
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir()
+    _git(path, "init", "-b", "main")
+    _git(path, "config", "commit.gpgsign", "false")
+    return path
+
+
+def test_git_diff_skips_docs_and_keeps_renames_from_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "README.md").write_text("hello\n")
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("guide\n")
+    _git(repo, "add", "README.md", "docs/guide.md")
+    base = _commit(repo, "docs")
+    (repo / "omnigent.py").write_text("print(1)\n")
+    _git(repo, "add", "omnigent.py")
+    _git(repo, "mv", "README.md", "docs/readme.md")
+    _commit(repo, "code and rename")
+
+    monkeypatch.chdir(repo)
+    listed = ci_pytest_skip.changed_paths(base)
+    assert "omnigent.py" in listed
+    assert "README.md" in listed
+    assert "docs/readme.md" in listed
+    assert ci_pytest_skip.pytest_suite_should_run(listed) is True
+
+    # A second repo whose only change is markdown outside tests/ and specs/.
+    docs_repo = _init_repo(tmp_path / "docs-repo")
+    (docs_repo / "README.md").write_text("v1\n")
+    _git(docs_repo, "add", "README.md")
+    docs_base = _commit(docs_repo, "base")
+    (docs_repo / "README.md").write_text("v2\n")
+    nested = docs_repo / "docs"
+    nested.mkdir()
+    (nested / "fork-workflow.md").write_text("doc\n")
+    _git(docs_repo, "add", "README.md", "docs/fork-workflow.md")
+    _commit(docs_repo, "docs only")
+    monkeypatch.chdir(docs_repo)
+    docs_paths = ci_pytest_skip.changed_paths(docs_base)
+    assert docs_paths == ["README.md", "docs/fork-workflow.md"] or set(docs_paths) == {
+        "README.md",
+        "docs/fork-workflow.md",
     }
-    seen: list[str] = []
-
-    def opener(request: Any, timeout: int) -> _Response:
-        assert timeout == 30
-        assert request.get_header("Authorization") == "Bearer test-token"
-        seen.append(request.full_url)
-        return pages[request.full_url]
-
-    entries = ci_pytest_skip.fetch_pr_files("jholze/omnigent", "7", "test-token", opener)
-    assert [entry["filename"] for entry in entries] == ["README.md", "docs/a.md"]
-    assert seen == list(pages)
-    assert _docs_only(entries, 2) is True
+    assert ci_pytest_skip.pytest_suite_should_run(docs_paths) is False
 
 
-def test_fetch_rejects_non_github_next_link() -> None:
-    def opener(_request: Any, timeout: int) -> _Response:
-        assert timeout == 30
-        return _Response(
-            [{"filename": "README.md"}],
-            '<https://example.invalid/files>; rel="next"',
-        )
-
-    with pytest.raises(ci_pytest_skip.FileListError):
-        ci_pytest_skip.fetch_pr_files("jholze/omnigent", "7", "test-token", opener)
+def test_missing_base_keeps_pytest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "README.md").write_text("hello\n")
+    _git(repo, "add", "README.md")
+    _commit(repo, "base")
+    _git(repo, "remote", "add", "origin", str(tmp_path / "missing-origin"))
+    output = tmp_path / "github_output"
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("BASE_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    assert ci_pytest_skip.classify_main() == 0
+    assert output.read_text() == "docs_only=false\n"
 
 
 def test_classify_without_a_pull_request_keeps_pytest(tmp_path: Path) -> None:
     output = tmp_path / "github_output"
     env = os.environ.copy()
-    env.pop("GITHUB_TOKEN", None)
     env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
     env["GITHUB_OUTPUT"] = str(output)
     result = subprocess.run(
@@ -174,25 +177,6 @@ def test_classify_without_a_pull_request_keeps_pytest(tmp_path: Path) -> None:
         env=env,
     )
     assert result.returncode == 0, result.stderr
-    assert output.read_text() == "docs_only=false\n"
-
-
-def test_classify_error_exits_zero_and_keeps_pytest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    output = tmp_path / "github_output"
-
-    def boom(*_args: object, **_kwargs: object) -> list[dict[str, str]]:
-        raise ci_pytest_skip.FileListError("nope")
-
-    monkeypatch.setattr(ci_pytest_skip, "fetch_pr_files", boom)
-    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "jholze/omnigent")
-    monkeypatch.setenv("PR_NUMBER", "7")
-    monkeypatch.setenv("PR_CHANGED_FILES", "1")
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
-    assert ci_pytest_skip.classify_main() == 0
     assert output.read_text() == "docs_only=false\n"
 
 
@@ -209,6 +193,9 @@ def _steps(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def test_workflow_skips_suite_steps_without_skipping_required_jobs() -> None:
     text = _WORKFLOW.read_text()
     assert "paths-ignore" not in text
+    script = _SCRIPT.read_text()
+    assert '"--name-only"' in script
+    assert '"--no-renames"' in script
     workflow = _workflow()
     jobs = workflow["jobs"]
     pytest_job = jobs["pytest"]
@@ -221,6 +208,7 @@ def test_workflow_skips_suite_steps_without_skipping_required_jobs() -> None:
     assert lint_job["name"] == "Python lint (ruff, pyrefly)"
     assert "docs_only" not in str(lint_job["if"])
     assert pytest_job["outputs"]["docs_only"] == "${{ steps.classify.outputs.docs_only }}"
+    assert workflow["permissions"] == {"contents": "read"}
 
     pytest_steps = _steps(pytest_job)
     web_steps = _steps(web_job)
@@ -232,8 +220,9 @@ def test_workflow_skips_suite_steps_without_skipping_required_jobs() -> None:
     assert "steps.classify.outputs.docs_only != 'true'" in vitest_if
     assert "docs_only" not in str(web_steps["Lint (oxlint)"].get("if", ""))
     assert "docs_only" not in str(web_steps["Format check (prettier)"].get("if", ""))
-    assert "ci_pytest_skip.py classify" in pytest_steps["Classify changed files"]["run"]
-    assert "ci_pytest_skip.py classify" in web_steps["Classify changed files"]["run"]
+    for job_steps in (pytest_steps, web_steps):
+        step = job_steps["Classify changed files"]
+        assert "ci_pytest_skip.py classify" in step["run"]
+        assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+        assert "GITHUB_TOKEN" not in step["env"]
     assert "needs.pytest.outputs.docs_only != 'true'" in e2e_job["if"]
-    assert workflow["permissions"]["pull-requests"] == "read"
-    assert workflow["permissions"]["contents"] == "read"
