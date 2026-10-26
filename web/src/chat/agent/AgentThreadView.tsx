@@ -45,6 +45,7 @@ import {
   useThreadApprovals,
 } from "./agentApprovals";
 import { useStatusAfterConnect } from "./useStatusAfterConnect";
+import { CardMount } from "./CardMount";
 
 /** Author id of mirrored agent replies (`chat_agent_threads._AUTHOR_AGENT`). */
 export const AGENT_AUTHOR_ID = "agent";
@@ -190,6 +191,15 @@ function LiveAgentOutput({
       held.key === turn.key &&
       agentReplyCount <= held.replies);
 
+  // Cards already there when the live view finished loading are history and
+  // mount static; a card that arrives later springs in (FR-078, cardMount).
+  const [initialCardIds, setInitialCardIds] = useState<Set<string> | null>(null);
+  if (initialCardIds === null && !loadingConversation) {
+    setInitialCardIds(
+      new Set(turn.items.flatMap((item) => ("elicitationId" in item ? [item.elicitationId] : []))),
+    );
+  }
+
   const approvals = useThreadApprovals();
   const meLabel = principalLabel(me, directory);
   const submit: SubmitApprovalFn = (elicitationId, action, content, meta) => {
@@ -258,7 +268,13 @@ function LiveAgentOutput({
             else if (approvals.sending[id]) note = SENDING_NOTE;
             return (
               // Phone: the card's buttons reach the 44 px touch target (NFR-032).
-              <div key={key} className="flex min-w-0 flex-col gap-1 max-md:[&_button]:min-h-11">
+              <CardMount
+                key={key}
+                animate={
+                  initialCardIds !== null && !initialCardIds.has(id) && item.status === "pending"
+                }
+                className="flex min-w-0 flex-col gap-1 max-md:[&_button]:min-h-11"
+              >
                 <ElicitationCard
                   item={item}
                   onSubmit={submit}
@@ -272,7 +288,7 @@ function LiveAgentOutput({
                     {SEND_FAILED_TEXT}
                   </p>
                 ) : null}
-              </div>
+              </CardMount>
             );
           })}
           {working && !hasText ? (

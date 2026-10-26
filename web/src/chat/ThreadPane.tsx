@@ -8,8 +8,9 @@
  * An Agent-Thread adds the status chip to the header and the live agent
  * output below the stored replies (T-008).
  */
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { m } from "motion/react";
 import { ChevronLeftIcon, XIcon } from "lucide-react";
 
 import { Link, useNavigate } from "@/lib/routing";
@@ -34,6 +35,8 @@ import {
   type MessageView,
 } from "./MessageItem";
 import { MessageList } from "./MessageList";
+import { paneOpen } from "./motion";
+import { useChatReducedMotion } from "./MotionRoot";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
 
@@ -47,6 +50,32 @@ export interface ThreadPaneProps {
 }
 
 const TITLE_ID = "chat-thread-title";
+
+/** Desktop layout (Tailwind `md`): the pane is a column next to the channel. */
+const DESKTOP_QUERY = "(min-width: 48rem)";
+
+function isDesktopColumn(): boolean {
+  return typeof window !== "undefined" && Boolean(window.matchMedia?.(DESKTOP_QUERY).matches);
+}
+
+/**
+ * Slide-in on mount for the desktop column (FR-078, 220 ms). Closing
+ * (Escape, close button) unmounts without animation. On a phone the pane
+ * replaces the channel column and mounts static.
+ */
+export function usePaneOpenMotion() {
+  const reduced = useChatReducedMotion();
+  const [desktop] = useState(isDesktopColumn);
+  if (!desktop) return { initial: false as const };
+  const preset = paneOpen(reduced);
+  return {
+    initial: preset.initial,
+    animate: preset.animate,
+    transition: preset.transition,
+    "data-motion": preset.name,
+    "data-motion-duration": preset.durationMs,
+  };
+}
 
 const AGENT_MENTION_RE = /<@omnigent_agent:[^>\s]+>/;
 /** Prefix of the server's sharing notice (`chat_agent_threads._post_sharing_notice`). */
@@ -139,6 +168,7 @@ export function ThreadPane({
   );
   const sentCount = views.filter((view) => view.status === "sent").length;
   const onRetry = (clientId: string) => retryChatMessage(queryClient, clientId);
+  const paneMotion = usePaneOpenMotion();
 
   const agentSessionId = useAgentThreadStore(
     (state) => state.threads[threadRootId]?.sessionId ?? null,
@@ -223,7 +253,8 @@ export function ThreadPane({
   }
 
   return (
-    <section
+    <m.section
+      {...paneMotion}
       data-testid={CHAT_TEST_IDS.threadPane}
       aria-labelledby={TITLE_ID}
       className={cn(
@@ -276,6 +307,6 @@ export function ThreadPane({
         label={`Antwort im Thread in ${channelLabel}`}
         directory={directory}
       />
-    </section>
+    </m.section>
   );
 }
