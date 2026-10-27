@@ -58,7 +58,6 @@ _PLAIN_TOOLS = frozenset(
         "basename",
         "dirname",
         "realpath",
-        "pytest",
         "ruff",
     }
 )
@@ -117,6 +116,82 @@ _UV_FLAGS = frozenset({"-q", "--quiet", "--frozen", "--locked", "--offline", "--
 _UV_OPTIONS_WITH_VALUE = frozenset({"--project", "--directory", "--package"})
 _NODE_PM_FLAGS = frozenset({"-r", "--recursive", "-s", "--silent", "--if-present"})
 _NODE_PM_OPTIONS_WITH_VALUE = frozenset({"--filter", "-F", "-C", "--dir", "--prefix"})
+_NODE_PM_DIRECTORY_OPTIONS = frozenset({"-C", "--dir", "--prefix"})
+_PYTEST_PATH_OPTIONS = frozenset({"-c", "--config-file", "--rootdir", "--confcutdir"})
+_PYTEST_LONG_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--config-file",
+        "--rootdir",
+        "--confcutdir",
+        "--override-ini",
+        "--maxfail",
+        "--tb",
+        "--durations",
+        "--deselect",
+        "--ignore",
+        "--ignore-glob",
+        "--junitxml",
+        "--junit-xml",
+        "--log-file",
+        "--import-mode",
+        "--capture",
+        "--color",
+        "--log-level",
+        "--log-cli-level",
+        "--durations-min",
+    }
+)
+# Long flags without a value. Any other long option is reported.
+_PYTEST_LONG_FLAGS = frozenset(
+    {
+        "--lf",
+        "--last-failed",
+        "--ff",
+        "--failed-first",
+        "--nf",
+        "--new-first",
+        "--sw",
+        "--stepwise",
+        "--co",
+        "--collect-only",
+        "--exitfirst",
+        "--verbose",
+        "--quiet",
+        "--no-header",
+        "--no-summary",
+        "--showlocals",
+        "--strict-markers",
+        "--strict-config",
+        "--disable-warnings",
+        "--setup-show",
+        "--runxfail",
+        "--doctest-modules",
+    }
+)
+# pytest writes these report files; the target must be /tmp or /dev/null.
+_PYTEST_OUTPUT_FILE_OPTIONS = frozenset({"--junitxml", "--junit-xml", "--log-file"})
+# Short options: no-value flags may cluster (-qx); value options may attach (-ra, -pno:x).
+_PYTEST_SHORT_FLAGS = frozenset("qvxslh")
+_PYTEST_SHORT_WITH_VALUE = frozenset("ckmnoprW")
+# ini keys that move imports, collection, or config outside the command line.
+_PYTEST_RISKY_INI_KEYS = frozenset(
+    {
+        "pythonpath",
+        "testpaths",
+        "rootdir",
+        "confcutdir",
+        "addopts",
+        "required_plugins",
+        "cache_dir",
+        "log_file",
+    }
+)
+# Programs that run project code or config from the cwd; a cd out of the
+# workspace reports them. git counts: a foreign repo's config runs programs.
+_PROJECT_TOOLS = frozenset({"npm", "pnpm", "uv", "just", "pytest", "ruff", "git"})
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Shell parameter expansion: ${...}, $NAME, $1, $?, $'...', $"...", $[...].
+_EXPANSION_RE = re.compile(r"\$(?![\s|)]|$)")
 _NODE_PM_SUBCOMMANDS = frozenset({"test", "t", "run", "run-script", "ls", "list", "why"})
 _JUST_FLAGS = frozenset({"-l", "--list", "-n", "--dry-run", "--summary"})
 
@@ -204,22 +279,50 @@ def evaluate_card(data: dict[str, Any], *, workspace_roots: Sequence[str]) -> De
     if command is None:
         return Decision(False, "no inspectable command on card")
     cwd = data.get("cwd", request.get("cwd"))
+    cwd_outside_workspace = False
     if cwd is not None:
         if not isinstance(cwd, str) or not _is_under_roots(cwd, workspace_roots):
             return Decision(False, "card cwd outside workspace", command)
-    decision = evaluate_command(command, workspace_roots=workspace_roots)
+        # /tmp is fine for ls/cat, but project tools there would run foreign code.
+        cwd_outside_workspace = not _is_under_roots(
+            cwd, workspace_roots, include_fixed_roots=False
+        )
+    decision = evaluate_command(
+        command, workspace_roots=workspace_roots, cwd_outside_workspace=cwd_outside_workspace
+    )
     return Decision(decision.approve, decision.reason, command)
 
 
-def evaluate_command(command: str, *, workspace_roots: Sequence[str]) -> Decision:
-    """Apply the allow-list to one shell command string."""
-    reason = _command_violation(command, workspace_roots, depth=0)
+@dataclass
+class _WalkState:
+    """State shared by every segment of one command, nested ``-c`` scripts included.
+
+    :param cwd_outside_workspace: True once a ``cd`` left the workspace roots
+        (``/tmp`` counts as outside here), so later project tools would run
+        a foreign project's scripts or config.
+    """
+
+    cwd_outside_workspace: bool = False
+
+
+def evaluate_command(
+    command: str, *, workspace_roots: Sequence[str], cwd_outside_workspace: bool = False
+) -> Decision:
+    """Apply the allow-list to one shell command string.
+
+    :param cwd_outside_workspace: True when the command starts in a directory
+        outside the workspace roots (for example a card ``cwd`` under ``/tmp``).
+    """
+    state = _WalkState(cwd_outside_workspace=cwd_outside_workspace)
+    reason = _command_violation(command, workspace_roots, depth=0, state=state)
     if reason is not None:
         return Decision(False, reason, command if isinstance(command, str) else None)
     return Decision(True, "local command passed allow-list", command)
 
 
-def _command_violation(command: str, workspace_roots: Sequence[str], *, depth: int) -> str | None:
+def _command_violation(
+    command: str, workspace_roots: Sequence[str], *, depth: int, state: _WalkState
+) -> str | None:
     if not isinstance(command, str) or not command.strip():
         return "empty command"
     if depth > _MAX_SHELL_DEPTH:
@@ -228,6 +331,8 @@ def _command_violation(command: str, workspace_roots: Sequence[str], *, depth: i
         return "command contained a credential"
     if "$(" in command or "`" in command or "<(" in command or ">(" in command:
         return "command substitution is not inspectable"
+    if _EXPANSION_RE.search(command):
+        return "shell variable expansion is not inspectable"
     if _DESTRUCTIVE_SQL_RE.search(command):
         return "destructive SQL"
     try:
@@ -238,7 +343,7 @@ def _command_violation(command: str, workspace_roots: Sequence[str], *, depth: i
     if not segments:
         return "empty command"
     for segment in segments:
-        reason = _segment_violation(segment, workspace_roots, depth)
+        reason = _segment_violation(segment, workspace_roots, depth, state)
         if reason is not None:
             return reason
     return None
@@ -270,7 +375,7 @@ def _segments(tokens: Iterable[str]) -> list[list[str]]:
 
 
 def _segment_violation(
-    segment: list[str], workspace_roots: Sequence[str], depth: int
+    segment: list[str], workspace_roots: Sequence[str], depth: int, state: _WalkState
 ) -> str | None:
     words: list[str] = []
     index = 0
@@ -289,7 +394,7 @@ def _segment_violation(
         index += 1
     if not words:
         return None
-    return _argv_violation(words, workspace_roots, depth)
+    return _argv_violation(words, workspace_roots, depth, state)
 
 
 def _is_output_target_safe(target: str) -> bool:
@@ -298,7 +403,9 @@ def _is_output_target_safe(target: str) -> bool:
     return os.path.isabs(target) and _is_under_roots(target, ())
 
 
-def _argv_violation(words: list[str], workspace_roots: Sequence[str], depth: int) -> str | None:
+def _argv_violation(
+    words: list[str], workspace_roots: Sequence[str], depth: int, state: _WalkState
+) -> str | None:
     """Check one simple command: program on the allow-list, arguments local."""
     while words and _ENV_ASSIGNMENT_RE.match(words[0]):
         if not _SAFE_ENV_NAME_RE.match(words[0].split("=", 1)[0]):
@@ -316,31 +423,52 @@ def _argv_violation(words: list[str], workspace_roots: Sequence[str], depth: int
         inner = _WRAPPERS[name](args)
         if isinstance(inner, str):
             return inner
-        return _argv_violation(inner, workspace_roots, depth)
+        return _argv_violation(inner, workspace_roots, depth, state)
     if name in _SHELLS:
         script = _shell_script(args)
         if script is None:
             return f"{name} without an inspectable -c script"
-        return _command_violation(script, workspace_roots, depth=depth + 1)
+        return _command_violation(script, workspace_roots, depth=depth + 1, state=state)
     if name == "gh":
         return "gh talks to a non-local host"
     if name in _INTERPRETERS:
         if _has_inline_code_flag(args):
             return f"inline code via {name}"
         return f"{name} is not on the allow-list"
+    if name in _PROJECT_TOOLS and state.cwd_outside_workspace:
+        return f"{name} with cwd outside the workspace"
     guard = _TOOL_GUARDS.get(name)
-    if guard is None and name not in _PLAIN_TOOLS:
+    workspace_guard = _WORKSPACE_TOOL_GUARDS.get(name)
+    if guard is None and workspace_guard is None and name not in _PLAIN_TOOLS:
         return f"{name} is not on the allow-list"
     for token in args:
         reason = _token_violation(token, workspace_roots)
         if reason is not None:
             return reason
-    if guard is None:
+    if workspace_guard is not None:
+        result = workspace_guard(args, workspace_roots)
+    elif guard is not None:
+        result = guard(args)
+    else:
         return None
-    result = guard(args)
+    if name == "cd" and result is None:
+        state.cwd_outside_workspace = _cd_leaves_workspace(
+            args[0], workspace_roots, currently_outside=state.cwd_outside_workspace
+        )
     if isinstance(result, list):
-        return _argv_violation(result, workspace_roots, depth)
+        return _argv_violation(result, workspace_roots, depth, state)
     return result
+
+
+def _cd_leaves_workspace(
+    target: str, workspace_roots: Sequence[str], *, currently_outside: bool
+) -> bool:
+    """Whether the cwd is outside the workspace roots after ``cd target``."""
+    if target.startswith("~"):
+        target = os.path.expanduser(target)
+    if not os.path.isabs(target):
+        return currently_outside
+    return not _is_under_roots(target, workspace_roots, include_fixed_roots=False)
 
 
 def _program_name(program: str) -> str | None:
@@ -478,13 +606,24 @@ _WRAPPERS: dict[str, Callable[[list[str]], WrapperResult]] = {
 GuardResult = list[str] | str | None
 
 
-def _guard_git(args: list[str]) -> GuardResult:
+def _guard_git(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+    # -C / --git-dir / --work-tree pick whose .git/config runs (fsmonitor, diff.external).
     index = 0
     while index < len(args):
         arg = args[index]
         if arg in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
+            value = args[index + 1] if index + 1 < len(args) else None
+            reason = _workspace_dir_violation(value, workspace_roots)
+            if reason is not None:
+                return f"git {arg}: {reason}"
             index += 2
-        elif arg in _GIT_GLOBAL_FLAGS or arg.startswith(_GIT_GLOBAL_PATH_PREFIXES):
+        elif arg.startswith(_GIT_GLOBAL_PATH_PREFIXES):
+            name, value = arg.split("=", 1)
+            reason = _workspace_dir_violation(value, workspace_roots)
+            if reason is not None:
+                return f"git {name}: {reason}"
+            index += 1
+        elif arg in _GIT_GLOBAL_FLAGS:
             index += 1
         elif arg.startswith("-"):
             return f"git option {arg} is not on the allow-list"
@@ -542,15 +681,49 @@ def _guard_network(args: list[str]) -> GuardResult:
     return None
 
 
-def _guard_uv(args: list[str]) -> GuardResult:
+def _option_value(args: list[str], index: int) -> tuple[str, str | None, int]:
+    """Split ``--opt value`` / ``--opt=value``: (name, value, next index)."""
+    arg = args[index]
+    if arg.startswith("--") and "=" in arg:
+        name, value = arg.split("=", 1)
+        return name, value, index + 1
+    value = args[index + 1] if index + 1 < len(args) else None
+    return arg, value, index + 2
+
+
+def _workspace_dir_violation(value: str | None, workspace_roots: Sequence[str]) -> str | None:
+    """A project directory must be inside a workspace root; /tmp does not count."""
+    if not value or "$" in value:
+        return "project directory is not inspectable"
+    if value.startswith("~"):
+        value = os.path.expanduser(value)
+    if os.path.isabs(value):
+        if _is_under_roots(value, workspace_roots, include_fixed_roots=False):
+            return None
+        return "project directory outside workspace"
+    normalized = os.path.normpath(value)
+    if normalized == ".." or normalized.startswith("../"):
+        return "project directory outside workspace"
+    return None
+
+
+def _guard_uv(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
     index = 0
     seen_run = False
     while index < len(args):
         arg = args[index]
+        name = arg.split("=", 1)[0] if arg.startswith("--") else arg
         if arg in _UV_FLAGS:
             index += 1
-        elif arg in _UV_OPTIONS_WITH_VALUE:
-            index += 2
+        elif name in _UV_OPTIONS_WITH_VALUE:
+            name, value, index = _option_value(args, index)
+            if name == "--package":
+                if value is None or not _PACKAGE_NAME_RE.match(value):
+                    return "uv --package needs a plain package name"
+            else:
+                reason = _workspace_dir_violation(value, workspace_roots)
+                if reason is not None:
+                    return reason
         elif arg.startswith("-"):
             return f"uv option {arg} is not on the allow-list"
         elif not seen_run:
@@ -563,21 +736,102 @@ def _guard_uv(args: list[str]) -> GuardResult:
     return "uv without run <command>"
 
 
-def _guard_node_package_manager(args: list[str]) -> GuardResult:
+def _guard_node_package_manager(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+    # npm/pnpm read config options on either side of the subcommand, so scan
+    # every argument up to a literal "--" (after which they go to the script).
+    index = 0
+    subcommand: str | None = None
+    while index < len(args):
+        arg = args[index]
+        if arg == "--" and subcommand is not None:
+            return None
+        name = arg.split("=", 1)[0] if arg.startswith("--") else arg
+        if arg in _NODE_PM_FLAGS:
+            index += 1
+        elif name in _NODE_PM_OPTIONS_WITH_VALUE:
+            name, value, index = _option_value(args, index)
+            if name in _NODE_PM_DIRECTORY_OPTIONS:
+                reason = _workspace_dir_violation(value, workspace_roots)
+            elif value is None or value.startswith(("/", "~")) or ".." in value:
+                reason = "package filter must name a workspace package"
+            else:
+                reason = None
+            if reason is not None:
+                return reason
+        elif arg.startswith("-"):
+            return f"package manager option {arg} is not on the allow-list"
+        elif subcommand is None:
+            if arg not in _NODE_PM_SUBCOMMANDS:
+                return f"package manager {arg} is not on the allow-list"
+            subcommand = arg
+            index += 1
+        else:
+            index += 1
+    return None if subcommand is not None else "package manager without a subcommand"
+
+
+def _guard_pytest(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+    """Test paths, config, rootdir, plugins and import paths stay in the workspace."""
+    # pytest expands @file into more arguments (fromfile_prefix_chars); unreadable here.
+    if any(arg.startswith("@") for arg in args):
+        return "pytest @argfile reads arguments from a file"
     index = 0
     while index < len(args):
         arg = args[index]
-        if arg in _NODE_PM_FLAGS:
-            index += 1
-        elif arg in _NODE_PM_OPTIONS_WITH_VALUE:
-            index += 2
-        elif arg.startswith("-"):
-            return f"package manager option {arg} is not on the allow-list"
-        elif arg in _NODE_PM_SUBCOMMANDS:
-            return None
+        reason: str | None = None
+        if arg.startswith("--") and arg != "--":
+            name = arg.split("=", 1)[0]
+            if name == "--basetemp":
+                # pytest rm -rf's the basetemp directory before the run.
+                return "pytest --basetemp deletes that directory"
+            if name in _PYTEST_LONG_OPTIONS_WITH_VALUE:
+                name, value, index = _option_value(args, index)
+                reason = _pytest_option_violation(name, value, workspace_roots)
+            elif arg in _PYTEST_LONG_FLAGS:
+                index += 1
+            else:
+                return f"pytest option {name} is not on the allow-list"
+        elif arg.startswith("-") and len(arg) > 1 and arg != "--":
+            letter = arg[1]
+            if letter in _PYTEST_SHORT_WITH_VALUE:
+                # argparse reads -c=x as -c x; strip "=" so the value is checked as given.
+                attached = arg[2:].lstrip("=")
+                if arg[2:] and not attached:
+                    return f"pytest {arg} without a value"
+                value = attached or (args[index + 1] if index + 1 < len(args) else None)
+                index += 1 if attached else 2
+                reason = _pytest_option_violation(f"-{letter}", value, workspace_roots)
+            elif set(arg[1:]) <= _PYTEST_SHORT_FLAGS:
+                index += 1
+            else:
+                return f"pytest option {arg} is not on the allow-list"
         else:
-            return f"package manager {arg} is not on the allow-list"
-    return "package manager without a subcommand"
+            if arg != "--":
+                reason = _workspace_dir_violation(arg.split("::", 1)[0], workspace_roots)
+            index += 1
+        if reason is not None:
+            return reason
+    return None
+
+
+def _pytest_option_violation(
+    name: str, value: str | None, workspace_roots: Sequence[str]
+) -> str | None:
+    if value is None:
+        return f"pytest {name} without a value"
+    if value.startswith("@"):
+        return "pytest @argfile reads arguments from a file"
+    if name in _PYTEST_PATH_OPTIONS:
+        return _workspace_dir_violation(value, workspace_roots)
+    if name in _PYTEST_OUTPUT_FILE_OPTIONS and not _is_output_target_safe(value):
+        return f"pytest {name} writes outside /tmp"
+    if name in {"-o", "--override-ini"}:
+        key = value.split("=", 1)[0].strip().lower()
+        if key in _PYTEST_RISKY_INI_KEYS:
+            return f"pytest -o {key} can load code or config from elsewhere"
+    if name == "-p" and not value.startswith("no:"):
+        return "pytest -p loads a plugin"
+    return None
 
 
 def _guard_just(args: list[str]) -> GuardResult:
@@ -589,15 +843,20 @@ def _guard_just(args: list[str]) -> GuardResult:
 
 _TOOL_GUARDS: dict[str, Callable[[list[str]], GuardResult]] = {
     "cd": _guard_cd,
-    "git": _guard_git,
     "find": _guard_find,
     "rg": _guard_rg,
     "curl": _guard_network,
     "wget": _guard_network,
+    "just": _guard_just,
+}
+
+# Guards that also need the workspace roots (project-directory options).
+_WORKSPACE_TOOL_GUARDS: dict[str, Callable[[list[str], Sequence[str]], GuardResult]] = {
     "uv": _guard_uv,
     "npm": _guard_node_package_manager,
     "pnpm": _guard_node_package_manager,
-    "just": _guard_just,
+    "pytest": _guard_pytest,
+    "git": _guard_git,
 }
 
 
@@ -661,11 +920,14 @@ def _path_is_local(path: str, workspace_roots: Sequence[str]) -> bool:
     return normalized != ".." and not normalized.startswith("../")
 
 
-def _is_under_roots(path: str, workspace_roots: Sequence[str]) -> bool:
+def _is_under_roots(
+    path: str, workspace_roots: Sequence[str], *, include_fixed_roots: bool = True
+) -> bool:
     if path.startswith("~"):
         return False
     resolved = os.path.realpath(path)
-    for root in (*workspace_roots, *_FIXED_LOCAL_ROOTS):
+    fixed_roots = _FIXED_LOCAL_ROOTS if include_fixed_roots else ()
+    for root in (*workspace_roots, *fixed_roots):
         if not root:
             continue
         real_root = os.path.realpath(root)

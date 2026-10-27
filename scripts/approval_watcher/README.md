@@ -70,6 +70,45 @@ card has a command it can read and every segment of it
     `--dry-run`, `--summary`), `uv run <allowed command>`, and
     `npm`/`pnpm` with `test`, `run`, `run-script`, `ls`, `list`, or `why`.
     `npm test` and `just <recipe>` run the project's own scripts.
+  - Project-directory options must stay inside a workspace root; `/tmp`
+    does not count here.
+    - The options are `npm --prefix`, `pnpm -C`/`--dir`,
+      `uv --project`/`--directory`, and `git -C`/`--git-dir=`/
+      `--work-tree=`, in both the `--opt value` and `--opt=value` forms.
+    - `uv --package` must be a plain package name.
+    - `--filter` must not be an absolute path or contain `..`.
+    - npm and pnpm read options on both sides of the subcommand, so
+      `npm test --prefix /tmp/x` is checked too, up to a literal `--`.
+      Anything after `--` goes to the script, not npm. Any other npm/pnpm
+      option is reported, `--script-shell` included.
+  - Project tools run project code or config from the current directory:
+    `npm`, `pnpm`, `uv`, `just`, `pytest`, `ruff`, and `git` (a foreign
+    repo's `.git/config` can run programs).
+    - They are reported once the directory is outside the workspace roots,
+      and here `/tmp` counts as outside.
+    - That covers a card `cwd` such as `/tmp/x`, an earlier
+      `cd /tmp/x && …`, and a `cd` inside a nested `sh -c` script.
+    - `ls` or `cat` in `/tmp` stays approved.
+  - pytest:
+    - Test paths, `-c`/`--config-file`, `--rootdir`, and `--confcutdir`
+      must be inside a workspace root.
+    - `-p <plugin>` is reported, but `-p no:<plugin>` is allowed.
+    - `-o`/`--override-ini` is reported for `pythonpath`, `testpaths`,
+      `rootdir`, `confcutdir`, `addopts`, `required_plugins`, `cache_dir`,
+      and `log_file`.
+    - Any `@argfile` argument or option value is reported, including a
+      workspace-relative one such as `@args.txt`. pytest expands it into
+      more arguments, and the watcher cannot read the file.
+    - Short flags may only be `q v x s l h`; value options such as `-k`,
+      `-m`, `-r`, `-n`, and `-W` work in both the separate and attached
+      forms. Any other short option is reported.
+    - `--basetemp` is always reported, because pytest deletes that
+      directory before the run (`--basetemp=.` would wipe the worktree).
+    - `--junitxml`/`--junit-xml`/`--log-file` may write only to `/tmp` or
+      `/dev/null`.
+    - Long options must be known. Common flags such as `--lf`, `--ff`,
+      `--sw`, `--co`, `--tb=`, `--maxfail=`, and `--no-header` are allowed.
+      Others, such as `--cov-report` or `--debug`, are reported.
   - Git: read-only inspection only. Allowed: `status`, `diff`, `log`,
     `show`, `rev-parse`, `rev-list`, `ls-files`, `ls-tree`, `cat-file`,
     `blame`, `grep`, `describe`, `shortlog`, `merge-base`, `name-rev`,
@@ -81,7 +120,7 @@ card has a command it can read and every segment of it
       `cherry-pick`, `revert`, `mv`, `init`, `push`, `merge`, `rebase`,
       `reset`, and `clean`.
     - Also reported: global options other than `-C`/`--no-pager`/
-      `--git-dir=`/`--work-tree=`, `--output=`,
+      `--git-dir=`/`--work-tree=` (all workspace-only), `--output=`,
       `grep --open-files-in-pager`, and `--ext-diff`/`--textconv`.
 - **Wrappers.** `env`, `nohup`, `timeout`, and `nice` are unwrapped, and
   the inner command is checked.
@@ -96,7 +135,11 @@ card has a command it can read and every segment of it
     including any `-c`/`-e`/`-p` cluster such as `-Ic` or `-pe`), `awk`,
     `sed`, editors, `tar`, `cp`, `mv`, `rm`, `sudo`, `ssh`, `ping`,
     `openssl`, `printenv`, `docker`, and package installs.
-  - `$(...)`, backticks, `<(...)`, and `DROP`/`TRUNCATE TABLE`/`DELETE FROM`.
+  - `$(...)`, backticks, and `<(...)`.
+  - Any shell expansion, inside URLs and quotes too: `${VAR}`, `$NAME`,
+    `$1`, `$?`, and `$'...'`. A `$` is allowed only before whitespace,
+    `|`, `)`, or the end of the command, so `grep 'x$' f` is reported too.
+  - `DROP`/`TRUNCATE TABLE`/`DELETE FROM`.
 - **Arguments.** Every argument is checked.
   - Secret-looking words or paths are reported: `.ssh`, `id_rsa`, `.env`,
     `credentials`, `.netrc`, `.aws`, `.omnigent/`, `secret`/`token`/

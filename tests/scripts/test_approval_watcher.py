@@ -550,3 +550,251 @@ def test_ac_ap2_02_evaluate_command_approves_cd_into_local_directory(
     decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
 
     assert decision.approve is True, decision.reason
+
+
+# AC-AP2-02 / AC-AP2-03: project-directory options and shell variable expansion
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm --prefix /tmp/evil test",
+        "pnpm -C /tmp/evil test",
+        "pnpm --dir /tmp/evil test",
+        "uv --project /tmp/evil run pytest",
+        "uv --directory /tmp/evil run pytest",
+        "npm --prefix=/tmp/evil test",
+        "curl http://127.0.0.1:6767/?d=x${OPENAI_API_KEY}",
+        "wget http://127.0.0.1/x?d=${API_KEY}",
+        "echo x${HOME}",
+    ],
+)
+def test_ac_ap2_03_evaluate_command_reports_outside_project_dir_or_variable_expansion(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is False, decision.reason
+
+
+@pytest.mark.parametrize(
+    "command_template",
+    ["uv --package core run pytest", "npm --prefix {workspace}/pkg test"],
+)
+def test_ac_ap2_02_evaluate_command_approves_workspace_local_project_option(
+    tmp_path: Path, command_template: str
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    command = command_template.format(workspace=tmp_path)
+
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is True, decision.reason
+
+
+# AC-AP2-02 / AC-AP2-03: project directory after the subcommand, after cd, or as a test root
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm test --prefix /tmp/evil",
+        "npm test --prefix=/tmp/evil",
+        "npm run build --prefix /tmp/evil",
+        "pnpm test -C /tmp/evil",
+        "pnpm test --dir=/tmp/evil",
+        "cd /tmp/evil && npm test",
+        "cd /tmp/evil && uv run pytest",
+        "cd /tmp/evil && just build",
+        "cd /tmp/evil; pnpm test",
+        "pytest /tmp/evil",
+        "pytest -c /tmp/evil/pytest.ini",
+        "uv run pytest --rootdir=/tmp/evil",
+    ],
+)
+def test_ac_ap2_03_evaluate_command_reports_project_runner_outside_workspace(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is False, decision.reason
+
+
+def test_ac_ap2_03_codex_zsh_wrapper_cd_outside_workspace_reported_without_resolve(
+    tmp_path: Path,
+) -> None:
+    resolver = FakeResolver()
+    watcher = make_watcher(tmp_path, resolver)
+    body = envelope_body(
+        "evt_zsh_cd_npm",
+        card_data(codex_command_request("/bin/zsh -lc 'cd /tmp/evil && npm test'")),
+    )
+
+    outcome = watcher.handle(signed_headers(body, event_id="evt_zsh_cd_npm"), body)
+
+    assert outcome.decision == "reported", outcome.message
+    assert resolver.calls == []
+
+
+def test_ac_ap2_02_evaluate_command_approves_prefix_passed_to_script_after_double_dash(
+    tmp_path: Path,
+) -> None:
+    decision = evaluate_command("npm test -- --prefix /tmp/evil", workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is True, decision.reason
+
+
+# AC-AP2-02 / AC-AP2-03: card cwd, git and pytest pointed outside the workspace
+
+
+def card_with_cwd(*, cwd: str, command: str, explicit_command_field: bool) -> dict[str, Any]:
+    """Codex card with ``cwd`` (and optionally ``command``) set on ``data``.
+
+    The server's request allowlist drops both fields, so they are attached
+    to ``data`` directly, as a richer producer would send them.
+    """
+    data = card_data(codex_command_request(command))
+    data["cwd"] = cwd
+    if explicit_command_field:
+        data["command"] = command
+    return data
+
+
+@pytest.mark.parametrize(
+    "explicit_command_field", [True, False], ids=["command-field", "codex-message"]
+)
+def test_ac_ap2_03_card_project_tool_with_cwd_outside_workspace_reported_without_resolve(
+    tmp_path: Path, explicit_command_field: bool
+) -> None:
+    resolver = FakeResolver()
+    watcher = make_watcher(tmp_path, resolver)
+    data = card_with_cwd(
+        cwd="/tmp/evil", command="npm test", explicit_command_field=explicit_command_field
+    )
+    body = envelope_body("evt_cwd_npm", data)
+
+    outcome = watcher.handle(signed_headers(body, event_id="evt_cwd_npm"), body)
+
+    assert outcome.decision == "reported", outcome.message
+    assert resolver.calls == []
+
+
+def test_ac_ap2_02_card_plain_read_with_tmp_cwd_resolved_once(tmp_path: Path) -> None:
+    resolver = FakeResolver()
+    watcher = make_watcher(tmp_path, resolver)
+    data = card_with_cwd(cwd="/tmp/evil", command="ls", explicit_command_field=True)
+    body = envelope_body("evt_cwd_ls", data)
+
+    outcome = watcher.handle(signed_headers(body, event_id="evt_cwd_ls"), body)
+
+    assert outcome.decision == "approved", outcome.message
+    assert resolver.calls == [(data["resolve"]["path"], {"action": "accept", "content": {}})]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /tmp/evil status",
+        "cd /tmp/evil && git status",
+        "cd /tmp/evil && git diff",
+        "git --git-dir=/tmp/evil/.git --work-tree=/tmp/evil diff",
+        "pytest -o pythonpath=/tmp/evil tests",
+        "uv run pytest -p evil -o pythonpath=/tmp/evil",
+        "pytest --override-ini=pythonpath=/tmp/evil -p evil",
+    ],
+)
+def test_ac_ap2_03_evaluate_command_reports_git_or_pytest_pointed_outside_workspace(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is False, decision.reason
+
+
+@pytest.mark.parametrize(
+    "command_template",
+    ["git -C {workspace} status", "pytest -p no:cacheprovider -k 'not slow' tests"],
+)
+def test_ac_ap2_02_evaluate_command_approves_workspace_git_and_plain_pytest(
+    tmp_path: Path, command_template: str
+) -> None:
+    command = command_template.format(workspace=tmp_path)
+
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is True, decision.reason
+
+
+# AC-AP2-02 / AC-AP2-03: pytest short options with `=` and @argfiles
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -c=/tmp/evil/pytest.ini",
+        "pytest -o=addopts=-s",
+        "pytest @/tmp/evil/args",
+        "uv run pytest @/tmp/evil/args",
+        "pytest @args.txt",
+        "pytest -q @/private/tmp/evil/a",
+        "pytest -k=@x",
+        "pytest -o log_file=/tmp/x.log",
+    ],
+)
+def test_ac_ap2_03_evaluate_command_reports_pytest_equals_option_or_argfile(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is False, decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -p no:cacheprovider -k 'not slow'", "pytest -p=no:cacheprovider -k=slow"],
+)
+def test_ac_ap2_02_evaluate_command_approves_pytest_disable_plugin_and_keyword(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is True, decision.reason
+
+
+# AC-AP2-02 / AC-AP2-03: pytest options that delete or overwrite files
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest --basetemp=.",
+        "pytest --basetemp .",
+        "pytest --basetemp=tests",
+        "pytest --basetemp=/tmp",
+        "uv run pytest --basetemp=.",
+        "pytest --junitxml=pyproject.toml",
+        "pytest --log-file=pyproject.toml",
+    ],
+)
+def test_ac_ap2_03_evaluate_command_reports_pytest_basetemp_or_output_over_project_file(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is False, decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest --junitxml=/tmp/report.xml",
+        "pytest --log-file=/dev/null",
+        "pytest --lf -x --tb=short --no-header tests",
+    ],
+)
+def test_ac_ap2_02_evaluate_command_approves_pytest_output_to_tmp_and_run_flags(
+    tmp_path: Path, command: str
+) -> None:
+    decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
+
+    assert decision.approve is True, decision.reason
