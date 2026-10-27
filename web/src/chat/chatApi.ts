@@ -172,6 +172,8 @@ export const teamChatQueryKeys = {
   thread: (channelId: string, threadRootId: string) =>
     ["team-chat", "thread", channelId, threadRootId] as const,
   members: (channelId: string) => ["team-chat", "members", channelId] as const,
+  /** Lines of the session chat on one root session (FR-029). */
+  sessionChat: (sessionId: string) => ["team-chat", "session-chat", sessionId] as const,
 };
 
 /** Server rule for `client_id` (`POST .../messages`). */
@@ -500,4 +502,61 @@ export async function listChannelMembers(
     { signal },
   );
   return readJson(response, "Invalid chat members response", isChatMemberList);
+}
+
+/** One line of `GET /v1/sessions/{id}/chat`. `created_at` is epoch microseconds. */
+export interface SessionChatLine {
+  id: string;
+  created_by: string | null;
+  created_at: number;
+  body: string;
+}
+
+/** `GET /v1/sessions/{id}/chat`: lines ascending, and whether another person has a grant. */
+export interface SessionChatList {
+  items: SessionChatLine[];
+  shared: boolean;
+}
+
+function isSessionChatLine(value: unknown): value is SessionChatLine {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    (value.created_by === null || typeof value.created_by === "string") &&
+    typeof value.created_at === "number" &&
+    typeof value.body === "string"
+  );
+}
+
+function isSessionChatList(value: unknown): value is SessionChatList {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.shared === "boolean" &&
+    Array.isArray(value.items) &&
+    value.items.every(isSessionChatLine)
+  );
+}
+
+/**
+ * Session chat of a root session (FR-029). The server answers 404 for an
+ * Agent-Thread session (AC-029c) and 403 for a public-link visitor (AC-029b).
+ */
+export async function fetchSessionChat(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionChatList> {
+  const response = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/chat`, {
+    signal,
+  });
+  return readJson(response, "Invalid session chat response", isSessionChatList);
+}
+
+/** `POST /v1/sessions/{id}/chat`. The server trims the body and refuses admins (403). */
+export async function postSessionChat(sessionId: string, body: string): Promise<SessionChatLine> {
+  const response = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body }),
+  });
+  return readJson(response, "Invalid session chat line", isSessionChatLine);
 }

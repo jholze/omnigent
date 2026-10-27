@@ -62,7 +62,7 @@ import { CHAT_TEST_IDS } from "../testids";
 import { AgentThreadStatus } from "./AgentStatusChip";
 import { SEND_FAILED_TEXT, useThreadApprovals } from "./agentApprovals";
 import { useAgentThreadStore } from "./agentThreadStore";
-import { AgentThreadView } from "./AgentThreadView";
+import { AgentThreadView, OpenAgentSessionLink } from "./AgentThreadView";
 
 const SESSION = "conv_agent";
 const directory = new Map<string, DirectoryEntry>([
@@ -628,5 +628,42 @@ describe("Approval cards in the thread", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Genehmigen" })).toBeInTheDocument();
     expect(toastMock.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpenAgentSessionLink (thread header)", () => {
+  function renderLink() {
+    return render(
+      <Providers>
+        <OpenAgentSessionLink sessionId={SESSION} />
+      </Providers>,
+    );
+  }
+
+  it("AC-085a without a grant the Session öffnen link does not render", () => {
+    sessionResult.current = {
+      session: null,
+      isLoading: false,
+      error: new ApiError("not found", 404, null),
+    };
+    renderLink();
+    expect(screen.queryByTestId(CHAT_TEST_IDS.threadOpenSession)).toBeNull();
+  });
+
+  it("AC-085a while the session snapshot loads the link does not render", () => {
+    sessionResult.current = { session: null, isLoading: true, error: null };
+    renderLink();
+    expect(screen.queryByTestId(CHAT_TEST_IDS.threadOpenSession)).toBeNull();
+  });
+
+  it.each([
+    ["read", 1],
+    ["edit", 2],
+  ] as const)("AC-085a a %s grant shows Session öffnen linking to the session", (_name, level) => {
+    withAccess(level);
+    renderLink();
+    const link = screen.getByTestId(CHAT_TEST_IDS.threadOpenSession);
+    expect(link).toHaveTextContent("Session öffnen");
+    expect(link).toHaveAttribute("href", `/c/${SESSION}`);
   });
 });

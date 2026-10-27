@@ -37,6 +37,12 @@ export const CHAT_TEST_IDS = {
   agentStatusChip: "agent-status-chip",
   approvalCard: "approval-card",
   pendingRequest: "chat-pending-request",
+  sidebarSessions: "chat-sidebar-sessions",
+  sessionColumn: "chat-session-column",
+  sessionColumnToggle: "chat-session-column-toggle",
+  sessionColumnError: "chat-session-column-error",
+  agentThreadGlyph: "sidebar-agent-thread-glyph",
+  threadOpenSession: "chat-thread-open-session",
 } as const;
 
 export type ChatTestId = (typeof CHAT_TEST_IDS)[keyof typeof CHAT_TEST_IDS];

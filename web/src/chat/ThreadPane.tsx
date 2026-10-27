@@ -17,7 +17,7 @@ import { Link, useNavigate } from "@/lib/routing";
 import { cn } from "@/lib/utils";
 import { fetchThreadMessages, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
 import { AgentThreadStatus } from "./agent/AgentStatusChip";
-import { AgentThreadView } from "./agent/AgentThreadView";
+import { AgentThreadView, OpenAgentSessionLink } from "./agent/AgentThreadView";
 import {
   useAgentThreadStore,
   useSeedAgentThreads,
@@ -286,6 +286,9 @@ export function ThreadPane({
         <span className="min-w-0 flex-1 text-xs break-words text-muted-foreground max-md:hidden">
           {channelLabel}
         </span>
+        {agentSessionId ? (
+          <OpenAgentSessionLink key={agentSessionId} sessionId={agentSessionId} />
+        ) : null}
         {/* A button with its own navigate(): same exit as Escape, independent of the Link wrapper. */}
         <button
           type="button"

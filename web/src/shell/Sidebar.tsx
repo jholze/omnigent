@@ -1,4 +1,8 @@
-import { filterSessionScope } from "@/lib/sessionVisibility";
+import {
+  filterSessionScope,
+  isAgentThreadSession,
+  showsInMainSidebar,
+} from "@/lib/sessionVisibility";
 import { getCurrentUserId } from "@/lib/identity";
 import { PinCapacityContext, SidebarConfigContext } from "@/lib/sidebarConfig";
 import { useSidebarDisplayPagination } from "@/hooks/useSidebarDisplayPagination";
@@ -1913,7 +1917,12 @@ function ConversationList({
     // Merge the server pinned set in, so a pinned session outside the loaded
     // paginated window still renders. Dedupe by id: a pinned session is usually
     // also present in the paginated list, and merging both would render it twice.
-    const allWithPinned = dedupeConversationsById([...allConversations, ...pinnedConversations]);
+    // Agent-Thread sessions (FR-085) are listed for their owner only; anyone
+    // else reaches them from the Thread. Pinned copies follow the same rule.
+    const allWithPinned = dedupeConversationsById([
+      ...allConversations,
+      ...pinnedConversations,
+    ]).filter((c) => showsInMainSidebar(c, viewerId));
     const notArchived = allWithPinned.filter((c) => c.archived !== true);
     // The filter picks the slice; the Pinned / Projects / Sessions structure is
     // then built from it, so every filter reuses the same layout.
@@ -5055,6 +5064,15 @@ function ConversationRowImpl({
       {/* Row 1: the session name. Working, needs-approval, unseen, and draft
           markers render in the shared trailing indicator slot below. */}
       <div className="flex w-full items-center">
+        {/* Started from a team-chat Thread (FR-085, AC-085b): only the owner sees this row. */}
+        {isAgentThreadSession(conversation) && (
+          <MessagesSquareIcon
+            role="img"
+            aria-label="Agent-Thread aus dem Team-Chat"
+            data-testid={CHAT_TEST_IDS.agentThreadGlyph}
+            className="mr-1.5 size-3.5 shrink-0 text-muted-foreground"
+          />
+        )}
         <span
           className={cn(
             "relative min-w-0 truncate",
