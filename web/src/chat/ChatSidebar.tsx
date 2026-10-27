@@ -8,6 +8,7 @@
 import type { ReactNode } from "react";
 
 import type { ChatChannel } from "./chatApi";
+import { CountBadge } from "./CountBadge";
 import { CHAT_TEST_IDS } from "./testids";
 import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
@@ -51,10 +52,8 @@ function count(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
-/** Badge text. Large counts stay one short pill. */
-export function badgeCount(value: number): string {
-  return value > 99 ? "99+" : String(value);
-}
+/** Sidebar pill size; CountBadge supplies the text, cap and pulse. */
+const SIDEBAR_BADGE_CLASS = "h-5 min-w-5 px-1.5 text-xs";
 
 /** "#general, 3 ungelesen, 1 Erwähnung". Plain label when nothing is unread. */
 export function entryAccessibleName(label: string, unread: number, mentions: number): string {
@@ -95,24 +94,19 @@ function EntryLink({
       >
         {/* A flex item's min-content ignores `break-words`; the span lets one long word wrap too. */}
         <span className="min-w-0 flex-1 break-words">{label}</span>
-        {mentions > 0 ? (
-          <span
-            aria-hidden="true"
-            data-testid={CHAT_TEST_IDS.mentionBadge}
-            className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-xs font-medium text-primary-foreground tabular-nums"
-          >
-            @{badgeCount(mentions)}
-          </span>
-        ) : null}
-        {unread > 0 ? (
-          <span
-            aria-hidden="true"
-            data-testid={CHAT_TEST_IDS.unreadBadge}
-            className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-muted-foreground/15 px-1.5 text-xs font-medium text-foreground tabular-nums"
-          >
-            {badgeCount(unread)}
-          </span>
-        ) : null}
+        {/* Decorative: the link's aria-label already speaks both counts. */}
+        <CountBadge
+          count={mentions}
+          prefix="@"
+          tone="accent"
+          testId={CHAT_TEST_IDS.mentionBadge}
+          className={SIDEBAR_BADGE_CLASS}
+        />
+        <CountBadge
+          count={unread}
+          testId={CHAT_TEST_IDS.unreadBadge}
+          className={cn(SIDEBAR_BADGE_CLASS, "bg-muted-foreground/15 text-foreground")}
+        />
       </Link>
     </li>
   );

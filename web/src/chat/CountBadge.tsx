@@ -3,8 +3,9 @@
  *
  * When `count` changes after the first render, the badge pulses
  * 1 → 1.08 → 1 over 150 ms (`badgePulse`). Reduced motion: no pulse. The
- * first value and a count of 0 (badge hidden) are static. T-111 consumes
- * this component for the sidebar unread counts.
+ * first value and a count of 0 (badge hidden) are static. `ChatSidebar`
+ * renders its unread and mention pills through this component; there the
+ * link carries the accessible name, so the badge is decorative (no `label`).
  */
 import { useEffect, useRef } from "react";
 import { useAnimate } from "motion/react";
@@ -22,14 +23,28 @@ export function countBadgeText(count: number): string {
 
 export interface CountBadgeProps {
   count: number;
-  /** Accessible text, e.g. "3 ungelesene Nachrichten". */
-  label: string;
+  /**
+   * Accessible text, e.g. "3 ungelesene Nachrichten". Omit it when the
+   * surrounding control already names the count: the badge is then
+   * `aria-hidden` so screen readers do not hear the count twice.
+   */
+  label?: string;
+  /** Text before the count, e.g. "@" for mentions. */
+  prefix?: string;
+  testId?: string;
   /** Mentions use the accent tone; plain unread stays muted. */
   tone?: "muted" | "accent";
   className?: string;
 }
 
-export function CountBadge({ count, label, tone = "muted", className }: CountBadgeProps) {
+export function CountBadge({
+  count,
+  label,
+  prefix,
+  testId,
+  tone = "muted",
+  className,
+}: CountBadgeProps) {
   const [scope, animate] = useAnimate<HTMLSpanElement>();
   const reduced = useChatReducedMotion();
   const previousRef = useRef(count);
@@ -49,7 +64,9 @@ export function CountBadge({ count, label, tone = "muted", className }: CountBad
     <span
       ref={scope}
       aria-label={label}
+      aria-hidden={label === undefined ? "true" : undefined}
       title={label}
+      data-testid={testId}
       data-motion={pulse === null ? "badge-pulse-reduced" : "badge-pulse"}
       data-motion-duration={pulse === null ? 0 : durations.micro}
       className={cn(
@@ -58,6 +75,7 @@ export function CountBadge({ count, label, tone = "muted", className }: CountBad
         className,
       )}
     >
+      {prefix}
       {countBadgeText(count)}
     </span>
   );
