@@ -101,6 +101,7 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
+import { isAgentThreadSession } from "@/lib/sessionVisibility";
 import { holdsInitialDraft, isTempConvId, useChatStore } from "@/store/chatStore";
 import { supportsSideChat } from "@/lib/sideChat";
 import {
@@ -641,6 +642,10 @@ export function AppShell() {
   // (embedded Omnigent REPL terminal) have NO wrapper label and must
   // keep regular chat behavior. See TerminalFirstContext.tsx.
   const isNativeWrapper = isNativeWrapperLabel(sessionLabels["omnigent.wrapper"]);
+  // Session chat (FR-029): needs `team_chat`; an Agent-Thread session has
+  // none (AC-029c), the Thread is its chat.
+  const showSessionChat =
+    isFeatureEnabled(serverInfo, "team_chat") && !isAgentThreadSession({ labels: sessionLabels });
   // Used for the header "Back to parent" link, which is hidden on
   // top-level sessions. The Subagents tab itself is always visible —
   // it lists the root's children plus a "main" entry, so the user
@@ -2494,6 +2499,7 @@ export function AppShell() {
                     rightPanelOpen={rightPanelOpen}
                     onToggleRightPanel={toggleRightPanel}
                     pending={pendingConversation}
+                    sessionChat={showSessionChat}
                     mobileMenu={{
                       fileViewerOpen,
                       panelOpen,

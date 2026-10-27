@@ -49,6 +49,13 @@ export interface ChatComposerCardProps {
   /** Bootstrap directory, for mention autocomplete. */
   directory?: Map<string, DirectoryEntry>;
   className?: string;
+  /**
+   * Send through another endpoint (session chat, FR-029) instead of the
+   * channel outbox. Return false when nothing was sent; the text then stays.
+   */
+  onSend?: (body: string) => boolean;
+  /** Offer `@` mentions from the channel members. Off where there is no channel. */
+  mentions?: boolean;
 }
 
 const EMPTY_DIRECTORY = new Map<string, DirectoryEntry>();
@@ -61,6 +68,8 @@ export function ChatComposerCard({
   label,
   directory = EMPTY_DIRECTORY,
   className,
+  onSend,
+  mentions = true,
 }: ChatComposerCardProps) {
   const queryClient = useQueryClient();
   const isMobileViewport = useIsMobileViewport();
@@ -84,6 +93,7 @@ export function ChatComposerCard({
     queryFn: ({ signal }) => fetchChannelMembers(channelId, signal),
     staleTime: Infinity,
     retry: false,
+    enabled: mentions,
   });
   const candidates = useMemo(
     () => mentionCandidates(members.data ?? [], directory, me),
@@ -124,6 +134,7 @@ export function ChatComposerCard({
   }, [open]);
 
   const updateTrigger = (value: string, caret: number) => {
+    if (!mentions) return;
     const next = findMentionTrigger(value, caret);
     if (next === null || next.start !== dismissedStart) setDismissedStart(null);
     const visible =
@@ -159,12 +170,10 @@ export function ChatComposerCard({
   };
 
   const submit = () => {
-    const sent = sendChatMessage(queryClient, {
-      channelId,
-      threadRootId,
-      authorId: me,
-      body: serializeMentions(text, chips),
-    });
+    const body = serializeMentions(text, chips);
+    const sent = onSend
+      ? onSend(body)
+      : sendChatMessage(queryClient, { channelId, threadRootId, authorId: me, body });
     if (!sent) return;
     setText("");
     setChips([]);
@@ -223,6 +232,7 @@ export function ChatComposerCard({
                 if (open) setTrigger(null);
                 return;
               }
+              if (!mentions) return;
               const next = findMentionTrigger(textarea.value, textarea.selectionStart);
               if (next?.start !== trigger?.start || next?.query !== trigger?.query) {
                 updateTrigger(textarea.value, textarea.selectionStart);

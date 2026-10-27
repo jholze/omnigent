@@ -39,6 +39,7 @@ import { HeaderProjectTag } from "./HeaderProjectTag";
 import { HeaderTitle } from "./HeaderTitle";
 import { UNTITLED_CONVERSATION_LABEL } from "./sidebarNav";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
+import { SessionChatToggle } from "./SessionChatColumn";
 import type { Agent } from "@/hooks/useAgents";
 import type { Conversation } from "@/hooks/useConversations";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -206,6 +207,11 @@ interface ChatHeaderProps {
   pending?: boolean;
   /** Gating + handlers for the mobile session-menu FAB. */
   mobileMenu: MobileSessionMenuProps;
+  /**
+   * Show the session-chat entry (FR-029). AppShell sets it with `team_chat`
+   * on and off for Agent-Thread sessions (AC-029c).
+   */
+  sessionChat?: boolean;
 }
 
 const PENDING_ACTION_TITLE = "Available when the session starts";
@@ -350,6 +356,7 @@ export function ChatHeader({
   onToggleRightPanel,
   pending = false,
   mobileMenu,
+  sessionChat = false,
 }: ChatHeaderProps) {
   const isMobile = useIsMobileViewport();
   const canvas = useCanvasWorkspace();
@@ -609,6 +616,13 @@ export function ChatHeader({
             Self-contained — reads the chat store directly, renders
             nothing when the user is alone. */}
         {conversationId && !isMobile && <PresenceAvatars />}
+        {/* Session chat (FR-029): human-only side chat of this session. */}
+        {!pending && conversationId && sessionChat && (
+          <SessionChatToggle
+            sessionId={conversationId}
+            title={conversationTitle ?? UNTITLED_CONVERSATION_LABEL}
+          />
+        )}
         {/* Desktop (md+) action buttons. On mobile these collapse into
             the three-dot "Session actions" menu below. Fork is also
             available from the session menus and assistant messages. */}
