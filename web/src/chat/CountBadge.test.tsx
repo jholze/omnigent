@@ -57,4 +57,13 @@ describe("CountBadge", () => {
     expect(countBadgeText(100)).toBe("99+");
     expect(countBadgeText(7)).toBe("7");
   });
+
+  it("without a label it is decorative: aria-hidden, no aria-label, prefix and test id kept", () => {
+    render(<CountBadge count={120} prefix="@" testId="badge" />);
+    const badge = screen.getByTestId("badge");
+    expect(badge).toHaveTextContent(/^@99\+$/);
+    expect(badge).toHaveAttribute("aria-hidden", "true");
+    expect(badge).not.toHaveAttribute("aria-label");
+    expect(badge).not.toHaveAttribute("title");
+  });
 });
