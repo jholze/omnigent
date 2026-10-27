@@ -12,7 +12,7 @@ import os
 import re
 import shlex
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -278,17 +278,23 @@ def evaluate_card(data: dict[str, Any], *, workspace_roots: Sequence[str]) -> De
     command = extract_command(data)
     if command is None:
         return Decision(False, "no inspectable command on card")
-    cwd = data.get("cwd", request.get("cwd"))
-    cwd_outside_workspace = False
-    if cwd is not None:
-        if not isinstance(cwd, str) or not _is_under_roots(cwd, workspace_roots):
+    # Check every cwd the card carries (data and request); null means absent.
+    # Empty or relative values would resolve against the watcher's own cwd.
+    cwds = [source.get("cwd") for source in (data, request) if source.get("cwd") is not None]
+    for cwd in cwds:
+        if not isinstance(cwd, str) or not cwd or not os.path.isabs(cwd):
             return Decision(False, "card cwd outside workspace", command)
-        # /tmp is fine for ls/cat, but project tools there would run foreign code.
-        cwd_outside_workspace = not _is_under_roots(
-            cwd, workspace_roots, include_fixed_roots=False
-        )
+        if not _is_under_roots(cwd, workspace_roots):
+            return Decision(False, "card cwd outside workspace", command)
+    # /tmp is fine for ls/cat, but project tools there would run foreign code.
+    cwd_outside_workspace = any(
+        not _is_under_roots(cwd, workspace_roots, include_fixed_roots=False) for cwd in cwds
+    )
     decision = evaluate_command(
-        command, workspace_roots=workspace_roots, cwd_outside_workspace=cwd_outside_workspace
+        command,
+        workspace_roots=workspace_roots,
+        cwd_outside_workspace=cwd_outside_workspace,
+        cwds=cwds,
     )
     return Decision(decision.approve, decision.reason, command)
 
@@ -303,17 +309,40 @@ class _WalkState:
     """
 
     cwd_outside_workspace: bool = False
+    # Resolved candidates for the current directory: the card cwd, else every
+    # workspace root (the agent's cwd is not in the payload), updated by cd.
+    base_dirs: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """What a project-directory check needs: the roots and the current base dirs."""
+
+    workspace_roots: Sequence[str]
+    base_dirs: Sequence[str]
 
 
 def evaluate_command(
-    command: str, *, workspace_roots: Sequence[str], cwd_outside_workspace: bool = False
+    command: str,
+    *,
+    workspace_roots: Sequence[str],
+    cwd_outside_workspace: bool = False,
+    cwds: Sequence[str] = (),
 ) -> Decision:
     """Apply the allow-list to one shell command string.
 
     :param cwd_outside_workspace: True when the command starts in a directory
         outside the workspace roots (for example a card ``cwd`` under ``/tmp``).
+    :param cwds: Absolute directories the command may start in (the card's
+        cwd values). Relative project paths are resolved against each of
+        them, else against each workspace root.
     """
-    state = _WalkState(cwd_outside_workspace=cwd_outside_workspace)
+    starts = list(cwds) or list(workspace_roots)
+    starts = [start for start in starts if start and os.path.isabs(start)]
+    state = _WalkState(
+        cwd_outside_workspace=cwd_outside_workspace,
+        base_dirs=[os.path.realpath(start) for start in starts],
+    )
     reason = _command_violation(command, workspace_roots, depth=0, state=state)
     if reason is not None:
         return Decision(False, reason, command if isinstance(command, str) else None)
@@ -446,29 +475,38 @@ def _argv_violation(
         if reason is not None:
             return reason
     if workspace_guard is not None:
-        result = workspace_guard(args, workspace_roots)
+        result = workspace_guard(args, _Scope(workspace_roots, tuple(state.base_dirs)))
     elif guard is not None:
         result = guard(args)
     else:
         return None
     if name == "cd" and result is None:
-        state.cwd_outside_workspace = _cd_leaves_workspace(
-            args[0], workspace_roots, currently_outside=state.cwd_outside_workspace
-        )
+        _apply_cd(args[0], workspace_roots, state)
     if isinstance(result, list):
         return _argv_violation(result, workspace_roots, depth, state)
     return result
 
 
-def _cd_leaves_workspace(
-    target: str, workspace_roots: Sequence[str], *, currently_outside: bool
-) -> bool:
-    """Whether the cwd is outside the workspace roots after ``cd target``."""
+def _apply_cd(target: str, workspace_roots: Sequence[str], state: _WalkState) -> None:
+    """Move the base dirs through ``cd target``, following symlinks.
+
+    The cwd counts as outside the workspace when any candidate resolves
+    outside the roots, so ``cd link`` to ``/tmp/x`` is caught.
+    """
     if target.startswith("~"):
         target = os.path.expanduser(target)
-    if not os.path.isabs(target):
-        return currently_outside
-    return not _is_under_roots(target, workspace_roots, include_fixed_roots=False)
+    if os.path.isabs(target):
+        state.base_dirs = [os.path.realpath(target)]
+    elif state.base_dirs:
+        state.base_dirs = [
+            os.path.realpath(os.path.join(base, target)) for base in state.base_dirs
+        ]
+    else:
+        return
+    state.cwd_outside_workspace = any(
+        not _is_under_roots(base, workspace_roots, include_fixed_roots=False)
+        for base in state.base_dirs
+    )
 
 
 def _program_name(program: str) -> str | None:
@@ -606,20 +644,20 @@ _WRAPPERS: dict[str, Callable[[list[str]], WrapperResult]] = {
 GuardResult = list[str] | str | None
 
 
-def _guard_git(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+def _guard_git(args: list[str], scope: _Scope) -> GuardResult:
     # -C / --git-dir / --work-tree pick whose .git/config runs (fsmonitor, diff.external).
     index = 0
     while index < len(args):
         arg = args[index]
         if arg in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
             value = args[index + 1] if index + 1 < len(args) else None
-            reason = _workspace_dir_violation(value, workspace_roots)
+            reason = _workspace_dir_violation(value, scope)
             if reason is not None:
                 return f"git {arg}: {reason}"
             index += 2
         elif arg.startswith(_GIT_GLOBAL_PATH_PREFIXES):
             name, value = arg.split("=", 1)
-            reason = _workspace_dir_violation(value, workspace_roots)
+            reason = _workspace_dir_violation(value, scope)
             if reason is not None:
                 return f"git {name}: {reason}"
             index += 1
@@ -691,23 +729,34 @@ def _option_value(args: list[str], index: int) -> tuple[str, str | None, int]:
     return arg, value, index + 2
 
 
-def _workspace_dir_violation(value: str | None, workspace_roots: Sequence[str]) -> str | None:
-    """A project directory must be inside a workspace root; /tmp does not count."""
+def _workspace_dir_violation(value: str | None, scope: _Scope) -> str | None:
+    """A project directory must resolve inside a workspace root; /tmp does not count.
+
+    Relative values are joined to every base dir and resolved with realpath,
+    so a workspace symlink to ``/tmp/x`` is outside. realpath also resolves
+    every existing parent of a path that does not exist yet.
+    """
     if not value or "$" in value:
         return "project directory is not inspectable"
     if value.startswith("~"):
         value = os.path.expanduser(value)
     if os.path.isabs(value):
-        if _is_under_roots(value, workspace_roots, include_fixed_roots=False):
+        if _is_under_roots(value, scope.workspace_roots, include_fixed_roots=False):
             return None
         return "project directory outside workspace"
     normalized = os.path.normpath(value)
     if normalized == ".." or normalized.startswith("../"):
         return "project directory outside workspace"
+    if not scope.base_dirs:
+        return "project directory is not inspectable without a workspace"
+    for base in scope.base_dirs:
+        resolved = os.path.realpath(os.path.join(base, value))
+        if not _is_under_roots(resolved, scope.workspace_roots, include_fixed_roots=False):
+            return "project directory outside workspace"
     return None
 
 
-def _guard_uv(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+def _guard_uv(args: list[str], scope: _Scope) -> GuardResult:
     index = 0
     seen_run = False
     while index < len(args):
@@ -721,7 +770,7 @@ def _guard_uv(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
                 if value is None or not _PACKAGE_NAME_RE.match(value):
                     return "uv --package needs a plain package name"
             else:
-                reason = _workspace_dir_violation(value, workspace_roots)
+                reason = _workspace_dir_violation(value, scope)
                 if reason is not None:
                     return reason
         elif arg.startswith("-"):
@@ -736,7 +785,7 @@ def _guard_uv(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
     return "uv without run <command>"
 
 
-def _guard_node_package_manager(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+def _guard_node_package_manager(args: list[str], scope: _Scope) -> GuardResult:
     # npm/pnpm read config options on either side of the subcommand, so scan
     # every argument up to a literal "--" (after which they go to the script).
     index = 0
@@ -751,7 +800,7 @@ def _guard_node_package_manager(args: list[str], workspace_roots: Sequence[str])
         elif name in _NODE_PM_OPTIONS_WITH_VALUE:
             name, value, index = _option_value(args, index)
             if name in _NODE_PM_DIRECTORY_OPTIONS:
-                reason = _workspace_dir_violation(value, workspace_roots)
+                reason = _workspace_dir_violation(value, scope)
             elif value is None or value.startswith(("/", "~")) or ".." in value:
                 reason = "package filter must name a workspace package"
             else:
@@ -770,7 +819,7 @@ def _guard_node_package_manager(args: list[str], workspace_roots: Sequence[str])
     return None if subcommand is not None else "package manager without a subcommand"
 
 
-def _guard_pytest(args: list[str], workspace_roots: Sequence[str]) -> GuardResult:
+def _guard_pytest(args: list[str], scope: _Scope) -> GuardResult:
     """Test paths, config, rootdir, plugins and import paths stay in the workspace."""
     # pytest expands @file into more arguments (fromfile_prefix_chars); unreadable here.
     if any(arg.startswith("@") for arg in args):
@@ -786,7 +835,7 @@ def _guard_pytest(args: list[str], workspace_roots: Sequence[str]) -> GuardResul
                 return "pytest --basetemp deletes that directory"
             if name in _PYTEST_LONG_OPTIONS_WITH_VALUE:
                 name, value, index = _option_value(args, index)
-                reason = _pytest_option_violation(name, value, workspace_roots)
+                reason = _pytest_option_violation(name, value, scope)
             elif arg in _PYTEST_LONG_FLAGS:
                 index += 1
             else:
@@ -800,29 +849,27 @@ def _guard_pytest(args: list[str], workspace_roots: Sequence[str]) -> GuardResul
                     return f"pytest {arg} without a value"
                 value = attached or (args[index + 1] if index + 1 < len(args) else None)
                 index += 1 if attached else 2
-                reason = _pytest_option_violation(f"-{letter}", value, workspace_roots)
+                reason = _pytest_option_violation(f"-{letter}", value, scope)
             elif set(arg[1:]) <= _PYTEST_SHORT_FLAGS:
                 index += 1
             else:
                 return f"pytest option {arg} is not on the allow-list"
         else:
             if arg != "--":
-                reason = _workspace_dir_violation(arg.split("::", 1)[0], workspace_roots)
+                reason = _workspace_dir_violation(arg.split("::", 1)[0], scope)
             index += 1
         if reason is not None:
             return reason
     return None
 
 
-def _pytest_option_violation(
-    name: str, value: str | None, workspace_roots: Sequence[str]
-) -> str | None:
+def _pytest_option_violation(name: str, value: str | None, scope: _Scope) -> str | None:
     if value is None:
         return f"pytest {name} without a value"
     if value.startswith("@"):
         return "pytest @argfile reads arguments from a file"
     if name in _PYTEST_PATH_OPTIONS:
-        return _workspace_dir_violation(value, workspace_roots)
+        return _workspace_dir_violation(value, scope)
     if name in _PYTEST_OUTPUT_FILE_OPTIONS and not _is_output_target_safe(value):
         return f"pytest {name} writes outside /tmp"
     if name in {"-o", "--override-ini"}:
@@ -851,7 +898,7 @@ _TOOL_GUARDS: dict[str, Callable[[list[str]], GuardResult]] = {
 }
 
 # Guards that also need the workspace roots (project-directory options).
-_WORKSPACE_TOOL_GUARDS: dict[str, Callable[[list[str], Sequence[str]], GuardResult]] = {
+_WORKSPACE_TOOL_GUARDS: dict[str, Callable[[list[str], _Scope], GuardResult]] = {
     "uv": _guard_uv,
     "npm": _guard_node_package_manager,
     "pnpm": _guard_node_package_manager,
@@ -923,12 +970,13 @@ def _path_is_local(path: str, workspace_roots: Sequence[str]) -> bool:
 def _is_under_roots(
     path: str, workspace_roots: Sequence[str], *, include_fixed_roots: bool = True
 ) -> bool:
-    if path.startswith("~"):
+    # Never resolve against the watcher's own cwd: relative paths and roots fail.
+    if not path or not os.path.isabs(path):
         return False
     resolved = os.path.realpath(path)
     fixed_roots = _FIXED_LOCAL_ROOTS if include_fixed_roots else ()
     for root in (*workspace_roots, *fixed_roots):
-        if not root:
+        if not root or not os.path.isabs(root):
             continue
         real_root = os.path.realpath(root)
         if resolved == real_root or resolved.startswith(real_root.rstrip(os.sep) + os.sep):

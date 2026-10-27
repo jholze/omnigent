@@ -47,6 +47,15 @@ card has a command it can read and every segment of it
   Claude-native `wants to call **Bash**` card does not include the command
   in the webhook payload, so it is reported. Forms with schema fields,
   plan approvals, and unknown cards are also reported.
+- **Card cwd.** Both `data.cwd` and `data.request.cwd` are checked; a JSON
+  `null` counts as absent.
+  - Each present value must be an absolute, non-empty path under a
+    workspace root or `/tmp`. Otherwise the card is reported, including
+    `""`, `web`, and `.`.
+  - Relative values are never resolved against the watcher's own
+    directory.
+  - If either cwd is outside the workspace roots (`/tmp` included), project
+    tools are reported.
 - **Shell wrapper.** `<shell> -<flags> '<script>'` (sh, bash, zsh, dash,
   ksh) is unwrapped when the flags contain `c` and use only `l c e x u`.
   The script is then checked with the same rules. Codex's real form,
@@ -75,6 +84,14 @@ card has a command it can read and every segment of it
     - The options are `npm --prefix`, `pnpm -C`/`--dir`,
       `uv --project`/`--directory`, and `git -C`/`--git-dir=`/
       `--work-tree=`, in both the `--opt value` and `--opt=value` forms.
+    - Relative values are not assumed to be local.
+      - They are joined to the current directory and resolved with
+        `realpath`. The current directory is the card `cwd`, otherwise every
+        workspace root, and it follows each `cd`.
+      - So a workspace symlink such as `evil -> /tmp/evil` counts as
+        outside (`git -C evil`, `npm --prefix evil`).
+      - With no workspace roots configured, a relative project directory is
+        reported.
     - `uv --package` must be a plain package name.
     - `--filter` must not be an absolute path or contain `..`.
     - npm and pnpm read options on both sides of the subcommand, so
@@ -87,7 +104,8 @@ card has a command it can read and every segment of it
     - They are reported once the directory is outside the workspace roots,
       and here `/tmp` counts as outside.
     - That covers a card `cwd` such as `/tmp/x`, an earlier
-      `cd /tmp/x && …`, and a `cd` inside a nested `sh -c` script.
+      `cd /tmp/x && …`, a `cd` through a symlink that leaves the workspace,
+      and a `cd` inside a nested `sh -c` script.
     - `ls` or `cat` in `/tmp` stays approved.
   - pytest:
     - Test paths, `-c`/`--config-file`, `--rootdir`, and `--confcutdir`
@@ -165,7 +183,7 @@ are all reported.
 | `OMNIGENT_APPROVAL_WATCHER_ALLOW_REMOTE_SERVER` | no | `1` allows a non-loopback server origin. Off by default. |
 | `OMNIGENT_APPROVAL_WATCHER_TOKEN` | one of | Sent as `Authorization: Bearer <token>` on the resolve POST. |
 | `OMNIGENT_APPROVAL_WATCHER_COOKIE` | one of | Sent as `Cookie:` when no token is set. |
-| `OMNIGENT_APPROVAL_WATCHER_WORKSPACES` | no | Absolute workspace roots, `:`-separated. |
+| `OMNIGENT_APPROVAL_WATCHER_WORKSPACES` | no | Absolute workspace roots, `:`-separated. Relative entries are ignored. |
 | `OMNIGENT_APPROVAL_WATCHER_AUDIT` | no | JSONL path. Default `/tmp/omnigent-approval-watcher.jsonl`. |
 | `OMNIGENT_APPROVAL_WATCHER_PORT` | no | Listen port on `127.0.0.1`. Default `8787`. |
 

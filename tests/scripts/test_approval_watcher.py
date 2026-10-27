@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -798,3 +799,146 @@ def test_ac_ap2_02_evaluate_command_approves_pytest_output_to_tmp_and_run_flags(
     decision = evaluate_command(command, workspace_roots=[str(tmp_path)])
 
     assert decision.approve is True, decision.reason
+
+
+# AC-AP2-02 / AC-AP2-03: workspace symlinks and a JSON-null card cwd
+
+
+def workspace_with_outside_symlink(tmp_path: Path) -> Path:
+    """Workspace holding ``web/`` and ``evil -> <tmp_path>/outside`` (outside the workspace)."""
+    workspace = tmp_path / "workspace"
+    (workspace / "web").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, workspace / "evil")
+    return workspace
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C evil status",
+        "cd evil && npm test",
+        "npm --prefix evil test",
+        "pytest evil",
+        "uv --project evil run pytest",
+    ],
+)
+def test_ac_ap2_03_evaluate_command_reports_project_dir_symlinked_outside_workspace(
+    tmp_path: Path, command: str
+) -> None:
+    workspace = workspace_with_outside_symlink(tmp_path)
+
+    decision = evaluate_command(command, workspace_roots=[str(workspace)])
+
+    assert decision.approve is False, decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git -C web status", "npm --prefix web test", "pytest tests/new_file_test.py::test_a"],
+)
+def test_ac_ap2_02_evaluate_command_approves_real_workspace_subdirectory(
+    tmp_path: Path, command: str
+) -> None:
+    workspace = workspace_with_outside_symlink(tmp_path)
+
+    decision = evaluate_command(command, workspace_roots=[str(workspace)])
+
+    assert decision.approve is True, decision.reason
+
+
+def test_ac_ap2_03_card_null_cwd_falls_back_to_request_cwd_reported_without_resolve(
+    tmp_path: Path,
+) -> None:
+    resolver = FakeResolver()
+    watcher = make_watcher(tmp_path, resolver)
+    data = card_data(codex_command_request("npm test"))
+    # A JSON-null data.cwd must not hide the request cwd outside the workspace.
+    data["cwd"] = None
+    data["request"]["cwd"] = "/tmp/evil"
+    body = envelope_body("evt_null_cwd", data)
+
+    outcome = watcher.handle(signed_headers(body, event_id="evt_null_cwd"), body)
+
+    assert outcome.decision == "reported", outcome.message
+    assert resolver.calls == []
+
+
+# AC-AP2-02 / AC-AP2-03: every card cwd is checked, and must be absolute.
+# The watcher runs inside the workspace, so a relative or empty cwd would
+# otherwise resolve against the watcher's own directory and look local.
+
+ABSENT = object()
+
+
+def card_with_cwds(command: str, *, data_cwd: Any, request_cwd: Any, workspace: Path) -> dict:
+    data = card_data(codex_command_request(command))
+    for target, value in ((data, data_cwd), (data["request"], request_cwd)):
+        if value is not ABSENT:
+            target["cwd"] = value.format(ws=workspace) if isinstance(value, str) else value
+    return data
+
+
+@pytest.mark.parametrize(
+    ("command", "data_cwd", "request_cwd"),
+    [
+        ("npm test", "", "/tmp/evil"),
+        ("git status", "", "/tmp/evil"),
+        ("pytest", "", "/tmp/evil"),
+        ("npm test", "web", ABSENT),
+        ("npm test", ".", ABSENT),
+        ("npm test", "{ws}", "/tmp/evil"),
+        ("npm test", "/tmp/evil", "{ws}"),
+    ],
+    ids=[
+        "empty-data-cwd-npm",
+        "empty-data-cwd-git",
+        "empty-data-cwd-pytest",
+        "relative-web",
+        "relative-dot",
+        "data-ws-request-tmp",
+        "data-tmp-request-ws",
+    ],
+)
+def test_ac_ap2_03_card_cwd_empty_relative_or_mixed_reported_without_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, data_cwd: Any, request_cwd: Any
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "web").mkdir(parents=True)
+    monkeypatch.chdir(workspace)
+    resolver = FakeResolver()
+    watcher = make_watcher(workspace, resolver)
+    data = card_with_cwds(command, data_cwd=data_cwd, request_cwd=request_cwd, workspace=workspace)
+    body = envelope_body("evt_cwds", data)
+
+    outcome = watcher.handle(signed_headers(body, event_id="evt_cwds"), body)
+
+    assert outcome.decision == "reported", outcome.message
+    assert resolver.calls == []
+
+
+@pytest.mark.parametrize(
+    ("command", "data_cwd", "request_cwd"),
+    [
+        ("npm test", "{ws}", "{ws}"),
+        ("ls", "{ws}", "{ws}"),
+        ("npm test", None, "{ws}/web"),
+    ],
+    ids=["both-ws-npm", "both-ws-ls", "null-data-cwd-request-web"],
+)
+def test_ac_ap2_02_card_absolute_workspace_cwds_resolved_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, data_cwd: Any, request_cwd: Any
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "web").mkdir(parents=True)
+    monkeypatch.chdir(workspace)
+    resolver = FakeResolver()
+    watcher = make_watcher(workspace, resolver)
+    data = card_with_cwds(command, data_cwd=data_cwd, request_cwd=request_cwd, workspace=workspace)
+    body = envelope_body("evt_cwds_ok", data)
+
+    outcome = watcher.handle(signed_headers(body, event_id="evt_cwds_ok"), body)
+
+    assert outcome.decision == "approved", outcome.message
+    assert resolver.calls == [(data["resolve"]["path"], {"action": "accept", "content": {}})]
