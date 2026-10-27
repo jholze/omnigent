@@ -27,6 +27,7 @@ import { ChannelView, directoryMap } from "./ChannelView";
 import "./chatScale.css";
 import { ChatSidebar, channelLabel, dmLabel } from "./ChatSidebar";
 import { dmHeading, dmParticipantLine } from "./dmTitle";
+import { MotionRoot } from "./MotionRoot";
 import { NewDmDialog } from "./NewDmDialog";
 import { ThreadPane } from "./ThreadPane";
 import { CHAT_TEST_IDS } from "./testids";
@@ -105,7 +106,16 @@ function useBootstrapForNewChannels(enabled: boolean, data: BootstrapResponse | 
   }, [enabled, data, changes, queryClient]);
 }
 
+/** Motion root around the whole chat so every `m.*` has `LazyMotion` above it (T-117). */
 export function ChatPage() {
+  return (
+    <MotionRoot>
+      <ChatPageContent />
+    </MotionRoot>
+  );
+}
+
+function ChatPageContent() {
   const info = useServerInfo();
   const enabled = isFeatureEnabled(info, "team_chat");
   const { channelId, threadRootId } = useParams<{ channelId?: string; threadRootId?: string }>();

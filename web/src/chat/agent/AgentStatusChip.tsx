@@ -12,8 +12,14 @@
  * truncates, so the sizer never forces horizontal scroll.
  * "arbeitet im Hintergrund" shares the icon and border of "arbeitet"; only
  * "braucht Antwort" (an open approval) gets the warning accent.
- * No motion yet; the crossfade waits for the motion tokens (T-117).
+ *
+ * Motion (T-117, FR-078/079): on a status change the new label fades in over
+ * `chipCrossfade` (200 ms; reduced motion 120 ms opacity). The first value
+ * is static. Tone colours transition via `colorTransitionStyle` (listed
+ * properties, never `all`).
  */
+import { useState } from "react";
+import { m } from "motion/react";
 import {
   BotIcon,
   CircleCheckIcon,
@@ -26,6 +32,8 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { chipCrossfade, colorTransitionStyle } from "../motion";
+import { useChatReducedMotion } from "../MotionRoot";
 import { CHAT_TEST_IDS } from "../testids";
 import { AGENT_CHIP_LABELS, type AgentChipKind, type AgentChipState } from "./agentStatus";
 import { useAgentThreadChip } from "./useAgentThreadChip";
@@ -78,12 +86,31 @@ export interface AgentStatusChipProps {
 
 export function AgentStatusChip({ state, className }: AgentStatusChipProps) {
   const Icon = ICONS[state.kind];
+  const reduced = useChatReducedMotion();
+  // Animate only after the kind changed once; the first value stays static.
+  const [shownKind, setShownKind] = useState(state.kind);
+  const [changed, setChanged] = useState(false);
+  if (shownKind !== state.kind) {
+    setShownKind(state.kind);
+    setChanged(true);
+  }
+  const preset = chipCrossfade(reduced);
+  const labelMotion = changed
+    ? {
+        initial: preset.initial,
+        animate: preset.animate,
+        transition: preset.transition,
+        "data-motion": preset.name,
+        "data-motion-duration": preset.durationMs,
+      }
+    : { initial: false as const };
   return (
     <span
       data-testid={CHAT_TEST_IDS.agentStatusChip}
       data-state={state.kind}
       data-source={state.source}
       title={agentChipTitle(state)}
+      style={colorTransitionStyle(reduced)}
       className={cn(
         "inline-flex h-5 max-w-full shrink-0 items-center gap-1 rounded-sm border px-1.5 text-xs font-medium",
         TONES[state.kind],
@@ -97,7 +124,9 @@ export function AgentStatusChip({ state, className }: AgentStatusChipProps) {
           aria-hidden="true"
           className="invisible col-start-1 row-start-1 truncate before:content-['arbeitet_im_Hintergrund']"
         />
-        <span className="col-start-1 row-start-1 truncate">{AGENT_CHIP_LABELS[state.kind]}</span>
+        <m.span key={state.kind} {...labelMotion} className="col-start-1 row-start-1 truncate">
+          {AGENT_CHIP_LABELS[state.kind]}
+        </m.span>
       </span>
     </span>
   );

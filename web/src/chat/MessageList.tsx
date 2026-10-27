@@ -23,6 +23,46 @@ function isCompact(previous: MessageView | undefined, message: MessageView): boo
   return message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
 }
 
+/** More rows than this arriving at once is a backfill, not a live arrival. */
+export const LIVE_BATCH_MAX = 3;
+
+/**
+ * Decide once per row whether it plays the enter animation (FR-078): only
+ * rows that arrive after the first paint, at the end of the list, from
+ * someone else, in a small batch. The first page, scroll-back pages,
+ * backfill bursts and the reader's own sends (NFR-006) stay static.
+ *
+ * The decision is stored per key, so a re-render (or React's double render
+ * in dev) never flips it.
+ */
+export function useEnterKeys(messages: MessageView[], me: string): Set<string> {
+  const decidedRef = useRef<Map<string, boolean> | null>(null);
+  const newestRef = useRef(0);
+  let decided = decidedRef.current;
+  if (decided === null) {
+    // The first page is history, not news.
+    decided = new Map(messages.map((message) => [message.key, false]));
+    decidedRef.current = decided;
+    newestRef.current = messages.reduce((max, message) => Math.max(max, message.createdAtMs), 0);
+  }
+  const fresh = messages.filter((message) => !decided.has(message.key));
+  const burst = fresh.length > LIVE_BATCH_MAX;
+  for (const message of fresh) {
+    const live =
+      !burst &&
+      message.authorId !== me &&
+      message.status === "sent" &&
+      message.createdAtMs >= newestRef.current;
+    decided.set(message.key, live);
+  }
+  for (const message of fresh) {
+    newestRef.current = Math.max(newestRef.current, message.createdAtMs);
+  }
+  const keys = new Set<string>();
+  for (const message of messages) if (decided.get(message.key)) keys.add(message.key);
+  return keys;
+}
+
 /** Batch "Neue Nachricht von Anna" announcements to one per interval. */
 function useNewMessageAnnouncement(
   messages: MessageView[],
@@ -110,6 +150,7 @@ export function MessageList({
   const contentRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const announcement = useNewMessageAnnouncement(messages, me, directory);
+  const enterKeys = useEnterKeys(messages, me);
   const last = messages.at(-1);
   const lastKey = last?.key;
   const ownSend = last !== undefined && last.authorId === me && last.status !== "sent";
@@ -162,6 +203,7 @@ export function MessageList({
                 replyCount={message.id ? (replyCounts?.get(message.id) ?? 0) : 0}
                 onRetry={onRetry}
                 threadAccessory={renderThreadAccessory?.(message)}
+                enter={enterKeys.has(message.key)}
               />
             ))}
           </ol>

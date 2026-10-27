@@ -8,6 +8,7 @@
  * (server notices such as a failed agent start) are one muted text line.
  */
 import type { ReactNode } from "react";
+import { m } from "motion/react";
 import { BotIcon, CircleAlertIcon, InfoIcon, MessageSquareIcon } from "lucide-react";
 
 import { MessageResponse } from "@/components/ai-elements/message";
@@ -16,6 +17,8 @@ import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
 import { AgentBotBadge } from "./BotBadge";
 import type { DirectoryEntry } from "./chatApi";
+import { messageEnter } from "./motion";
+import { useChatReducedMotion } from "./MotionRoot";
 import { CHAT_TEST_IDS } from "./testids";
 
 export type MessageDeliveryStatus = "sent" | "sending" | "failed";
@@ -256,12 +259,40 @@ export interface MessageItemProps {
   onRetry?: (clientId: string) => void;
   /** Shown next to the reply count on a thread root, e.g. the agent status chip. */
   threadAccessory?: ReactNode;
+  /**
+   * The row arrived live (not initial load, backfill or scroll-back, and not
+   * the reader's own send): play the enter animation (FR-078).
+   */
+  enter?: boolean;
 }
 
-function SystemLine({ message, directory }: Pick<MessageItemProps, "message" | "directory">) {
+/**
+ * Props for the row element: enter animation for live rows, nothing for the
+ * rest. `data-motion` names the preset (E2E reads it).
+ */
+function useEnterMotion(enter: boolean) {
+  const reduced = useChatReducedMotion();
+  if (!enter) return { initial: false as const };
+  const preset = messageEnter(reduced);
+  return {
+    initial: preset.initial,
+    animate: preset.animate,
+    transition: preset.transition,
+    "data-motion": preset.name,
+    "data-motion-duration": preset.durationMs,
+  };
+}
+
+function SystemLine({
+  message,
+  directory,
+  enter = false,
+}: Pick<MessageItemProps, "message" | "directory" | "enter">) {
   const date = new Date(message.createdAtMs);
+  const motionProps = useEnterMotion(enter);
   return (
-    <li
+    <m.li
+      {...motionProps}
       data-testid={CHAT_TEST_IDS.message}
       data-message-id={message.id ?? undefined}
       data-author-kind="system"
@@ -285,7 +316,7 @@ function SystemLine({ message, directory }: Pick<MessageItemProps, "message" | "
           {formatMessageTime(message.createdAtMs)}
         </time>
       </div>
-    </li>
+    </m.li>
   );
 }
 
@@ -297,9 +328,10 @@ export function MessageItem({
   replyCount = 0,
   onRetry,
   threadAccessory,
+  enter = false,
 }: MessageItemProps) {
   if (message.authorKind === "system") {
-    return <SystemLine message={message} directory={directory} />;
+    return <SystemLine message={message} directory={directory} enter={enter} />;
   }
   return (
     <MessageRow
@@ -310,6 +342,7 @@ export function MessageItem({
       replyCount={replyCount}
       onRetry={onRetry}
       threadAccessory={threadAccessory}
+      enter={enter}
     />
   );
 }
@@ -322,7 +355,9 @@ function MessageRow({
   replyCount = 0,
   onRetry,
   threadAccessory,
+  enter = false,
 }: MessageItemProps) {
+  const motionProps = useEnterMotion(enter);
   const author = principalLabel(message.authorId, directory);
   const agent = isAgentKind(message.authorKind);
   const time = formatMessageTime(message.createdAtMs);
@@ -332,7 +367,8 @@ function MessageRow({
   const showReplies = Boolean(threadHref) && replyCount > 0;
 
   return (
-    <li
+    <m.li
+      {...motionProps}
       data-testid={CHAT_TEST_IDS.message}
       data-message-id={message.id ?? undefined}
       data-client-id={message.clientId ?? undefined}
@@ -451,6 +487,6 @@ function MessageRow({
           <MessageSquareIcon className="size-4" aria-hidden="true" />
         </Link>
       ) : null}
-    </li>
+    </m.li>
   );
 }
