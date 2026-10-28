@@ -15,7 +15,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRightIcon, CircleAlertIcon, EyeOffIcon } from "lucide-react";
+import { CircleAlertIcon, EyeOffIcon } from "lucide-react";
 
 import { MessageResponse } from "@/components/ai-elements/message";
 import { ElicitationCard, type SubmitApprovalFn } from "@/components/blocks/ApprovalCard";
@@ -29,10 +29,7 @@ import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { Button } from "@/components/ui/button";
 import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useSession } from "@/hooks/useSession";
-import { LEVEL_EDIT } from "@/lib/permissionsApi";
 import { buildBubbles, createBubbleCache, type Bubble, type RenderItem } from "@/lib/renderItems";
-import { Link } from "@/lib/routing";
-import { ApiError } from "@/lib/sessionsApi";
 import { ensureConversationStreamed, releaseConversation, useChatStore } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
 import type { DirectoryEntry } from "../chatApi";
@@ -48,29 +45,14 @@ import {
 import { useStatusAfterConnect } from "./useStatusAfterConnect";
 import { CardMount } from "./CardMount";
 import { useSmoothedStream } from "./useSmoothedStream";
-import { CHAT_TEST_IDS } from "../testids";
+import type { AgentControlsController } from "./useAgentControls";
+import { RunStuckBanner, useRunStuck } from "./RunStuckBanner";
+import { sessionAccessOf } from "./sessionAccess";
+
+export { OpenAgentSessionLink, sessionAccessOf, type SessionAccess } from "./sessionAccess";
 
 /** Author id of mirrored agent replies (`chat_agent_threads._AUTHOR_AGENT`). */
 export const AGENT_AUTHOR_ID = "agent";
-
-export type SessionAccess = "loading" | "none" | "read" | "edit" | "error";
-
-/** READ / EDIT from the session snapshot; 403 or 404 means no grant. */
-export function sessionAccessOf(
-  session: { permissionLevel: number | null } | null,
-  isLoading: boolean,
-  error: Error | null,
-): SessionAccess {
-  if (session !== null) {
-    const level = session.permissionLevel;
-    // `null`: permissions are off on this server, everyone may act.
-    if (level === null || level >= LEVEL_EDIT) return "edit";
-    return level >= 1 ? "read" : "none";
-  }
-  if (error instanceof ApiError && (error.status === 403 || error.status === 404)) return "none";
-  if (error !== null) return "error";
-  return isLoading ? "loading" : "error";
-}
 
 type ElicitationItem = Extract<RenderItem, { kind: "elicitation" }>;
 type ShownItem = Extract<RenderItem, { kind: "text" | "reasoning" | "elicitation" }>;
@@ -133,6 +115,8 @@ interface LiveAgentOutputProps {
   directory: Map<string, DirectoryEntry>;
   /** Stored agent and system replies in this thread; a new one ends a held turn. */
   agentReplyCount: number;
+  /** Agent controls for the run-stuck banner (FR-053). */
+  controls: AgentControlsController | null;
 }
 
 function LiveAgentOutput({
@@ -141,6 +125,7 @@ function LiveAgentOutput({
   me,
   directory,
   agentReplyCount,
+  controls,
 }: LiveAgentOutputProps) {
   // Bind only this session. A stream this view opened closes with it, so
   // closed threads hold no connection (HTTP/1.1 budget, R-6).
@@ -180,6 +165,12 @@ function LiveAgentOutput({
   const turn = useMemo(() => currentTurn(bubbles), [bubbles]);
   const working = computeIsTurnActive(sessionStatus, state.status === "streaming");
   const live = working || turn.items.some(isPendingCard);
+  // Every stream event yields a new state object, so it doubles as the clock reset.
+  const stuck = useRunStuck(sessionStatus === "running" && !loadingConversation, state);
+  const stuckBanner =
+    stuck && controls !== null ? (
+      <RunStuckBanner sessionId={sessionId} controller={controls} />
+    ) : null;
 
   // After the turn ends the mirrored reply replaces it. Keep the turn on
   // screen until that stored reply arrives, so the answer does not blink.
@@ -222,7 +213,7 @@ function LiveAgentOutput({
   if (loadingConversation && blocks.length === 0) {
     return <LiveNotice tone="busy" text="Live-Ansicht lädt…" />;
   }
-  if (!show) return null;
+  if (!show) return stuckBanner;
 
   const lastIndex = turn.items.length - 1;
   const hasText = turn.items.some((item) => item.kind === "text" && item.text.trim() !== "");
@@ -295,6 +286,7 @@ function LiveAgentOutput({
           ) : null}
         </div>
       </section>
+      {stuckBanner}
     </ConversationScopeContext.Provider>
   );
 }
@@ -343,29 +335,6 @@ function LiveNotice({
   );
 }
 
-/**
- * "Session öffnen" in the Thread header (FR-085, AC-085a). The main sidebar
- * lists an Agent-Thread session for its owner only; everyone else with a
- * grant opens it here. Without a grant the link does not render: the server
- * would refuse the session anyway.
- */
-export function OpenAgentSessionLink({ sessionId }: { sessionId: string }) {
-  const { session, isLoading, error } = useSession(sessionId);
-  const access = sessionAccessOf(session, isLoading, error);
-  if (access !== "read" && access !== "edit") return null;
-  return (
-    <Link
-      to={`/c/${encodeURIComponent(sessionId)}`}
-      componentId="chat.thread.open_session"
-      data-testid={CHAT_TEST_IDS.threadOpenSession}
-      className="relative inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-[''] hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring md:min-h-8"
-    >
-      Session öffnen
-      <ArrowUpRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
-    </Link>
-  );
-}
-
 export interface AgentThreadViewProps {
   sessionId: string;
   me: string;
@@ -375,6 +344,8 @@ export interface AgentThreadViewProps {
   agentReplyCount: number;
   /** The server already stored its "Live-Ansicht nur für …" line in this thread. */
   sharingNoticeStored: boolean;
+  /** Agent controls, for the run-stuck banner's "Unterbrechen" (FR-053). */
+  controls?: AgentControlsController | null;
 }
 
 export function AgentThreadView({
@@ -384,6 +355,7 @@ export function AgentThreadView({
   ownerLabel,
   agentReplyCount,
   sharingNoticeStored,
+  controls = null,
 }: AgentThreadViewProps) {
   const queryClient = useQueryClient();
   const { session, isLoading, error } = useSession(sessionId);
@@ -411,6 +383,7 @@ export function AgentThreadView({
       me={me}
       directory={directory}
       agentReplyCount={agentReplyCount}
+      controls={controls}
     />
   );
 }

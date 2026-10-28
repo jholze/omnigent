@@ -138,9 +138,11 @@ describe("Agent-Thread in ThreadPane", () => {
       />,
     );
     const pane = screen.getByTestId(CHAT_TEST_IDS.threadPane);
-    const chip = within(within(pane).getByRole("status")).getByTestId(
-      CHAT_TEST_IDS.agentStatusChip,
-    );
+    // The pane holds further live regions (control and command hints); find the chip's own.
+    const chip = within(pane).getByTestId(CHAT_TEST_IDS.agentStatusChip);
+    const chipRegion = chip.closest<HTMLElement>('[role="status"]');
+    expect(chipRegion).not.toBeNull();
+    expect(within(chipRegion as HTMLElement).getByText("Agent:")).toHaveClass("sr-only");
     expect(chip.textContent).toBe("aktiv");
     expect(chip).toHaveAttribute("data-source", "thread");
     await waitFor(() =>

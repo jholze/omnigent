@@ -130,6 +130,8 @@ export interface MessageListProps {
   threadHrefFor?: (message: MessageView) => string | undefined;
   replyCounts?: Map<string, number>;
   onRetry: (clientId: string) => void;
+  /** Retry a failed forward of a thread reply (FR-054). */
+  onForward?: (messageId: string) => void;
   /** Extra content next to a thread root's reply count (agent status chip). */
   renderThreadAccessory?: (message: MessageView) => ReactNode;
   /** Rendered below the rows inside the scroller (live agent output). */
@@ -146,6 +148,7 @@ export function MessageList({
   threadHrefFor,
   replyCounts,
   onRetry,
+  onForward,
   renderThreadAccessory,
   footer,
 }: MessageListProps) {
@@ -224,6 +227,7 @@ export function MessageList({
                   threadHref={threadHrefFor?.(message)}
                   replyCount={message.id ? (replyCounts?.get(message.id) ?? 0) : 0}
                   onRetry={onRetry}
+                  onForward={onForward}
                   threadAccessory={renderThreadAccessory?.(message)}
                   enter={enterKeys.has(message.key)}
                 />

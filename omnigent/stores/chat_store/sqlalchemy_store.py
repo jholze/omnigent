@@ -107,6 +107,7 @@ def _to_message(row: SqlChatMessage) -> ChatMessage:
         created_at=row.created_at,
         body=row.body,
         client_id=row.client_id,
+        forward_state=row.forward_state,
     )
 
 

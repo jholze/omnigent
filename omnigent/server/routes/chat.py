@@ -94,6 +94,11 @@ class MessageResponse(BaseModel):
     messages whose thread has an agent session, omitted otherwise. It
     is the value ``thread.updated`` already sends to every channel
     member, so a reloaded client can mount the live view.
+
+    ``forward_state`` mirrors ``chat_messages.forward_state``
+    (``not_forwarded``/``failed``/``forwarding``/``forwarded``) and is
+    present only when the stored value is not ``NULL``, i.e. on agent
+    thread replies whose forward has been attempted. Omitted otherwise.
     """
 
     id: str
@@ -106,6 +111,7 @@ class MessageResponse(BaseModel):
     client_id: str | None
     agent_state: str | None = None
     session_id: str | None = None
+    forward_state: str | None = None
 
 
 class DirectoryEntry(BaseModel):
@@ -398,6 +404,8 @@ def _message_response(
         response.agent_state = agent_state
     if session_id is not None:
         response.session_id = session_id
+    if message.forward_state is not None:
+        response.forward_state = message.forward_state
     return response
 
 

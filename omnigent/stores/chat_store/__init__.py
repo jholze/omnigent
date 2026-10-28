@@ -59,6 +59,7 @@ class ChatMessage:
     created_at: int
     body: str
     client_id: str | None
+    forward_state: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1474,6 +1474,7 @@ def _load_message(chat_store: ChatStore, message_id: str) -> tuple[ChatMessage, 
             created_at=row.created_at,
             body=row.body,
             client_id=row.client_id,
+            forward_state=row.forward_state,
         )
         return message, row.forward_state
 

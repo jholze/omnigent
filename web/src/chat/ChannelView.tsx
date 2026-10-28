@@ -53,6 +53,7 @@ export function messageViewOf(message: ChatMessage): MessageView {
     createdAtMs: toEpochMs(message.created_at),
     body: message.body,
     status: "sent",
+    ...(message.forward_state ? { forwardState: message.forward_state } : {}),
   };
 }
 

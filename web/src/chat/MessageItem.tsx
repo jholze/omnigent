@@ -7,9 +7,9 @@
  * through AI Elements `MessageResponse` (streamdown-security). System lines
  * (server notices such as a failed agent start) are one muted text line.
  */
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { m } from "motion/react";
-import { BotIcon, CircleAlertIcon, InfoIcon, MessageSquareIcon } from "lucide-react";
+import { BotIcon, BotOffIcon, CircleAlertIcon, InfoIcon, MessageSquareIcon } from "lucide-react";
 
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,16 @@ export interface MessageView {
    * `Retry-After`, or null when the server sent none.
    */
   rateLimited?: { retryAfterSeconds: number | null } | null;
+  /**
+   * Agent-Thread reply delivery (FR-041, FR-054): `not_forwarded` (author
+   * below EDIT, or the agent was dismissed), `failed` (retry offered),
+   * `forwarding` (a retry is in flight). Anything else shows nothing.
+   */
+  forwardState?: string | null;
 }
+
+/** FR-041 label, verbatim. */
+export const NOT_FORWARDED_LABEL = "nicht an Agent";
 
 /** "Zu viele Nachrichten …" hint for a 429 send. Names Retry-After when known. */
 export function rateLimitHint(retryAfterSeconds: number | null): string {
@@ -257,6 +266,8 @@ export interface MessageItemProps {
   threadHref?: string;
   replyCount?: number;
   onRetry?: (clientId: string) => void;
+  /** Retry a failed forward to the thread's agent (FR-054). */
+  onForward?: (messageId: string) => void;
   /** Shown next to the reply count on a thread root, e.g. the agent status chip. */
   threadAccessory?: ReactNode;
   /**
@@ -327,6 +338,7 @@ export function MessageItem({
   threadHref,
   replyCount = 0,
   onRetry,
+  onForward,
   threadAccessory,
   enter = false,
 }: MessageItemProps) {
@@ -341,9 +353,73 @@ export function MessageItem({
       threadHref={threadHref}
       replyCount={replyCount}
       onRetry={onRetry}
+      onForward={onForward}
       threadAccessory={threadAccessory}
       enter={enter}
     />
+  );
+}
+
+/** "nicht an Agent" / "nicht zugestellt – erneut senden" under a thread reply. */
+function ForwardStatus({
+  message,
+  onForward,
+}: {
+  message: MessageView;
+  onForward?: (messageId: string) => void;
+}) {
+  const failedLabelId = useId();
+  const state = message.forwardState;
+  if (message.status !== "sent" || message.id === null) return null;
+  if (state === "not_forwarded") {
+    return (
+      <p
+        data-testid={CHAT_TEST_IDS.forwardNotForwarded}
+        className="flex items-center gap-1 text-xs text-muted-foreground"
+      >
+        <BotOffIcon className="size-4 shrink-0" aria-hidden="true" />
+        {NOT_FORWARDED_LABEL}
+      </p>
+    );
+  }
+  if (state === "forwarding") {
+    return (
+      <p
+        data-testid={CHAT_TEST_IDS.forwardForwarding}
+        aria-busy="true"
+        className="flex items-center gap-1 text-xs text-muted-foreground"
+      >
+        <BotIcon className="size-4 shrink-0" aria-hidden="true" />
+        wird zugestellt…
+      </p>
+    );
+  }
+  if (state !== "failed") return null;
+  const id = message.id;
+  return (
+    <div
+      data-testid={CHAT_TEST_IDS.forwardFailed}
+      className="flex flex-wrap items-center gap-x-1 text-xs text-destructive"
+    >
+      <CircleAlertIcon className="size-4 shrink-0" aria-hidden="true" />
+      <span id={failedLabelId}>{onForward ? "nicht zugestellt – " : "nicht zugestellt"}</span>
+      {onForward ? (
+        <Button
+          type="button"
+          variant="link"
+          size="xs"
+          componentId="chat.message.forward_retry"
+          data-testid={CHAT_TEST_IDS.forwardRetry}
+          // WCAG 2.5.3: the accessible name is the visible label "erneut senden";
+          // the "nicht zugestellt" context comes from the neighbour text.
+          aria-describedby={failedLabelId}
+          className="min-h-11 px-1 text-xs text-destructive md:min-h-0"
+          onClick={() => onForward(id)}
+        >
+          erneut senden
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -354,6 +430,7 @@ function MessageRow({
   threadHref,
   replyCount = 0,
   onRetry,
+  onForward,
   threadAccessory,
   enter = false,
 }: MessageItemProps) {
@@ -458,6 +535,7 @@ function MessageRow({
             ) : null}
           </div>
         ) : null}
+        <ForwardStatus message={message} onForward={onForward} />
         {showReplies || threadAccessory ? (
           <div className="flex min-w-0 flex-wrap items-center gap-x-2">
             {showReplies && threadHref ? (
