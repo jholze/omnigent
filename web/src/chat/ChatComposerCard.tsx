@@ -9,10 +9,22 @@
  * Typing `@` opens a mention list (FR-026). While it is open, the arrow keys
  * move the highlight, Enter picks and Escape closes; a pick adds a chip that
  * is sent as its `<@kind:id>` token.
+ *
+ * `onCommand` sees every body first (Agent-Thread slash commands, FR-049):
+ * it can take the body (`handled`, nothing is posted), refuse it with a hint
+ * (the text stays, nothing is sent; FR-050) or let it post as usual.
  */
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BotIcon, XIcon } from "lucide-react";
+import { BotIcon, CircleAlertIcon, XIcon } from "lucide-react";
 
 import {
   ChatComposer,
@@ -56,7 +68,14 @@ export interface ChatComposerCardProps {
   onSend?: (body: string) => boolean;
   /** Offer `@` mentions from the channel members. Off where there is no channel. */
   mentions?: boolean;
+  /** Sees the body before it is posted; see the file comment. */
+  onCommand?: (body: string) => ComposerCommandResult;
+  /** Rendered between the hint line and the composer card (agent toolbar). */
+  toolbar?: ReactNode;
 }
+
+/** `pass`: post as a message. `handled`: done, clear. `{ hint }`: refuse, keep the text. */
+export type ComposerCommandResult = "pass" | "handled" | { hint: string };
 
 const EMPTY_DIRECTORY = new Map<string, DirectoryEntry>();
 
@@ -70,6 +89,8 @@ export function ChatComposerCard({
   className,
   onSend,
   mentions = true,
+  onCommand,
+  toolbar,
 }: ChatComposerCardProps) {
   const queryClient = useQueryClient();
   const isMobileViewport = useIsMobileViewport();
@@ -81,6 +102,8 @@ export function ChatComposerCard({
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [dismissedStart, setDismissedStart] = useState<number | null>(null);
   const [highlight, setHighlight] = useState(0);
+  const [commandHint, setCommandHint] = useState<string | null>(null);
+  const hintId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingCaretRef = useRef<number | null>(null);
   const columnRef = useRef<HTMLDivElement>(null);
@@ -169,17 +192,34 @@ export function ChatComposerCard({
     setTrigger(null);
   };
 
-  const submit = () => {
-    const body = serializeMentions(text, chips);
-    const sent = onSend
-      ? onSend(body)
-      : sendChatMessage(queryClient, { channelId, threadRootId, authorId: me, body });
-    if (!sent) return;
+  const clear = () => {
     setText("");
     setChips([]);
     setTrigger(null);
     setDismissedStart(null);
     textareaRef.current?.focus();
+  };
+
+  const submit = () => {
+    const body = serializeMentions(text, chips);
+    if (body.trim() === "") return;
+    const command = onCommand ? onCommand(body) : "pass";
+    if (command === "handled") {
+      setCommandHint(null);
+      clear();
+      return;
+    }
+    if (command !== "pass") {
+      setCommandHint(command.hint);
+      textareaRef.current?.focus();
+      return;
+    }
+    setCommandHint(null);
+    const sent = onSend
+      ? onSend(body)
+      : sendChatMessage(queryClient, { channelId, threadRootId, authorId: me, body });
+    if (!sent) return;
+    clear();
   };
 
   const removeChip = (chip: MentionChip) => {
@@ -196,6 +236,25 @@ export function ChatComposerCard({
         className,
       )}
     >
+      {toolbar}
+      {onCommand ? (
+        <p
+          id={hintId}
+          role="status"
+          data-testid={CHAT_TEST_IDS.composerCommandHint}
+          className={cn(
+            "flex min-w-0 items-start gap-1 pb-1 text-xs break-words text-muted-foreground",
+            commandHint === null && "sr-only",
+          )}
+        >
+          {commandHint !== null ? (
+            <>
+              <CircleAlertIcon className="mt-px size-4 shrink-0" aria-hidden="true" />
+              <span className="min-w-0">{commandHint}</span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       <div ref={columnRef} className="relative">
         {open ? (
           <MentionList
@@ -216,6 +275,7 @@ export function ChatComposerCard({
             rows: 1,
             placeholder,
             "aria-label": label,
+            "aria-describedby": commandHint !== null ? hintId : undefined,
             "aria-autocomplete": "list",
             "aria-controls": open ? listId : undefined,
             "aria-activedescendant": open && matches.length > 0 ? optionId(active) : undefined,
@@ -223,6 +283,7 @@ export function ChatComposerCard({
             onChange: (event) => {
               const value = event.target.value;
               setText(value);
+              if (commandHint !== null) setCommandHint(null);
               setChips((current) => presentChips(value, current));
               updateTrigger(value, event.target.selectionStart ?? value.length);
             },

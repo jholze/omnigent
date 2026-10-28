@@ -6,16 +6,24 @@
  * and brings its own back control. Escape closes the pane.
  *
  * An Agent-Thread adds the status chip to the header and the live agent
- * output below the stored replies (T-008).
+ * output below the stored replies (T-008), plus the agent toolbar and slash
+ * commands above the composer and the reply forward labels (T-114).
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { m } from "motion/react";
 import { ChevronLeftIcon, XIcon } from "lucide-react";
 
 import { Link, useNavigate } from "@/lib/routing";
 import { cn } from "@/lib/utils";
-import { fetchThreadMessages, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
+import {
+  fetchThreadMessages,
+  forwardChatMessage,
+  teamChatQueryKeys,
+  type DirectoryEntry,
+} from "./chatApi";
+import { AgentControls } from "./agent/AgentControls";
+import { parseAgentCommand, useAgentControls } from "./agent/useAgentControls";
 import { AgentThreadStatus } from "./agent/AgentStatusChip";
 import { AgentThreadView, OpenAgentSessionLink } from "./agent/AgentThreadView";
 import {
@@ -23,7 +31,7 @@ import {
   useSeedAgentThreads,
   useWatchAgentSessions,
 } from "./agent/agentThreadStore";
-import { ChatComposerCard } from "./ChatComposerCard";
+import { ChatComposerCard, type ComposerCommandResult } from "./ChatComposerCard";
 import { messageQueryOptions, shareMessagePage } from "./messagePage";
 import { MessagesError, MessagesSkeleton, messageViewOf, withOutbox } from "./ChannelView";
 import { retryChatMessage, useChatOutbox } from "./chatOutbox";
@@ -96,6 +104,26 @@ function agentStarterLabel(
   return principalLabel(starter.authorId, directory);
 }
 
+/**
+ * Forward retries (FR-054, AC-054a): at most one request per reply in flight,
+ * and the answer overrides the stored state until the page reloads it.
+ */
+function useForwardRetry() {
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const inFlight = useRef(new Set<string>());
+  const retry = useCallback((messageId: string) => {
+    if (inFlight.current.has(messageId)) return;
+    inFlight.current.add(messageId);
+    setOverrides((current) => ({ ...current, [messageId]: "forwarding" }));
+    forwardChatMessage(messageId)
+      .then((state) => setOverrides((current) => ({ ...current, [messageId]: state })))
+      // Not delivered again (runner still offline, 409): offer the retry once more.
+      .catch(() => setOverrides((current) => ({ ...current, [messageId]: "failed" })))
+      .finally(() => inFlight.current.delete(messageId));
+  }, []);
+  return { overrides, retry };
+}
+
 export function ThreadPane({
   channelId,
   threadRootId,
@@ -162,10 +190,16 @@ export function ThreadPane({
     void queryClient.invalidateQueries({ queryKey: threadKey });
   }, [liveIds, replies.data, queryClient, threadKey]);
 
-  const views = useMemo(
-    () => withOutbox(replies.data?.items ?? [], outbox, channelId, threadRootId),
-    [replies.data, outbox, channelId, threadRootId],
-  );
+  const forward = useForwardRetry();
+  const views = useMemo(() => {
+    const merged = withOutbox(replies.data?.items ?? [], outbox, channelId, threadRootId);
+    if (Object.keys(forward.overrides).length === 0) return merged;
+    return merged.map((view) =>
+      view.id !== null && forward.overrides[view.id] !== undefined
+        ? { ...view, forwardState: forward.overrides[view.id] }
+        : view,
+    );
+  }, [replies.data, outbox, channelId, threadRootId, forward.overrides]);
   const sentCount = views.filter((view) => view.status === "sent").length;
   const onRetry = (clientId: string) => retryChatMessage(queryClient, clientId);
   const paneMotion = usePaneOpenMotion();
@@ -185,8 +219,21 @@ export function ThreadPane({
     () => agentStarterLabel([...(root ? [messageViewOf(root)] : []), ...views], directory),
     [root, views, directory],
   );
+  const controls = useAgentControls({
+    sessionId: agentSessionId,
+    rootId: threadRootId,
+    directory,
+    ownerFallback: ownerLabel,
+  });
+  const onCommand = (body: string): ComposerCommandResult => {
+    const command = parseAgentCommand(body);
+    if (command === null) return "pass";
+    const result = controls.request(command);
+    return result.kind === "blocked" ? { hint: result.hint } : "handled";
+  };
   const agentFooter = agentSessionId ? (
     <AgentThreadView
+      controls={controls}
       key={agentSessionId}
       sessionId={agentSessionId}
       me={me}
@@ -248,6 +295,7 @@ export function ThreadPane({
         header={header}
         footer={agentFooter}
         onRetry={onRetry}
+        onForward={forward.retry}
       />
     );
   }
@@ -309,6 +357,8 @@ export function ThreadPane({
         placeholder="Im Thread antworten…"
         label={`Antwort im Thread in ${channelLabel}`}
         directory={directory}
+        onCommand={agentSessionId ? onCommand : undefined}
+        toolbar={agentSessionId ? <AgentControls controller={controls} /> : null}
       />
     </m.section>
   );

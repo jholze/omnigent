@@ -4936,7 +4936,7 @@
         "type": "object"
       },
       "MessageResponse": {
-        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.\n\n`session_id` follows the same rule: present only on thread-root\nmessages whose thread has an agent session, omitted otherwise. It\nis the value `thread.updated` already sends to every channel\nmember, so a reloaded client can mount the live view.",
+        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.\n\n`session_id` follows the same rule: present only on thread-root\nmessages whose thread has an agent session, omitted otherwise. It\nis the value `thread.updated` already sends to every channel\nmember, so a reloaded client can mount the live view.\n\n`forward_state` mirrors `chat_messages.forward_state`\n(`not_forwarded`/`failed`/`forwarding`/`forwarded`) and is\npresent only when the stored value is not `NULL`, i.e. on agent\nthread replies whose forward has been attempted. Omitted otherwise.",
         "properties": {
           "agent_state": {
             "anyOf": [
@@ -4980,6 +4980,17 @@
             "format": "int64",
             "title": "Created At",
             "type": "integer"
+          },
+          "forward_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forward State"
           },
           "id": {
             "title": "Id",

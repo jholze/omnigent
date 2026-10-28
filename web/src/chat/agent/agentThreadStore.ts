@@ -47,6 +47,8 @@ interface AgentThreadStoreState {
   /** Session ids on screen, per view key (`channel:<id>`, `thread:<root>`). */
   watchers: Record<string, string[]>;
   applyThreadFrame: (frame: ChatThreadFrame) => void;
+  /** Our own write answered with the thread's new state (e.g. `/dismiss`, FR-042). */
+  setAgentState: (rootId: string, agentState: string) => void;
   seedFromMessages: (messages: readonly ChatMessage[]) => void;
   /** Active agent threads from `GET .../agent-threads`, including off-page roots. */
   seedFromChannelThreads: (channelId: string, threads: readonly ChannelAgentThread[]) => void;
@@ -163,6 +165,11 @@ export const useAgentThreadStore = create<AgentThreadStoreState>((set, get) => (
       return;
     }
     set({ threads: { ...get().threads, [next.rootId]: next } });
+  },
+  setAgentState: (rootId, agentState) => {
+    const current = get().threads[rootId];
+    if (current === undefined || current.agentState === agentState) return;
+    set({ threads: { ...get().threads, [rootId]: { ...current, agentState } } });
   },
   seedFromMessages: (messages) => {
     const threads = get().threads;

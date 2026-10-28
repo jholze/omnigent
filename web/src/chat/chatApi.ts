@@ -153,6 +153,12 @@ export interface ChatMessage {
    * Read-only.
    */
   session_id?: string | null;
+  /**
+   * `chat_messages.forward_state` of a reply in an Agent-Thread
+   * (`not_forwarded` / `failed` / `forwarding` / `forwarded`), when the
+   * server sends it. Absent on other messages. Read-only (FR-041, FR-054).
+   */
+  forward_state?: string | null;
 }
 
 export interface MessagePageResponse {
@@ -215,7 +221,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof value.body === "string" &&
     (value.client_id === null || typeof value.client_id === "string") &&
     (value.agent_state == null || typeof value.agent_state === "string") &&
-    (value.session_id == null || typeof value.session_id === "string")
+    (value.session_id == null || typeof value.session_id === "string") &&
+    (value.forward_state == null || typeof value.forward_state === "string")
   );
 }
 
@@ -440,6 +447,45 @@ export async function postMessage(
     },
   );
   return readJson(response, "Invalid chat message response", isChatMessage);
+}
+
+/** `POST /v1/chat/threads/{root}/dismiss` (FR-042): the thread's new agent state. */
+export interface DismissResult {
+  root_message_id: string;
+  agent_state: string;
+  session_id?: string | null;
+}
+
+function isDismissResult(value: unknown): value is DismissResult {
+  return (
+    isRecord(value) &&
+    typeof value.root_message_id === "string" &&
+    typeof value.agent_state === "string"
+  );
+}
+
+/** Stop forwarding thread replies to the agent; the session keeps running. */
+export async function dismissAgentThread(rootMessageId: string): Promise<DismissResult> {
+  const response = await authenticatedFetch(
+    `/v1/chat/threads/${encodeURIComponent(rootMessageId)}/dismiss`,
+    { method: "POST" },
+  );
+  return readJson(response, "Invalid dismiss response", isDismissResult);
+}
+
+/** `POST /v1/chat/messages/{id}/forward` (FR-054): the reply's stored forward state. */
+export async function forwardChatMessage(messageId: string): Promise<string> {
+  const response = await authenticatedFetch(
+    `/v1/chat/messages/${encodeURIComponent(messageId)}/forward`,
+    { method: "POST" },
+  );
+  const result = await readJson(
+    response,
+    "Invalid forward response",
+    (value: unknown): value is { forward_state: string } =>
+      isRecord(value) && typeof value.forward_state === "string",
+  );
+  return result.forward_state;
 }
 
 /** Channel read cursor: one stored top-level message. */

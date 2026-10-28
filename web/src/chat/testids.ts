@@ -44,6 +44,23 @@ export const CHAT_TEST_IDS = {
   agentThreadGlyph: "sidebar-agent-thread-glyph",
   threadOpenSession: "chat-thread-open-session",
   newMessages: "chat-new-messages",
+  agentControls: "chat-agent-controls",
+  agentControlInterrupt: "chat-agent-control-interrupt",
+  agentControlRetry: "chat-agent-control-retry",
+  agentControlStop: "chat-agent-control-stop",
+  agentControlDismiss: "chat-agent-control-dismiss",
+  agentControlTooltip: "chat-agent-control-tooltip",
+  agentControlHint: "chat-agent-control-hint",
+  agentStopConfirm: "chat-agent-stop-confirm",
+  agentStopConfirmButton: "chat-agent-stop-confirm-button",
+  composerCommandHint: "chat-composer-command-hint",
+  runStuckBanner: "chat-run-stuck-banner",
+  runStuckInterrupt: "chat-run-stuck-interrupt",
+  runStuckOpenSession: "chat-run-stuck-open-session",
+  forwardNotForwarded: "chat-forward-not-forwarded",
+  forwardFailed: "chat-forward-failed",
+  forwardForwarding: "chat-forward-forwarding",
+  forwardRetry: "chat-forward-retry",
 } as const;
 
 export type ChatTestId = (typeof CHAT_TEST_IDS)[keyof typeof CHAT_TEST_IDS];
