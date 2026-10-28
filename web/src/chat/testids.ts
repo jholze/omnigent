@@ -43,6 +43,7 @@ export const CHAT_TEST_IDS = {
   sessionColumnError: "chat-session-column-error",
   agentThreadGlyph: "sidebar-agent-thread-glyph",
   threadOpenSession: "chat-thread-open-session",
+  newMessages: "chat-new-messages",
 } as const;
 
 export type ChatTestId = (typeof CHAT_TEST_IDS)[keyof typeof CHAT_TEST_IDS];
