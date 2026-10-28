@@ -199,16 +199,27 @@ afterEach(() => {
 });
 
 describe("AgentThreadView live output", () => {
-  it("AC-045a a READ viewer sees the streamed text grow without a reload", () => {
+  it("AC-045a a READ viewer sees the streamed text grow without a reload", async () => {
     withAccess(1);
     const entry = seedEntry([userInput], "running");
     renderView({ me: "jens" });
     expect(ensureMock).toHaveBeenCalledWith(SESSION);
     const parts = ["Tests ", "sind ", "gr", "ü", "n"];
     const blocks: AnyBlock[] = [userInput];
-    for (const [index, part] of parts.entries()) {
-      blocks.push(chunk(part));
+    // One chunk per step; each must paint before the next arrives.
+    const streamFrom = async (index: number): Promise<void> => {
+      if (index >= parts.length) return;
+      blocks.push(chunk(parts[index]));
       act(() => entry.setState({ blocks: [...blocks] }));
+      // Live text paints on the next animation frame (FR-080).
+      await act(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => {
+              resolve();
+            });
+          }),
+      );
       const live = screen.getByTestId("agent-thread-live");
       expect(live.textContent).toContain(
         parts
@@ -216,7 +227,9 @@ describe("AgentThreadView live output", () => {
           .join("")
           .trim(),
       );
-    }
+      await streamFrom(index + 1);
+    };
+    await streamFrom(0);
     expect(screen.getByTestId("agent-thread-live").textContent).toContain("Tests sind grün");
   });
 

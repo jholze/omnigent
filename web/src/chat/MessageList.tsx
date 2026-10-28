@@ -2,7 +2,9 @@
  * Scrollable message list for a channel or a thread.
  *
  * Stays anchored at the bottom only while the reader is at the bottom, or
- * when the reader sends (FR-080, R0: anchor without smoothing). New messages
+ * when the reader sends (FR-080). When streamed agent output grows while the
+ * reader has scrolled up, the position stays put and a "Neue Nachrichten"
+ * pill offers the jump (AC-080a). New messages
  * from others are announced politely, at most once per 2 s (NFR-009).
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -10,6 +12,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { cn } from "@/lib/utils";
 import type { DirectoryEntry } from "./chatApi";
 import { MessageItem, principalLabel, type MessageView } from "./MessageItem";
+import { NewMessagesPill } from "./agent/NewMessagesPill";
 import { CHAT_TEST_IDS } from "./testids";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -148,7 +151,9 @@ export function MessageList({
 }: MessageListProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
+  const [pill, setPill] = useState(false);
   const announcement = useNewMessageAnnouncement(messages, me, directory);
   const enterKeys = useEnterKeys(messages, me);
   const last = messages.at(-1);
@@ -165,54 +170,73 @@ export function MessageList({
   }, [lastKey, messages.length, ownSend]);
 
   // Streamed agent output grows the footer without adding a row. Follow it
-  // only while the reader is at the bottom (FR-080); no smoothing.
+  // only while the reader is at the bottom (FR-080, AC-080b); otherwise keep
+  // the position and offer the pill (AC-080a).
   useEffect(() => {
     const scroller = scrollerRef.current;
     const content = contentRef.current;
+    const footerBox = footerRef.current;
     if (scroller === null || content === null || typeof ResizeObserver === "undefined") return;
+    let footerHeight = footerBox?.offsetHeight ?? 0;
     const observer = new ResizeObserver(() => {
+      const grown = footerBox !== null && footerBox.offsetHeight > footerHeight;
+      if (footerBox !== null) footerHeight = footerBox.offsetHeight;
       if (atBottomRef.current) scroller.scrollTop = scroller.scrollHeight;
+      else if (grown) setPill(true);
     });
     observer.observe(content);
+    if (footerBox !== null) observer.observe(footerBox);
     return () => observer.disconnect();
   }, []);
 
+  const jumpToBottom = () => {
+    const scroller = scrollerRef.current;
+    if (scroller !== null) scroller.scrollTop = scroller.scrollHeight;
+    atBottomRef.current = true;
+    setPill(false);
+  };
+
   return (
-    <div
-      ref={scrollerRef}
-      data-testid={CHAT_TEST_IDS.messageList}
-      className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain"
-      onScroll={(event) => {
-        const el = event.currentTarget;
-        atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLACK_PX;
-      }}
-    >
-      <div ref={contentRef} className={cn(messages.length === 0 && !footer && "h-full")}>
-        {header}
-        {messages.length === 0 ? (
-          empty
-        ) : (
-          <ol aria-label={label} className={cn("flex flex-col", footer ? "pb-1" : "pb-3")}>
-            {messages.map((message, index) => (
-              <MessageItem
-                key={message.key}
-                message={message}
-                directory={directory}
-                compact={isCompact(messages[index - 1], message)}
-                threadHref={threadHrefFor?.(message)}
-                replyCount={message.id ? (replyCounts?.get(message.id) ?? 0) : 0}
-                onRetry={onRetry}
-                threadAccessory={renderThreadAccessory?.(message)}
-                enter={enterKeys.has(message.key)}
-              />
-            ))}
-          </ol>
-        )}
-        {footer}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollerRef}
+        data-testid={CHAT_TEST_IDS.messageList}
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain"
+        onScroll={(event) => {
+          const el = event.currentTarget;
+          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLACK_PX;
+          atBottomRef.current = atBottom;
+          if (atBottom) setPill(false);
+        }}
+      >
+        <div ref={contentRef} className={cn(messages.length === 0 && !footer && "h-full")}>
+          {header}
+          {messages.length === 0 ? (
+            empty
+          ) : (
+            <ol aria-label={label} className={cn("flex flex-col", footer ? "pb-1" : "pb-3")}>
+              {messages.map((message, index) => (
+                <MessageItem
+                  key={message.key}
+                  message={message}
+                  directory={directory}
+                  compact={isCompact(messages[index - 1], message)}
+                  threadHref={threadHrefFor?.(message)}
+                  replyCount={message.id ? (replyCounts?.get(message.id) ?? 0) : 0}
+                  onRetry={onRetry}
+                  threadAccessory={renderThreadAccessory?.(message)}
+                  enter={enterKeys.has(message.key)}
+                />
+              ))}
+            </ol>
+          )}
+          <div ref={footerRef}>{footer}</div>
+        </div>
+        <div aria-live="polite" aria-atomic="true" className="sr-only">
+          {announcement}
+        </div>
       </div>
-      <div aria-live="polite" aria-atomic="true" className="sr-only">
-        {announcement}
-      </div>
+      {pill ? <NewMessagesPill onClick={jumpToBottom} /> : null}
     </div>
   );
 }

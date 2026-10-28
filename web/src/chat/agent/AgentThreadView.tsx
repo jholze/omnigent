@@ -47,6 +47,7 @@ import {
 } from "./agentApprovals";
 import { useStatusAfterConnect } from "./useStatusAfterConnect";
 import { CardMount } from "./CardMount";
+import { useSmoothedStream } from "./useSmoothedStream";
 import { CHAT_TEST_IDS } from "../testids";
 
 /** Author id of mirrored agent replies (`chat_agent_threads._AUTHOR_AGENT`). */
@@ -248,11 +249,7 @@ function LiveAgentOutput({
           {turn.items.map((item, index) => {
             const key = itemKey(item, index);
             if (item.kind === "text") {
-              return (
-                <div key={key} className="min-w-0 text-sm text-pretty">
-                  <MessageResponse>{item.text}</MessageResponse>
-                </div>
-              );
+              return <LiveText key={key} text={item.text} streaming={working} />;
             }
             if (item.kind === "reasoning") {
               return (
@@ -299,6 +296,16 @@ function LiveAgentOutput({
         </div>
       </section>
     </ConversationScopeContext.Provider>
+  );
+}
+
+/** Live agent text, painted at most once per frame while streaming (FR-080). */
+function LiveText({ text, streaming }: { text: string; streaming: boolean }) {
+  const shown = useSmoothedStream(text, streaming);
+  return (
+    <div className="min-w-0 text-sm text-pretty">
+      <MessageResponse>{shown}</MessageResponse>
+    </div>
   );
 }
 
