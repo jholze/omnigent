@@ -1,6 +1,28 @@
 import "@testing-library/jest-dom/vitest";
 import { vi } from "vitest";
 
+// Pin the default number-formatting locale so assertions like "1K" or
+// "1,200" don't depend on the host's LANG (e.g. de_DE renders "1.200").
+const TEST_LOCALE = "en-US";
+const NativeNumberFormat = Intl.NumberFormat;
+Intl.NumberFormat = new Proxy(NativeNumberFormat, {
+  construct(target, [locales, options]) {
+    return new target(locales ?? TEST_LOCALE, options);
+  },
+  apply(target, _thisArg, [locales, options]) {
+    return target(locales ?? TEST_LOCALE, options);
+  },
+});
+const nativeNumberToLocaleString = Number.prototype.toLocaleString;
+// oxlint-disable-next-line no-extend-native -- test-only locale pin; wraps the native method
+Number.prototype.toLocaleString = function toLocaleStringWithTestLocale(
+  this: number,
+  locales?: Intl.LocalesArgument,
+  options?: Intl.NumberFormatOptions,
+) {
+  return nativeNumberToLocaleString.call(this, locales ?? TEST_LOCALE, options);
+};
+
 // The @lobehub icon packages have broken nested-module resolution
 // under vitest; stub presentational glyphs so component modules that
 // import them can still load in tests. (The Antigravity glyph additionally
