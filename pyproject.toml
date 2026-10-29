@@ -359,6 +359,8 @@ test = [
     # uses (see tests/e2e_ui/visual/ and .github/workflows/ui-snapshot.yml).
     # Requires pytest-playwright>=0.7 (hence the floor bump above).
     "pytest-playwright-visual-snapshot>=0.5.1",
+    # axe-core accessibility scans for the team chat browser suite (NFR-009).
+    "axe-playwright-python>=0.1.8",
     # Hash-partition the test suite across N shards for the nightly
     # matrix. Pinned to a known-stable older release. Used by e2e.yml;
     # the e2e-ui suite uses its own round-robin `--splits`/`--group`

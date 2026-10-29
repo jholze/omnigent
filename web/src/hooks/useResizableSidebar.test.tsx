@@ -72,6 +72,22 @@ describe("useResizableSidebar", () => {
     expect(readPanelSizePreference("sidebarWidthPx")).toBe(320);
   });
 
+  it("exposes separator aria values that track the live width", () => {
+    const { result } = renderHook(() => useResizableSidebar());
+    expect(result.current.handleProps).toMatchObject({
+      role: "separator",
+      "aria-valuemin": 220,
+      "aria-valuemax": 1000, // 2000px viewport * 0.5
+      "aria-valuenow": 320,
+    });
+
+    nudge(result, "ArrowRight");
+    expect(result.current.handleProps["aria-valuenow"]).toBe(340);
+
+    dragTo(result, 600);
+    expect(result.current.handleProps["aria-valuenow"]).toBe(600);
+  });
+
   it("clamps between 220px and half the viewport", () => {
     const { result } = renderHook(() => useResizableSidebar());
 

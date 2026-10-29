@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import quote
 
@@ -25,9 +25,12 @@ from tests.e2e_ui.team_chat.conftest import (
     fetch_bootstrap,
     join_channel,
     list_messages,
+    revoke_agent_account,
+    seed_agent_account,
     seed_channel,
     seed_message,
 )
+from tests.e2e_ui.team_chat.test_viewports import _assert_no_horizontal_scroll
 
 DESKTOP = {"width": 1280, "height": 800}
 PHONE = {"width": 390, "height": 844}
@@ -270,3 +273,111 @@ def test_ac_026c_ac_026g_phone_tap_picks_and_send_posts_token(
     ).click()
     body = _stored_body(team_chat_server, mention_channel, marker, thread=thread)
     assert body == f"{marker} {JENS_TOKEN}"
+
+
+# Header-auth users have no display name: the owner label is the capitalised
+# email local part, so Jens Holze's bot reads "Grok (Jens)" on this server.
+_BOT_LABEL = "Grok (Jens)"
+
+# Time from the last typed key to the list showing exactly Jens and his bot.
+_ARM_FILTER_PROBE = """([optionTestId, ids]) => {
+  window.__mentionFilterMs = null;
+  const onKey = (event) => {
+    if (event.key !== "e") return;
+    const pressedAt = performance.now();
+    document.removeEventListener("keydown", onKey, { capture: true });
+    const check = () => {
+      const shown = [...document.querySelectorAll(`[data-testid="${optionTestId}"]`)]
+        .map((option) => option.getAttribute("data-mention-id"));
+      if (shown.length === ids.length && ids.every((id) => shown.includes(id))) {
+        window.__mentionFilterMs = performance.now() - pressedAt;
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  };
+  document.addEventListener("keydown", onKey, { capture: true });
+}"""
+
+
+@pytest.fixture
+def jens_bot(team_chat_server: TeamChatServer) -> Iterator[dict[str, Any]]:
+    """Jens's agent account "Grok"; its handle starts with "je". Revoked afterwards."""
+    fetch_bootstrap(team_chat_server, as_user=JENS)
+    account = seed_agent_account(
+        team_chat_server,
+        as_user=JENS,
+        display_name="Grok",
+        handle=f"jens-grok-{uuid.uuid4().hex[:6]}",
+    )
+    yield account
+    revoke_agent_account(team_chat_server, as_user=JENS, account_id=account["id"])
+
+
+def _general_path(server: TeamChatServer) -> str:
+    channels = fetch_bootstrap(server, as_user=ANNA)["channels"]
+    general = next(channel for channel in channels if channel["name"] == "general")
+    return f"/chat/{quote(general['id'], safe='')}"
+
+
+def _option(page: Page, principal_id: str) -> Locator:
+    return page.locator(
+        f'[data-testid="{CHAT_TEST_IDS["mentionOption"]}"][data-mention-id="{principal_id}"]'
+    )
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["1280x800", "390x844"])
+def test_ac_026a_at_je_lists_jens_and_bot_and_enter_inserts_highlighted_chip(
+    team_chat_server: TeamChatServer,
+    page_as: Callable[..., Page],
+    jens_bot: dict[str, Any],
+    viewport: dict[str, int],
+) -> None:
+    """#general: "@je" shows Jens and "Grok (Jens)" with "Bot" in 100 ms; the pick is a chip.
+
+    Desktop picks the highlighted row with Enter; the phone taps it.
+    """
+    bot_id = jens_bot["principal_id"]
+    page = page_as(ANNA, viewport=viewport)
+    composer_input = _open_composer(
+        page, team_chat_server, _general_path(team_chat_server), thread=False
+    )
+    posts = _record_posts(page)
+
+    page.evaluate(_ARM_FILTER_PROBE, [CHAT_TEST_IDS["mentionOption"], [JENS, bot_id]])
+    composer_input.press_sequentially("@je")
+    options = page.get_by_test_id(CHAT_TEST_IDS["mentionOption"])
+    expect(options).to_have_count(2)
+    page.wait_for_function("() => window.__mentionFilterMs !== null")
+    elapsed = page.evaluate("() => window.__mentionFilterMs")
+    assert isinstance(elapsed, (int, float)), "the @je list never settled on Jens and his bot"
+    assert elapsed <= _LIST_BUDGET_MS, f"@je list took {elapsed:.1f} ms"
+
+    jens, bot = _option(page, JENS), _option(page, bot_id)
+    expect(jens).to_contain_text(JENS)
+    expect(jens.get_by_text("Bot", exact=True)).to_have_count(0)
+    expect(bot).to_have_attribute("data-mention-kind", "agent_account")
+    expect(bot).to_contain_text(_BOT_LABEL)
+    expect(bot.get_by_text("Bot", exact=True)).to_be_visible()
+    if viewport == PHONE:
+        _assert_row_heights(options)
+        _assert_inside_viewport(page, page.get_by_test_id(CHAT_TEST_IDS["mentionList"]))
+    _assert_no_horizontal_scroll(page)
+
+    highlighted = page.locator(
+        f'[data-testid="{CHAT_TEST_IDS["mentionOption"]}"][aria-selected="true"]'
+    )
+    expect(highlighted).to_have_count(1)
+    token = (
+        f"<@{highlighted.get_attribute('data-mention-kind')}:"
+        f"{highlighted.get_attribute('data-mention-id')}>"
+    )
+    if viewport == PHONE:
+        # Phones pick by tap; Enter there is a newline (see the phone AC-026c test).
+        highlighted.click()
+    else:
+        composer_input.press("Enter")
+    expect(page.get_by_test_id(CHAT_TEST_IDS["mentionList"])).to_have_count(0)
+    assert _chip_tokens(page) == [token]
+    assert posts == [], "picking from the open list must not send"
