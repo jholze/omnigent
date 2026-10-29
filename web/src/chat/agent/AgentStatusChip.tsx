@@ -17,6 +17,10 @@
  * `chipCrossfade` (200 ms; reduced motion 120 ms opacity). The first value
  * is static. Tone colours transition via `colorTransitionStyle` (listed
  * properties, never `all`).
+ *
+ * T-115: the `LoaderCircle` of startet…/arbeitet/arbeitet im Hintergrund
+ * turns like the active agent step (`spinSeconds`, linear) and stays still
+ * under reduced motion, so chip and step list share one motion language.
  */
 import { useState } from "react";
 import { m } from "motion/react";
@@ -32,7 +36,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { chipCrossfade, colorTransitionStyle } from "../motion";
+import { chipCrossfade, colorTransitionStyle, spinSeconds } from "../motion";
 import { useChatReducedMotion } from "../MotionRoot";
 import { CHAT_TEST_IDS } from "../testids";
 import { AGENT_CHIP_LABELS, type AgentChipKind, type AgentChipState } from "./agentStatus";
@@ -63,6 +67,9 @@ const TONES: Record<AgentChipKind, string> = {
   active: "border-border text-muted-foreground",
   closed: "border-border text-muted-foreground",
 };
+
+/** Kinds whose LoaderCircle spins (an agent at work). */
+const SPINNING: ReadonlySet<AgentChipKind> = new Set(["launching", "running", "background"]);
 
 const pendingFormat = new Intl.PluralRules("de-DE");
 
@@ -95,6 +102,7 @@ export function AgentStatusChip({ state, className }: AgentStatusChipProps) {
     setChanged(true);
   }
   const preset = chipCrossfade(reduced);
+  const spinning = !reduced && SPINNING.has(state.kind);
   const labelMotion = changed
     ? {
         initial: preset.initial,
@@ -117,7 +125,12 @@ export function AgentStatusChip({ state, className }: AgentStatusChipProps) {
         className,
       )}
     >
-      <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+      <Icon
+        className={cn("size-3.5 shrink-0", spinning && "animate-spin")}
+        style={spinning ? { animationDuration: `${spinSeconds}s` } : undefined}
+        data-spinning={spinning || undefined}
+        aria-hidden="true"
+      />
       <span className="inline-grid min-w-0 grid-cols-1 overflow-hidden text-left">
         {/* Sizer text mirrors AGENT_CHIP_WIDEST_LABEL (Tailwind needs a literal). */}
         <span

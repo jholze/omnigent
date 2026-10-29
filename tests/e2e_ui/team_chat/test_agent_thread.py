@@ -111,6 +111,10 @@ class ParkedApproval:
     elicitation_id: str
     verdict: dict[str, Any] = field(default_factory=dict)
     thread: threading.Thread | None = None
+    tool_name: str = "Bash"
+    tool_input: dict[str, Any] = field(
+        default_factory=lambda: {"command": "alembic upgrade head", "description": _APPROVAL_TEXT}
+    )
 
 
 def _request(
@@ -281,8 +285,8 @@ def _park(server: TeamChatServer, approval: ParkedApproval) -> None:
         "transcript_path": "/tmp/transcript.jsonl",
         "cwd": "/tmp",
         "hook_event_name": "PermissionRequest",
-        "tool_name": "Bash",
-        "tool_input": {"command": "alembic upgrade head", "description": _APPROVAL_TEXT},
+        "tool_name": approval.tool_name,
+        "tool_input": approval.tool_input,
         "_omnigent_elicitation_id": approval.elicitation_id,
     }
     try:
@@ -300,9 +304,23 @@ def _park(server: TeamChatServer, approval: ParkedApproval) -> None:
 
 
 @contextlib.contextmanager
-def _parked_approval(server: TeamChatServer, session_id: str) -> Iterator[ParkedApproval]:
-    """Ask for approval of "Migration anwenden?" in *session_id* until the block ends."""
+def _parked_approval(
+    server: TeamChatServer,
+    session_id: str,
+    *,
+    tool_name: str | None = None,
+    tool_input: dict[str, Any] | None = None,
+) -> Iterator[ParkedApproval]:
+    """Ask for approval in *session_id* until the block ends.
+
+    Defaults to the Bash call "Migration anwenden?"; pass *tool_name* and
+    *tool_input* for another tool, e.g. ``ExitPlanMode`` with ``{"plan": ...}``.
+    """
     approval = ParkedApproval(session_id, f"elicit_claude_{secrets.token_hex(16)}")
+    if tool_name is not None:
+        approval.tool_name = tool_name
+    if tool_input is not None:
+        approval.tool_input = tool_input
     approval.thread = threading.Thread(target=_park, args=(server, approval), daemon=True)
     approval.thread.start()
     try:
