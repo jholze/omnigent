@@ -12,13 +12,20 @@
  *
  * Without a grant nothing is streamed: a hint names who can watch live, and
  * the stored (mirrored) replies above stay the record (AC-045b).
+ *
+ * T-115: the live turn opens with the collapsed agent steps of this session
+ * (`StepsGroup`, FR-048/089/090). A plan approval renders
+ * `ExitPlanModeReview` under the same EDIT rule as the approval cards
+ * (FR-059): READ viewers see the plan with its buttons disabled. A session
+ * with an attached pull request shows a read-only `PrCard` (FR-060).
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CircleAlertIcon, EyeOffIcon } from "lucide-react";
+import { CircleAlertIcon, EyeOffIcon, ListChecksIcon } from "lucide-react";
 
 import { MessageResponse } from "@/components/ai-elements/message";
 import { ElicitationCard, type SubmitApprovalFn } from "@/components/blocks/ApprovalCard";
+import { ExitPlanModeReview } from "@/components/blocks/ExitPlanModeReview";
 import { ReasoningView } from "@/components/blocks/ReasoningView";
 import {
   computeIsTurnActive,
@@ -29,11 +36,12 @@ import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { Button } from "@/components/ui/button";
 import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useSession } from "@/hooks/useSession";
+import { exitPlanModePlan } from "@/lib/askUserQuestion";
 import { buildBubbles, createBubbleCache, type Bubble, type RenderItem } from "@/lib/renderItems";
 import { ensureConversationStreamed, releaseConversation, useChatStore } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
 import type { DirectoryEntry } from "../chatApi";
-import { MessageAvatar, principalLabel } from "../MessageItem";
+import { isAgentKind, MessageAvatar, principalLabel, type MessageView } from "../MessageItem";
 import {
   CHAT_APPROVAL_LABELS,
   READ_ONLY_NOTE,
@@ -48,6 +56,8 @@ import { useSmoothedStream } from "./useSmoothedStream";
 import type { AgentControlsController } from "./useAgentControls";
 import { RunStuckBanner, useRunStuck } from "./RunStuckBanner";
 import { sessionAccessOf } from "./sessionAccess";
+import { PrCard } from "./PrCard";
+import { StepsGroup } from "./StepsGroup";
 
 export { OpenAgentSessionLink, sessionAccessOf, type SessionAccess } from "./sessionAccess";
 
@@ -108,12 +118,22 @@ function itemKey(item: ShownItem, index: number): string {
   return `${item.kind}:${item.itemId ?? index}`;
 }
 
+/**
+ * Stored replies that end a held live turn: the agent's own mirrored
+ * answers. System lines do not count. The failed-turn mirror
+ * ("Agent-Fehler: …") lands while the turn is still held, and the live
+ * view must stay so its error step stays on screen (FR-089).
+ */
+export function storedAgentReplyCount(views: readonly MessageView[]): number {
+  return views.filter((view) => view.status === "sent" && isAgentKind(view.authorKind)).length;
+}
+
 interface LiveAgentOutputProps {
   sessionId: string;
   canResolve: boolean;
   me: string;
   directory: Map<string, DirectoryEntry>;
-  /** Stored agent and system replies in this thread; a new one ends a held turn. */
+  /** Stored agent replies in this thread (`storedAgentReplyCount`); a new one ends a held turn. */
   agentReplyCount: number;
   /** Agent controls for the run-stuck banner (FR-053). */
   controls: AgentControlsController | null;
@@ -237,6 +257,7 @@ function LiveAgentOutput({
               {working ? "schreibt gerade" : "live"}
             </span>
           </div>
+          <StepsGroup bubbles={bubbles} todos={state.todos} working={working} />
           {turn.items.map((item, index) => {
             const key = itemKey(item, index);
             if (item.kind === "text") {
@@ -256,6 +277,32 @@ function LiveAgentOutput({
             let note: string | null = null;
             if (!canResolve || approvals.forbidden[id]) note = READ_ONLY_NOTE;
             else if (approvals.sending[id]) note = SENDING_NOTE;
+            const plan = exitPlanModePlan(item.exitPlanMode);
+            if (plan !== null) {
+              return (
+                <CardMount
+                  key={key}
+                  animate={
+                    initialCardIds !== null && !initialCardIds.has(id) && item.status === "pending"
+                  }
+                  className="flex min-w-0 flex-col gap-1 max-md:[&_button]:min-h-11"
+                >
+                  <PlanReview
+                    item={item}
+                    plan={plan}
+                    note={note}
+                    onSubmit={submit}
+                    resolvedBy={approvals.resolvers[id] ?? decidedByLabel(item, directory)}
+                  />
+                  {approvals.failed[id] && item.status === "pending" ? (
+                    <p role="alert" className="flex items-center gap-1 text-xs text-destructive">
+                      <CircleAlertIcon className="size-4 shrink-0" aria-hidden="true" />
+                      {SEND_FAILED_TEXT}
+                    </p>
+                  ) : null}
+                </CardMount>
+              );
+            }
             return (
               // Phone: the card's buttons reach the 44 px touch target (NFR-032).
               <CardMount
@@ -288,6 +335,67 @@ function LiveAgentOutput({
       </section>
       {stuckBanner}
     </ConversationScopeContext.Provider>
+  );
+}
+
+/**
+ * Plan approval (FR-059). Pending: the plan through `ExitPlanModeReview`;
+ * a READ viewer (or one the server refused) sees the same review with every
+ * control disabled plus the read-only note. Answered: the approval card's
+ * resolved state (verdict and who decided). Verdicts map exactly as in
+ * `ApprovalCard`: auto mode = accept + `allow_all_edits`, manual = accept,
+ * reject = decline with optional `feedback`.
+ */
+export function PlanReview({
+  item,
+  plan,
+  note,
+  onSubmit,
+  resolvedBy,
+}: {
+  item: ElicitationItem;
+  plan: string;
+  /** Read-only or sending note; any note disables the controls. */
+  note: string | null;
+  onSubmit: SubmitApprovalFn;
+  resolvedBy: string | null;
+}) {
+  const id = item.elicitationId;
+  if (item.status !== "pending") {
+    return (
+      <div data-testid="plan-review" data-state="resolved" className="min-w-0">
+        <ElicitationCard item={item} labels={CHAT_APPROVAL_LABELS} resolvedBy={resolvedBy} />
+      </div>
+    );
+  }
+  return (
+    <section
+      data-testid="plan-review"
+      data-state={note === null ? "pending" : "read-only"}
+      aria-label="Plan zur Freigabe"
+      className="flex min-w-0 flex-col gap-2 rounded-md border border-border px-3 py-2"
+    >
+      <h3 className="flex items-center gap-1.5 text-sm font-medium">
+        <ListChecksIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        Plan zur Freigabe
+      </h3>
+      <fieldset disabled={note !== null} className="min-w-0 disabled:opacity-100">
+        <ExitPlanModeReview
+          plan={plan}
+          onAcceptAuto={() => onSubmit(id, "accept", { allow_all_edits: true })}
+          onAccept={() => onSubmit(id, "accept")}
+          onReject={(feedback) => {
+            const trimmed = feedback.trim();
+            onSubmit(id, "decline", trimmed ? { feedback: trimmed } : undefined);
+          }}
+        />
+      </fieldset>
+      {note !== null ? (
+        <p data-testid="approval-card-read-only" className="text-xs text-muted-foreground">
+          {note}
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -377,13 +485,19 @@ export function AgentThreadView({
     return <LiveNotice tone="hint" text={`Live-Ansicht nur für ${who}`} />;
   }
   return (
-    <LiveAgentOutput
-      sessionId={sessionId}
-      canResolve={access === "edit"}
-      me={me}
-      directory={directory}
-      agentReplyCount={agentReplyCount}
-      controls={controls}
-    />
+    <>
+      <LiveAgentOutput
+        sessionId={sessionId}
+        canResolve={access === "edit"}
+        me={me}
+        directory={directory}
+        agentReplyCount={agentReplyCount}
+        controls={controls}
+      />
+      {/* Aligned with the message column: px-4 + avatar w-7 + gap-3. */}
+      <div className="min-w-0 pr-4 pb-3 pl-14 empty:hidden">
+        <PrCard sessionId={sessionId} workspace={session?.workspace} />
+      </div>
+    </>
   );
 }
