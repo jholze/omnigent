@@ -62,6 +62,35 @@ def publish_read_updated(
     )
 
 
+def publish_typing(
+    store: ChatStore,
+    channel: ChatChannel,
+    principal_id: str,
+    *,
+    active: bool,
+) -> None:
+    """Tell every other channel member that *principal_id* is typing (FR-032).
+
+    The frame carries only ``channel_id``, ``principal_id`` and ``active``:
+    no body, no draft text and no display name (NFR-014). The typing member
+    is not a recipient.
+    """
+    members = [
+        member.principal_id
+        for member in store.list_members(channel.id)
+        if member.principal_id != principal_id
+    ]
+    publish_chat(
+        members,
+        {
+            "kind": "typing",
+            "channel_id": channel.id,
+            "principal_id": principal_id,
+            "active": active,
+        },
+    )
+
+
 def publish_message_created(store: ChatStore, channel: ChatChannel, message: ChatMessage) -> None:
     """Announce a stored message to every member of its channel.
 

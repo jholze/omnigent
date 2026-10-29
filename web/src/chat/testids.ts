@@ -61,6 +61,7 @@ export const CHAT_TEST_IDS = {
   forwardFailed: "chat-forward-failed",
   forwardForwarding: "chat-forward-forwarding",
   forwardRetry: "chat-forward-retry",
+  typingIndicator: "chat-typing-indicator",
 } as const;
 
 export type ChatTestId = (typeof CHAT_TEST_IDS)[keyof typeof CHAT_TEST_IDS];

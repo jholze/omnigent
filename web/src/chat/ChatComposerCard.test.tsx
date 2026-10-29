@@ -4,13 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as ComposerSendShortcutPreferences from "@/lib/composerSendShortcutPreferences";
 
-import { ChatComposerCard } from "./ChatComposerCard";
+import type * as ChatApi from "./chatApi";
+import { ChatComposerCard, TYPING_SEND_INTERVAL_MS } from "./ChatComposerCard";
 import { teamChatQueryKeys, type ChannelMember, type DirectoryEntry } from "./chatApi";
 import { CHAT_TEST_IDS } from "./testids";
 
 const sendChatMessageMock = vi.hoisted(() => vi.fn(() => true));
 const isComposerSendKeySpy = vi.hoisted(() => ({ calls: [] as boolean[] }));
 const viewport = vi.hoisted(() => ({ mobile: false }));
+const postTypingMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./chatApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof ChatApi>()),
+  postTyping: (...args: unknown[]) => postTypingMock(...args),
+}));
 
 vi.mock("./chatOutbox", () => ({
   sendChatMessage: (...args: unknown[]) => sendChatMessageMock(...(args as [])),
@@ -53,9 +60,136 @@ beforeEach(() => {
   sendChatMessageMock.mockClear();
   isComposerSendKeySpy.calls = [];
   viewport.mobile = false;
+  postTypingMock.mockReset();
+  postTypingMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => cleanup());
+
+describe("ChatComposerCard typing signal", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-29T10:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("AC-032a the first keystroke sends active:true with the channel id only", () => {
+    const input = renderCard();
+    fireEvent.change(input, { target: { value: "D" } });
+
+    expect(postTypingMock.mock.calls).toEqual([["c-general", true]]);
+  });
+
+  it("AC-032a a second keystroke inside 3 s does not send again", () => {
+    const input = renderCard();
+    fireEvent.change(input, { target: { value: "D" } });
+    vi.setSystemTime(Date.now() + TYPING_SEND_INTERVAL_MS - 1);
+    fireEvent.change(input, { target: { value: "De" } });
+
+    expect(postTypingMock.mock.calls).toEqual([["c-general", true]]);
+  });
+
+  it("AC-032a a keystroke 3 s after the last signal sends active:true again", () => {
+    const input = renderCard();
+    fireEvent.change(input, { target: { value: "D" } });
+    vi.setSystemTime(Date.now() + TYPING_SEND_INTERVAL_MS);
+    fireEvent.change(input, { target: { value: "De" } });
+
+    expect(postTypingMock.mock.calls).toEqual([
+      ["c-general", true],
+      ["c-general", true],
+    ]);
+  });
+
+  it("AC-032a clearing the input sends active:false", () => {
+    const input = renderCard();
+    fireEvent.change(input, { target: { value: "D" } });
+    fireEvent.change(input, { target: { value: "" } });
+
+    expect(postTypingMock.mock.calls).toEqual([
+      ["c-general", true],
+      ["c-general", false],
+    ]);
+  });
+
+  it("AC-032a the draft text never reaches postTyping", () => {
+    const input = renderCard();
+    fireEvent.change(input, { target: { value: "geheimer Entwurf" } });
+
+    expect(JSON.stringify(postTypingMock.mock.calls)).not.toContain("geheimer");
+  });
+});
+
+describe("ChatComposerCard trailing typing signal", () => {
+  // Real timers are faked too, so the trailing setTimeout runs only on advance.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(new Date("2026-10-29T10:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function typeTwiceWithin100ms(): HTMLTextAreaElement {
+    const input = renderCard();
+    fireEvent.change(input, { target: { value: "D" } });
+    vi.advanceTimersByTime(100);
+    fireEvent.change(input, { target: { value: "De" } });
+    return input;
+  }
+
+  it("AC-032a an edit inside 3 s sends one trailing active:true when the window ends", () => {
+    typeTwiceWithin100ms();
+    vi.advanceTimersByTime(TYPING_SEND_INTERVAL_MS - 100 - 1);
+    expect(postTypingMock.mock.calls).toEqual([["c-general", true]]);
+
+    vi.advanceTimersByTime(1);
+    expect(postTypingMock.mock.calls).toEqual([
+      ["c-general", true],
+      ["c-general", true],
+    ]);
+
+    vi.advanceTimersByTime(TYPING_SEND_INTERVAL_MS * 3);
+    expect(postTypingMock.mock.calls).toHaveLength(2);
+  });
+
+  it("AC-032a blur before the trailing send sends false and no later true", () => {
+    const input = typeTwiceWithin100ms();
+    fireEvent.blur(input);
+    vi.advanceTimersByTime(TYPING_SEND_INTERVAL_MS * 2);
+
+    expect(postTypingMock.mock.calls).toEqual([
+      ["c-general", true],
+      ["c-general", false],
+    ]);
+  });
+
+  it("AC-032a clearing before the trailing send sends false and no later true", () => {
+    const input = typeTwiceWithin100ms();
+    fireEvent.change(input, { target: { value: "" } });
+    vi.advanceTimersByTime(TYPING_SEND_INTERVAL_MS * 2);
+
+    expect(postTypingMock.mock.calls).toEqual([
+      ["c-general", true],
+      ["c-general", false],
+    ]);
+  });
+
+  it("AC-032a unmount before the trailing send sends false and no later true", () => {
+    typeTwiceWithin100ms();
+    cleanup();
+    vi.advanceTimersByTime(TYPING_SEND_INTERVAL_MS * 2);
+
+    expect(postTypingMock.mock.calls).toEqual([
+      ["c-general", true],
+      ["c-general", false],
+    ]);
+  });
+});
 
 describe("ChatComposerCard send key", () => {
   it("NFR-011 Enter sends and Shift+Enter does not, decided by isComposerSendKey", () => {

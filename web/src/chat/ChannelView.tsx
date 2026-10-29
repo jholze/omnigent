@@ -39,6 +39,7 @@ import { toEpochMs, type MessageView } from "./MessageItem";
 import { MessageList } from "./MessageList";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
+import { TypingIndicator } from "./TypingIndicator";
 import { newestTopLevel, useReadCursor } from "./useReadCursor";
 
 export function messageViewOf(message: ChatMessage): MessageView {
@@ -374,6 +375,7 @@ export function ChannelView({ channelId, label, me, directory }: ChannelViewProp
     <div ref={viewRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <PendingAgentRequests roots={requestRoots} directory={directory} />
       {body}
+      <TypingIndicator channelId={channelId} me={me} directory={directory} />
       <ChatComposerCard
         channelId={channelId}
         me={me}
