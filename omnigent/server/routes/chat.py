@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from omnigent.db.utils import now_epoch_us
 from omnigent.debug_logging import add_audit_attrs
@@ -37,7 +38,11 @@ from omnigent.server.chat_agent_threads import (
     visible_agent_handles,
 )
 from omnigent.server.chat_rate_limit import consume_agent_request, consume_channel_post
-from omnigent.server.chat_realtime import publish_message_created, publish_read_updated
+from omnigent.server.chat_realtime import (
+    publish_message_created,
+    publish_read_updated,
+    publish_typing,
+)
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes.agent_accounts import register_agent_account_routes, resolve_caller
 from omnigent.stores.chat_store import (
@@ -61,6 +66,10 @@ _CHANGES_LIMIT = 1000
 _CHANNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _UNREAD_LIMIT = 50
+# FR-032: at most one ``typing`` frame per principal and channel in this window.
+_TYPING_THROTTLE_SECONDS = 3.0
+# Prune the in-process throttle map once it grows past this many entries.
+_TYPING_THROTTLE_PRUNE_AT = 1024
 _ACTIVE_WINDOW_US = 10 * 60 * 1_000_000
 
 _logger = logging.getLogger("omnigent.chat")
@@ -284,6 +293,15 @@ class NeedsYouResponse(BaseModel):
 
     mentions: list[NeedsYouMentionResponse]
     approvals: list[NeedsYouApprovalResponse]
+
+
+class TypingBody(BaseModel):
+    """``POST /v1/chat/channels/{id}/typing`` (FR-032).
+
+    Only the flag is accepted; draft text is never sent (NFR-014).
+    """
+
+    active: StrictBool
 
 
 class ReadBody(BaseModel):
@@ -1130,6 +1148,42 @@ def create_chat_router(
                 )
             )
         return NeedsYouResponse(mentions=mentions, approvals=approvals)
+
+    # (principal_id, channel_id) -> monotonic time of the last published
+    # active typing frame. In-process only; nothing is persisted (FR-032).
+    typing_sent_at: dict[tuple[str, str], float] = {}
+
+    def _typing_allowed(caller: str, channel_id: str) -> bool:
+        """Return whether an active typing frame may be published now."""
+        now = time.monotonic()
+        if len(typing_sent_at) > _TYPING_THROTTLE_PRUNE_AT:
+            for key, sent in list(typing_sent_at.items()):
+                if now - sent >= _TYPING_THROTTLE_SECONDS:
+                    del typing_sent_at[key]
+        key = (caller, channel_id)
+        last = typing_sent_at.get(key)
+        if last is not None and now - last < _TYPING_THROTTLE_SECONDS:
+            return False
+        typing_sent_at[key] = now
+        return True
+
+    @router.post("/chat/channels/{channel_id}/typing", status_code=204)
+    async def typing(request: Request, channel_id: str, body: TypingBody) -> Response:
+        """Announce that the caller is or stopped typing (FR-032).
+
+        Access matches reading the channel. Nothing is stored. An active
+        frame inside 3 s of the previous one for the same caller and
+        channel is dropped; ``active: false`` is always published.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
+        if channel is None:
+            raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_read, chat_store, channel, caller)
+        if body.active and not _typing_allowed(caller, channel.id):
+            return Response(status_code=204)
+        await asyncio.to_thread(publish_typing, chat_store, channel, caller, active=body.active)
+        return Response(status_code=204)
 
     @router.post("/chat/channels/{channel_id}/read")
     async def mark_read(request: Request, channel_id: str, body: ReadBody) -> JSONResponse:

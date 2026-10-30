@@ -13,6 +13,10 @@
  * `onCommand` sees every body first (Agent-Thread slash commands, FR-049):
  * it can take the body (`handled`, nothing is posted), refuse it with a hint
  * (the text stays, nothing is sent; FR-050) or let it post as usual.
+ *
+ * In a chat channel (no `onSend`), a non-empty draft announces typing at
+ * most once per 3 s; an empty draft, blur, or leaving the channel ends it at
+ * once (FR-032). Only the channel id and the flag are sent, never the draft.
  */
 import {
   useEffect,
@@ -36,7 +40,13 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { cn } from "@/lib/utils";
 import { AgentBotBadge } from "./BotBadge";
-import { fetchChannelMembers, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
+import {
+  ChatApiError,
+  fetchChannelMembers,
+  postTyping,
+  teamChatQueryKeys,
+  type DirectoryEntry,
+} from "./chatApi";
 import { sendChatMessage } from "./chatOutbox";
 import {
   filterMentionCandidates,
@@ -79,6 +89,101 @@ export type ComposerCommandResult = "pass" | "handled" | { hint: string };
 
 const EMPTY_DIRECTORY = new Map<string, DirectoryEntry>();
 
+/** FR-032: at most one `active: true` per 3 s from this composer. */
+export const TYPING_SEND_INTERVAL_MS = 3000;
+
+function sendTyping(channelId: string, active: boolean): void {
+  void postTyping(channelId, active).catch((error: unknown) => {
+    const status = error instanceof ChatApiError ? String(error.status) : "error";
+    console.warn(`[team-chat] typing signal failed (${status})`);
+  });
+}
+
+/**
+ * Typing signal for one channel. `draftChanged` is called on each edit,
+ * `stop` on blur. The draft never leaves this hook; only its emptiness is read.
+ *
+ * Throttle is leading + trailing: the first edit sends `active: true` at once;
+ * edits inside the 3 s window schedule one trailing `active: true` when the
+ * window ends, so the receiver's 4 s hide counts from (nearly) the last edit
+ * (AC-032a). Every `active: false` path cancels the pending trailing send.
+ */
+function useTypingSignal(channelId: string, enabled: boolean, draftEmpty: boolean) {
+  const lastActiveAtRef = useRef<number | null>(null);
+  const activeRef = useRef(false);
+  const trailingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelTrailing = () => {
+    if (trailingRef.current === null) return;
+    clearTimeout(trailingRef.current);
+    trailingRef.current = null;
+  };
+
+  const stop = () => {
+    cancelTrailing();
+    if (!activeRef.current) return;
+    activeRef.current = false;
+    sendTyping(channelId, false);
+  };
+
+  const draftChanged = (value: string) => {
+    if (!enabled) return;
+    if (value === "") {
+      stop();
+      return;
+    }
+    const now = Date.now();
+    const last = lastActiveAtRef.current;
+    if (last !== null && now - last < TYPING_SEND_INTERVAL_MS) {
+      activeRef.current = true;
+      if (trailingRef.current === null) {
+        trailingRef.current = setTimeout(
+          () => {
+            trailingRef.current = null;
+            if (!activeRef.current) return;
+            lastActiveAtRef.current = Date.now();
+            sendTyping(channelId, true);
+          },
+          last + TYPING_SEND_INTERVAL_MS - now,
+        );
+      }
+      return;
+    }
+    cancelTrailing();
+    lastActiveAtRef.current = now;
+    activeRef.current = true;
+    sendTyping(channelId, true);
+  };
+
+  // Sending or clearing empties the draft without an edit event.
+  useEffect(() => {
+    if (!draftEmpty) return;
+    if (trailingRef.current !== null) {
+      clearTimeout(trailingRef.current);
+      trailingRef.current = null;
+    }
+    if (!activeRef.current) return;
+    activeRef.current = false;
+    sendTyping(channelId, false);
+  }, [draftEmpty, channelId]);
+
+  // Leaving the channel (or unmounting) ends the signal for that channel.
+  useEffect(() => {
+    lastActiveAtRef.current = null;
+    return () => {
+      if (trailingRef.current !== null) {
+        clearTimeout(trailingRef.current);
+        trailingRef.current = null;
+      }
+      if (!activeRef.current) return;
+      activeRef.current = false;
+      sendTyping(channelId, false);
+    };
+  }, [channelId]);
+
+  return { draftChanged, stop };
+}
+
 export function ChatComposerCard({
   channelId,
   threadRootId = null,
@@ -109,6 +214,7 @@ export function ChatComposerCard({
   const columnRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const canSend = text.trim() !== "";
+  const typing = useTypingSignal(channelId, onSend === undefined, text === "");
 
   // Loaded once per channel on mount; the list filters it locally.
   const members = useQuery({
@@ -280,9 +386,11 @@ export function ChatComposerCard({
             "aria-controls": open ? listId : undefined,
             "aria-activedescendant": open && matches.length > 0 ? optionId(active) : undefined,
             "data-testid": CHAT_TEST_IDS.composerInput,
+            onBlur: typing.stop,
             onChange: (event) => {
               const value = event.target.value;
               setText(value);
+              typing.draftChanged(value);
               if (commandHint !== null) setCommandHint(null);
               setChips((current) => presentChips(value, current));
               updateTrigger(value, event.target.selectionStart ?? value.length);

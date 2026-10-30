@@ -44,6 +44,8 @@ _FRAME_KEYS = {
     "author_id",
 }
 
+_TYPING_FRAME_KEYS = {"type", "kind", "channel_id", "principal_id", "active"}
+
 
 def _headers(user: str) -> dict[str, str]:
     return {"X-Forwarded-Email": user}
@@ -319,3 +321,74 @@ def test_ac_014_local_single_user_header_socket_gets_bodyless_frame(
     assert frame["author_id"] == RESERVED_USER_LOCAL
     assert "body" not in frame
     assert sentinel["type"] == "hosts_changed"
+
+
+def _typing(client: TestClient, user: str, channel_id: str, body: dict[str, Any]) -> None:
+    resp = client.post(f"/v1/chat/channels/{channel_id}/typing", json=body, headers=_headers(user))
+    assert resp.status_code == 204, resp.text
+
+
+def test_ac_032a_typing_frame_reaches_other_member(chat_app: TestClient) -> None:
+    general_id = _general_id(chat_app, ANNA)
+    _bootstrap(chat_app, JENS)
+
+    with chat_app.websocket_connect("/v1/sessions/updates", headers=_headers(JENS)) as ws:
+        _wait_for_subscriber(JENS)
+        _typing(chat_app, ANNA, general_id, {"active": True})
+        frame = json.loads(_recv_raw(ws, {"chat"}))
+
+    assert frame == {
+        "type": "chat",
+        "kind": "typing",
+        "channel_id": general_id,
+        "principal_id": ANNA,
+        "active": True,
+    }
+
+
+def test_ac_032a_typing_frame_has_no_draft_body_or_name(chat_app: TestClient) -> None:
+    general_id = _general_id(chat_app, ANNA)
+    _bootstrap(chat_app, JENS)
+    marker = f"draft-{time.monotonic_ns()}"
+
+    with chat_app.websocket_connect("/v1/sessions/updates", headers=_headers(JENS)) as ws:
+        _wait_for_subscriber(JENS)
+        _typing(
+            chat_app,
+            ANNA,
+            general_id,
+            {"active": True, "draft": marker, "body": marker, "display_name": marker},
+        )
+        raw = _recv_raw(ws, {"chat"})
+
+    assert marker not in raw
+    assert set(json.loads(raw)) == _TYPING_FRAME_KEYS
+
+
+def test_ac_032a_typing_frame_not_sent_to_typist(chat_app: TestClient) -> None:
+    general_id = _general_id(chat_app, ANNA)
+    _bootstrap(chat_app, JENS)
+
+    with chat_app.websocket_connect("/v1/sessions/updates", headers=_headers(ANNA)) as ws:
+        _wait_for_subscriber(ANNA)
+        _typing(chat_app, ANNA, general_id, {"active": True})
+        _typing(chat_app, ANNA, general_id, {"active": False})
+        # Events reach one subscriber in publish order: the sentinel must come first.
+        user_session_stream.publish(ANNA, {"type": "hosts_changed"})
+        frame = json.loads(_recv_raw(ws, {"chat", "hosts_changed"}))
+
+    assert frame["type"] == "hosts_changed"
+
+
+def test_ac_032a_typing_stop_frame_reaches_other_member(chat_app: TestClient) -> None:
+    general_id = _general_id(chat_app, ANNA)
+    _bootstrap(chat_app, JENS)
+
+    with chat_app.websocket_connect("/v1/sessions/updates", headers=_headers(JENS)) as ws:
+        _wait_for_subscriber(JENS)
+        _typing(chat_app, ANNA, general_id, {"active": False})
+        frame = json.loads(_recv_raw(ws, {"chat"}))
+
+    assert frame["kind"] == "typing"
+    assert frame["principal_id"] == ANNA
+    assert frame["active"] is False

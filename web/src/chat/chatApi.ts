@@ -513,6 +513,23 @@ export async function postReadCursor(channelId: string, cursor: ReadCursor): Pro
 }
 
 /**
+ * `POST /v1/chat/channels/{id}/typing` (FR-032). Sends the flag only, never
+ * the draft (NFR-014). The server answers 204 and stores nothing.
+ */
+export async function postTyping(channelId: string, active: boolean): Promise<void> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/typing`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active }),
+      keepalive: !active,
+    },
+  );
+  if (!response.ok) throw apiError(response);
+}
+
+/**
  * `POST /v1/chat/dms` with the other participants (never the caller).
  * 201 creates, 200 returns the existing DM; both carry the same channel id.
  */

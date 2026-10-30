@@ -29,6 +29,7 @@ import {
   useTeamChatStore,
 } from "./teamChatStore";
 import { applyAgentThreadFrame } from "./agent/agentThreadStore";
+import { applyTypingFrame, type ChatTypingFrame } from "./typingStore";
 import type {
   ChatChangeFrame,
   ChatThreadFrame,
@@ -70,13 +71,36 @@ function parseThreadFrame(
   };
 }
 
+/**
+ * `typing` has no `created_at` or thread. Rebuilt from known fields, so a
+ * body or draft a sender attached is dropped (NFR-014).
+ */
+function parseTypingFrame(
+  frame: Record<string, unknown>,
+  channelId: string,
+): ChatTypingFrame | null {
+  if (typeof frame.principal_id !== "string" || frame.principal_id === "") return null;
+  if (typeof frame.active !== "boolean") return null;
+  return {
+    type: "chat",
+    kind: "typing",
+    channel_id: channelId,
+    principal_id: frame.principal_id,
+    active: frame.active,
+  };
+}
+
+/** A parsed chat frame: a change or state frame, or a typing signal. */
+export type ParsedChatFrame = ChatUpdatesFrame | ChatTypingFrame;
+
 /** Narrow a socket payload to a body-less chat frame. Unknown kinds are ignored. */
-export function parseChatFrame(raw: unknown): ChatUpdatesFrame | null {
+export function parseChatFrame(raw: unknown): ParsedChatFrame | null {
   if (typeof raw !== "object" || raw === null) return null;
   const frame = raw as Record<string, unknown>;
   if (frame.type !== "chat") return null;
   if (typeof frame.channel_id !== "string" || frame.channel_id === "") return null;
   if (frame.kind === "thread.updated") return parseThreadFrame(frame, frame.channel_id);
+  if (frame.kind === "typing") return parseTypingFrame(frame, frame.channel_id);
   const thread = threadRootId(frame.thread_root_id);
   if (thread === undefined || !isFiniteNumber(frame.created_at)) return null;
   if (frame.kind === "message.created") {
@@ -197,9 +221,14 @@ let flushingBackfill = false;
  * Apply a frame now, or after the in-flight changes backfill.
  *
  * A `thread.updated` frame is a state snapshot, not a change id, so it
- * applies at once and never waits for the backfill.
+ * applies at once and never waits for the backfill. A `typing` frame is
+ * ephemeral and applies at once too.
  */
-export function acceptChatFrame(frame: ChatUpdatesFrame): void {
+export function acceptChatFrame(frame: ParsedChatFrame): void {
+  if (frame.kind === "typing") {
+    applyTypingFrame(frame);
+    return;
+  }
   if (frame.kind === "thread.updated") {
     applyAgentThreadFrame(frame);
     return;
