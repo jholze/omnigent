@@ -112,10 +112,11 @@ it is the target for step 4.
 Optional, same checkout, no production data involved:
 
 ```bash
-uv run --no-sync pytest tests/db -q
+uv run --no-sync pytest tests/db -q -m "not databricks"
 ```
 
-Expected: green.
+Expected: green. Tests marked `databricks` need the `psycopg` extra and run
+only in that CI lane.
 
 Stop if there are two or more heads. That is a release blocker (NFR-022).
 
