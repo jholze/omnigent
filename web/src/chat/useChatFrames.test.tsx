@@ -3,15 +3,20 @@ import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { MessagePageResponse } from "./chatApi";
+import type { BootstrapResponse, ChatChannel, ChatMessage, MessagePageResponse } from "./chatApi";
 import { teamChatQueryKeys } from "./chatApi";
-import { applyChatFrame, useTeamChatStore } from "./teamChatStore";
+import { applyChatFrame, type TeamChatChange, useTeamChatStore } from "./teamChatStore";
 import {
   acceptChatFrame,
   backfillFromCursor,
+  bootstrapCursorTime,
+  changeMovesBadges,
+  countsAfterCursor,
+  mentionsPrincipal,
   parseChatFrame,
   useChatFrames,
   watchChatSocketReconnect,
+  withChannelCounts,
 } from "./useChatFrames";
 
 const fetchMock = vi.hoisted(() => vi.fn());
@@ -447,5 +452,238 @@ describe("useChatFrames", () => {
     renderHook(() => useChatFrames(false), { wrapper });
     await Promise.resolve();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+function row(
+  overrides: Partial<ChatMessage> & Pick<ChatMessage, "id" | "created_at">,
+): ChatMessage {
+  return {
+    channel_id: "c1",
+    thread_root_id: null,
+    author_id: "jens",
+    author_kind: "user",
+    body: "hi",
+    client_id: null,
+    ...overrides,
+  };
+}
+
+function badgeChannel(id: string, unread = 0, mentions = 0): ChatChannel {
+  return {
+    id,
+    name: id,
+    kind: "channel",
+    topic: null,
+    project_name: null,
+    visibility: "public",
+    created_by: "anna",
+    created_at: 1,
+    unread_count: unread,
+    mention_count: mentions,
+  };
+}
+
+function badgeBootstrap(overrides: Partial<BootstrapResponse> = {}): BootstrapResponse {
+  return {
+    me: "anna",
+    channels: [badgeChannel("c1")],
+    dms: [],
+    directory: [],
+    changes_cursor: `5:${"0".repeat(32)}`,
+    ...overrides,
+  };
+}
+
+function badgeChange(
+  overrides: Partial<TeamChatChange> & Pick<TeamChatChange, "kind">,
+): TeamChatChange {
+  return { id: "m1", channel_id: "c1", thread_root_id: null, created_at: 10, ...overrides };
+}
+
+describe("mentionsPrincipal", () => {
+  it("is true for a <@user:me> token", () => {
+    expect(mentionsPrincipal("hey <@user:anna> look", "anna")).toBe(true);
+  });
+
+  it("is true for a <@agent_account:me> token", () => {
+    expect(mentionsPrincipal("<@agent_account:anna> run it", "anna")).toBe(true);
+  });
+
+  it("is false for another principal's token", () => {
+    expect(mentionsPrincipal("<@user:jens> and <@agent_account:annabel>", "anna")).toBe(false);
+  });
+
+  it("is false when me is empty", () => {
+    expect(mentionsPrincipal("<@user:>", "")).toBe(false);
+  });
+});
+
+describe("bootstrapCursorTime", () => {
+  it("reads the microsecond prefix of <us>:<hex>", () => {
+    expect(bootstrapCursorTime(`1700000000000000:${"a".repeat(32)}`)).toBe(1700000000000000);
+  });
+
+  it("is null when the cursor is missing", () => {
+    expect(bootstrapCursorTime(undefined)).toBeNull();
+  });
+
+  it("is null when the prefix is not a positive number", () => {
+    expect(bootstrapCursorTime("abc:ff")).toBeNull();
+    expect(bootstrapCursorTime("0:ff")).toBeNull();
+    expect(bootstrapCursorTime("-5:ff")).toBeNull();
+  });
+});
+
+describe("countsAfterCursor", () => {
+  const cursor = { id: "m2", created_at: 20 };
+
+  it("counts only other people's top-level rows after the cursor", () => {
+    const items = [
+      row({ id: "m1", created_at: 10 }),
+      row({ id: "m2", created_at: 20 }),
+      row({ id: "m3", created_at: 30 }),
+      row({ id: "m4", created_at: 40 }),
+    ];
+    expect(countsAfterCursor(items, cursor, "anna", false)).toEqual({ unread: 2, mentions: 0 });
+  });
+
+  it("skips thread replies after the cursor", () => {
+    const items = [
+      row({ id: "m2", created_at: 20 }),
+      row({ id: "r1", created_at: 30, thread_root_id: "m2" }),
+    ];
+    expect(countsAfterCursor(items, cursor, "anna", false)).toEqual({ unread: 0, mentions: 0 });
+  });
+
+  it("skips my own messages after the cursor", () => {
+    const items = [
+      row({ id: "m2", created_at: 20 }),
+      row({ id: "m3", created_at: 30, author_id: "anna" }),
+    ];
+    expect(countsAfterCursor(items, cursor, "anna", false)).toEqual({ unread: 0, mentions: 0 });
+  });
+
+  it("counts a row naming me twice as one mention", () => {
+    const items = [
+      row({ id: "m2", created_at: 20 }),
+      row({ id: "m3", created_at: 30, body: "<@user:anna> <@agent_account:anna>" }),
+    ];
+    expect(countsAfterCursor(items, cursor, "anna", false)).toEqual({ unread: 1, mentions: 1 });
+  });
+
+  it("is null when older messages exist and the page never reaches the cursor", () => {
+    const items = [row({ id: "m3", created_at: 30 }), row({ id: "m4", created_at: 40 })];
+    expect(countsAfterCursor(items, cursor, "anna", true)).toBeNull();
+  });
+});
+
+describe("withChannelCounts", () => {
+  it("replaces one channel's counts in channels", () => {
+    const data = badgeBootstrap({ channels: [badgeChannel("c1"), badgeChannel("c2", 4, 1)] });
+    const next = withChannelCounts(data, "c1", () => ({ unread: 3, mentions: 2 }));
+    expect(next.channels[0]).toMatchObject({ id: "c1", unread_count: 3, mention_count: 2 });
+    expect(next.channels[1]).toBe(data.channels[1]);
+  });
+
+  it("replaces one channel's counts in dms", () => {
+    const data = badgeBootstrap({ dms: [{ ...badgeChannel("d1", 1, 0), kind: "dm" }] });
+    const next = withChannelCounts(data, "d1", (unread, mentions) => ({
+      unread: unread + 1,
+      mentions: mentions + 1,
+    }));
+    expect(next.dms[0]).toMatchObject({ id: "d1", unread_count: 2, mention_count: 1 });
+  });
+
+  it("returns the same object when nothing moved", () => {
+    const data = badgeBootstrap({ channels: [badgeChannel("c1", 2, 1)] });
+    expect(withChannelCounts(data, "c1", () => ({ unread: 2, mentions: 1 }))).toBe(data);
+    expect(withChannelCounts(data, "missing", () => ({ unread: 9, mentions: 9 }))).toBe(data);
+  });
+});
+
+describe("changeMovesBadges", () => {
+  const listed = new Set(["c1"]);
+
+  it("is false for a channel bootstrap does not list", () => {
+    expect(
+      changeMovesBadges(
+        badgeChange({ kind: "message", channel_id: "c-new", author_id: "jens" }),
+        "anna",
+        listed,
+      ),
+    ).toBe(false);
+  });
+
+  it("is false for a thread reply", () => {
+    expect(
+      changeMovesBadges(
+        badgeChange({ kind: "message", thread_root_id: "root", author_id: "jens" }),
+        "anna",
+        listed,
+      ),
+    ).toBe(false);
+  });
+
+  it("is false for a thread read cursor", () => {
+    expect(
+      changeMovesBadges(badgeChange({ kind: "read", thread_root_id: "root" }), "anna", listed),
+    ).toBe(false);
+  });
+
+  it("is true for a channel-level read", () => {
+    expect(
+      changeMovesBadges(badgeChange({ kind: "read", thread_root_id: "" }), "anna", listed),
+    ).toBe(true);
+    expect(
+      changeMovesBadges(badgeChange({ kind: "read", thread_root_id: null }), "anna", listed),
+    ).toBe(true);
+  });
+
+  it("is true for someone else's top-level message in a listed channel", () => {
+    expect(
+      changeMovesBadges(badgeChange({ kind: "message", author_id: "jens" }), "anna", listed),
+    ).toBe(true);
+  });
+});
+
+describe("useChatFrames badge sync", () => {
+  it("a foreign top-level message in a listed channel updates the cached badge without GET /v1/chat/bootstrap", async () => {
+    const page: MessagePageResponse = {
+      items: [row({ id: "m1", created_at: 10, body: "<@user:anna> ping" })],
+      has_older: false,
+      has_more: false,
+      next_after: null,
+      next_before: null,
+    };
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/v1/chat/channels/c1/messages")) return jsonResponse(page);
+      throw new Error(url);
+    });
+    const client = queryClient();
+    client.setQueryData(teamChatQueryKeys.bootstrap, badgeBootstrap());
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+
+    renderHook(() => useChatFrames(true), { wrapper });
+    act(() => {
+      applyChatFrame({
+        type: "chat",
+        kind: "message.created",
+        channel_id: "c1",
+        message_id: "m1",
+        thread_root_id: null,
+        created_at: 10,
+        author_id: "jens",
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        client.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap)?.channels[0],
+      ).toMatchObject({ unread_count: 1, mention_count: 1 });
+    });
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).not.toContain("/v1/chat/bootstrap");
   });
 });

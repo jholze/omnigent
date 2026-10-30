@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { teamChatQueryKeys, type BootstrapResponse, type ChatChannel } from "./chatApi";
 import { ChatPage } from "./ChatPage";
 import { CHAT_TEST_IDS } from "./testids";
-import { useTeamChatStore } from "./teamChatStore";
+import { applyChatFrame, useTeamChatStore } from "./teamChatStore";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 const serverState = vi.hoisted(() => ({
@@ -368,5 +368,70 @@ describe("ChatPage bootstrap refetch for a new channel (AC-021a)", () => {
     messageIn("d-new", "m-2");
     await settle();
     expect(bootstrapCalls()).toBe(initial + 6);
+  });
+});
+
+describe("ChatPage badge for a listed channel", () => {
+  beforeEach(() => {
+    serverState.info = { features: { team_chat: true } };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a foreign top-level message in #general raises its badge without GET /v1/chat/bootstrap", async () => {
+    const page = {
+      items: [
+        {
+          id: "m-1",
+          channel_id: "c-general",
+          thread_root_id: null,
+          author_id: "jens",
+          author_kind: "user",
+          created_at: 10,
+          body: "<@user:anna> ping",
+          client_id: null,
+        },
+      ],
+      has_older: false,
+      has_more: false,
+      next_after: null,
+      next_before: null,
+    };
+    fetchMock.mockImplementation(async (url: string) =>
+      url.startsWith("/v1/chat/channels/c-general/messages")
+        ? jsonResponse(page)
+        : jsonResponse(bootstrap()),
+    );
+    const bootstrapCalls = () =>
+      fetchMock.mock.calls.filter((call) => String(call[0]) === "/v1/chat/bootstrap").length;
+    renderPage();
+    expect(await screen.findByRole("link", { name: "#general" })).toBeInTheDocument();
+    const initial = bootstrapCalls();
+
+    act(() => {
+      applyChatFrame({
+        type: "chat",
+        kind: "message.created",
+        channel_id: "c-general",
+        message_id: "m-1",
+        thread_root_id: null,
+        created_at: 10,
+        author_id: "jens",
+      });
+    });
+
+    expect(
+      await screen.findByRole("link", { name: "#general, 1 ungelesen, 1 Erwähnung" }),
+    ).toBeInTheDocument();
+    // Give a late refetch (ChatPage retries after 400ms) time to show up.
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 600);
+      });
+    });
+    expect(bootstrapCalls()).toBe(initial);
   });
 });
