@@ -27,6 +27,10 @@ from tests.e2e_ui.team_chat.conftest import (
 
 DESKTOP = {"width": 1280, "height": 800}
 PHONE = {"width": 390, "height": 844}
+TABLET = {"width": 768, "height": 1024}
+# Below lg the chat shows one column; it must stay a usable reading width
+# (T-122 H1: >= 440px, well above the 320px floor for any chat column).
+_MIN_TABLET_COLUMN_PX = 440
 _MAX_CHANNEL_NAME_LENGTH = 40
 _MIN_TOUCH_TARGET_PX = 44
 # Header-auth principal ids are the email; this one is far wider than a phone.
@@ -205,6 +209,51 @@ def test_nfr032_phone_390_thread_replaces_channel_with_44px_controls(
         thread.get_by_test_id(CHAT_TEST_IDS["composer"]).get_by_role("button", name="Senden"),
         "thread send button",
     )
+
+
+def _assert_column_width(column: Locator, name: str) -> None:
+    box = column.bounding_box()
+    assert box is not None, f"{name} has no box"
+    assert box["width"] >= _MIN_TABLET_COLUMN_PX, f"{name} is {box['width']}px wide"
+
+
+def test_nfr032_tablet_768_channel_is_the_only_chat_column(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 768x1024 the channel replaces the channel list and keeps a usable width."""
+    page = page_as(ANNA, viewport=TABLET)
+    page.goto(f"{team_chat_server.base_url}{_channel_path(conversation)}")
+    author = _long_author_label(page)
+    expect(page.get_by_test_id(CHAT_TEST_IDS["sidebar"])).to_be_hidden()
+    back = page.get_by_test_id(CHAT_TEST_IDS["back"])
+    expect(back).to_be_visible()
+    _assert_column_width(page.get_by_test_id(CHAT_TEST_IDS["messageList"]).first, "channel")
+    _assert_no_horizontal_scroll(page)
+    _assert_within_viewport(page, author, "long author name")
+    back.click()
+    expect(page).to_have_url(re.compile(r"/chat/?$"))
+    sidebar = page.get_by_test_id(CHAT_TEST_IDS["sidebar"])
+    expect(sidebar).to_be_visible()
+    _assert_column_width(sidebar, "channel list")
+
+
+def test_nfr032_tablet_768_thread_is_the_only_chat_column(
+    team_chat_server: TeamChatServer, page_as, conversation: dict[str, Any]
+) -> None:
+    """At 768x1024 the thread replaces the channel; its back link leads to the channel."""
+    page = page_as(ANNA, viewport=TABLET)
+    page.goto(f"{team_chat_server.base_url}{_thread_path(conversation)}")
+    thread = page.get_by_test_id(CHAT_TEST_IDS["threadPane"])
+    expect(thread.get_by_test_id(CHAT_TEST_IDS["message"]).filter(has_text="Passt")).to_be_visible(
+        timeout=30_000
+    )
+    expect(page.get_by_test_id(CHAT_TEST_IDS["sidebar"])).to_be_hidden()
+    expect(page.get_by_test_id(CHAT_TEST_IDS["back"])).to_be_hidden()
+    _assert_column_width(thread, "thread")
+    _assert_no_horizontal_scroll(page)
+    thread.get_by_test_id(CHAT_TEST_IDS["threadBack"]).click()
+    expect(thread).to_be_hidden()
+    _assert_column_width(page.get_by_test_id(CHAT_TEST_IDS["messageList"]).first, "channel")
 
 
 def test_nfr032_phone_390_new_dm_controls_are_44px(

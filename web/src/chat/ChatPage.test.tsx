@@ -127,8 +127,8 @@ describe("ChatPage", () => {
     expect(back).toBeInTheDocument();
     expect(back).toHaveAccessibleName("Channels");
     expect(back).toHaveAttribute("href", "/chat");
-    expect(back).toHaveClass("md:hidden", "min-h-11");
-    expect(screen.getByTestId(CHAT_TEST_IDS.sidebar)).toHaveClass("max-md:hidden", "md:w-60");
+    expect(back).toHaveClass("lg:hidden", "min-h-11");
+    expect(screen.getByTestId(CHAT_TEST_IDS.sidebar)).toHaveClass("max-lg:hidden", "lg:w-60");
   });
 
   it("mobile layout keeps the back control on the thread route", async () => {
@@ -269,7 +269,7 @@ describe("ChatPage", () => {
       expect(link).not.toHaveClass("truncate");
     }
     expect(screen.getByTestId(CHAT_TEST_IDS.page)).toHaveClass("overflow-x-hidden");
-    expect(screen.getByTestId(CHAT_TEST_IDS.sidebar)).toHaveClass("md:w-60");
+    expect(screen.getByTestId(CHAT_TEST_IDS.sidebar)).toHaveClass("lg:w-60");
   });
 });
 

@@ -168,7 +168,7 @@ export function AgentThreadStatus({ rootId }: { rootId: string }) {
   const state = useAgentThreadChip(rootId);
   if (state === null) return null;
   return (
-    <span role="status" className="inline-flex min-w-0 items-center">
+    <span role="status" className="inline-flex shrink-0 items-center">
       <span className="sr-only">Agent:</span>
       <AgentStatusChip state={state} />
     </span>

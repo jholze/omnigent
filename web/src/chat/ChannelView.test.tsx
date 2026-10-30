@@ -305,7 +305,7 @@ describe("ThreadPane", () => {
     );
     const back = within(pane).getByTestId(CHAT_TEST_IDS.threadBack);
     expect(back).toHaveAttribute("href", "/chat/c-general");
-    expect(back).toHaveClass("min-h-11", "md:hidden");
+    expect(back).toHaveClass("min-h-11", "lg:hidden");
   });
 
   it("a reply frame raises the live count on the root row", async () => {

@@ -301,7 +301,7 @@ export function ThreadPane({
       data-testid={CHAT_TEST_IDS.threadPane}
       aria-labelledby={TITLE_ID}
       className={cn(
-        "flex min-h-0 min-w-0 flex-col max-md:w-full max-md:flex-1 md:w-80 md:shrink-0 md:border-l md:border-border lg:w-96",
+        "flex min-h-0 min-w-0 flex-col max-lg:w-full max-lg:flex-1 lg:w-96 lg:shrink-0 lg:border-l lg:border-border",
         className,
       )}
       onKeyDown={(event) => {
@@ -316,17 +316,22 @@ export function ThreadPane({
         to={channelPath}
         componentId="chat.thread.back"
         data-testid={CHAT_TEST_IDS.threadBack}
-        className="flex min-h-11 min-w-0 items-center gap-1 border-b border-border px-3 text-sm text-muted-foreground hover:text-foreground md:hidden"
+        className="flex min-h-11 min-w-0 items-center gap-1 border-b border-border px-3 text-sm text-muted-foreground hover:text-foreground lg:hidden"
       >
         <ChevronLeftIcon className="size-4 shrink-0" aria-hidden="true" />
         <span className="min-w-0 break-words">{channelLabel}</span>
       </Link>
-      <header className="flex min-h-11 items-center gap-2 border-b border-border py-1 pr-2 pl-4">
+      {/* A tool row: the channel name truncates, the status chip never shrinks
+          below its label; if the row is full, trailing items wrap (T-122 B1). */}
+      <header className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border py-1 pr-2 pl-4">
         <h2 id={TITLE_ID} className="shrink-0 text-sm font-medium">
           Thread
         </h2>
         <AgentThreadStatus rootId={threadRootId} />
-        <span className="min-w-0 flex-1 text-xs break-words text-muted-foreground max-md:hidden">
+        <span
+          title={channelLabel}
+          className="min-w-0 flex-1 truncate text-xs text-muted-foreground max-lg:hidden"
+        >
           {channelLabel}
         </span>
         {agentSessionId ? (
