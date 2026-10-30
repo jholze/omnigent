@@ -124,7 +124,7 @@ export function ChatSidebar({
     <aside
       data-testid={CHAT_TEST_IDS.sidebar}
       className={cn(
-        "flex shrink-0 flex-col overflow-y-auto max-md:w-full md:w-60 md:border-r md:border-border",
+        "flex shrink-0 flex-col overflow-y-auto max-lg:w-full lg:w-60 lg:border-r lg:border-border",
         className,
       )}
     >

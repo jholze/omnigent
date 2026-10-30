@@ -80,6 +80,14 @@ _UPDATES_SOCKET_PATH = "/v1/sessions/updates"
 _LEVEL_READ = 1
 _LEVEL_EDIT = 2
 _MIN_TOUCH_TARGET_PX = 44
+_MAX_CHANNEL_NAME_LENGTH = 40
+# One tool row: 44px touch row plus the 1px border, rounded up.
+_MAX_HEADER_PX = 48
+# NFR-032 allows two rows; the 48px single-line cap was a UX-plan limit
+# (Spec decision 30.10, T-122 variant 3).
+_TWO_ROW_HEADER_PX = 2 * _MAX_HEADER_PX
+_ONE_LINE_PX = 20
+PHONE_320 = {"width": 320, "height": 720}
 _APPROVAL_TEXT = "Migration anwenden?"
 _READ_ONLY_NOTE = "Nur Aufrufer und Bearbeiter können antworten"
 _LIVE_TESTID = "agent-thread-live"
@@ -146,9 +154,9 @@ def _wait_until(predicate: Callable[[], bool], *, timeout_s: float, what: str) -
     raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
 
 
-def _agent_channel(server: TeamChatServer) -> dict[str, Any]:
+def _agent_channel(server: TeamChatServer, *, name: str | None = None) -> dict[str, Any]:
     """A channel Anna created; Jens and Bob are members."""
-    channel = seed_channel(server, as_user=ANNA)
+    channel = seed_channel(server, as_user=ANNA, name=name)
     for user in (JENS, BOB):
         fetch_bootstrap(server, as_user=user)
         join_channel(server, as_user=user, channel_id=channel["id"])
@@ -416,9 +424,22 @@ def _assert_no_horizontal_scroll(page: Page) -> None:
     )
 
 
+def _settled_box(control: Locator) -> dict[str, float] | None:
+    """The control's box once mount motion is done (the card enters from scale 0.97)."""
+    previous = control.bounding_box()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        box = control.bounding_box()
+        if box == previous:
+            return box
+        previous = box
+    return previous
+
+
 def _assert_touch_target(control: Locator, name: str) -> None:
     expect(control).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
-    box = control.bounding_box()
+    box = _settled_box(control)
     assert box is not None, f"{name} has no box"
     assert box["height"] >= _MIN_TOUCH_TARGET_PX, f"{name} is {box['height']}px tall"
     assert box["width"] >= _MIN_TOUCH_TARGET_PX, f"{name} is {box['width']}px wide"
@@ -730,6 +751,144 @@ def test_nfr032_desktop_1280_agent_thread_with_approval_does_not_scroll(
         box = card.bounding_box()
         assert box is not None
         assert box["x"] + box["width"] <= client_width, "approval card overflows the viewport"
+
+
+_HEADER_VIEWPORTS = pytest.mark.parametrize(
+    "viewport",
+    [
+        {"width": 1440, "height": 900},
+        DESKTOP,
+        {"width": 768, "height": 1024},
+    ],
+    ids=["1440", "1280", "768"],
+)
+
+
+def _long_channel_thread_header(
+    server: TeamChatServer, page_as, viewer: str, viewport: dict[str, int]
+) -> tuple[Page, Locator, str, AgentThread]:
+    """Open an Agent-Thread with a pending approval in a 40-char channel as *viewer*."""
+    name = f"qs-{uuid.uuid4().hex}-lang"[:_MAX_CHANNEL_NAME_LENGTH]
+    assert len(name) == _MAX_CHANNEL_NAME_LENGTH
+    channel = _agent_channel(server, name=name)
+    page = page_as(viewer, viewport=viewport)
+    _open_channel(page, server, channel["id"])
+    thread = _start_agent_thread(server, channel["id"])
+    pane = _open_live_thread(page, thread)
+    _set_status(server, thread, "running", response_id="resp_turn")
+    return page, pane, name, thread
+
+
+def _assert_header_row(page: Page, pane: Locator, name: str) -> Locator:
+    """Chip text whole, channel label one truncated line (or in the back link)."""
+    chip = _thread_chip(pane)
+    expect(chip).to_have_text("braucht Antwort", timeout=_LOAD_TIMEOUT_MS)
+    assert chip.evaluate(
+        "el => [...el.querySelectorAll('span')].every(s => s.scrollWidth <= s.clientWidth)"
+    ), "the status chip label is truncated"
+    header = pane.locator("header").first
+    label = header.get_by_title(f"#{name}")
+    if label.is_visible():
+        label_box = label.bounding_box()
+        assert label_box is not None
+        assert label_box["width"] > 0
+        assert label_box["height"] <= _ONE_LINE_PX, "channel label wraps"
+    else:
+        # Below lg the name sits in the back link above the header.
+        expect(pane.get_by_test_id(CHAT_TEST_IDS["threadBack"])).to_contain_text(name)
+    _assert_no_horizontal_scroll(page)
+    return header
+
+
+@_HEADER_VIEWPORTS
+def test_nfr032_long_channel_thread_header_with_session_link_wraps_whole(
+    team_chat_server: TeamChatServer, page_as, viewport: dict[str, int]
+) -> None:
+    """With "Session öffnen" the row may wrap once; every item stays whole."""
+    page, pane, name, thread = _long_channel_thread_header(
+        team_chat_server, page_as, ANNA, viewport
+    )
+    with _parked_approval(team_chat_server, thread.session_id):
+        card = _thread_card(pane)
+        expect(card).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+        header = _assert_header_row(page, pane, name)
+        link = pane.get_by_test_id(CHAT_TEST_IDS["threadOpenSession"])
+        expect(link).to_be_visible()
+        assert link.evaluate("el => el.scrollWidth <= el.clientWidth"), "session link is cut"
+        header_box = header.bounding_box()
+        assert header_box is not None
+        assert header_box["height"] <= _TWO_ROW_HEADER_PX, (
+            f"thread header is {header_box['height']}px tall at {viewport['width']}px"
+        )
+        expect(card).to_be_in_viewport()
+
+
+_NFR032_HEADER_VIEWPORTS = pytest.mark.parametrize(
+    "viewport",
+    [
+        {"width": 1440, "height": 900},
+        {"width": 768, "height": 1024},
+        PHONE,
+        PHONE_320,
+    ],
+    ids=["1440", "768", "390", "320"],
+)
+
+
+@_NFR032_HEADER_VIEWPORTS
+def test_nfr032_long_channel_thread_header_is_one_row(
+    team_chat_server: TeamChatServer, page_as, viewport: dict[str, int]
+) -> None:
+    """NFR-032: header ≤96px, chip whole, name truncated with title, share card visible."""
+    page, pane, name, thread = _long_channel_thread_header(
+        team_chat_server, page_as, ANNA, viewport
+    )
+    with _parked_approval(team_chat_server, thread.session_id):
+        card = _thread_card(pane)
+        expect(card).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
+        header = _assert_header_row(page, pane, name)
+        header_box = header.bounding_box()
+        assert header_box is not None
+        assert header_box["height"] <= _TWO_ROW_HEADER_PX, (
+            f"thread header is {header_box['height']}px tall at {viewport['width']}px"
+        )
+        expect(card).to_be_in_viewport()
+
+
+def test_nfr032_phone_320_approval_buttons_stay_inside_card(
+    team_chat_server: TeamChatServer, page_as
+) -> None:
+    """At 320px every approval option wraps inside the card instead of being cut off."""
+    channel = _agent_channel(team_chat_server)
+    page = page_as(ANNA, viewport=PHONE_320)
+    _open_channel(page, team_chat_server, channel["id"])
+    thread = _start_agent_thread(team_chat_server, channel["id"])
+    pane = _open_live_thread(page, thread)
+    _set_status(team_chat_server, thread, "running", response_id="resp_turn")
+
+    with _parked_approval(team_chat_server, thread.session_id):
+        card = _thread_card(pane)
+        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible(
+            timeout=_LOAD_TIMEOUT_MS
+        )
+        expect(_thread_chip(pane)).to_have_text("braucht Antwort")
+        card_box = card.bounding_box()
+        assert card_box is not None
+        buttons = card.get_by_role("button")
+        assert buttons.count() >= 2
+        for index in range(buttons.count()):
+            button = buttons.nth(index)
+            box = button.bounding_box()
+            assert box is not None
+            name = button.inner_text()
+            assert box["x"] >= card_box["x"] - 0.5, f"{name!r} starts left of the card"
+            assert box["x"] + box["width"] <= card_box["x"] + card_box["width"] + 0.5, (
+                f"{name!r} ends past the card"
+            )
+            assert button.evaluate("el => el.scrollWidth <= el.clientWidth"), (
+                f"{name!r} clips its label"
+            )
+        _assert_no_horizontal_scroll(page)
 
 
 def test_nfr032_phone_390_agent_thread_approval_buttons_are_44px(

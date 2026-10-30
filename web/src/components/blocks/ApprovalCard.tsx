@@ -270,6 +270,11 @@ interface ApprovalCardProps {
 
 const EMPTY_CODEX_PERSIST_MODES: CodexPersistMode[] = [];
 
+// Option buttons wrap instead of overflowing the card on narrow panes
+// (WCAG 1.4.10 reflow at 320 px). `min-h-7` keeps a one-line button at the
+// `sm` height, so wide layouts render exactly as before.
+const OPTION_BUTTON_CLASS = "h-auto min-h-7 max-w-full py-0.5 whitespace-normal text-left";
+
 export function ApprovalCard({
   elicitationId,
   message,
@@ -447,16 +452,21 @@ export function ApprovalCard({
     : undefined;
   const binaryButtons = (
     <div className="flex flex-wrap gap-2 pt-1">
-      <Button size="sm" onClick={() => submitBinary("accept")} componentId="approval.approve">
-        <CheckIcon className="mr-1 size-3.5" />
-        {labels?.approve ?? "Approve"}
+      <Button
+        size="sm"
+        className={OPTION_BUTTON_CLASS}
+        onClick={() => submitBinary("accept")}
+        componentId="approval.approve"
+      >
+        <CheckIcon className="mr-1 size-3.5 shrink-0" />
+        <span className="min-w-0">{labels?.approve ?? "Approve"}</span>
       </Button>
       {agyPermission?.alwaysAllowPattern && (
         <>
           <Button
             size="sm"
             variant="outline"
-            className="h-auto max-w-full whitespace-normal text-left"
+            className={OPTION_BUTTON_CLASS}
             onClick={() => submitPersist("session")}
             title={`Ask Antigravity to allow commands starting with “${agyPermission.alwaysAllowPattern}” for this conversation`}
             data-testid="approval-card-agy-session-allow"
@@ -474,7 +484,7 @@ export function ApprovalCard({
           <Button
             size="sm"
             variant="outline"
-            className="h-auto max-w-full whitespace-normal text-left"
+            className={OPTION_BUTTON_CLASS}
             onClick={() => submitPersist("always")}
             title={`Ask Antigravity to save a rule allowing commands starting with “${agyPermission.alwaysAllowPattern}” for this Omnigent session`}
             data-testid="approval-card-agy-always-allow"
@@ -494,68 +504,76 @@ export function ApprovalCard({
         <Button
           size="sm"
           variant="outline"
+          className={OPTION_BUTTON_CLASS}
           onClick={() => submitPersist("session")}
           componentId="approval.approve_session"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Approve for this session
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0">Approve for this session</span>
         </Button>
       )}
       {codexPersistModes.includes("always") && (
         <Button
           size="sm"
           variant="outline"
+          className={OPTION_BUTTON_CLASS}
           onClick={() => submitPersist("always")}
           componentId="approval.approve_always"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Always allow
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0">Always allow</span>
         </Button>
       )}
       {allowAutoMode && (
         <Button
           size="sm"
           variant="outline"
+          className={OPTION_BUTTON_CLASS}
           onClick={submitAutoMode}
           title="Approve this request and let Claude review future tool permissions automatically for this session"
           componentId="approval.approve_auto_mode"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Approve &amp; switch to auto mode
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0">Approve &amp; switch to auto mode</span>
         </Button>
       )}
       {allowAllEdits && (
         <Button
           size="sm"
           variant="outline"
+          className={OPTION_BUTTON_CLASS}
           onClick={submitAllowAllEdits}
           componentId="approval.approve_allow_edits"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Accept & allow all edits
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0">Accept & allow all edits</span>
         </Button>
       )}
       {rememberTarget && (
         <Button
           size="sm"
           variant="outline"
+          className={OPTION_BUTTON_CLASS}
           onClick={submitRemember}
           title={rememberTitle}
           data-testid="approval-card-remember"
           componentId="approval.approve_remember"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Approve &amp; don't ask again for {rememberTarget}
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0 break-words">
+            Approve &amp; don't ask again for {rememberTarget}
+          </span>
         </Button>
       )}
       <Button
         size="sm"
         variant="outline"
+        className={OPTION_BUTTON_CLASS}
         onClick={() => submitBinary("decline")}
         componentId="approval.reject"
       >
-        <XIcon className="mr-1 size-3.5" />
-        {labels?.reject ?? "Reject"}
+        <XIcon className="mr-1 size-3.5 shrink-0" />
+        <span className="min-w-0">{labels?.reject ?? "Reject"}</span>
       </Button>
     </div>
   );
@@ -563,26 +581,33 @@ export function ApprovalCard({
     <div className="flex flex-wrap items-center gap-2 pt-1" data-testid="codex-command-actions">
       <Button
         size="sm"
+        className={OPTION_BUTTON_CLASS}
         onClick={() => submitBinary("accept")}
         componentId="approval.approve_command"
       >
-        <CheckIcon className="mr-1 size-3.5" />
-        Approve
+        <CheckIcon className="mr-1 size-3.5 shrink-0" />
+        <span className="min-w-0">Approve</span>
       </Button>
       {execPolicyAmendment && (
         <Button
           size="sm"
           variant="outline"
+          className={OPTION_BUTTON_CLASS}
           onClick={() => submitExecPolicyAmendment(execPolicyAmendment)}
           componentId="approval.approve_command_remember"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Approve and remember
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0">Approve and remember</span>
         </Button>
       )}
-      <Button size="sm" variant="outline" onClick={() => submitBinary("decline")}>
-        <XIcon className="mr-1 size-3.5" />
-        Reject
+      <Button
+        size="sm"
+        variant="outline"
+        className={OPTION_BUTTON_CLASS}
+        onClick={() => submitBinary("decline")}
+      >
+        <XIcon className="mr-1 size-3.5 shrink-0" />
+        <span className="min-w-0">Reject</span>
       </Button>
     </div>
   );
