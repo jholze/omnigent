@@ -5,9 +5,12 @@
  * `GET /v1/chat/changes?after=<cursor>` is merged by id. `reset` refetches
  * bootstrap, replaces the cursor and reloads open views (FR-083).
  *
- * Badge counts live in bootstrap. A new `read.updated` change, or a message
- * from someone else, refetches bootstrap once per short window (FR-008,
- * FR-009), so another tab's read clears the badge here too.
+ * Badge counts arrive with bootstrap. In a channel bootstrap already lists, a
+ * new message from someone else or a `read.updated` change updates the
+ * cached counts from that channel's message page, never with another
+ * bootstrap GET (FR-008, FR-009). Another tab's read clears the badge here
+ * too. A channel bootstrap does not list yet is `ChatPage`'s new-channel
+ * refetch (AC-021a).
  */
 import { useEffect } from "react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
@@ -19,8 +22,12 @@ import {
   fetchChanges,
   teamChatQueryKeys,
   type BootstrapResponse,
+  type ChatMessage,
+  type MessagePageResponse,
+  type ReadCursor,
 } from "./chatApi";
 import { fetchLatest } from "./freshQuery";
+import { isCursorAfter } from "./useReadCursor";
 import {
   applyChatFrame,
   normalizeChangeItem,
@@ -288,13 +295,12 @@ export function watchChatSocketReconnect(
   });
 }
 
-/** Coalesce badge refreshes. Keeps AC-009a (badge gone within 1 s) with room for the fetch. */
-export const BADGE_REFRESH_DELAY_MS = 250;
-
 /**
  * True when this new change can move a listed sidebar count. My own messages
- * do not. A channel bootstrap does not list yet is left to the new-channel
- * refetch in `ChatPage`, which brings its counts along.
+ * do not, and neither do thread replies or thread read cursors: counts only
+ * cover top-level messages after the channel cursor. A channel bootstrap does
+ * not list yet is left to the new-channel refetch in `ChatPage`, which brings
+ * its counts along.
  */
 export function changeMovesBadges(
   change: TeamChatChange,
@@ -302,49 +308,189 @@ export function changeMovesBadges(
   listed: ReadonlySet<string>,
 ): boolean {
   if (!listed.has(change.channel_id)) return false;
-  if (change.kind === "read") return true;
+  if (change.kind === "read") return change.thread_root_id === null || change.thread_root_id === "";
   if (change.thread_root_id !== null) return false;
   return change.author_id === undefined || me === undefined || change.author_id !== me;
 }
 
+/** True when *body* carries a `<@user:me>` or `<@agent_account:me>` token (FR-008). */
+export function mentionsPrincipal(body: string, me: string): boolean {
+  if (me === "") return false;
+  return body.includes(`<@user:${me}>`) || body.includes(`<@agent_account:${me}>`);
+}
+
+/** Epoch microseconds of a bootstrap `changes_cursor` (`<us>:<hex>`), or null. */
+export function bootstrapCursorTime(cursor: string | undefined): number | null {
+  if (cursor === undefined) return null;
+  const value = Number(cursor.split(":", 1)[0]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 /**
- * Refetch bootstrap shortly after a change that can move unread or mention
- * counts. Waits for an in-flight bootstrap so its stale answer is not the
- * last word, then refetches once.
+ * Unread and mention counts of one page after a channel read cursor, or null
+ * when the page cannot tell: it has older messages and none of its rows is
+ * at or before the cursor.
  */
-function useBadgeRefresh(enabled: boolean): void {
+export function countsAfterCursor(
+  items: readonly ChatMessage[],
+  cursor: ReadCursor,
+  me: string,
+  hasOlder: boolean,
+): { unread: number; mentions: number } | null {
+  let unread = 0;
+  let mentions = 0;
+  let reachesCursor = false;
+  for (const item of items) {
+    if (item.thread_root_id !== null) continue;
+    if (!isCursorAfter({ id: item.id, created_at: item.created_at }, cursor)) {
+      reachesCursor = true;
+      continue;
+    }
+    if (item.author_id === me) continue;
+    unread += 1;
+    if (mentionsPrincipal(item.body, me)) mentions += 1;
+  }
+  if (hasOlder && !reachesCursor) return null;
+  return { unread, mentions };
+}
+
+/** Bootstrap with one channel's counts replaced by `update`. Same object when nothing moved. */
+export function withChannelCounts(
+  data: BootstrapResponse,
+  channelId: string,
+  update: (unread: number, mentions: number) => { unread: number; mentions: number },
+): BootstrapResponse {
+  let moved = false;
+  const apply = (rows: BootstrapResponse["channels"]) =>
+    rows.map((row) => {
+      if (row.id !== channelId) return row;
+      const next = update(row.unread_count, row.mention_count);
+      if (next.unread === row.unread_count && next.mentions === row.mention_count) return row;
+      moved = true;
+      return { ...row, unread_count: next.unread, mention_count: next.mentions };
+    });
+  const channels = apply(data.channels);
+  const dms = apply(data.dms);
+  return moved ? { ...data, channels, dms } : data;
+}
+
+/**
+ * Keep listed sidebar counts current without a bootstrap GET (FR-008,
+ * FR-009, AC-009a).
+ *
+ * A new top-level message in a listed channel waits for its row in that
+ * channel's message page (`cacheChannelMessages` fills it). When the row is
+ * from someone else, newer than the bootstrap counts and after the known
+ * read cursor, unread goes up by one, and mentions too when the body names
+ * me. A channel `read.updated` change recounts that channel from its page,
+ * fetching the page when nothing has cached it. Each message counts once.
+ */
+function useBadgeSync(enabled: boolean): void {
   const queryClient = useQueryClient();
   useEffect(() => {
     if (!enabled) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const run = (): void => {
-      timer = null;
-      if (queryClient.isFetching({ queryKey: teamChatQueryKeys.bootstrap, exact: true }) > 0) {
-        timer = setTimeout(run, BADGE_REFRESH_DELAY_MS);
+    /** Message id -> channel id, for rows whose author and body are not loaded yet. */
+    const pendingMessages = new Map<string, string>();
+    /** Channel id -> newest channel read cursor not applied yet. */
+    const pendingReads = new Map<string, ReadCursor>();
+    /** Channel id -> newest channel read cursor seen while mounted. */
+    const lastRead = new Map<string, ReadCursor>();
+    const counted = new Set<string>();
+
+    const resolve = (channelId: string): void => {
+      const data = queryClient.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+      const page = queryClient.getQueryData<MessagePageResponse>(
+        teamChatQueryKeys.messages(channelId),
+      );
+      if (data === undefined || page === undefined) return;
+      const countedUntil = bootstrapCursorTime(data.changes_cursor);
+      const read = lastRead.get(channelId) ?? null;
+      const byId = new Map(page.items.map((item) => [item.id, item]));
+      let next = data;
+      for (const [messageId, pendingChannel] of pendingMessages) {
+        if (pendingChannel !== channelId) continue;
+        const item = byId.get(messageId);
+        if (item === undefined) continue;
+        pendingMessages.delete(messageId);
+        if (counted.has(messageId)) continue;
+        counted.add(messageId);
+        if (item.thread_root_id !== null || item.author_id === data.me) continue;
+        // Bootstrap already counted everything up to its cursor.
+        if (countedUntil !== null && item.created_at <= countedUntil) continue;
+        if (!isCursorAfter({ id: item.id, created_at: item.created_at }, read)) continue;
+        const mention = mentionsPrincipal(item.body, data.me);
+        next = withChannelCounts(next, channelId, (unread, mentions) => ({
+          unread: unread + 1,
+          mentions: mentions + (mention ? 1 : 0),
+        }));
+      }
+      const cursor = pendingReads.get(channelId);
+      if (cursor !== undefined) {
+        pendingReads.delete(channelId);
+        const counts = countsAfterCursor(page.items, cursor, data.me, page.has_older);
+        if (counts !== null) next = withChannelCounts(next, channelId, () => counts);
+      }
+      if (next !== data) queryClient.setQueryData(teamChatQueryKeys.bootstrap, next);
+    };
+
+    /** Resolve from the cached page, or fetch that page (never bootstrap) for a read. */
+    const resolveOrLoad = (channelId: string, fetchPage: boolean): void => {
+      const queryKey = teamChatQueryKeys.messages(channelId);
+      if (queryClient.getQueryData(queryKey) !== undefined || !fetchPage) {
+        resolve(channelId);
         return;
       }
-      void queryClient.invalidateQueries(
-        { queryKey: teamChatQueryKeys.bootstrap, exact: true },
-        { cancelRefetch: false },
-      );
+      // Joins a fill already in flight; the cache event below resolves it.
+      void queryClient
+        .fetchQuery({
+          queryKey,
+          queryFn: ({ signal }) => fetchChannelMessages(channelId, signal),
+          staleTime: 0,
+        })
+        .catch((error: unknown) => {
+          const status = error instanceof ChatApiError ? String(error.status) : "error";
+          console.warn(`[team-chat] badge page fetch failed (${status})`);
+        });
     };
+
     let known = new Set(Object.keys(useTeamChatStore.getState().changes));
-    const unsubscribe = useTeamChatStore.subscribe((state, previous) => {
+    const unsubscribeStore = useTeamChatStore.subscribe((state, previous) => {
       if (state.changes === previous.changes) return;
       const data = queryClient.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
       const listed = new Set([...(data?.channels ?? []), ...(data?.dms ?? [])].map((c) => c.id));
-      let moves = false;
+      const messageChannels = new Set<string>();
+      const readChannels = new Set<string>();
       for (const change of Object.values(state.changes)) {
         const key = teamChatChangeKey(change);
         if (known.has(key)) continue;
-        if (changeMovesBadges(change, data?.me, listed)) moves = true;
+        if (!changeMovesBadges(change, data?.me, listed)) continue;
+        if (change.kind === "read") {
+          const cursor = { id: change.id, created_at: change.created_at };
+          if (!isCursorAfter(cursor, lastRead.get(change.channel_id) ?? null)) continue;
+          lastRead.set(change.channel_id, cursor);
+          pendingReads.set(change.channel_id, cursor);
+          readChannels.add(change.channel_id);
+        } else if (!counted.has(change.id)) {
+          pendingMessages.set(change.id, change.channel_id);
+          messageChannels.add(change.channel_id);
+        }
       }
       known = new Set(Object.keys(state.changes));
-      if (moves && timer === null) timer = setTimeout(run, BADGE_REFRESH_DELAY_MS);
+      // A message row may already be cached; otherwise its fill resolves it.
+      for (const channelId of messageChannels) {
+        if (!readChannels.has(channelId)) resolveOrLoad(channelId, false);
+      }
+      for (const channelId of readChannels) resolveOrLoad(channelId, true);
+    });
+    const unsubscribeCache = queryClient.getQueryCache().subscribe((event) => {
+      if (event.type !== "updated") return;
+      const [scope, kind, channelId] = event.query.queryKey as readonly unknown[];
+      if (scope !== "team-chat" || kind !== "messages" || typeof channelId !== "string") return;
+      if (event.query.state.data !== undefined) resolve(channelId);
     });
     return () => {
-      unsubscribe();
-      if (timer !== null) clearTimeout(timer);
+      unsubscribeStore();
+      unsubscribeCache();
     };
   }, [enabled, queryClient]);
 }
@@ -359,7 +505,7 @@ function useBadgeRefresh(enabled: boolean): void {
 export function useChatFrames(enabled: boolean): void {
   const queryClient = useQueryClient();
   const pendingChannels = useTeamChatStore((state) => state.pendingChannels);
-  useBadgeRefresh(enabled);
+  useBadgeSync(enabled);
   useEffect(() => {
     if (!enabled || pendingChannels.length === 0) return;
     const channelIds = useTeamChatStore.getState().takePendingChannels();
