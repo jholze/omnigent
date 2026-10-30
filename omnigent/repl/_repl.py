@@ -4878,7 +4878,6 @@ async def _cmd_theme(
     ``/theme dark`` / ``/theme light`` sets explicitly with a preview.
     ``/theme default`` resets to the built-in default (light).
     """
-    from omnigent_ui_sdk.terminal._theme import DARK_THEME, LIGHT_THEME
     from rich.text import Text
 
     from omnigent.repl._theme_picker import _build_preview, build_theme_confirmation
@@ -4895,9 +4894,9 @@ async def _cmd_theme(
         )
         return
     if value in _THEME_CLEAR_ALIASES or value == "light":
-        selected = LIGHT_THEME
+        selected = get_theme("light")
     elif value == "dark":
-        selected = DARK_THEME
+        selected = get_theme("dark")
     else:
         host.output(
             Text.from_markup("  [bold red]Invalid theme: expected light, dark, or default[/]")
