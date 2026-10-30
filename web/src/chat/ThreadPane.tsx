@@ -25,7 +25,11 @@ import {
 import { AgentControls } from "./agent/AgentControls";
 import { parseAgentCommand, useAgentControls } from "./agent/useAgentControls";
 import { AgentThreadStatus } from "./agent/AgentStatusChip";
-import { AgentThreadView, OpenAgentSessionLink } from "./agent/AgentThreadView";
+import {
+  AgentThreadView,
+  OpenAgentSessionLink,
+  storedAgentReplyCount,
+} from "./agent/AgentThreadView";
 import {
   useAgentThreadStore,
   useSeedAgentThreads,
@@ -35,13 +39,7 @@ import { ChatComposerCard, type ComposerCommandResult } from "./ChatComposerCard
 import { messageQueryOptions, shareMessagePage } from "./messagePage";
 import { MessagesError, MessagesSkeleton, messageViewOf, withOutbox } from "./ChannelView";
 import { retryChatMessage, useChatOutbox } from "./chatOutbox";
-import {
-  isAgentKind,
-  MessageItem,
-  principalLabel,
-  replyCountLabel,
-  type MessageView,
-} from "./MessageItem";
+import { MessageItem, principalLabel, replyCountLabel, type MessageView } from "./MessageItem";
 import { MessageList } from "./MessageList";
 import { paneOpen } from "./motion";
 import { useChatReducedMotion } from "./MotionRoot";
@@ -208,10 +206,7 @@ export function ThreadPane({
     (state) => state.threads[threadRootId]?.sessionId ?? null,
   );
   useWatchAgentSessions(`thread:${threadRootId}`, agentSessionId ? [agentSessionId] : []);
-  const agentReplyCount = views.filter(
-    (view) =>
-      view.status === "sent" && (view.authorKind === "system" || isAgentKind(view.authorKind)),
-  ).length;
+  const agentReplyCount = storedAgentReplyCount(views);
   const sharingNoticeStored = views.some(
     (view) => view.authorKind === "system" && view.body.startsWith(SHARING_NOTICE_PREFIX),
   );
