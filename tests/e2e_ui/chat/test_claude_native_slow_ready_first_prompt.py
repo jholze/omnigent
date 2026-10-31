@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import logging
 import os
 import secrets
@@ -106,6 +107,8 @@ _TERMINAL_VIEW = '[data-testid="terminal-view"]'
 # Model baked into the rig's mock anthropic provider config (matches
 # conftest._CLAUDE_MOCK_MODEL).
 _CLAUDE_MOCK_MODEL = "claude-sonnet-4-20250514"
+# Key a CI ``claude`` shim exports for loopback base URLs (see fork-ci.yml).
+_CI_SHIM_API_KEY = "mock-key"
 
 # The first prompt of the reported journey (a SQL anti-pattern audit) plus a
 # verbatim echo token so the delivered turn is unambiguous in the transcript.
@@ -346,6 +349,16 @@ def slow_ready_claude_session(
     gate_started = work / "readiness-gate-started"
     wrapper = _write_slow_ready_claude_wrapper(wrapper_bin, real_claude, gate_started)
     rig_python = _rig_python(work, gate_started)
+    # Reject a shim-injected env key up front: Claude otherwise opens its "Detected a
+    # custom API key" decision dialog, which rightly blocks delivery of the first prompt.
+    (home_dir / ".claude.json").write_text(
+        json.dumps(
+            {
+                "hasCompletedOnboarding": True,
+                "customApiKeyResponses": {"approved": [], "rejected": [_CI_SHIM_API_KEY]},
+            }
+        )
+    )
 
     # Mock anthropic provider so the real ``claude`` boots against the mock
     # LLM (no live credentials) — mirrors ``native_claude_mock_session``.
@@ -369,8 +382,9 @@ def slow_ready_claude_session(
 
     runner_id = token_bound_runner_id(binding_token)
 
+    # Claude reads the rig's isolated HOME config, not a CLAUDE_CONFIG_DIR shared by CI.
     shared_env = {
-        **_no_proxy_env(),
+        **{key: value for key, value in _no_proxy_env().items() if key != "CLAUDE_CONFIG_DIR"},
         "PYTHONPATH": f"{_REPO_ROOT}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
         "OMNIGENT_CONFIG_HOME": str(config_home),
         "HOME": str(home_dir),
