@@ -396,7 +396,7 @@ async def test_disabled_dispatcher_sends_nothing(
     )
     task = dispatcher.start_dispatcher(store)
     try:
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.4)  # custom-lint: disable=sleep-then-assert -- negative window
         with receiver.lock:
             assert receiver.events == []
         assert store.latest_delivery(session_id).status == "pending"  # type: ignore[union-attr]

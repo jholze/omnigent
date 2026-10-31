@@ -488,10 +488,19 @@ export function TerminalView({
   // ignores the cleanup function attachSession returns (ref cleanups
   // arrived in React 19), so without this every remount would abandon
   // the previous session — xterm buffers, observers, and all.
-  const disposeActiveSession = useCallback(() => {
-    sessionRef.current?.dispose();
-    sessionRef.current = null;
+  // React 19 (fork) also runs the ref cleanup, so a session that was
+  // already disposed here would be disposed a second time there. Track
+  // disposed sessions so each one is disposed exactly once.
+  const disposedSessionsRef = useRef(new WeakSet<TerminalSession>());
+  const disposeOnce = useCallback((session: TerminalSession | null | undefined) => {
+    if (!session || disposedSessionsRef.current.has(session)) return;
+    disposedSessionsRef.current.add(session);
+    session.dispose();
   }, []);
+  const disposeActiveSession = useCallback(() => {
+    disposeOnce(sessionRef.current);
+    sessionRef.current = null;
+  }, [disposeOnce]);
 
   useLayoutEffect(() => {
     mountedRef.current = true;
@@ -614,7 +623,7 @@ export function TerminalView({
       return () => {
         cancelled = true;
         upgradeCtl.abort();
-        terminalSession?.dispose();
+        disposeOnce(terminalSession);
         sessionRef.current = null;
         onStateChangeRef.current?.(null);
       };
@@ -630,6 +639,7 @@ export function TerminalView({
       notifyClipboardRequest,
       notifyFileLink,
       disposeActiveSession,
+      disposeOnce,
     ],
   );
 
