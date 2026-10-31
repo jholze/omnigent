@@ -6,10 +6,15 @@ import threading
 import uuid
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from omnigent.db.db_models import SqlChatAgentAccount, SqlChatChannel, SqlChatMention
+from omnigent.db.db_models import (
+    SqlChatAgentAccount,
+    SqlChatChannel,
+    SqlChatMention,
+    SqlChatMessage,
+)
 from omnigent.db.utils import get_or_create_engine, now_epoch_us
 from omnigent.stores.chat_store import (
     ChatChannel,
@@ -429,3 +434,30 @@ def test_bootstrap_general_concurrent(chat_store: SqlAlchemyChatStore, db_uri: s
     assert errors == []
     assert _count_channels(db_uri) == 1
     assert {channel.id for channel in results} == {results[0].id}
+
+
+def _set_created_at(db_uri: str, message_id: str, created_at: int) -> None:
+    engine = get_or_create_engine(db_uri)
+    with Session(engine) as session:
+        session.execute(
+            update(SqlChatMessage)
+            .where(SqlChatMessage.id == message_id)
+            .values(created_at=created_at)
+        )
+        session.commit()
+
+
+def test_channel_unread_counts_until_includes_boundary_and_excludes_later(
+    chat_store: SqlAlchemyChatStore, db_uri: str
+) -> None:
+    channel = chat_store.bootstrap_channel("general", "anna@bloopark.de")
+    at_cut = chat_store.post_message(channel.id, "anna@bloopark.de", "at cut")
+    after_cut = chat_store.post_message(channel.id, "anna@bloopark.de", "after cut")
+    assert at_cut.message is not None and after_cut.message is not None
+    until = now_epoch_us()
+    _set_created_at(db_uri, at_cut.message.id, until)
+    _set_created_at(db_uri, after_cut.message.id, until + 1)
+
+    counts = chat_store.channel_unread_counts("bob@bloopark.de", [channel.id], until=until)
+
+    assert counts[channel.id] == (1, 0)

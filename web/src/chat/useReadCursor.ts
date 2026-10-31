@@ -8,7 +8,7 @@
  *
  * After a successful post the cached bootstrap drops this channel's badge at
  * once when the posted message is still the newest one. The `read.updated`
- * frame then refetches bootstrap for the server counts (see `useChatFrames`).
+ * frame then recounts the channel from its message page (see `useChatFrames`).
  */
 import { useEffect, useRef, type RefObject } from "react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";

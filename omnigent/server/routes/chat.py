@@ -586,10 +586,15 @@ def create_chat_router(
             _raise_rate_limited(retry_after)
         await asyncio.to_thread(chat_store.touch_agent_last_seen, caller)
 
-    async def _channels_with_counts(caller: str, rows: list[ChatChannel]) -> list[ChannelResponse]:
-        """Attach unread and mention counts for *rows* (FR-008)."""
+    async def _channels_with_counts(
+        caller: str, rows: list[ChatChannel], *, until: int | None = None
+    ) -> list[ChannelResponse]:
+        """Attach unread and mention counts for *rows* (FR-008).
+
+        *until* limits the counts to messages created at or before that epoch-us.
+        """
         counts = await asyncio.to_thread(
-            chat_store.channel_unread_counts, caller, [row.id for row in rows]
+            chat_store.channel_unread_counts, caller, [row.id for row in rows], until=until
         )
         rendered: list[ChannelResponse] = []
         for row in rows:
@@ -615,6 +620,8 @@ def create_chat_router(
         general = await asyncio.to_thread(
             chat_store.bootstrap_channel, _GENERAL_CHANNEL, human_caller
         )
+        # Counts cover messages up to this cursor; the changes feed delivers later ones.
+        counted_until = now_epoch_us()
         channels, dms = await _channels_visible_to(chat_store, caller)
         members = await asyncio.to_thread(chat_store.list_members, general.id)
         accounts = await asyncio.to_thread(chat_store.list_active_agent_accounts)
@@ -636,10 +643,10 @@ def create_chat_router(
         )
         return BootstrapResponse(
             me=caller,
-            channels=await _channels_with_counts(caller, channels),
-            dms=await _channels_with_counts(caller, dms),
+            channels=await _channels_with_counts(caller, channels, until=counted_until),
+            dms=await _channels_with_counts(caller, dms, until=counted_until),
             directory=directory,
-            changes_cursor=f"{now_epoch_us()}:{'0' * 32}",
+            changes_cursor=f"{counted_until}:{'0' * 32}",
         )
 
     @router.get("/chat/channels", response_model=list[ChannelResponse])
