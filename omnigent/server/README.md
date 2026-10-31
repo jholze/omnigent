@@ -11,3 +11,8 @@ and the same trusted `Origin` check as `/v1`. Writes do nothing unless
 `confirm` is boolean `true`. Deletes and revokes name what would be lost.
 That doc also has the Claude Code and Cursor client config and how to get a
 bearer token with `omnigent login`.
+
+**Fork-only:** `/mcp`, agent accounts (`ogc_` tokens, `/v1/agent-accounts`),
+and the `chat_*` MCP tools exist only in the `jholze/omnigent` fork, not
+upstream. The full reference (auth, tool catalog, limits, troubleshooting) is
+[`docs/mcp.md`](../../docs/mcp.md).
