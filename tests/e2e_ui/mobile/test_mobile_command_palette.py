@@ -15,6 +15,8 @@ No LLM turn is needed — this is client-side layout + routing.
 
 from __future__ import annotations
 
+import sys
+
 from playwright.sync_api import Page, ViewportSize, expect
 
 # iPhone-12-class portrait viewport — below the Tailwind ``md`` breakpoint
@@ -23,6 +25,9 @@ _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
 
 _COMPOSER = "Send a message…"
 
+# The palette opens only on the command modifier: Cmd on macOS, Ctrl elsewhere.
+_PALETTE_CHORD = "Meta+k" if sys.platform == "darwin" else "Control+k"
+
 
 def _open_palette(page: Page, base_url: str, session_id: str) -> None:
     """Load the session at a phone width and open the palette via ⌘/Ctrl+K."""
@@ -30,7 +35,7 @@ def _open_palette(page: Page, base_url: str, session_id: str) -> None:
     page.goto(f"{base_url}/c/{session_id}")
     # Wait for the shell to be interactive before firing the window-level hotkey.
     expect(page.get_by_placeholder(_COMPOSER)).to_be_visible(timeout=30_000)
-    page.keyboard.press("Control+k")
+    page.keyboard.press(_PALETTE_CHORD)
     expect(page.get_by_test_id("command-palette-input")).to_be_focused(timeout=10_000)
 
 

@@ -7,8 +7,8 @@ opens or focuses on ⌘/Ctrl + ⌥/Alt + ``]`` and closes when focus is inside i
 tab strip. The hook matches the physical ``e.code``
 (``BracketLeft`` / ``BracketRight``) rather than the character, because ⌥ on
 macOS turns ``[``/``]`` into ``“``/``‘`` — only a code match survives the
-modifier. CI runs Linux chromium, so this presses the ``Control+Alt`` chord
-(the hook also accepts Cmd via ``metaKey`` on macOS).
+modifier. The hook accepts only the platform command modifier, so this
+presses ``Meta+Alt`` on macOS and ``Control+Alt`` elsewhere.
 
 Two design points this exercises end-to-end that the unit test cannot:
 
@@ -32,13 +32,15 @@ and always has content (the Agents tab is unconditional).
 from __future__ import annotations
 
 import re
+import sys
 from datetime import UTC, datetime, timedelta
 
 from playwright.sync_api import Page, expect
 
 _COMPOSER = "Send a message…"
-_LEFT_CHORD = "Control+Alt+BracketLeft"
-_RIGHT_CHORD = "Control+Alt+BracketRight"
+_COMMAND_MODIFIER = "Meta" if sys.platform == "darwin" else "Control"
+_LEFT_CHORD = f"{_COMMAND_MODIFIER}+Alt+BracketLeft"
+_RIGHT_CHORD = f"{_COMMAND_MODIFIER}+Alt+BracketRight"
 
 # The left sidebar stays mounted when collapsed (it animates to width 0), so
 # its open-state reads off ``data-collapsed`` rather than presence. The right
