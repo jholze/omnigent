@@ -1467,7 +1467,7 @@ def register_events_routes(
 
         startup = getattr(request.app.state, "startup_inputs", None)
         if (
-            not isinstance(request, (StartupInputContext, _RunnerEventContext))
+            not isinstance(request, (StartupInputContext, _RunnerEventContext, OwnerWakeContext))
             and startup is not None
             and (
                 (body.type == "message" and body.data.get("role") == "user")
