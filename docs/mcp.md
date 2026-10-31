@@ -107,7 +107,7 @@ includes `will_lose`, a sentence naming what that call removes.
 | `list_sessions` | Compact rows: `id`, `title`, `status`, `agent_name`, `project_id`, `working_directory`, `updated_at`. `project` / `project_id` filters to one project (an id from `list_projects`, or the project name). `working_directory` is parsed from the `omnigent.composer_context.v1.0` label |
 | `get_session` | One session, without the embedded transcript |
 | `get_session_items` | Newest 30 items by default, text truncated |
-| `create_session` | `POST /v1/sessions`. `agent_id` or `agent_name`, plus optional `host_id`, `workspace`, and `message`. Dry-run unless `confirm` is true |
+| `create_session` | `POST /v1/sessions`. `agent_id` or `agent_name`, plus optional `host_id`, `workspace`, and `message`. Dry-run unless `confirm` is true. With `parent_session_id` and no `project_id`, the child inherits the parent's project; an explicit `project_id` wins and `""` means no project |
 | `send_message` | `POST /v1/sessions/{id}/events` with `type: "message"` and an `input_text` block. `wait: true` reads the live stream until `session.status` is `idle` or `failed`, an elicitation arrives (`needs_input`), or `timeout_seconds` (default 120) |
 | `interrupt_turn`, `stop_session` | `{type: "interrupt"}` / `{type: "stop_session"}` on the events route. Dry-run unless `confirm` is true |
 | `get_elicitation` | `GET .../elicitations/{elicitation_id}` |
