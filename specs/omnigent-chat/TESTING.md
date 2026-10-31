@@ -6,7 +6,7 @@ are green.
 
 The instance prepared on 31 Oct 2026 runs commit `0ff489ba3` (epic tip after
 PR #145). It is a separate process. It does not use port 6767, the production
-database, or `~/.omnigent`.
+database `~/.omnigent/chat.db`, or any other file under `~/.omnigent`.
 
 ## Open it
 
