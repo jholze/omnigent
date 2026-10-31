@@ -686,4 +686,117 @@ describe("useChatFrames badge sync", () => {
     const urls = fetchMock.mock.calls.map((call) => String(call[0]));
     expect(urls).not.toContain("/v1/chat/bootstrap");
   });
+
+  it("a listed-channel frame that arrives before bootstrap is counted once after bootstrap is set", async () => {
+    const page: MessagePageResponse = {
+      items: [row({ id: "m1", created_at: 10 })],
+      has_older: false,
+      has_more: false,
+      next_after: null,
+      next_before: null,
+    };
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/v1/chat/channels/c1/messages")) return jsonResponse(page);
+      throw new Error(url);
+    });
+    const client = queryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const unreadOf = () =>
+      client.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap)?.channels[0]
+        ?.unread_count;
+
+    renderHook(() => useChatFrames(true), { wrapper });
+    act(() => {
+      applyChatFrame({
+        type: "chat",
+        kind: "message.created",
+        channel_id: "c1",
+        message_id: "m1",
+        thread_root_id: null,
+        created_at: 10,
+        author_id: "jens",
+      });
+    });
+    await waitFor(() => {
+      expect(client.getQueryData(teamChatQueryKeys.messages("c1"))).toBeDefined();
+    });
+    expect(client.getQueryData(teamChatQueryKeys.bootstrap)).toBeUndefined();
+
+    // Cursor time 5 is older than the message (10), so bootstrap did not count it.
+    act(() => {
+      client.setQueryData(teamChatQueryKeys.bootstrap, badgeBootstrap());
+    });
+    await waitFor(() => expect(unreadOf()).toBe(1));
+
+    act(() => {
+      const current = client.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+      client.setQueryData(teamChatQueryKeys.bootstrap, { ...current! });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(unreadOf()).toBe(1);
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).not.toContain("/v1/chat/bootstrap");
+  });
+
+  it("a message at or before the bootstrap cursor does not increment a count that already includes it", async () => {
+    const page: MessagePageResponse = {
+      items: [row({ id: "m1", created_at: 10 }), row({ id: "m2", created_at: 11 })],
+      has_older: false,
+      has_more: false,
+      next_after: null,
+      next_before: null,
+    };
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/v1/chat/channels/c1/messages")) return jsonResponse(page);
+      throw new Error(url);
+    });
+    const client = queryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const unreadOf = () =>
+      client.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap)?.channels[0]
+        ?.unread_count;
+
+    renderHook(() => useChatFrames(true), { wrapper });
+    act(() => {
+      for (const [messageId, createdAt] of [
+        ["m1", 10],
+        ["m2", 11],
+      ] as const) {
+        applyChatFrame({
+          type: "chat",
+          kind: "message.created",
+          channel_id: "c1",
+          message_id: messageId,
+          thread_root_id: null,
+          created_at: createdAt,
+          author_id: "jens",
+        });
+      }
+    });
+    await waitFor(() => {
+      expect(client.getQueryData(teamChatQueryKeys.messages("c1"))).toBeDefined();
+    });
+
+    // Bootstrap cut at m1 (10) and already counts it; m2 (11) is after the cut.
+    act(() => {
+      client.setQueryData(
+        teamChatQueryKeys.bootstrap,
+        badgeBootstrap({
+          channels: [badgeChannel("c1", 1)],
+          changes_cursor: `10:${"0".repeat(32)}`,
+        }),
+      );
+    });
+    await waitFor(() => expect(unreadOf()).toBe(2));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(unreadOf()).toBe(2);
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).not.toContain("/v1/chat/bootstrap");
+  });
 });
