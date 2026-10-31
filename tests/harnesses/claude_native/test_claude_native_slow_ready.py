@@ -182,3 +182,49 @@ def test_first_message_survives_slow_terminal_startup(
         finally:
             with contextlib.suppress(subprocess.SubprocessError):
                 subprocess.run([*tmux, "kill-server"], check=False, capture_output=True, timeout=5)
+
+
+_SLOW_BOOT = "Claude Code — connecting to host...\nThis is taking longer than usual.\n"
+_RULE = "─" * 120
+# Claude Code 2.1.266 panes captured after the slow-boot launcher exec'd it.
+_BOOTED_COMPOSER = (
+    _SLOW_BOOT + " ▐▛███▛█   Claude Code v2.1.266\n▝▜██████▀  Sonnet 4 · API Usage Billing\n"
+    f"{_RULE}\n❯ \n{_RULE}\n  ⏸ manual mode on · ? for shortcuts · ← for agents\n"
+)
+_CUSTOM_API_KEY_DIALOG = (
+    _SLOW_BOOT + f"{_RULE}\n  Detected a custom API key in your environment\n"
+    "  ANTHROPIC_API_KEY: sk-ant-...mock-key\n  Do you want to use this API key?\n"
+    "    Yes\n  ❯ No (recommended)\n  Enter to confirm · Esc to cancel\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("ready_frame", "blocks"), [(_BOOTED_COMPOSER, False), (_CUSTOM_API_KEY_DIALOG, True)]
+)
+@pytest.mark.timeout(10)
+def test_slow_boot_screen_waits_but_a_startup_decision_dialog_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ready_frame: str, blocks: bool
+) -> None:
+    """Launcher boot output keeps the gate waiting; Claude's own decision dialog stops it."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "session-boot"}))
+    frames = iter([_SLOW_BOOT, _SLOW_BOOT, ready_frame])
+    captured: list[str] = []
+
+    def capture(*_args: object, **_kwargs: object) -> str:
+        captured.append(next(frames, ready_frame))
+        return captured[-1]
+
+    monkeypatch.setattr(bridge, "_capture_pane", capture)
+    assert not bridge.has_pending_user_prompt(bridge_dir)
+    if blocks:
+        with pytest.raises(bridge.ClaudeUserPromptPending, match="message not sent"):
+            bridge._wait_for_claude_prompt_ready(
+                "/tmp/example.sock", "main", timeout_s=30.0, bridge_dir=bridge_dir
+            )
+    else:
+        bridge._wait_for_claude_prompt_ready(
+            "/tmp/example.sock", "main", timeout_s=30.0, bridge_dir=bridge_dir
+        )
+    assert captured[:3] == [_SLOW_BOOT, _SLOW_BOOT, ready_frame]
