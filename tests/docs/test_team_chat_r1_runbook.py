@@ -62,3 +62,11 @@ def test_nfr_025_team_chat_r1_runbook_launch_and_rollback_steps() -> None:
     upgrade_section = _normalized(_section_body(markdown, "alembic upgrade head"))
     assert "on a copy of the backup" in upgrade_section
     assert "never on `<home>/.omnigent/chat.db`" in upgrade_section
+
+    db_test_command = "uv run --no-sync pytest tests/db -q"
+    unmarked_db_test_lines = [
+        line for line in markdown.splitlines() if line.strip().strip("`") == db_test_command
+    ]
+    assert f'{db_test_command} -m "not databricks"' in markdown and not unmarked_db_test_lines, (
+        f"tests/db step must carry -m 'not databricks'; unmarked: {unmarked_db_test_lines}"
+    )
