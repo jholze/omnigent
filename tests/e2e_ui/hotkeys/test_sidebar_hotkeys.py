@@ -15,6 +15,7 @@ Covers the two hook changes end to end:
 from __future__ import annotations
 
 import json
+import sys
 
 from playwright.sync_api import Page, expect
 
@@ -47,7 +48,9 @@ def test_numeric_chord_jumps_to_pinned_session(
     # appears once the session list has loaded and the pin resolved).
     expect(page.get_by_text("Pinned", exact=True)).to_be_visible(timeout=30_000)
 
-    page.keyboard.press("Control+Alt+Digit1")
+    # Only the command modifier fires: Cmd on macOS, Ctrl elsewhere.
+    modifier = "Meta" if sys.platform == "darwin" else "Control"
+    page.keyboard.press(f"{modifier}+Alt+Digit1")
     page.wait_for_url(f"**/c/{session_id}", timeout=15_000)
 
 
