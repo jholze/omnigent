@@ -116,8 +116,9 @@ export type SubmitApprovalFn = (
 
 /**
  * Copy for a surface outside the English session chat (the team chat).
- * Covers the binary card and the generic verdicts; harness-specific modes
- * (plan review, Codex commands, question forms) keep their own copy.
+ * Covers the binary card, its option buttons, the generic and option
+ * verdicts and the plan verdict lines. The pending plan review, Codex
+ * command details and question forms keep their own copy.
  */
 export interface ApprovalCardLabels {
   /** Pending title of the binary card, e.g. "Freigabe nötig". */
@@ -131,6 +132,41 @@ export interface ApprovalCardLabels {
   resolvedElsewhereDetail: string;
   /** Verdict plus resolver, e.g. `("Genehmigt", "Anna") => "Genehmigt von Anna"`. */
   byResolver: (verdict: string, resolver: string) => string;
+  /** Option button: accept plus session-wide auto mode. */
+  approveAutoMode: string;
+  /** Tooltip of the auto-mode button. */
+  approveAutoModeTitle: string;
+  /** Option button: accept plus edit auto-accept. */
+  acceptAllEdits: string;
+  /** Option button: accept plus a session allow rule, e.g. `("Bash") => "…"`. */
+  approveRemember: (target: string) => string;
+  /** Tooltip of the remember button scoped to a WebFetch host. */
+  rememberHostTitle: (host: string) => string;
+  /** Tooltip of the remember button scoped to every call of a tool. */
+  rememberToolTitle: (tool: string) => string;
+  /** Codex persist option: this session only. */
+  approveSession: string;
+  /** Codex persist option: always. */
+  alwaysAllow: string;
+  /** Antigravity prefix options; the prefix renders as code between the parts. */
+  allowPrefixSession: { before: string; after: string };
+  allowPrefixAlways: { before: string; after: string };
+  /** Codex command option that stores an exec-policy amendment. */
+  approveAndRemember: string;
+  approvedAndRemembered: string;
+  approvedAutoMode: string;
+  approvedAllEdits: string;
+  /** Remember verdict; `target` is null when the scope is unknown. */
+  approvedRemember: (target: string | null) => string;
+  approvedSession: string;
+  alwaysAllowed: string;
+  sessionAllowRequested: string;
+  alwaysAllowRequested: string;
+  planApproved: string;
+  planApprovedAutoMode: string;
+  planRejected: string;
+  promptExpired: string;
+  promptExpiredHint: string;
 }
 
 /** Sub-agent session behind a prompt mirrored into an ancestor's view. */
@@ -447,8 +483,10 @@ export function ApprovalCard({
   // than letting the short button label imply a narrower scope.
   const rememberTitle = rememberScope
     ? rememberScope.host
-      ? `Won't ask again for ${rememberScope.host} for the rest of this session`
-      : `Won't ask again for any ${rememberScope.tool} call for the rest of this session`
+      ? (labels?.rememberHostTitle(rememberScope.host) ??
+        `Won't ask again for ${rememberScope.host} for the rest of this session`)
+      : (labels?.rememberToolTitle(rememberScope.tool) ??
+        `Won't ask again for any ${rememberScope.tool} call for the rest of this session`)
     : undefined;
   const binaryButtons = (
     <div className="flex flex-wrap gap-2 pt-1">
@@ -474,11 +512,11 @@ export function ApprovalCard({
           >
             <CheckIcon className="mr-1 size-3.5 shrink-0" />
             <span className="min-w-0">
-              Allow commands starting with{" "}
+              {labels?.allowPrefixSession.before ?? "Allow commands starting with"}{" "}
               <code className="break-all rounded bg-muted px-1 font-mono">
                 {agyPermission.alwaysAllowPattern}
               </code>{" "}
-              for this session
+              {labels?.allowPrefixSession.after ?? "for this session"}
             </span>
           </Button>
           <Button
@@ -492,10 +530,11 @@ export function ApprovalCard({
           >
             <CheckIcon className="mr-1 size-3.5 shrink-0" />
             <span className="min-w-0">
-              Always allow commands starting with{" "}
+              {labels?.allowPrefixAlways.before ?? "Always allow commands starting with"}{" "}
               <code className="break-all rounded bg-muted px-1 font-mono">
                 {agyPermission.alwaysAllowPattern}
               </code>
+              {labels?.allowPrefixAlways.after ? <> {labels.allowPrefixAlways.after}</> : null}
             </span>
           </Button>
         </>
@@ -509,7 +548,7 @@ export function ApprovalCard({
           componentId="approval.approve_session"
         >
           <CheckIcon className="mr-1 size-3.5 shrink-0" />
-          <span className="min-w-0">Approve for this session</span>
+          <span className="min-w-0">{labels?.approveSession ?? "Approve for this session"}</span>
         </Button>
       )}
       {codexPersistModes.includes("always") && (
@@ -521,7 +560,7 @@ export function ApprovalCard({
           componentId="approval.approve_always"
         >
           <CheckIcon className="mr-1 size-3.5 shrink-0" />
-          <span className="min-w-0">Always allow</span>
+          <span className="min-w-0">{labels?.alwaysAllow ?? "Always allow"}</span>
         </Button>
       )}
       {allowAutoMode && (
@@ -530,11 +569,16 @@ export function ApprovalCard({
           variant="outline"
           className={OPTION_BUTTON_CLASS}
           onClick={submitAutoMode}
-          title="Approve this request and let Claude review future tool permissions automatically for this session"
+          title={
+            labels?.approveAutoModeTitle ??
+            "Approve this request and let Claude review future tool permissions automatically for this session"
+          }
           componentId="approval.approve_auto_mode"
         >
           <CheckIcon className="mr-1 size-3.5 shrink-0" />
-          <span className="min-w-0">Approve &amp; switch to auto mode</span>
+          <span className="min-w-0">
+            {labels?.approveAutoMode ?? "Approve & switch to auto mode"}
+          </span>
         </Button>
       )}
       {allowAllEdits && (
@@ -546,7 +590,7 @@ export function ApprovalCard({
           componentId="approval.approve_allow_edits"
         >
           <CheckIcon className="mr-1 size-3.5 shrink-0" />
-          <span className="min-w-0">Accept & allow all edits</span>
+          <span className="min-w-0">{labels?.acceptAllEdits ?? "Accept & allow all edits"}</span>
         </Button>
       )}
       {rememberTarget && (
@@ -561,7 +605,8 @@ export function ApprovalCard({
         >
           <CheckIcon className="mr-1 size-3.5 shrink-0" />
           <span className="min-w-0 break-words">
-            Approve &amp; don't ask again for {rememberTarget}
+            {labels?.approveRemember(rememberTarget) ??
+              `Approve & don't ask again for ${rememberTarget}`}
           </span>
         </Button>
       )}
@@ -586,7 +631,7 @@ export function ApprovalCard({
         componentId="approval.approve_command"
       >
         <CheckIcon className="mr-1 size-3.5 shrink-0" />
-        <span className="min-w-0">Approve</span>
+        <span className="min-w-0">{labels?.approve ?? "Approve"}</span>
       </Button>
       {execPolicyAmendment && (
         <Button
@@ -597,7 +642,7 @@ export function ApprovalCard({
           componentId="approval.approve_command_remember"
         >
           <CheckIcon className="mr-1 size-3.5 shrink-0" />
-          <span className="min-w-0">Approve and remember</span>
+          <span className="min-w-0">{labels?.approveAndRemember ?? "Approve and remember"}</span>
         </Button>
       )}
       <Button
@@ -607,7 +652,7 @@ export function ApprovalCard({
         onClick={() => submitBinary("decline")}
       >
         <XIcon className="mr-1 size-3.5 shrink-0" />
-        <span className="min-w-0">Reject</span>
+        <span className="min-w-0">{labels?.reject ?? "Reject"}</span>
       </Button>
     </div>
   );
@@ -647,14 +692,16 @@ export function ApprovalCard({
         : null;
 
     let icon = <XIcon className="size-4 text-destructive" />;
-    let label = isExitPlanMode ? "Plan rejected" : (labels?.rejected ?? "Rejected");
+    let label = isExitPlanMode
+      ? (labels?.planRejected ?? "Plan rejected")
+      : (labels?.rejected ?? "Rejected");
     if (promptExpired) {
       // The server cleared the prompt because the hook stopped waiting
       // before anyone answered (a severed poll never re-parked, the ask
       // timed out). Nothing was decided, so say so and tell the user how
       // to get the agent moving again instead of implying an answer.
       icon = <ClockIcon className="size-4 text-muted-foreground" />;
-      label = "Prompt expired";
+      label = labels?.promptExpired ?? "Prompt expired";
     } else if (autoResolved) {
       // Verdict unknown here; explain the neutral pill.
       const detail = labels?.resolvedElsewhereDetail ?? AUTO_RESOLVED_DETAIL;
@@ -681,33 +728,42 @@ export function ApprovalCard({
       label = `Selected: ${selectedAnswer}`;
     } else if (acceptedWithExecPolicy) {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = "Approved and remembered";
+      label = labels?.approvedAndRemembered ?? "Approved and remembered";
     } else if (acceptedAutoMode) {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = "Approved · auto mode";
+      label = labels?.approvedAutoMode ?? "Approved · auto mode";
     } else if (acceptedAllEdits) {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = isExitPlanMode ? "Plan approved · auto mode" : "Approved · auto-accepting edits";
+      label = isExitPlanMode
+        ? (labels?.planApprovedAutoMode ?? "Plan approved · auto mode")
+        : (labels?.approvedAllEdits ?? "Approved · auto-accepting edits");
     } else if (acceptedRemember) {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = rememberTarget
-        ? `Approved · won't ask again for ${rememberTarget}`
-        : "Approved · won't ask again";
+      label = labels
+        ? labels.approvedRemember(rememberTarget)
+        : rememberTarget
+          ? `Approved · won't ask again for ${rememberTarget}`
+          : "Approved · won't ask again";
     } else if (
       phase === "agy_permission" &&
       (acceptedPersist === "session" || acceptedPersist === "always")
     ) {
       icon = <InfoIcon className="size-4 text-muted-foreground" />;
-      label = acceptedPersist === "session" ? "Session allow requested" : "Always allow requested";
+      label =
+        acceptedPersist === "session"
+          ? (labels?.sessionAllowRequested ?? "Session allow requested")
+          : (labels?.alwaysAllowRequested ?? "Always allow requested");
     } else if (acceptedPersist === "session") {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = "Approved for this session";
+      label = labels?.approvedSession ?? "Approved for this session";
     } else if (acceptedPersist === "always") {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = "Always allowed";
+      label = labels?.alwaysAllowed ?? "Always allowed";
     } else if (accepted) {
       icon = <CheckIcon className="size-4 text-success" />;
-      label = isExitPlanMode ? "Plan approved" : (labels?.approved ?? "Approved");
+      label = isExitPlanMode
+        ? (labels?.planApproved ?? "Plan approved")
+        : (labels?.approved ?? "Approved");
     }
     const decided = response.action === "accept" || response.action === "decline";
     if (decided && resolvedBy) {
@@ -794,7 +850,8 @@ export function ApprovalCard({
             )}
             {promptExpired && (
               <span className="text-muted-foreground" data-testid="prompt-expired-hint">
-                Nobody answered before the agent stopped waiting. Send a message to continue.
+                {labels?.promptExpiredHint ??
+                  "Nobody answered before the agent stopped waiting. Send a message to continue."}
               </span>
             )}
           </AlertDescription>
