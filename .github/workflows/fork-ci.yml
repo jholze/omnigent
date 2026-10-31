@@ -174,12 +174,23 @@ jobs:
           # -n 4, not -n auto: this Mac also runs the other jobs, and auto
           # spawned enough workers that xdist reported them "not properly
           # terminated" for the rest of the suite.
+          # tests/server and tests/stores leak about 1,100 fds in total
+          # (unclosed SQLite engines, upstream tests). In one -n 4 run a single
+          # worker collected most of them and passed fd 1024, so the pexpect
+          # tests later on that worker failed with "filedescriptor out of range
+          # in select()" (FD_SETSIZE). Upstream CI spreads them over many shards.
+          # Two runs give each half fresh workers; every test still runs.
+          run_suite stores-server tests/server tests/stores \
+            -n 4 \
+            --dist=worksteal
           run_suite main tests \
             --ignore=tests/e2e \
             --ignore=tests/e2e_ui \
             --ignore=tests/codex_parity \
             --ignore=tests/integration \
             --ignore=tests/inner \
+            --ignore=tests/server \
+            --ignore=tests/stores \
             -n 4 \
             --dist=worksteal
           run_suite inner tests/inner -n 4 --dist=worksteal
