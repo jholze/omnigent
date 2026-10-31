@@ -518,6 +518,48 @@ def record_session_failed(
     )
 
 
+def record_session_stalled(
+    *,
+    session_id: str,
+    epoch: int,
+    seconds_since_last_event: float | None,
+) -> None:
+    """Record one ``session.stalled`` for this silence epoch.
+
+    The transition key is the epoch, so a second tick does not insert
+    another row for the same stall.
+    """
+    config = _active_config()
+    if config is None:
+        return
+    payload: dict[str, Any] = {"session_id": session_id}
+    if seconds_since_last_event is not None:
+        payload["seconds_since_last_event"] = seconds_since_last_event
+    _record(
+        config=config,
+        session_id=session_id,
+        event_type="session.stalled",
+        transition_key=f"stall:{epoch}:stalled",
+        payload=payload,
+        now=now_epoch(),
+    )
+
+
+def record_session_recovered(*, session_id: str, epoch: int) -> None:
+    """Record one ``session.recovered`` for the stall epoch that just ended."""
+    config = _active_config()
+    if config is None:
+        return
+    _record(
+        config=config,
+        session_id=session_id,
+        event_type="session.recovered",
+        transition_key=f"stall:{epoch}:recovered",
+        payload={"session_id": session_id},
+        now=now_epoch(),
+    )
+
+
 def _request_from_event(event: dict[str, Any]) -> dict[str, Any]:
     params = event.get("params")
     request = dict(params) if isinstance(params, dict) else {}

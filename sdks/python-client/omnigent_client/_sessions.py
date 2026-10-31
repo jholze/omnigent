@@ -24,6 +24,7 @@ from __future__ import annotations
 import builtins
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -31,6 +32,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import TypeAdapter
 
+from omnigent.server.event_idempotency import retry_same_key
 from omnigent.server.schemas import ServerStreamEvent
 
 from ._child_status import child_summary_busy
@@ -181,6 +183,9 @@ class Session:
         returned with ``visibility="archived"`` or with
         ``visibility="all", include_archived=True``. ``False`` for normal
         sessions.
+    :param stalled: Whether the server has marked the running turn quiet.
+    :param seconds_since_last_event: Seconds since the last progress
+        event, or ``None`` when the server has not reported one.
     """
 
     id: str
@@ -202,6 +207,8 @@ class Session:
     last_task_error: dict[str, str] | None = None
     external_session_id: str | None = None
     archived: bool = False
+    stalled: bool = False
+    seconds_since_last_event: float | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Session:
@@ -238,6 +245,12 @@ class Session:
             last_task_error=raw.get("last_task_error"),
             external_session_id=raw.get("external_session_id"),
             archived=bool(raw.get("archived", False)),
+            stalled=bool(raw.get("stalled", False)),
+            seconds_since_last_event=(
+                float(raw["seconds_since_last_event"])
+                if raw.get("seconds_since_last_event") is not None
+                else None
+            ),
         )
 
 
@@ -280,6 +293,7 @@ class SessionListItem:
         sessions.
     :param parent_session_id: Parent session for a sub-agent child; ``None``
         for top-level sessions or when omitted by an older server.
+    :param stalled: Whether the server has marked the running turn quiet.
     """
 
     id: str
@@ -297,6 +311,7 @@ class SessionListItem:
     pending_elicitations_count: int = 0
     archived: bool = False
     parent_session_id: str | None = None
+    stalled: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> SessionListItem:
@@ -324,6 +339,7 @@ class SessionListItem:
             pending_elicitations_count=raw.get("pending_elicitations_count", 0),
             archived=bool(raw.get("archived", False)),
             parent_session_id=raw.get("parent_session_id"),
+            stalled=bool(raw.get("stalled", False)),
         )
 
 
@@ -1097,12 +1113,27 @@ class SessionsNamespace:
         :raises OmnigentError: If the server returns a non-2xx
             status (404 when the session does not exist).
         """
-        resp = await self._http.post(
-            f"{self._base}/v1/sessions/{session_id}/events",
-            json=event,
+        url = f"{self._base}/v1/sessions/{session_id}/events"
+        key = str(uuid.uuid4())
+
+        async def _once(idem_key: str) -> dict[str, Any]:
+            resp = await self._http.post(
+                url,
+                json=event,
+                headers={"Idempotency-Key": idem_key},
+            )
+            raise_for_status(resp.status_code, response_body(resp))
+            return require_json_object(resp, "POST /v1/sessions/{session_id}/events")
+
+        return await retry_same_key(
+            _once,
+            key=key,
+            retry_exceptions=(
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ),
         )
-        raise_for_status(resp.status_code, response_body(resp))
-        return require_json_object(resp, "POST /v1/sessions/{session_id}/events")
 
     async def resolve_elicitation(
         self,

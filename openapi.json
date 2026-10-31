@@ -6663,9 +6663,11 @@
             "session.permission_mode": "#/components/schemas/SessionPermissionModeEvent",
             "session.presence": "#/components/schemas/SessionPresenceEvent",
             "session.reasoning_effort": "#/components/schemas/SessionReasoningEffortEvent",
+            "session.recovered": "#/components/schemas/SessionRecoveredEvent",
             "session.resource.created": "#/components/schemas/SessionResourceCreatedEvent",
             "session.resource.deleted": "#/components/schemas/SessionResourceDeletedEvent",
             "session.sandbox_status": "#/components/schemas/SessionSandboxStatusEvent",
+            "session.stalled": "#/components/schemas/SessionStalledEvent",
             "session.status": "#/components/schemas/SessionStatusEvent",
             "session.superseded": "#/components/schemas/SessionSupersededEvent",
             "session.terminal.activity": "#/components/schemas/SessionTerminalActivityEvent",
@@ -6740,6 +6742,12 @@
           },
           {
             "$ref": "#/components/schemas/SessionPresenceEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStalledEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionRecoveredEvent"
           },
           {
             "$ref": "#/components/schemas/SessionResourceCreatedEvent"
@@ -7844,6 +7852,11 @@
             "description": "Excerpt of the chat content that matched the request's `search_query`, centered on the match with `\u2026` marking elided ends, so the search UI can show *where* a session matched in its body. Present whenever the query hit an item body (even if the title also matched); `None` on non-search reads and when only the title matched.",
             "title": "Search Snippet"
           },
+          "stalled": {
+            "default": false,
+            "title": "Stalled",
+            "type": "boolean"
+          },
           "status": {
             "description": "Derived session lifecycle status.",
             "enum": [
@@ -8205,6 +8218,41 @@
           "conversation_id"
         ],
         "title": "SessionReasoningEffortEvent",
+        "type": "object"
+      },
+      "SessionRecoveredEvent": {
+        "description": "A stalled session emitted progress again.\n\nEmitted once. The stall label is cleared with this event.",
+        "properties": {
+          "conversation_id": {
+            "description": "The session that resumed progress.",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "sequence_number": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sequence Number"
+          },
+          "type": {
+            "const": "session.recovered",
+            "description": "Always `\"session.recovered\"`.",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "conversation_id"
+        ],
+        "title": "SessionRecoveredEvent",
         "type": "object"
       },
       "SessionResourceCreatedEvent": {
@@ -8793,10 +8841,27 @@
             ],
             "description": "Managed-sandbox launch progress while the session's background sandbox launch is in flight or has failed \u2014 see `SandboxStatus`. `None` for sessions without a managed launch and once the launch succeeds. Sourced from the Omnigent server's in-memory `_session_sandbox_status_cache` at snapshot build time, so a client opening the session mid-launch sees the current stage."
           },
+          "seconds_since_last_event": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seconds Since Last Event"
+          },
           "share_workspace_files": {
             "default": false,
             "description": "Whether the owner opted into letting view-level collaborators browse the workspace (Files/Changes/GitHub surfaces). `False` by default \u2014 read grants share the conversation only. The web share dialog reads this to render the toggle, and the rail reads it to decide whether to mount the file surfaces for a view-only viewer.",
             "title": "Share Workspace Files",
+            "type": "boolean"
+          },
+          "stalled": {
+            "default": false,
+            "title": "Stalled",
             "type": "boolean"
           },
           "status": {
@@ -9018,6 +9083,55 @@
           "stage"
         ],
         "title": "SessionSandboxStatusEvent",
+        "type": "object"
+      },
+      "SessionStalledEvent": {
+        "description": "A running turn has gone quiet past the stall threshold.\n\nEmitted once when the stall watchdog marks the session. The next\nprogress event emits `SessionRecoveredEvent`.",
+        "properties": {
+          "conversation_id": {
+            "description": "The stalled session, e.g. `\"conv_abc123\"`.",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "seconds_since_last_event": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Silence that tripped the mark, when known.",
+            "title": "Seconds Since Last Event"
+          },
+          "sequence_number": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sequence Number"
+          },
+          "type": {
+            "const": "session.stalled",
+            "description": "Always `\"session.stalled\"`.",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "conversation_id"
+        ],
+        "title": "SessionStalledEvent",
         "type": "object"
       },
       "SessionStatusEvent": {

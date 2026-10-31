@@ -104,7 +104,7 @@ includes `will_lose`, a sentence naming what that call removes.
 | `health`, `info` | `GET /health`, `GET /v1/info` |
 | `list_agents`, `list_hosts`, `list_harnesses` | The matching `GET /v1/...` lists |
 | `list_projects` | `GET /v1/projects`. Rows are `id`, `name`, `workspace`, `default_agent` (`config.workspace` and `config.agentId`) |
-| `list_sessions` | Compact rows: `id`, `title`, `status`, `agent_name`, `project_id`, `working_directory`, `updated_at`. `project` / `project_id` filters to one project (an id from `list_projects`, or the project name). `working_directory` is parsed from the `omnigent.composer_context.v1.0` label |
+| `list_sessions` | Compact rows: `id`, `title`, `status`, `agent_name`, `project_id`, `working_directory`, `updated_at`, `stalled`. `project` / `project_id` filters to one project (an id from `list_projects`, or the project name). `working_directory` is parsed from the `omnigent.composer_context.v1.0` label |
 | `get_session` | One session, without the embedded transcript |
 | `get_session_items` | Newest 30 items by default, text truncated |
 | `create_session` | `POST /v1/sessions`. `agent_id` or `agent_name`, plus optional `host_id`, `workspace`, and `message`. Dry-run unless `confirm` is true |
@@ -128,6 +128,45 @@ includes `will_lose`, a sentence naming what that call removes.
 
 `confirm` must be the boolean `true`. Any other value, including the string
 `"true"` and the number `1`, is a dry-run.
+
+### Stall detection
+
+A running turn that emits no progress for `OMNIGENT_STALL_AFTER_S` seconds
+(default 300) is marked stalled. `get_session` and `list_sessions` then
+include `stalled: true`, the session label `omnigent.stall.state` is
+`stalled`, and the server emits `session.stalled` on the live stream, the
+session outbox, and the manager webhook.
+
+The next progress event emits `session.recovered` once and clears the label.
+Transport heartbeats (`session.heartbeat`, `response.heartbeat`) do not count
+as progress. A compaction progress event does.
+
+`send_message` and `POST /v1/sessions/{id}/events` acknowledgements add:
+
+- `delivery`: `turn_started` when the message starts a turn,
+  `buffered_behind_active_turn` when a turn is already running, or
+  `runner_restarted` when the send relaunched the runner.
+- `seconds_since_last_event`: seconds since the last progress event, or
+  null when this process has not seen one.
+- `active_turn_age_s`: present when a turn is already running. It is the
+  age of that turn in seconds.
+
+When input is buffered and the turn has been silent for
+`OMNIGENT_STALL_INTERRUPT_AFTER_S` seconds (default 600), the server
+interrupts that turn once through the existing interrupt path so the
+buffered message can start the next turn. It does not interrupt while an
+elicitation is pending, and it does this at most once per session every 30
+minutes. `OMNIGENT_STALL_AUTO_INTERRUPT` defaults on. Set it to `0` to keep
+the mark and the `session.stalled` event without interrupting. The behaviour
+is the same whether or not the `team_chat` flag is on.
+
+An event POST from MCP or the Python client retries up to 3 times with
+backoff. Every attempt sends the same `Idempotency-Key`. A retry after the
+server has stored the item does not create a second item. An HTTP 4xx is
+not retried.
+
+`HARNESS_TURN_TIMEOUT_S` is the harness idle watchdog. The default is 1200
+seconds. A value of `0` or less disables it.
 
 ### What the API does not do
 

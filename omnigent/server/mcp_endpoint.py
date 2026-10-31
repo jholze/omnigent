@@ -24,6 +24,7 @@ import json
 import logging
 import math
 import os
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -37,6 +38,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.agent_account_tokens import consume_mcp_request
 from omnigent.server.auth import LEVEL_EDIT, AuthProvider
 from omnigent.server.chat_access import principal_kind
+from omnigent.server.event_idempotency import retry_same_key
 from omnigent.server.feature_flags import Feature
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._content_type import require_json_content_type
@@ -962,6 +964,14 @@ def _reject_bot_session_quota(app: Any, account_id: str) -> None:
         )
 
 
+def _is_session_events_post(method: str, path: str) -> bool:
+    """True for the session event POST that must retry without duplicating an item."""
+    if method.upper() != "POST":
+        return False
+    clean = path.split("?", 1)[0].rstrip("/")
+    return "/sessions/" in clean and clean.endswith("/events")
+
+
 class _Api:
     """In-process client for the app that received the MCP call."""
 
@@ -987,18 +997,9 @@ class _Api:
             and isinstance(account_id, str)
         ):
             _reject_bot_session_quota(self._app, account_id)
-        transport = httpx.ASGITransport(app=_InProcessApp(self._app), raise_app_exceptions=False)
-        try:
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://omnigent"
-            ) as client:
-                response = await client.request(
-                    method, path, headers=headers, content=content, timeout=timeout
-                )
-        except httpx.TimeoutException as exc:
-            raise ToolFailure(f"Omnigent {method} {path} timed out") from exc
-        except httpx.HTTPError as exc:
-            raise ToolFailure(f"Omnigent {method} {path} failed: {exc}") from exc
+        response = await self._transport_request(
+            method, path, headers=headers, content=content, timeout=timeout
+        )
         self.last_status = response.status_code
         text = response.text
         if (
@@ -1028,6 +1029,56 @@ class _Api:
             return json.loads(text)
         except json.JSONDecodeError:
             return text
+
+    async def _transport_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        content: bytes | None,
+        timeout: float,
+    ) -> httpx.Response:
+        """Perform one in-process call. Event POSTs retry with one idempotency key."""
+
+        async def _once(attempt_headers: dict[str, str]) -> httpx.Response:
+            transport = httpx.ASGITransport(
+                app=_InProcessApp(self._app), raise_app_exceptions=False
+            )
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://omnigent"
+            ) as client:
+                return await client.request(
+                    method,
+                    path,
+                    headers=attempt_headers,
+                    content=content,
+                    timeout=timeout,
+                )
+
+        try:
+            if _is_session_events_post(method, path):
+                idem_key = str(uuid.uuid4())
+
+                async def _with_key(key: str) -> httpx.Response:
+                    attempt_headers = dict(headers)
+                    attempt_headers["Idempotency-Key"] = key
+                    return await _once(attempt_headers)
+
+                return await retry_same_key(
+                    _with_key,
+                    key=idem_key,
+                    retry_exceptions=(
+                        httpx.TimeoutException,
+                        httpx.NetworkError,
+                        httpx.RemoteProtocolError,
+                    ),
+                )
+            return await _once(headers)
+        except httpx.TimeoutException as exc:
+            raise ToolFailure(f"Omnigent {method} {path} timed out") from exc
+        except httpx.HTTPError as exc:
+            raise ToolFailure(f"Omnigent {method} {path} failed: {exc}") from exc
 
 
 def _forwarded_headers(request: Request, auth_provider: AuthProvider | None) -> dict[str, str]:
@@ -1228,6 +1279,7 @@ def _compact_session(item: Any) -> Any:
         "project_id": item.get("project_id"),
         "working_directory": working_directory_from_labels(labels),
         "updated_at": item.get("updated_at"),
+        "stalled": item.get("stalled", False),
     }
 
 
