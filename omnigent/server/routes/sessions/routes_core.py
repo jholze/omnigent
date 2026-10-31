@@ -1086,8 +1086,11 @@ def register_core_routes(
             body=parsed_metadata,
             user_id=user_id,
             project_store=project_store,
+            conversation_store=conversation_store,
         )
         parsed_metadata = project_resolution.body
+        # Inherited projects are known only after resolution (ADR-0011).
+        require_project_in_scope(project_resolution.project_id)
         creation_metadata(
             parent_session_id=parsed_metadata.parent_session_id,
             host_type=parsed_metadata.host_type,
