@@ -127,12 +127,22 @@ async def test_create_placement(placement, monkeypatch, profile, capability):
         return
     assert "error" not in result, result
     requests = [request for request in requests if request.url.path != "/v1/info"]
-    assert len(requests) == (2 if placement == "same_host" else 1)
+    if placement == "child":
+        # Fork: the child is created without ``message``; the runner then
+        # starts the first turn itself (inherit manager settings, POST event).
+        assert requests[-1].method == "POST"
+        assert requests[-1].url.path.endswith("/events")
+        assert json.loads(requests[-1].content)["data"]["content"][0]["text"] == "Start"
+    else:
+        assert len(requests) == (2 if placement == "same_host" else 1)
     body = json.loads(requests[0].content)
     if placement == "child":
         assert requests[0].url.path == "/v1/sessions"
         assert body["parent_session_id"] == "manager"
-        register.assert_called_once()
+        # Fork: registered when the first turn starts and again on finalize
+        # (idempotent mapping, identical arguments).
+        assert register.call_count >= 1
+        assert len({repr(c) for c in register.call_args_list}) == 1
     else:
         assert requests[0].url.path == "/v1/sessions/orchestrated"
         assert "parent_session_id" not in body
@@ -150,7 +160,9 @@ async def test_create_placement(placement, monkeypatch, profile, capability):
         assert body["initial_input"]["data"]["content"][0]["text"] == "Start"
         assert "initial_items" not in body
     elif placement == "child":
-        assert body["initial_items"][0]["data"]["content"][0]["text"] == "Start"
+        # Fork: the first message is posted as an event, not in the create body.
+        assert "initial_items" not in body
+        assert "message" not in body
     else:
         assert "initial_items" not in body
         assert json.loads(requests[1].content)["data"]["message"] == "Start"
