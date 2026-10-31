@@ -617,8 +617,8 @@ def test_ac_055a_open_thread_shows_approval_card_with_genehmigen_and_ablehnen(
         card = _thread_card(pane)
         expect(card).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
         expect(card).to_contain_text(_APPROVAL_TEXT)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible()
-        expect(card.get_by_role("button", name="Ablehnen")).to_be_visible()
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible()
+        expect(card.get_by_role("button", name="Ablehnen", exact=True)).to_be_visible()
 
 
 def test_ac_055b_approval_requested_while_thread_closed_shows_on_open(
@@ -637,7 +637,7 @@ def test_ac_055b_approval_requested_while_thread_closed_shows_on_open(
         card = _thread_card(pane)
         expect(card).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
         expect(card).to_contain_text(_APPROVAL_TEXT)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible()
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible()
 
 
 def test_ac_056a_genehmigen_resolves_202_and_card_names_anna(
@@ -654,7 +654,7 @@ def test_ac_056a_genehmigen_resolves_202_and_card_names_anna(
 
     with _parked_approval(team_chat_server, thread.session_id) as approval:
         card = _thread_card(pane)
-        approve = card.get_by_role("button", name="Genehmigen")
+        approve = card.get_by_role("button", name="Genehmigen", exact=True)
         expect(approve).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
         with page.expect_response(
             lambda response: (
@@ -710,7 +710,7 @@ def test_ac_057a_inbox_approval_by_jens_updates_annas_card_within_2s(
 
     with _parked_approval(team_chat_server, thread.session_id):
         card = _thread_card(pane)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible(
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible(
             timeout=_LOAD_TIMEOUT_MS
         )
         jens = page_as(JENS)
@@ -741,7 +741,7 @@ def test_nfr032_desktop_1280_agent_thread_with_approval_does_not_scroll(
 
     with _parked_approval(team_chat_server, thread.session_id):
         card = _thread_card(pane)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible(
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible(
             timeout=_LOAD_TIMEOUT_MS
         )
         expect(_thread_chip(pane)).to_have_text("braucht Antwort")
@@ -868,7 +868,7 @@ def test_nfr032_phone_320_approval_buttons_stay_inside_card(
 
     with _parked_approval(team_chat_server, thread.session_id):
         card = _thread_card(pane)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible(
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible(
             timeout=_LOAD_TIMEOUT_MS
         )
         expect(_thread_chip(pane)).to_have_text("braucht Antwort")
@@ -906,8 +906,10 @@ def test_nfr032_phone_390_agent_thread_approval_buttons_are_44px(
 
     with _parked_approval(team_chat_server, thread.session_id):
         card = _thread_card(pane)
-        _assert_touch_target(card.get_by_role("button", name="Genehmigen"), "Genehmigen")
-        _assert_touch_target(card.get_by_role("button", name="Ablehnen"), "Ablehnen")
+        _assert_touch_target(
+            card.get_by_role("button", name="Genehmigen", exact=True), "Genehmigen"
+        )
+        _assert_touch_target(card.get_by_role("button", name="Ablehnen", exact=True), "Ablehnen")
         chip = _thread_chip(pane)
         expect(chip).to_have_text("braucht Antwort")
         # A status, not a control: no touch target needed while this holds.
@@ -934,7 +936,7 @@ def test_reload_after_thread_start_shows_live_chip_and_approval(
         pane = _open_live_thread(page, thread)
         card = _thread_card(pane)
         expect(card).to_contain_text(_APPROVAL_TEXT, timeout=_LOAD_TIMEOUT_MS)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible()
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible()
 
 
 @pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["1280x800", "390x844"])
@@ -960,7 +962,7 @@ def test_nfr032_long_decided_by_wraps(
 
     with _parked_approval(team_chat_server, thread.session_id) as approval:
         card = _thread_card(pane)
-        expect(card.get_by_role("button", name="Genehmigen")).to_be_visible(
+        expect(card.get_by_role("button", name="Genehmigen", exact=True)).to_be_visible(
             timeout=_LOAD_TIMEOUT_MS
         )
         _request(
@@ -1183,7 +1185,7 @@ def _open_strip_with_root_outside_tail(
 
 def _approve_in_thread(page: Page) -> None:
     card = _thread_card(page.get_by_test_id(CHAT_TEST_IDS["threadPane"]))
-    approve = card.get_by_role("button", name="Genehmigen")
+    approve = card.get_by_role("button", name="Genehmigen", exact=True)
     expect(approve).to_be_visible(timeout=_LOAD_TIMEOUT_MS)
     approve.click()
     expect(card).to_have_attribute("data-state", "responded", timeout=_LOAD_TIMEOUT_MS)

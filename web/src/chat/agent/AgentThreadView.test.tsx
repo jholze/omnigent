@@ -184,6 +184,22 @@ function resolveElsewhere(action: "accept" | "decline", decidedBy?: string) {
   );
 }
 
+/** Accept the open card with option `content`, as a server event would. */
+function answerCard(
+  entry: ReturnType<typeof conversationRegistry.acquire>,
+  content: Record<string, unknown>,
+) {
+  act(() =>
+    entry.setState((state) => ({
+      blocks: state.blocks.map((block) =>
+        block.type === "elicitation"
+          ? { ...block, status: "responded", response: { action: "accept", content } }
+          : block,
+      ),
+    })),
+  );
+}
+
 function emitConnected(id = SESSION) {
   act(() => {
     for (const listener of connectListeners) listener(id);
@@ -507,6 +523,59 @@ describe("Approval cards in the thread", () => {
     expect(live.textContent?.indexOf("Freigabe.")).toBeLessThan(
       live.textContent?.indexOf("Migration anwenden?") ?? -1,
     );
+  });
+
+  it("COPY-01 option buttons on the thread card are German", () => {
+    withAccess(2);
+    seedEntry(
+      [userInput, card({ allowAutoMode: true, rememberScope: { tool: "Bash" } })],
+      "running",
+    );
+    renderView();
+    const approval = screen.getByTestId(CHAT_TEST_IDS.approvalCard);
+    expect(
+      within(approval).getByRole("button", { name: "Genehmigen & Auto-Modus einschalten" }),
+    ).toBeInTheDocument();
+    const remember = within(approval).getByTestId("approval-card-remember");
+    expect(remember).toHaveTextContent("Genehmigen & für Bash nicht mehr fragen");
+    expect(remember).toHaveAttribute(
+      "title",
+      "Bei keinem Bash-Aufruf in dieser Session mehr fragen",
+    );
+    expect(within(approval).queryByText(/switch to auto mode/)).toBeNull();
+    expect(within(approval).queryByText(/don't ask again/)).toBeNull();
+  });
+
+  it.each([
+    [{ allow_auto_mode: true }, "Genehmigt · Auto-Modus", /auto mode/],
+    [{ remember: true }, "Genehmigt · fragt für Bash nicht mehr", /won't ask again/],
+  ])("COPY-01 the resolved option line is German (%j)", (content, german, english) => {
+    withAccess(2);
+    const entry = seedEntry(
+      [userInput, card({ allowAutoMode: true, rememberScope: { tool: "Bash" } })],
+      "running",
+    );
+    renderView();
+    answerCard(entry, content);
+    const approval = screen.getByTestId(CHAT_TEST_IDS.approvalCard);
+    expect(within(approval).getByText(german)).toBeInTheDocument();
+    expect(within(approval).queryByText(english)).toBeNull();
+  });
+
+  it("COPY-01 the resolved plan line is German", () => {
+    withAccess(2);
+    const entry = seedEntry(
+      [
+        userInput,
+        card({ elicitationId: "elic_plan", exitPlanMode: { plan: "# Plan\n\n1. Fix schreiben" } }),
+      ],
+      "running",
+    );
+    renderView();
+    answerCard(entry, { allow_all_edits: true });
+    const review = screen.getByTestId("plan-review");
+    expect(within(review).getByText("Plan genehmigt · Auto-Modus")).toBeInTheDocument();
+    expect(within(review).queryByText(/Plan approved/)).toBeNull();
   });
 
   it("AC-055b a card opened while the thread was closed is there on open", () => {
