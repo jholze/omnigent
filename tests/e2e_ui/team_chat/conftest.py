@@ -29,7 +29,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -340,6 +340,8 @@ def spawn_team_chat_server(
         "ANTHROPIC_API_KEY": "",
         # Accept exactly this fixture's runner tunnel.
         "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token,
+        # Lets tests mint agent accounts through POST /v1/chat/agent-accounts.
+        "OMNIGENT_CHAT_AGENT_SECRET": secrets.token_urlsafe(32),
     }
     with isolated_local_server(
         tmp,
@@ -535,3 +537,59 @@ def seed_message(
     )
     resp.raise_for_status()
     return resp.json()
+
+
+@dataclass(frozen=True)
+class IssuedAgentAccount:
+    """An agent account with its one-time credentials, kept in memory only.
+
+    ``repr`` hides the token and the webhook secret, so a failing assertion or
+    a fixture dump never prints them.
+    """
+
+    account: dict[str, Any]
+    token: str = field(repr=False)
+    webhook_secret: str = field(repr=False)
+
+
+def issue_agent_account(
+    server: TeamChatServer, *, as_user: str, display_name: str, handle: str
+) -> IssuedAgentAccount:
+    """Create an agent account owned by *as_user*; keep its one-time credentials."""
+    resp = httpx.post(
+        f"{server.base_url}/v1/chat/agent-accounts",
+        json={"display_name": display_name, "handle": handle},
+        headers=identity_headers(as_user),
+        timeout=10.0,
+        trust_env=False,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    return IssuedAgentAccount(
+        account=payload["account"],
+        token=payload["token"],
+        webhook_secret=payload["webhook_secret"],
+    )
+
+
+def seed_agent_account(
+    server: TeamChatServer, *, as_user: str, display_name: str, handle: str
+) -> dict[str, Any]:
+    """Create an agent account owned by *as_user*; return its public record.
+
+    The response's one-time token is dropped so it never reaches test output.
+    """
+    return issue_agent_account(
+        server, as_user=as_user, display_name=display_name, handle=handle
+    ).account
+
+
+def revoke_agent_account(server: TeamChatServer, *, as_user: str, account_id: str) -> None:
+    """Revoke an agent account so it leaves the mention directory."""
+    resp = httpx.post(
+        f"{server.base_url}/v1/chat/agent-accounts/{account_id}/revoke",
+        headers=identity_headers(as_user),
+        timeout=10.0,
+        trust_env=False,
+    )
+    resp.raise_for_status()

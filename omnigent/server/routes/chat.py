@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from omnigent.db.utils import now_epoch_us
 from omnigent.debug_logging import add_audit_attrs
@@ -37,7 +38,11 @@ from omnigent.server.chat_agent_threads import (
     visible_agent_handles,
 )
 from omnigent.server.chat_rate_limit import consume_agent_request, consume_channel_post
-from omnigent.server.chat_realtime import publish_message_created, publish_read_updated
+from omnigent.server.chat_realtime import (
+    publish_message_created,
+    publish_read_updated,
+    publish_typing,
+)
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes.agent_accounts import register_agent_account_routes, resolve_caller
 from omnigent.stores.chat_store import (
@@ -61,6 +66,10 @@ _CHANGES_LIMIT = 1000
 _CHANNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _UNREAD_LIMIT = 50
+# FR-032: at most one ``typing`` frame per principal and channel in this window.
+_TYPING_THROTTLE_SECONDS = 3.0
+# Prune the in-process throttle map once it grows past this many entries.
+_TYPING_THROTTLE_PRUNE_AT = 1024
 _ACTIVE_WINDOW_US = 10 * 60 * 1_000_000
 
 _logger = logging.getLogger("omnigent.chat")
@@ -94,6 +103,11 @@ class MessageResponse(BaseModel):
     messages whose thread has an agent session, omitted otherwise. It
     is the value ``thread.updated`` already sends to every channel
     member, so a reloaded client can mount the live view.
+
+    ``forward_state`` mirrors ``chat_messages.forward_state``
+    (``not_forwarded``/``failed``/``forwarding``/``forwarded``) and is
+    present only when the stored value is not ``NULL``, i.e. on agent
+    thread replies whose forward has been attempted. Omitted otherwise.
     """
 
     id: str
@@ -106,6 +120,7 @@ class MessageResponse(BaseModel):
     client_id: str | None
     agent_state: str | None = None
     session_id: str | None = None
+    forward_state: str | None = None
 
 
 class DirectoryEntry(BaseModel):
@@ -245,6 +260,50 @@ class UnreadResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class NeedsYouMentionResponse(BaseModel):
+    """One unread message that mentions the caller (FR-010 a).
+
+    Carries no body: the view and OS notifications name only the place
+    and the author (FR-011, NFR-014).
+    """
+
+    channel_id: str
+    channel_kind: str
+    channel_name: str | None
+    thread_root_id: str | None
+    message_id: str
+    author_id: str
+    author_label: str
+    created_at: int
+
+
+class NeedsYouApprovalResponse(BaseModel):
+    """One agent thread whose session waits on an answer the caller may give (FR-010 b)."""
+
+    channel_id: str
+    channel_kind: str
+    channel_name: str | None
+    root_message_id: str
+    session_id: str
+    pending_count: int
+
+
+class NeedsYouResponse(BaseModel):
+    """``GET /v1/chat/needs-you``."""
+
+    mentions: list[NeedsYouMentionResponse]
+    approvals: list[NeedsYouApprovalResponse]
+
+
+class TypingBody(BaseModel):
+    """``POST /v1/chat/channels/{id}/typing`` (FR-032).
+
+    Only the flag is accepted; draft text is never sent (NFR-014).
+    """
+
+    active: StrictBool
+
+
 class ReadBody(BaseModel):
     """``POST /v1/chat/channels/{id}/read``.
 
@@ -363,6 +422,8 @@ def _message_response(
         response.agent_state = agent_state
     if session_id is not None:
         response.session_id = session_id
+    if message.forward_state is not None:
+        response.forward_state = message.forward_state
     return response
 
 
@@ -525,10 +586,15 @@ def create_chat_router(
             _raise_rate_limited(retry_after)
         await asyncio.to_thread(chat_store.touch_agent_last_seen, caller)
 
-    async def _channels_with_counts(caller: str, rows: list[ChatChannel]) -> list[ChannelResponse]:
-        """Attach unread and mention counts for *rows* (FR-008)."""
+    async def _channels_with_counts(
+        caller: str, rows: list[ChatChannel], *, until: int | None = None
+    ) -> list[ChannelResponse]:
+        """Attach unread and mention counts for *rows* (FR-008).
+
+        *until* limits the counts to messages created at or before that epoch-us.
+        """
         counts = await asyncio.to_thread(
-            chat_store.channel_unread_counts, caller, [row.id for row in rows]
+            chat_store.channel_unread_counts, caller, [row.id for row in rows], until=until
         )
         rendered: list[ChannelResponse] = []
         for row in rows:
@@ -554,6 +620,8 @@ def create_chat_router(
         general = await asyncio.to_thread(
             chat_store.bootstrap_channel, _GENERAL_CHANNEL, human_caller
         )
+        # Counts cover messages up to this cursor; the changes feed delivers later ones.
+        counted_until = now_epoch_us()
         channels, dms = await _channels_visible_to(chat_store, caller)
         members = await asyncio.to_thread(chat_store.list_members, general.id)
         accounts = await asyncio.to_thread(chat_store.list_active_agent_accounts)
@@ -575,10 +643,10 @@ def create_chat_router(
         )
         return BootstrapResponse(
             me=caller,
-            channels=await _channels_with_counts(caller, channels),
-            dms=await _channels_with_counts(caller, dms),
+            channels=await _channels_with_counts(caller, channels, until=counted_until),
+            dms=await _channels_with_counts(caller, dms, until=counted_until),
             directory=directory,
-            changes_cursor=f"{now_epoch_us()}:{'0' * 32}",
+            changes_cursor=f"{counted_until}:{'0' * 32}",
         )
 
     @router.get("/chat/channels", response_model=list[ChannelResponse])
@@ -1009,6 +1077,120 @@ def create_chat_router(
                 )
             )
         return UnreadResponse(items=rendered, next_cursor=None)
+
+    @router.get("/chat/needs-you", response_model=NeedsYouResponse)
+    async def needs_you(request: Request) -> NeedsYouResponse:
+        """Unread mentions of the caller and agent approvals the caller may answer (FR-010).
+
+        Approvals come from active agent threads in conversations the caller
+        sees, whose session has a pending elicitation and on which the caller
+        (a bot: its owner) holds at least EDIT. READ alone is not enough
+        (AC-010b). No message body leaves this route.
+        """
+        from omnigent.runtime import pending_elicitations
+        from omnigent.server.auth import LEVEL_EDIT
+        from omnigent.server.chat_agent_threads import _acting_principal, _session_level
+
+        caller = _resolve_caller(request, auth_provider)
+        channels, dms = await _channels_visible_to(chat_store, caller)
+        by_id = {row.id: row for row in [*channels, *dms]}
+        accounts = {
+            account.principal_id: account.display_name
+            for account in await asyncio.to_thread(chat_store.list_active_agent_accounts)
+        }
+
+        unread_items = await asyncio.to_thread(
+            chat_store.list_unread, caller, limit=_UNREAD_LIMIT, channel_ids=list(by_id)
+        )
+        mentions: list[NeedsYouMentionResponse] = []
+        for item in unread_items:
+            if item.reason != "mention":
+                continue
+            message = item.message
+            channel = by_id.get(message.channel_id)
+            if channel is None:
+                continue
+            mentions.append(
+                NeedsYouMentionResponse(
+                    channel_id=channel.id,
+                    channel_kind=channel.kind,
+                    channel_name=channel.name,
+                    thread_root_id=message.thread_root_id,
+                    message_id=message.id,
+                    author_id=message.author_id,
+                    author_label=accounts.get(message.author_id)
+                    or _human_label(message.author_id),
+                    created_at=message.created_at,
+                )
+            )
+        mentions.sort(key=lambda row: (row.created_at, row.message_id), reverse=True)
+
+        threads = []
+        for channel in by_id.values():
+            threads.extend(
+                await asyncio.to_thread(chat_store.list_channel_agent_threads, channel.id)
+            )
+        with_session = [thread for thread in threads if thread.session_id]
+        counts = pending_elicitations.counts_for(
+            [thread.session_id for thread in with_session if thread.session_id]
+        )
+        acting = await _acting_principal(chat_store, caller)
+        approvals: list[NeedsYouApprovalResponse] = []
+        for thread in with_session:
+            session_id = thread.session_id or ""
+            pending = counts.get(session_id, 0)
+            if pending <= 0 or acting is None:
+                continue
+            if await _session_level(chat_store, acting, session_id) < LEVEL_EDIT:
+                continue
+            channel = by_id[thread.channel_id]
+            approvals.append(
+                NeedsYouApprovalResponse(
+                    channel_id=channel.id,
+                    channel_kind=channel.kind,
+                    channel_name=channel.name,
+                    root_message_id=thread.root_message_id,
+                    session_id=session_id,
+                    pending_count=pending,
+                )
+            )
+        return NeedsYouResponse(mentions=mentions, approvals=approvals)
+
+    # (principal_id, channel_id) -> monotonic time of the last published
+    # active typing frame. In-process only; nothing is persisted (FR-032).
+    typing_sent_at: dict[tuple[str, str], float] = {}
+
+    def _typing_allowed(caller: str, channel_id: str) -> bool:
+        """Return whether an active typing frame may be published now."""
+        now = time.monotonic()
+        if len(typing_sent_at) > _TYPING_THROTTLE_PRUNE_AT:
+            for key, sent in list(typing_sent_at.items()):
+                if now - sent >= _TYPING_THROTTLE_SECONDS:
+                    del typing_sent_at[key]
+        key = (caller, channel_id)
+        last = typing_sent_at.get(key)
+        if last is not None and now - last < _TYPING_THROTTLE_SECONDS:
+            return False
+        typing_sent_at[key] = now
+        return True
+
+    @router.post("/chat/channels/{channel_id}/typing", status_code=204)
+    async def typing(request: Request, channel_id: str, body: TypingBody) -> Response:
+        """Announce that the caller is or stopped typing (FR-032).
+
+        Access matches reading the channel. Nothing is stored. An active
+        frame inside 3 s of the previous one for the same caller and
+        channel is dropped; ``active: false`` is always published.
+        """
+        caller = _resolve_caller(request, auth_provider)
+        channel = await asyncio.to_thread(chat_store.get_channel, channel_id)
+        if channel is None:
+            raise OmnigentError("Channel not found", code=ErrorCode.NOT_FOUND)
+        await asyncio.to_thread(require_read, chat_store, channel, caller)
+        if body.active and not _typing_allowed(caller, channel.id):
+            return Response(status_code=204)
+        await asyncio.to_thread(publish_typing, chat_store, channel, caller, active=body.active)
+        return Response(status_code=204)
 
     @router.post("/chat/channels/{channel_id}/read")
     async def mark_read(request: Request, channel_id: str, body: ReadBody) -> JSONResponse:

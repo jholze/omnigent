@@ -26,6 +26,7 @@ from tests.server.test_chat_agent_threads import (  # noqa: F401 - pytest fixtur
     _session,
     _stop_agent_threads,
     _thread,
+    _thread_items,
     _unwrap_chat_turn,
     _user_texts,
     _wait_for_start,
@@ -89,6 +90,25 @@ def _forward_state(db_uri: str, message_id: str) -> str | None:
         return session.execute(
             select(SqlChatMessage.forward_state).where(SqlChatMessage.id == message_id)
         ).scalar_one()
+
+
+async def _listed_reply(
+    client: httpx.AsyncClient, channel_id: str, root_id: str, message_id: str
+) -> dict:
+    """The reply as ``GET .../messages?thread_root_id=`` returns it to Anna."""
+    items = await _thread_items(client, ANNA, channel_id, root_id)
+    return next(item for item in items if item["id"] == message_id)
+
+
+async def _listed_root(client: httpx.AsyncClient, channel_id: str, root_id: str) -> dict:
+    """The thread root as the channel's top-level ``GET .../messages`` returns it."""
+    response = await client.get(
+        f"/v1/chat/channels/{channel_id}/messages",
+        params={"tail": True, "limit": 200},
+        headers=_headers(ANNA),
+    )
+    assert response.status_code == 200, response.text
+    return next(item for item in response.json()["items"] if item["id"] == root_id)
 
 
 def _rows_with_body(db_uri: str, root_id: str, body: str) -> int:
@@ -182,6 +202,11 @@ async def test_ac_041a_read_author_reply_is_stored_not_forwarded(
     assert _rows_with_body(db_uri, root_id, "nur lesend") == 1
     assert len(_user_texts(db_uri, session_id)) == 1
     assert _forward_state(db_uri, reply.json()["id"]) == "not_forwarded"
+    listed = await _listed_reply(chat_client, channel_id, root_id, reply.json()["id"])
+    assert listed["forward_state"] == "not_forwarded"
+
+    assert _forward_state(db_uri, root_id) is None
+    assert "forward_state" not in await _listed_root(chat_client, channel_id, root_id)
 
 
 async def test_ac_042a_owner_dismiss_stops_forwarding_but_not_the_session(
@@ -278,6 +303,8 @@ async def test_ac_054a_failed_forward_is_retried_once(
     message_id = reply.json()["id"]
     assert _forward_state(db_uri, message_id) == "failed"
     assert len(_user_texts(db_uri, session_id)) == 1
+    failed = await _listed_reply(chat_client, channel_id, root_id, message_id)
+    assert failed["forward_state"] == "failed"
 
     monkeypatch.setattr(chat_agent_threads, "_post_first_message", real_post)
     first = await chat_client.post(
@@ -295,6 +322,8 @@ async def test_ac_054a_failed_forward_is_retried_once(
     assert len(turns) == 2
     assert _unwrap_chat_turn(turns[1]) == "[Anna] zweiter Versuch"
     assert _forward_state(db_uri, message_id) == "forwarded"
+    forwarded = await _listed_reply(chat_client, channel_id, root_id, message_id)
+    assert forwarded["forward_state"] == "forwarded"
 
 
 async def test_ac_077a_bot_reply_forwards_with_bot_and_owner_name(

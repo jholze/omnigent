@@ -8,6 +8,7 @@ client fixture sets or clears it before calling ``create_app``.
 from __future__ import annotations
 
 import asyncio
+import types
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -151,6 +152,34 @@ async def _post(
 
 async def _open_dm(client: httpx.AsyncClient, user: str, others: list[str]) -> httpx.Response:
     return await client.post("/v1/chat/dms", json={"principals": others}, headers=_headers(user))
+
+
+async def _typing(
+    client: httpx.AsyncClient, user: str, channel_id: str, body: dict[str, object]
+) -> httpx.Response:
+    return await client.post(
+        f"/v1/chat/channels/{channel_id}/typing", json=body, headers=_headers(user)
+    )
+
+
+def _record_typing(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, bool]]:
+    """Replace the route's ``publish_typing`` and record ``(channel, principal, active)``."""
+    published: list[tuple[str, str, bool]] = []
+
+    def record(_store: object, channel: object, principal_id: str, *, active: bool) -> None:
+        published.append((channel.id, principal_id, active))  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("omnigent.server.routes.chat.publish_typing", record)
+    return published
+
+
+def _freeze_route_clock(monkeypatch: pytest.MonkeyPatch, start: float = 1000.0) -> list[float]:
+    """Pin ``time.monotonic`` inside the chat routes; mutate ``[0]`` to advance it."""
+    clock = [start]
+    monkeypatch.setattr(
+        "omnigent.server.routes.chat.time", types.SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    return clock
 
 
 async def test_ac_003a_post_is_404_and_stores_nothing_when_flag_off(
@@ -533,3 +562,148 @@ async def test_ac_023b_thread_root_message_carries_agent_state_reply_does_not(
     (reply_item,) = thread.json()["items"]
     assert reply_item["id"] == reply.json()["id"]
     assert "agent_state" not in reply_item
+
+
+async def test_ac_032a_typing_throttle(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second ``active: true`` inside 3 s is accepted but not published."""
+    general_id = await _general_id(chat_client, ANNA)
+    await _bootstrap(chat_client, JENS)
+    published = _record_typing(monkeypatch)
+    clock = _freeze_route_clock(monkeypatch)
+
+    first = await _typing(chat_client, ANNA, general_id, {"active": True})
+    clock[0] += 2.9
+    second = await _typing(chat_client, ANNA, general_id, {"active": True})
+
+    assert (first.status_code, second.status_code) == (204, 204)
+    assert published == [(general_id, ANNA, True)]
+
+
+async def test_ac_032a_typing_throttle_window_reopens_after_3s(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    general_id = await _general_id(chat_client, ANNA)
+    published = _record_typing(monkeypatch)
+    clock = _freeze_route_clock(monkeypatch)
+
+    await _typing(chat_client, ANNA, general_id, {"active": True})
+    clock[0] += 3.0
+    resp = await _typing(chat_client, ANNA, general_id, {"active": True})
+
+    assert resp.status_code == 204, resp.text
+    assert published == [(general_id, ANNA, True), (general_id, ANNA, True)]
+
+
+async def test_ac_032a_typing_throttle_is_per_principal(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    general_id = await _general_id(chat_client, ANNA)
+    await _bootstrap(chat_client, JENS)
+    published = _record_typing(monkeypatch)
+    _freeze_route_clock(monkeypatch)
+
+    await _typing(chat_client, ANNA, general_id, {"active": True})
+    await _typing(chat_client, JENS, general_id, {"active": True})
+
+    assert published == [(general_id, ANNA, True), (general_id, JENS, True)]
+
+
+async def test_ac_032a_typing_inactive_is_always_published(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    general_id = await _general_id(chat_client, ANNA)
+    published = _record_typing(monkeypatch)
+    _freeze_route_clock(monkeypatch)
+
+    await _typing(chat_client, ANNA, general_id, {"active": True})
+    first_stop = await _typing(chat_client, ANNA, general_id, {"active": False})
+    second_stop = await _typing(chat_client, ANNA, general_id, {"active": False})
+
+    assert (first_stop.status_code, second_stop.status_code) == (204, 204)
+    assert published == [
+        (general_id, ANNA, True),
+        (general_id, ANNA, False),
+        (general_id, ANNA, False),
+    ]
+
+
+async def test_ac_032a_typing_non_member_is_403_not_a_member(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    billing_id = await _create_channel(chat_client, ANNA, "billing")
+    published = _record_typing(monkeypatch)
+
+    resp = await _typing(chat_client, CARLA, billing_id, {"active": True})
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "not_a_member"
+    assert published == []
+
+
+async def test_ac_032a_typing_non_participant_in_dm_is_404(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dm = await _open_dm(chat_client, ANNA, [JENS])
+    assert dm.status_code == 201, dm.text
+    published = _record_typing(monkeypatch)
+
+    resp = await _typing(chat_client, BOB, dm.json()["id"], {"active": True})
+
+    assert resp.status_code == 404, resp.text
+    assert published == []
+
+
+async def test_ac_032a_typing_unknown_channel_is_404(chat_client: httpx.AsyncClient) -> None:
+    resp = await _typing(chat_client, ANNA, "nope", {"active": True})
+
+    assert resp.status_code == 404, resp.text
+
+
+async def test_ac_032a_typing_is_404_and_stores_nothing_when_flag_off(
+    flag_off_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    general = SqlAlchemyChatStore(db_uri).bootstrap_channel("general", ANNA)
+    members_before = _count(db_uri, SqlChatMember)
+
+    resp = await _typing(flag_off_client, ANNA, general.id, {"active": True})
+
+    assert resp.status_code == 404, resp.text
+    assert _count(db_uri, SqlChatMessage) == 0
+    assert _count(db_uri, SqlChatChannel) == 1
+    assert _count(db_uri, SqlChatMember) == members_before
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"active": "true"}, {"active": 1}, {"active": None}],
+    ids=["missing", "string", "int", "null"],
+)
+async def test_ac_032a_typing_non_boolean_active_is_422(
+    chat_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, object]
+) -> None:
+    general_id = await _general_id(chat_client, ANNA)
+    published = _record_typing(monkeypatch)
+
+    resp = await _typing(chat_client, ANNA, general_id, body)
+
+    assert resp.status_code == 422, resp.text
+    assert published == []
+
+
+async def test_ac_032a_typing_draft_field_is_ignored_and_stores_nothing(
+    chat_client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TypingBody uses the default pydantic config: extra keys are dropped."""
+    general_id = await _general_id(chat_client, ANNA)
+    published = _record_typing(monkeypatch)
+
+    resp = await _typing(
+        chat_client, ANNA, general_id, {"active": True, "draft": "geheimer Entwurf"}
+    )
+
+    assert resp.status_code == 204, resp.text
+    assert resp.content == b""
+    assert published == [(general_id, ANNA, True)]
+    assert _count(db_uri, SqlChatMessage) == 0

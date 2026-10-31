@@ -6,34 +6,43 @@
  * and brings its own back control. Escape closes the pane.
  *
  * An Agent-Thread adds the status chip to the header and the live agent
- * output below the stored replies (T-008).
+ * output below the stored replies (T-008), plus the agent toolbar and slash
+ * commands above the composer and the reply forward labels (T-114).
  */
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { m } from "motion/react";
 import { ChevronLeftIcon, XIcon } from "lucide-react";
 
 import { Link, useNavigate } from "@/lib/routing";
 import { cn } from "@/lib/utils";
-import { fetchThreadMessages, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
+import {
+  fetchThreadMessages,
+  forwardChatMessage,
+  teamChatQueryKeys,
+  type DirectoryEntry,
+} from "./chatApi";
+import { AgentControls } from "./agent/AgentControls";
+import { parseAgentCommand, useAgentControls } from "./agent/useAgentControls";
 import { AgentThreadStatus } from "./agent/AgentStatusChip";
-import { AgentThreadView } from "./agent/AgentThreadView";
+import {
+  AgentThreadView,
+  OpenAgentSessionLink,
+  storedAgentReplyCount,
+} from "./agent/AgentThreadView";
 import {
   useAgentThreadStore,
   useSeedAgentThreads,
   useWatchAgentSessions,
 } from "./agent/agentThreadStore";
-import { ChatComposerCard } from "./ChatComposerCard";
+import { ChatComposerCard, type ComposerCommandResult } from "./ChatComposerCard";
 import { messageQueryOptions, shareMessagePage } from "./messagePage";
 import { MessagesError, MessagesSkeleton, messageViewOf, withOutbox } from "./ChannelView";
 import { retryChatMessage, useChatOutbox } from "./chatOutbox";
-import {
-  isAgentKind,
-  MessageItem,
-  principalLabel,
-  replyCountLabel,
-  type MessageView,
-} from "./MessageItem";
+import { MessageItem, principalLabel, replyCountLabel, type MessageView } from "./MessageItem";
 import { MessageList } from "./MessageList";
+import { paneOpen } from "./motion";
+import { useChatReducedMotion } from "./MotionRoot";
 import { CHAT_TEST_IDS } from "./testids";
 import { useTeamChatStore } from "./teamChatStore";
 
@@ -47,6 +56,32 @@ export interface ThreadPaneProps {
 }
 
 const TITLE_ID = "chat-thread-title";
+
+/** Desktop layout (Tailwind `md`): the pane is a column next to the channel. */
+const DESKTOP_QUERY = "(min-width: 48rem)";
+
+function isDesktopColumn(): boolean {
+  return typeof window !== "undefined" && Boolean(window.matchMedia?.(DESKTOP_QUERY).matches);
+}
+
+/**
+ * Slide-in on mount for the desktop column (FR-078, 220 ms). Closing
+ * (Escape, close button) unmounts without animation. On a phone the pane
+ * replaces the channel column and mounts static.
+ */
+export function usePaneOpenMotion() {
+  const reduced = useChatReducedMotion();
+  const [desktop] = useState(isDesktopColumn);
+  if (!desktop) return { initial: false as const };
+  const preset = paneOpen(reduced);
+  return {
+    initial: preset.initial,
+    animate: preset.animate,
+    transition: preset.transition,
+    "data-motion": preset.name,
+    "data-motion-duration": preset.durationMs,
+  };
+}
 
 const AGENT_MENTION_RE = /<@omnigent_agent:[^>\s]+>/;
 /** Prefix of the server's sharing notice (`chat_agent_threads._post_sharing_notice`). */
@@ -65,6 +100,26 @@ function agentStarterLabel(
   const starter = messages.find((message) => AGENT_MENTION_RE.test(message.body));
   if (starter === undefined || starter.authorKind !== "user") return null;
   return principalLabel(starter.authorId, directory);
+}
+
+/**
+ * Forward retries (FR-054, AC-054a): at most one request per reply in flight,
+ * and the answer overrides the stored state until the page reloads it.
+ */
+function useForwardRetry() {
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const inFlight = useRef(new Set<string>());
+  const retry = useCallback((messageId: string) => {
+    if (inFlight.current.has(messageId)) return;
+    inFlight.current.add(messageId);
+    setOverrides((current) => ({ ...current, [messageId]: "forwarding" }));
+    forwardChatMessage(messageId)
+      .then((state) => setOverrides((current) => ({ ...current, [messageId]: state })))
+      // Not delivered again (runner still offline, 409): offer the retry once more.
+      .catch(() => setOverrides((current) => ({ ...current, [messageId]: "failed" })))
+      .finally(() => inFlight.current.delete(messageId));
+  }, []);
+  return { overrides, retry };
 }
 
 export function ThreadPane({
@@ -133,21 +188,25 @@ export function ThreadPane({
     void queryClient.invalidateQueries({ queryKey: threadKey });
   }, [liveIds, replies.data, queryClient, threadKey]);
 
-  const views = useMemo(
-    () => withOutbox(replies.data?.items ?? [], outbox, channelId, threadRootId),
-    [replies.data, outbox, channelId, threadRootId],
-  );
+  const forward = useForwardRetry();
+  const views = useMemo(() => {
+    const merged = withOutbox(replies.data?.items ?? [], outbox, channelId, threadRootId);
+    if (Object.keys(forward.overrides).length === 0) return merged;
+    return merged.map((view) =>
+      view.id !== null && forward.overrides[view.id] !== undefined
+        ? { ...view, forwardState: forward.overrides[view.id] }
+        : view,
+    );
+  }, [replies.data, outbox, channelId, threadRootId, forward.overrides]);
   const sentCount = views.filter((view) => view.status === "sent").length;
   const onRetry = (clientId: string) => retryChatMessage(queryClient, clientId);
+  const paneMotion = usePaneOpenMotion();
 
   const agentSessionId = useAgentThreadStore(
     (state) => state.threads[threadRootId]?.sessionId ?? null,
   );
   useWatchAgentSessions(`thread:${threadRootId}`, agentSessionId ? [agentSessionId] : []);
-  const agentReplyCount = views.filter(
-    (view) =>
-      view.status === "sent" && (view.authorKind === "system" || isAgentKind(view.authorKind)),
-  ).length;
+  const agentReplyCount = storedAgentReplyCount(views);
   const sharingNoticeStored = views.some(
     (view) => view.authorKind === "system" && view.body.startsWith(SHARING_NOTICE_PREFIX),
   );
@@ -155,8 +214,21 @@ export function ThreadPane({
     () => agentStarterLabel([...(root ? [messageViewOf(root)] : []), ...views], directory),
     [root, views, directory],
   );
+  const controls = useAgentControls({
+    sessionId: agentSessionId,
+    rootId: threadRootId,
+    directory,
+    ownerFallback: ownerLabel,
+  });
+  const onCommand = (body: string): ComposerCommandResult => {
+    const command = parseAgentCommand(body);
+    if (command === null) return "pass";
+    const result = controls.request(command);
+    return result.kind === "blocked" ? { hint: result.hint } : "handled";
+  };
   const agentFooter = agentSessionId ? (
     <AgentThreadView
+      controls={controls}
       key={agentSessionId}
       sessionId={agentSessionId}
       me={me}
@@ -218,16 +290,18 @@ export function ThreadPane({
         header={header}
         footer={agentFooter}
         onRetry={onRetry}
+        onForward={forward.retry}
       />
     );
   }
 
   return (
-    <section
+    <m.section
+      {...paneMotion}
       data-testid={CHAT_TEST_IDS.threadPane}
       aria-labelledby={TITLE_ID}
       className={cn(
-        "flex min-h-0 min-w-0 flex-col max-md:w-full max-md:flex-1 md:w-80 md:shrink-0 md:border-l md:border-border lg:w-96",
+        "flex min-h-0 min-w-0 flex-col max-lg:w-full max-lg:flex-1 lg:w-96 lg:shrink-0 lg:border-l lg:border-border",
         className,
       )}
       onKeyDown={(event) => {
@@ -242,19 +316,27 @@ export function ThreadPane({
         to={channelPath}
         componentId="chat.thread.back"
         data-testid={CHAT_TEST_IDS.threadBack}
-        className="flex min-h-11 min-w-0 items-center gap-1 border-b border-border px-3 text-sm text-muted-foreground hover:text-foreground md:hidden"
+        className="flex min-h-11 min-w-0 items-center gap-1 border-b border-border px-3 text-sm text-muted-foreground hover:text-foreground lg:hidden"
       >
         <ChevronLeftIcon className="size-4 shrink-0" aria-hidden="true" />
         <span className="min-w-0 break-words">{channelLabel}</span>
       </Link>
-      <header className="flex min-h-11 items-center gap-2 border-b border-border py-1 pr-2 pl-4">
+      {/* A tool row: the channel name truncates, the status chip never shrinks
+          below its label; if the row is full, trailing items wrap (T-122 B1). */}
+      <header className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border py-1 pr-2 pl-4">
         <h2 id={TITLE_ID} className="shrink-0 text-sm font-medium">
           Thread
         </h2>
         <AgentThreadStatus rootId={threadRootId} />
-        <span className="min-w-0 flex-1 text-xs break-words text-muted-foreground max-md:hidden">
+        <span
+          title={channelLabel}
+          className="min-w-0 flex-1 truncate text-xs text-muted-foreground max-lg:hidden"
+        >
           {channelLabel}
         </span>
+        {agentSessionId ? (
+          <OpenAgentSessionLink key={agentSessionId} sessionId={agentSessionId} />
+        ) : null}
         {/* A button with its own navigate(): same exit as Escape, independent of the Link wrapper. */}
         <button
           type="button"
@@ -275,7 +357,9 @@ export function ThreadPane({
         placeholder="Im Thread antworten…"
         label={`Antwort im Thread in ${channelLabel}`}
         directory={directory}
+        onCommand={agentSessionId ? onCommand : undefined}
+        toolbar={agentSessionId ? <AgentControls controller={controls} /> : null}
       />
-    </section>
+    </m.section>
   );
 }

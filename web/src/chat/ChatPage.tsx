@@ -27,6 +27,7 @@ import { ChannelView, directoryMap } from "./ChannelView";
 import "./chatScale.css";
 import { ChatSidebar, channelLabel, dmLabel } from "./ChatSidebar";
 import { dmHeading, dmParticipantLine } from "./dmTitle";
+import { MotionRoot } from "./MotionRoot";
 import { NewDmDialog } from "./NewDmDialog";
 import { ThreadPane } from "./ThreadPane";
 import { CHAT_TEST_IDS } from "./testids";
@@ -105,7 +106,16 @@ function useBootstrapForNewChannels(enabled: boolean, data: BootstrapResponse | 
   }, [enabled, data, changes, queryClient]);
 }
 
+/** Motion root around the whole chat so every `m.*` has `LazyMotion` above it (T-117). */
 export function ChatPage() {
+  return (
+    <MotionRoot>
+      <ChatPageContent />
+    </MotionRoot>
+  );
+}
+
+function ChatPageContent() {
   const info = useServerInfo();
   const enabled = isFeatureEnabled(info, "team_chat");
   const { channelId, threadRootId } = useParams<{ channelId?: string; threadRootId?: string }>();
@@ -250,17 +260,18 @@ export function ChatPage() {
         channels={channels}
         dms={dms}
         activeChannelId={channelId}
-        // Tablet with a thread open: channel and thread get the width.
-        className={cn(channelId && "max-md:hidden", threadOpen && "md:max-lg:hidden")}
+        // Below lg the docked app navigation leaves room for one chat column
+        // only: the list, the channel or the thread (T-122 H1).
+        className={cn(channelId && "max-lg:hidden")}
         dmAction={<NewDmDialog me={me} directory={bootstrap.data?.directory ?? []} />}
         dmTitles={dmTitles}
       />
       <div
         className={cn(
           "flex min-h-0 min-w-0 flex-1 flex-col",
-          !channelId && "max-md:hidden",
-          // Phone: the thread pane replaces the channel column.
-          threadOpen && "max-md:hidden",
+          !channelId && "max-lg:hidden",
+          // Phone and tablet: the thread pane replaces the channel column.
+          threadOpen && "max-lg:hidden",
         )}
       >
         {channelId ? (
@@ -268,7 +279,7 @@ export function ChatPage() {
             to="/chat"
             componentId="chat.back"
             data-testid={CHAT_TEST_IDS.back}
-            className="flex min-h-11 items-center gap-1 border-b border-border px-3 text-sm text-muted-foreground hover:text-foreground md:hidden"
+            className="flex min-h-11 items-center gap-1 border-b border-border px-3 text-sm text-muted-foreground hover:text-foreground lg:hidden"
           >
             <ChevronLeftIcon className="size-4 shrink-0" aria-hidden="true" />
             Channels

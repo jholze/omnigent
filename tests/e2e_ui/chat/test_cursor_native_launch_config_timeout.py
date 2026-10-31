@@ -80,19 +80,13 @@ _OUTCOME_TIMEOUT_S = 240.0
 # late (they ride the stall out).
 _STALL_S = 12.0
 
-#: Number of leading ``GET /v1/sessions/{id}`` reads the bind/init path issues
-#: BEFORE the launch-config fetch under test. On bind the runner reads the
-#: session snapshot twice (the bind/init handler, then
-#: ``_resolve_session_agent_spec_or_none``) and only then does
-#: ``_auto_create_cursor_terminal`` -> ``_pi_native_launch_config`` issue the
-#: launch-config fetch. These leading reads use no read budget (they ride out a
-#: slow server); the launch-config fetch has the hard 10s budget under test. So
-#: the proxy forwards the first two matches untouched and degrades only the
-#: third -- the launch-config fetch -- so the fault lands where the bug lives
-#: (not on init, which would merely hang the launch). Observed stable across
-#: runs; if the init path changes its read count the ``stall_count >= 1`` guard
-#: fires loudly rather than passing silently.
-_INIT_SNAPSHOT_READS = 2
+#: Leading query-string snapshot GETs to forward before the launch-config
+#: fetch. Bind used to read the snapshot twice before
+#: ``_pi_native_launch_config``. Those reads no longer use
+#: ``GET /v1/sessions/<id>?<params>``; the launch-config fetch is the first
+#: request line that matches. Forwarding it (the old count of 2) left
+#: ``stall_count`` at 0. Degrade that first match.
+_INIT_SNAPSHOT_READS = 0
 
 _ERROR_PILL = '[data-testid="error-pill"]'
 
@@ -668,7 +662,9 @@ def test_transient_slow_snapshot_read_does_not_brick_cursor_launch(
         if not os.environ.get("CURSOR_LAUNCH_E2E_NO_ARM"):
             assert rig.proxy.stall_count >= 1, (
                 "the launch-config fetch never traversed the degraded proxy path "
-                f"(stall_count=0); the reproduction did not inject its fault.\n"
+                f"(stall_count={rig.proxy.stall_count}, "
+                f"match_count={rig.proxy.match_count}); "
+                "the reproduction did not inject its fault.\n"
                 f"Runner log tail:\n{_real_runner_log(rig.work)[-3000:]}"
             )
 

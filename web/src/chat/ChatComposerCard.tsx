@@ -9,10 +9,26 @@
  * Typing `@` opens a mention list (FR-026). While it is open, the arrow keys
  * move the highlight, Enter picks and Escape closes; a pick adds a chip that
  * is sent as its `<@kind:id>` token.
+ *
+ * `onCommand` sees every body first (Agent-Thread slash commands, FR-049):
+ * it can take the body (`handled`, nothing is posted), refuse it with a hint
+ * (the text stays, nothing is sent; FR-050) or let it post as usual.
+ *
+ * In a chat channel (no `onSend`), a non-empty draft announces typing at
+ * most once per 3 s; an empty draft, blur, or leaving the channel ends it at
+ * once (FR-032). Only the channel id and the flag are sent, never the draft.
  */
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BotIcon, XIcon } from "lucide-react";
+import { BotIcon, CircleAlertIcon, XIcon } from "lucide-react";
 
 import {
   ChatComposer,
@@ -24,7 +40,13 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { cn } from "@/lib/utils";
 import { AgentBotBadge } from "./BotBadge";
-import { fetchChannelMembers, teamChatQueryKeys, type DirectoryEntry } from "./chatApi";
+import {
+  ChatApiError,
+  fetchChannelMembers,
+  postTyping,
+  teamChatQueryKeys,
+  type DirectoryEntry,
+} from "./chatApi";
 import { sendChatMessage } from "./chatOutbox";
 import {
   filterMentionCandidates,
@@ -49,9 +71,118 @@ export interface ChatComposerCardProps {
   /** Bootstrap directory, for mention autocomplete. */
   directory?: Map<string, DirectoryEntry>;
   className?: string;
+  /**
+   * Send through another endpoint (session chat, FR-029) instead of the
+   * channel outbox. Return false when nothing was sent; the text then stays.
+   */
+  onSend?: (body: string) => boolean;
+  /** Offer `@` mentions from the channel members. Off where there is no channel. */
+  mentions?: boolean;
+  /** Sees the body before it is posted; see the file comment. */
+  onCommand?: (body: string) => ComposerCommandResult;
+  /** Rendered between the hint line and the composer card (agent toolbar). */
+  toolbar?: ReactNode;
 }
 
+/** `pass`: post as a message. `handled`: done, clear. `{ hint }`: refuse, keep the text. */
+export type ComposerCommandResult = "pass" | "handled" | { hint: string };
+
 const EMPTY_DIRECTORY = new Map<string, DirectoryEntry>();
+
+/** FR-032: at most one `active: true` per 3 s from this composer. */
+export const TYPING_SEND_INTERVAL_MS = 3000;
+
+function sendTyping(channelId: string, active: boolean): void {
+  void postTyping(channelId, active).catch((error: unknown) => {
+    const status = error instanceof ChatApiError ? String(error.status) : "error";
+    console.warn(`[team-chat] typing signal failed (${status})`);
+  });
+}
+
+/**
+ * Typing signal for one channel. `draftChanged` is called on each edit,
+ * `stop` on blur. The draft never leaves this hook; only its emptiness is read.
+ *
+ * Throttle is leading + trailing: the first edit sends `active: true` at once;
+ * edits inside the 3 s window schedule one trailing `active: true` when the
+ * window ends, so the receiver's 4 s hide counts from (nearly) the last edit
+ * (AC-032a). Every `active: false` path cancels the pending trailing send.
+ */
+function useTypingSignal(channelId: string, enabled: boolean, draftEmpty: boolean) {
+  const lastActiveAtRef = useRef<number | null>(null);
+  const activeRef = useRef(false);
+  const trailingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelTrailing = () => {
+    if (trailingRef.current === null) return;
+    clearTimeout(trailingRef.current);
+    trailingRef.current = null;
+  };
+
+  const stop = () => {
+    cancelTrailing();
+    if (!activeRef.current) return;
+    activeRef.current = false;
+    sendTyping(channelId, false);
+  };
+
+  const draftChanged = (value: string) => {
+    if (!enabled) return;
+    if (value === "") {
+      stop();
+      return;
+    }
+    const now = Date.now();
+    const last = lastActiveAtRef.current;
+    if (last !== null && now - last < TYPING_SEND_INTERVAL_MS) {
+      activeRef.current = true;
+      if (trailingRef.current === null) {
+        trailingRef.current = setTimeout(
+          () => {
+            trailingRef.current = null;
+            if (!activeRef.current) return;
+            lastActiveAtRef.current = Date.now();
+            sendTyping(channelId, true);
+          },
+          last + TYPING_SEND_INTERVAL_MS - now,
+        );
+      }
+      return;
+    }
+    cancelTrailing();
+    lastActiveAtRef.current = now;
+    activeRef.current = true;
+    sendTyping(channelId, true);
+  };
+
+  // Sending or clearing empties the draft without an edit event.
+  useEffect(() => {
+    if (!draftEmpty) return;
+    if (trailingRef.current !== null) {
+      clearTimeout(trailingRef.current);
+      trailingRef.current = null;
+    }
+    if (!activeRef.current) return;
+    activeRef.current = false;
+    sendTyping(channelId, false);
+  }, [draftEmpty, channelId]);
+
+  // Leaving the channel (or unmounting) ends the signal for that channel.
+  useEffect(() => {
+    lastActiveAtRef.current = null;
+    return () => {
+      if (trailingRef.current !== null) {
+        clearTimeout(trailingRef.current);
+        trailingRef.current = null;
+      }
+      if (!activeRef.current) return;
+      activeRef.current = false;
+      sendTyping(channelId, false);
+    };
+  }, [channelId]);
+
+  return { draftChanged, stop };
+}
 
 export function ChatComposerCard({
   channelId,
@@ -61,6 +192,10 @@ export function ChatComposerCard({
   label,
   directory = EMPTY_DIRECTORY,
   className,
+  onSend,
+  mentions = true,
+  onCommand,
+  toolbar,
 }: ChatComposerCardProps) {
   const queryClient = useQueryClient();
   const isMobileViewport = useIsMobileViewport();
@@ -72,11 +207,14 @@ export function ChatComposerCard({
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [dismissedStart, setDismissedStart] = useState<number | null>(null);
   const [highlight, setHighlight] = useState(0);
+  const [commandHint, setCommandHint] = useState<string | null>(null);
+  const hintId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingCaretRef = useRef<number | null>(null);
   const columnRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const canSend = text.trim() !== "";
+  const typing = useTypingSignal(channelId, onSend === undefined, text === "");
 
   // Loaded once per channel on mount; the list filters it locally.
   const members = useQuery({
@@ -84,6 +222,7 @@ export function ChatComposerCard({
     queryFn: ({ signal }) => fetchChannelMembers(channelId, signal),
     staleTime: Infinity,
     retry: false,
+    enabled: mentions,
   });
   const candidates = useMemo(
     () => mentionCandidates(members.data ?? [], directory, me),
@@ -124,6 +263,7 @@ export function ChatComposerCard({
   }, [open]);
 
   const updateTrigger = (value: string, caret: number) => {
+    if (!mentions) return;
     const next = findMentionTrigger(value, caret);
     if (next === null || next.start !== dismissedStart) setDismissedStart(null);
     const visible =
@@ -158,19 +298,34 @@ export function ChatComposerCard({
     setTrigger(null);
   };
 
-  const submit = () => {
-    const sent = sendChatMessage(queryClient, {
-      channelId,
-      threadRootId,
-      authorId: me,
-      body: serializeMentions(text, chips),
-    });
-    if (!sent) return;
+  const clear = () => {
     setText("");
     setChips([]);
     setTrigger(null);
     setDismissedStart(null);
     textareaRef.current?.focus();
+  };
+
+  const submit = () => {
+    const body = serializeMentions(text, chips);
+    if (body.trim() === "") return;
+    const command = onCommand ? onCommand(body) : "pass";
+    if (command === "handled") {
+      setCommandHint(null);
+      clear();
+      return;
+    }
+    if (command !== "pass") {
+      setCommandHint(command.hint);
+      textareaRef.current?.focus();
+      return;
+    }
+    setCommandHint(null);
+    const sent = onSend
+      ? onSend(body)
+      : sendChatMessage(queryClient, { channelId, threadRootId, authorId: me, body });
+    if (!sent) return;
+    clear();
   };
 
   const removeChip = (chip: MentionChip) => {
@@ -187,6 +342,25 @@ export function ChatComposerCard({
         className,
       )}
     >
+      {toolbar}
+      {onCommand ? (
+        <p
+          id={hintId}
+          role="status"
+          data-testid={CHAT_TEST_IDS.composerCommandHint}
+          className={cn(
+            "flex min-w-0 items-start gap-1 pb-1 text-xs break-words text-muted-foreground",
+            commandHint === null && "sr-only",
+          )}
+        >
+          {commandHint !== null ? (
+            <>
+              <CircleAlertIcon className="mt-px size-4 shrink-0" aria-hidden="true" />
+              <span className="min-w-0">{commandHint}</span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       <div ref={columnRef} className="relative">
         {open ? (
           <MentionList
@@ -207,13 +381,17 @@ export function ChatComposerCard({
             rows: 1,
             placeholder,
             "aria-label": label,
+            "aria-describedby": commandHint !== null ? hintId : undefined,
             "aria-autocomplete": "list",
             "aria-controls": open ? listId : undefined,
             "aria-activedescendant": open && matches.length > 0 ? optionId(active) : undefined,
             "data-testid": CHAT_TEST_IDS.composerInput,
+            onBlur: typing.stop,
             onChange: (event) => {
               const value = event.target.value;
               setText(value);
+              typing.draftChanged(value);
+              if (commandHint !== null) setCommandHint(null);
               setChips((current) => presentChips(value, current));
               updateTrigger(value, event.target.selectionStart ?? value.length);
             },
@@ -223,6 +401,7 @@ export function ChatComposerCard({
                 if (open) setTrigger(null);
                 return;
               }
+              if (!mentions) return;
               const next = findMentionTrigger(textarea.value, textarea.selectionStart);
               if (next?.start !== trigger?.start || next?.query !== trigger?.query) {
                 updateTrigger(textarea.value, textarea.selectionStart);

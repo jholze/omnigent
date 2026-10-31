@@ -4936,7 +4936,7 @@
         "type": "object"
       },
       "MessageResponse": {
-        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.\n\n`session_id` follows the same rule: present only on thread-root\nmessages whose thread has an agent session, omitted otherwise. It\nis the value `thread.updated` already sends to every channel\nmember, so a reloaded client can mount the live view.",
+        "description": "Wire shape of one stored message.\n\n`agent_state` is read-only and present only on thread-root\nmessages (`thread_root_id is None`); replies omit it. It mirrors\n`SqlChatThread.agent_state` (`none`/`starting`/`active`/\n`dismissed`/`start_failed`/`closed`) so the UI can render\nthe agent thread's start state without a separate thread fetch.\n\n`session_id` follows the same rule: present only on thread-root\nmessages whose thread has an agent session, omitted otherwise. It\nis the value `thread.updated` already sends to every channel\nmember, so a reloaded client can mount the live view.\n\n`forward_state` mirrors `chat_messages.forward_state`\n(`not_forwarded`/`failed`/`forwarding`/`forwarded`) and is\npresent only when the stored value is not `NULL`, i.e. on agent\nthread replies whose forward has been attempted. Omitted otherwise.",
         "properties": {
           "agent_state": {
             "anyOf": [
@@ -4980,6 +4980,17 @@
             "format": "int64",
             "title": "Created At",
             "type": "integer"
+          },
+          "forward_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forward State"
           },
           "id": {
             "title": "Id",
@@ -5212,6 +5223,142 @@
           "item"
         ],
         "title": "NativeToolData",
+        "type": "object"
+      },
+      "NeedsYouApprovalResponse": {
+        "description": "One agent thread whose session waits on an answer the caller may give (FR-010 b).",
+        "properties": {
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "channel_kind": {
+            "title": "Channel Kind",
+            "type": "string"
+          },
+          "channel_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel Name"
+          },
+          "pending_count": {
+            "format": "int64",
+            "title": "Pending Count",
+            "type": "integer"
+          },
+          "root_message_id": {
+            "title": "Root Message Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel_id",
+          "channel_kind",
+          "channel_name",
+          "root_message_id",
+          "session_id",
+          "pending_count"
+        ],
+        "title": "NeedsYouApprovalResponse",
+        "type": "object"
+      },
+      "NeedsYouMentionResponse": {
+        "description": "One unread message that mentions the caller (FR-010 a).\n\nCarries no body: the view and OS notifications name only the place\nand the author (FR-011, NFR-014).",
+        "properties": {
+          "author_id": {
+            "title": "Author Id",
+            "type": "string"
+          },
+          "author_label": {
+            "title": "Author Label",
+            "type": "string"
+          },
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "channel_kind": {
+            "title": "Channel Kind",
+            "type": "string"
+          },
+          "channel_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel Name"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "thread_root_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Root Id"
+          }
+        },
+        "required": [
+          "channel_id",
+          "channel_kind",
+          "channel_name",
+          "thread_root_id",
+          "message_id",
+          "author_id",
+          "author_label",
+          "created_at"
+        ],
+        "title": "NeedsYouMentionResponse",
+        "type": "object"
+      },
+      "NeedsYouResponse": {
+        "description": "`GET /v1/chat/needs-you`.",
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/NeedsYouApprovalResponse"
+            },
+            "title": "Approvals",
+            "type": "array"
+          },
+          "mentions": {
+            "items": {
+              "$ref": "#/components/schemas/NeedsYouMentionResponse"
+            },
+            "title": "Mentions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mentions",
+          "approvals"
+        ],
+        "title": "NeedsYouResponse",
         "type": "object"
       },
       "OutputFileDoneEvent": {
@@ -10423,6 +10570,20 @@
         "title": "TurnStartedEvent",
         "type": "object"
       },
+      "TypingBody": {
+        "description": "`POST /v1/chat/channels/{id}/typing` (FR-032).\n\nOnly the flag is accepted; draft text is never sent (NFR-014).",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "active"
+        ],
+        "title": "TypingBody",
+        "type": "object"
+      },
       "UnreadItemResponse": {
         "description": "One unread mention or DM message for an agent account (FR-088).",
         "properties": {
@@ -12842,6 +13003,52 @@
         ]
       }
     },
+    "/v1/chat/channels/{channel_id}/typing": {
+      "post": {
+        "description": "Announce that the caller is or stopped typing (FR-032).\n\nAccess matches reading the channel. Nothing is stored. An active\nframe inside 3 s of the previous one for the same caller and\nchannel is dropped; `active: false` is always published.",
+        "operationId": "typing_v1_chat_channels__channel_id__typing_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TypingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Typing",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
     "/v1/chat/dms": {
       "post": {
         "description": "Return or create the DM for the caller plus 1\u20138 others (FR-021, FR-022).",
@@ -12922,6 +13129,28 @@
           }
         },
         "summary": "Retry Message Forward",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/v1/chat/needs-you": {
+      "get": {
+        "description": "Unread mentions of the caller and agent approvals the caller may answer (FR-010).\n\nApprovals come from active agent threads in conversations the caller\nsees, whose session has a pending elicitation and on which the caller\n(a bot: its owner) holds at least EDIT. READ alone is not enough\n(AC-010b). No message body leaves this route.",
+        "operationId": "needs_you_v1_chat_needs_you_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NeedsYouResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Needs You",
         "tags": [
           "chat"
         ]

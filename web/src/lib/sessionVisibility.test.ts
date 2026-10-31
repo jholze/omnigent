@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Conversation } from "@/hooks/useConversations";
-import { filterSessionScope, sessionVisibility } from "./sessionVisibility";
+import {
+  filterSessionScope,
+  isAgentThreadSession,
+  sessionVisibility,
+  showsInMainSidebar,
+} from "./sessionVisibility";
+
+const THREAD_LABELS = { "omnigent.chat.v1": "c-general:m-root" };
 
 describe("frontend session scope", () => {
   it.each([
@@ -29,5 +36,32 @@ describe("frontend session scope", () => {
     ] as Conversation[];
     expect(filterSessionScope(rows, "mine", "alice").map((r) => r.id)).toEqual(["mine"]);
     expect(filterSessionScope(rows, "shared", "alice").map((r) => r.id)).toEqual(["shared"]);
+  });
+});
+
+describe("Agent-Thread sessions in the main sidebar", () => {
+  it("AC-029c isAgentThreadSession is true only with the omnigent.chat.v1 label", () => {
+    expect(isAgentThreadSession({ labels: THREAD_LABELS })).toBe(true);
+    expect(isAgentThreadSession({ labels: { "omnigent.wrapper": "claude" } })).toBe(false);
+    expect(isAgentThreadSession({ labels: {} })).toBe(false);
+    expect(isAgentThreadSession({ labels: null } as unknown as Conversation)).toBe(false);
+  });
+
+  it("AC-085b the owner still sees a labelled Agent-Thread session", () => {
+    const row = { labels: THREAD_LABELS, owner: "alice", permission_level: 4 };
+    expect(showsInMainSidebar(row, "alice")).toBe(true);
+  });
+
+  it("AC-085a a non-owner with a grant does not see a labelled Agent-Thread session", () => {
+    for (const level of [1, 2, 3]) {
+      const row = { labels: THREAD_LABELS, owner: "alice", permission_level: level };
+      expect(showsInMainSidebar(row, "bob")).toBe(false);
+    }
+  });
+
+  it("AC-085a an unlabelled session is shown to owner and non-owner alike", () => {
+    const row = { labels: {}, owner: "alice", permission_level: 1 };
+    expect(showsInMainSidebar(row, "alice")).toBe(true);
+    expect(showsInMainSidebar(row, "bob")).toBe(true);
   });
 });

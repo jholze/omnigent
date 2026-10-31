@@ -31,6 +31,33 @@ export const CHAT_APPROVAL_LABELS: ApprovalCardLabels = {
   resolvedElsewhereDetail:
     "Diese Freigabe wurde schon an anderer Stelle beantwortet. Das Ergebnis liegt in der Session.",
   byResolver: (verdict, resolver) => `${verdict} von ${resolver}`,
+  approveAutoMode: "Genehmigen & Auto-Modus einschalten",
+  approveAutoModeTitle:
+    "Diese Anfrage genehmigen. Claude prüft weitere Tool-Freigaben dieser Session selbst.",
+  acceptAllEdits: "Genehmigen & alle Änderungen erlauben",
+  approveRemember: (target) => `Genehmigen & für ${target} nicht mehr fragen`,
+  rememberHostTitle: (host) => `Für ${host} in dieser Session nicht mehr fragen`,
+  rememberToolTitle: (tool) => `Bei keinem ${tool}-Aufruf in dieser Session mehr fragen`,
+  approveSession: "Für diese Session genehmigen",
+  alwaysAllow: "Immer erlauben",
+  allowPrefixSession: { before: "Befehle mit Präfix", after: "für diese Session erlauben" },
+  allowPrefixAlways: { before: "Befehle mit Präfix", after: "immer erlauben" },
+  approveAndRemember: "Genehmigen & merken",
+  approvedAndRemembered: "Genehmigt & gemerkt",
+  approvedAutoMode: "Genehmigt · Auto-Modus",
+  approvedAllEdits: "Genehmigt · Änderungen automatisch erlaubt",
+  approvedRemember: (target) =>
+    target === null ? "Genehmigt · fragt nicht mehr" : `Genehmigt · fragt für ${target} nicht mehr`,
+  approvedSession: "Für diese Session genehmigt",
+  alwaysAllowed: "Immer erlaubt",
+  sessionAllowRequested: "Erlaubnis für die Session angefragt",
+  alwaysAllowRequested: "Dauerhafte Erlaubnis angefragt",
+  planApproved: "Plan genehmigt",
+  planApprovedAutoMode: "Plan genehmigt · Auto-Modus",
+  planRejected: "Plan abgelehnt",
+  promptExpired: "Anfrage abgelaufen",
+  promptExpiredHint:
+    "Niemand hat geantwortet, bevor der Agent aufhörte zu warten. Eine neue Nachricht setzt ihn fort.",
 };
 
 export type ResolveOutcome = "resolved" | "already_resolved" | "forbidden" | "failed";

@@ -7,12 +7,32 @@ import { authenticatedFetch } from "@/lib/identity";
 
 export class ChatApiError extends Error {
   readonly status: number;
+  /** Whole seconds from a `Retry-After` header (429), else null. */
+  readonly retryAfterSeconds: number | null;
 
-  constructor(status: number) {
+  constructor(status: number, retryAfterSeconds: number | null = null) {
     super(`chat request failed (${status})`);
     this.name = "ChatApiError";
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+/** `Retry-After` as whole seconds. Delta-seconds and HTTP dates are accepted. */
+export function parseRetryAfter(value: string | null, nowMs = Date.now()): number | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  if (/^\d+$/.test(trimmed)) return Math.max(1, Number.parseInt(trimmed, 10));
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return null;
+  return Math.max(1, Math.ceil((at - nowMs) / 1000));
+}
+
+function apiError(response: Response): ChatApiError {
+  const retryAfter =
+    response.status === 429 ? parseRetryAfter(response.headers.get("Retry-After")) : null;
+  return new ChatApiError(response.status, retryAfter);
 }
 
 export interface ChatChannel {
@@ -133,6 +153,12 @@ export interface ChatMessage {
    * Read-only.
    */
   session_id?: string | null;
+  /**
+   * `chat_messages.forward_state` of a reply in an Agent-Thread
+   * (`not_forwarded` / `failed` / `forwarding` / `forwarded`), when the
+   * server sends it. Absent on other messages. Read-only (FR-041, FR-054).
+   */
+  forward_state?: string | null;
 }
 
 export interface MessagePageResponse {
@@ -152,6 +178,8 @@ export const teamChatQueryKeys = {
   thread: (channelId: string, threadRootId: string) =>
     ["team-chat", "thread", channelId, threadRootId] as const,
   members: (channelId: string) => ["team-chat", "members", channelId] as const,
+  /** Lines of the session chat on one root session (FR-029). */
+  sessionChat: (sessionId: string) => ["team-chat", "session-chat", sessionId] as const,
 };
 
 /** Server rule for `client_id` (`POST .../messages`). */
@@ -193,7 +221,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof value.body === "string" &&
     (value.client_id === null || typeof value.client_id === "string") &&
     (value.agent_state == null || typeof value.agent_state === "string") &&
-    (value.session_id == null || typeof value.session_id === "string")
+    (value.session_id == null || typeof value.session_id === "string") &&
+    (value.forward_state == null || typeof value.forward_state === "string")
   );
 }
 
@@ -218,7 +247,7 @@ async function readJson<T>(
   invalidMessage: string,
   accept: (value: unknown) => value is T,
 ): Promise<T> {
-  if (!response.ok) throw new ChatApiError(response.status);
+  if (!response.ok) throw apiError(response);
   const payload: unknown = await response.json();
   if (!accept(payload)) throw new Error(invalidMessage);
   return payload;
@@ -387,7 +416,7 @@ export async function revokeAgentAccount(accountId: string): Promise<void> {
     `/v1/chat/agent-accounts/${encodeURIComponent(accountId)}`,
     { method: "DELETE" },
   );
-  if (!response.ok) throw new ChatApiError(response.status);
+  if (!response.ok) throw apiError(response);
 }
 
 export interface PostMessageInput {
@@ -418,6 +447,86 @@ export async function postMessage(
     },
   );
   return readJson(response, "Invalid chat message response", isChatMessage);
+}
+
+/** `POST /v1/chat/threads/{root}/dismiss` (FR-042): the thread's new agent state. */
+export interface DismissResult {
+  root_message_id: string;
+  agent_state: string;
+  session_id?: string | null;
+}
+
+function isDismissResult(value: unknown): value is DismissResult {
+  return (
+    isRecord(value) &&
+    typeof value.root_message_id === "string" &&
+    typeof value.agent_state === "string"
+  );
+}
+
+/** Stop forwarding thread replies to the agent; the session keeps running. */
+export async function dismissAgentThread(rootMessageId: string): Promise<DismissResult> {
+  const response = await authenticatedFetch(
+    `/v1/chat/threads/${encodeURIComponent(rootMessageId)}/dismiss`,
+    { method: "POST" },
+  );
+  return readJson(response, "Invalid dismiss response", isDismissResult);
+}
+
+/** `POST /v1/chat/messages/{id}/forward` (FR-054): the reply's stored forward state. */
+export async function forwardChatMessage(messageId: string): Promise<string> {
+  const response = await authenticatedFetch(
+    `/v1/chat/messages/${encodeURIComponent(messageId)}/forward`,
+    { method: "POST" },
+  );
+  const result = await readJson(
+    response,
+    "Invalid forward response",
+    (value: unknown): value is { forward_state: string } =>
+      isRecord(value) && typeof value.forward_state === "string",
+  );
+  return result.forward_state;
+}
+
+/** Channel read cursor: one stored top-level message. */
+export interface ReadCursor {
+  id: string;
+  created_at: number;
+}
+
+/**
+ * `POST /v1/chat/channels/{id}/read` for the channel cursor (FR-007).
+ *
+ * The server keeps the newer of the stored and the sent cursor, so a late
+ * or repeated call never moves it back. The response body is not needed.
+ */
+export async function postReadCursor(channelId: string, cursor: ReadCursor): Promise<void> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/read`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: cursor.id, created_at: cursor.created_at }),
+    },
+  );
+  if (!response.ok) throw apiError(response);
+}
+
+/**
+ * `POST /v1/chat/channels/{id}/typing` (FR-032). Sends the flag only, never
+ * the draft (NFR-014). The server answers 204 and stores nothing.
+ */
+export async function postTyping(channelId: string, active: boolean): Promise<void> {
+  const response = await authenticatedFetch(
+    `/v1/chat/channels/${encodeURIComponent(channelId)}/typing`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active }),
+      keepalive: !active,
+    },
+  );
+  if (!response.ok) throw apiError(response);
 }
 
 /**
@@ -456,4 +565,61 @@ export async function listChannelMembers(
     { signal },
   );
   return readJson(response, "Invalid chat members response", isChatMemberList);
+}
+
+/** One line of `GET /v1/sessions/{id}/chat`. `created_at` is epoch microseconds. */
+export interface SessionChatLine {
+  id: string;
+  created_by: string | null;
+  created_at: number;
+  body: string;
+}
+
+/** `GET /v1/sessions/{id}/chat`: lines ascending, and whether another person has a grant. */
+export interface SessionChatList {
+  items: SessionChatLine[];
+  shared: boolean;
+}
+
+function isSessionChatLine(value: unknown): value is SessionChatLine {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    (value.created_by === null || typeof value.created_by === "string") &&
+    typeof value.created_at === "number" &&
+    typeof value.body === "string"
+  );
+}
+
+function isSessionChatList(value: unknown): value is SessionChatList {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.shared === "boolean" &&
+    Array.isArray(value.items) &&
+    value.items.every(isSessionChatLine)
+  );
+}
+
+/**
+ * Session chat of a root session (FR-029). The server answers 404 for an
+ * Agent-Thread session (AC-029c) and 403 for a public-link visitor (AC-029b).
+ */
+export async function fetchSessionChat(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionChatList> {
+  const response = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/chat`, {
+    signal,
+  });
+  return readJson(response, "Invalid session chat response", isSessionChatList);
+}
+
+/** `POST /v1/sessions/{id}/chat`. The server trims the body and refuses admins (403). */
+export async function postSessionChat(sessionId: string, body: string): Promise<SessionChatLine> {
+  const response = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body }),
+  });
+  return readJson(response, "Invalid session chat line", isSessionChatLine);
 }

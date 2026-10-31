@@ -32,22 +32,31 @@ export interface OutboxEntry {
   body: string;
   createdAtMs: number;
   status: OutboxStatus;
+  /**
+   * Set when the last send was answered 429. Seconds from `Retry-After`, or
+   * null when the header was missing. Cleared on the next attempt.
+   */
+  rateLimited?: { retryAfterSeconds: number | null } | null;
 }
 
 interface OutboxState {
   entries: OutboxEntry[];
   add: (entry: OutboxEntry) => void;
-  setStatus: (clientId: string, status: OutboxStatus) => void;
+  setStatus: (
+    clientId: string,
+    status: OutboxStatus,
+    rateLimited?: OutboxEntry["rateLimited"],
+  ) => void;
   remove: (clientId: string) => void;
 }
 
 export const useChatOutbox = create<OutboxState>((set) => ({
   entries: [],
   add: (entry) => set((state) => ({ entries: [...state.entries, entry] })),
-  setStatus: (clientId, status) =>
+  setStatus: (clientId, status, rateLimited = null) =>
     set((state) => ({
       entries: state.entries.map((entry) =>
-        entry.clientId === clientId ? { ...entry, status } : entry,
+        entry.clientId === clientId ? { ...entry, status, rateLimited } : entry,
       ),
     })),
   remove: (clientId) =>
@@ -144,10 +153,15 @@ async function deliver(queryClient: QueryClient, entry: OutboxEntry): Promise<vo
     storeSent(queryClient, message);
     useChatOutbox.getState().remove(entry.clientId);
     refreshSidebarIfUnknown(queryClient, entry.channelId);
-  } catch {
+  } catch (error: unknown) {
     // FR-084 names network, 429 and 5xx (`isRetryableSendError`). Other answers
     // (403, 409) also stay as "nicht gesendet", so the text is never dropped silently.
-    useChatOutbox.getState().setStatus(entry.clientId, "failed");
+    // A 429 stored nothing (AC-017a); the row says so and names Retry-After.
+    const rateLimited =
+      error instanceof ChatApiError && error.status === 429
+        ? { retryAfterSeconds: error.retryAfterSeconds }
+        : null;
+    useChatOutbox.getState().setStatus(entry.clientId, "failed", rateLimited);
   }
 }
 

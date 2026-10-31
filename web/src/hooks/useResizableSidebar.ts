@@ -28,6 +28,14 @@ function clamp(w: number): number {
   return Math.max(MIN_WIDTH_PX, Math.min(w, ceiling));
 }
 
+// Upper bound ``clamp`` can actually produce, exposed as the separator's
+// ``aria-valuemax``. The floor wins on very narrow viewports, so never report a
+// max below the min.
+function maxWidth(width: number): number {
+  if (typeof window === "undefined") return Math.max(MIN_WIDTH_PX, width);
+  return Math.max(MIN_WIDTH_PX, window.innerWidth * MAX_WIDTH_RATIO);
+}
+
 // ---------------------------------------------------------------------------
 // Module-level width store (independent of the inline panel / push-panel stores)
 // ---------------------------------------------------------------------------
@@ -165,6 +173,11 @@ export function useResizableSidebar() {
       role: "separator" as const,
       "aria-orientation": "vertical" as const,
       "aria-label": "Resize sidebar",
+      // A focusable separator is a widget: axe (aria-required-attr) requires a
+      // value. Mirrors the canvas separator in CanvasWorkspace.
+      "aria-valuemin": MIN_WIDTH_PX,
+      "aria-valuemax": maxWidth(width),
+      "aria-valuenow": width,
       tabIndex: 0,
     },
   };

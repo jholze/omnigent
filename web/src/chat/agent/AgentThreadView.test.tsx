@@ -3,6 +3,7 @@
 // test writes the registry entry the way the stream pump would.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -62,7 +63,13 @@ import { CHAT_TEST_IDS } from "../testids";
 import { AgentThreadStatus } from "./AgentStatusChip";
 import { SEND_FAILED_TEXT, useThreadApprovals } from "./agentApprovals";
 import { useAgentThreadStore } from "./agentThreadStore";
-import { AgentThreadView } from "./AgentThreadView";
+import {
+  AgentThreadView,
+  OpenAgentSessionLink,
+  PlanReview,
+  storedAgentReplyCount,
+} from "./AgentThreadView";
+import { STEP_TEST_IDS } from "./TaskSteps";
 
 const SESSION = "conv_agent";
 const directory = new Map<string, DirectoryEntry>([
@@ -177,6 +184,22 @@ function resolveElsewhere(action: "accept" | "decline", decidedBy?: string) {
   );
 }
 
+/** Accept the open card with option `content`, as a server event would. */
+function answerCard(
+  entry: ReturnType<typeof conversationRegistry.acquire>,
+  content: Record<string, unknown>,
+) {
+  act(() =>
+    entry.setState((state) => ({
+      blocks: state.blocks.map((block) =>
+        block.type === "elicitation"
+          ? { ...block, status: "responded", response: { action: "accept", content } }
+          : block,
+      ),
+    })),
+  );
+}
+
 function emitConnected(id = SESSION) {
   act(() => {
     for (const listener of connectListeners) listener(id);
@@ -199,16 +222,27 @@ afterEach(() => {
 });
 
 describe("AgentThreadView live output", () => {
-  it("AC-045a a READ viewer sees the streamed text grow without a reload", () => {
+  it("AC-045a a READ viewer sees the streamed text grow without a reload", async () => {
     withAccess(1);
     const entry = seedEntry([userInput], "running");
     renderView({ me: "jens" });
     expect(ensureMock).toHaveBeenCalledWith(SESSION);
     const parts = ["Tests ", "sind ", "gr", "ü", "n"];
     const blocks: AnyBlock[] = [userInput];
-    for (const [index, part] of parts.entries()) {
-      blocks.push(chunk(part));
+    // One chunk per step; each must paint before the next arrives.
+    const streamFrom = async (index: number): Promise<void> => {
+      if (index >= parts.length) return;
+      blocks.push(chunk(parts[index]));
       act(() => entry.setState({ blocks: [...blocks] }));
+      // Live text paints on the next animation frame (FR-080).
+      await act(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => {
+              resolve();
+            });
+          }),
+      );
       const live = screen.getByTestId("agent-thread-live");
       expect(live.textContent).toContain(
         parts
@@ -216,7 +250,9 @@ describe("AgentThreadView live output", () => {
           .join("")
           .trim(),
       );
-    }
+      await streamFrom(index + 1);
+    };
+    await streamFrom(0);
     expect(screen.getByTestId("agent-thread-live").textContent).toContain("Tests sind grün");
   });
 
@@ -312,6 +348,57 @@ describe("AgentThreadView live output", () => {
     expect(screen.getByTestId("agent-thread-live").textContent).toContain("Fertig.");
     view.rerenderWith({ agentReplyCount: 1 });
     expect(screen.queryByTestId("agent-thread-live")).toBeNull();
+  });
+
+  it("FR-089 the failed-turn system line keeps the live turn and its error step on screen", () => {
+    withAccess(1);
+    const toolCall: AnyBlock = {
+      type: "tool_group",
+      ctx: ctx("resp_1", "item_tool"),
+      iteration: 0,
+      executions: [
+        {
+          name: "run_pytest",
+          arguments: {},
+          argsSummary: "",
+          callId: "call_1",
+          agentName: "coder",
+          executedBy: "server",
+          output: null,
+        },
+      ],
+    };
+    const entry = seedEntry([userInput, toolCall], "running");
+    const view = renderView({ agentReplyCount: storedAgentReplyCount([]) });
+    act(() =>
+      entry.setState({
+        blocks: [
+          userInput,
+          toolCall,
+          { type: "error", ctx: ctx(), source: "llm", code: "llm_error", message: "boom" },
+        ],
+        activeResponse: { responseId: "resp_1", state: "failed", error: null },
+        sessionStatus: "failed",
+      }),
+    );
+    // The server mirrors the failure as one stored system line, nothing else.
+    const systemLine: MessageView = {
+      key: "m-sys",
+      id: "m-sys",
+      clientId: null,
+      channelId: "c1",
+      threadRootId: "m-root",
+      authorId: "system",
+      authorKind: "system",
+      createdAtMs: Date.now(),
+      body: "Agent-Fehler: internal",
+      status: "sent",
+    };
+    view.rerenderWith({ agentReplyCount: storedAgentReplyCount([systemLine]) });
+    expect(screen.getByTestId("agent-thread-live")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId(STEP_TEST_IDS.summary));
+    const row = screen.getByTestId(STEP_TEST_IDS.row);
+    expect(row.dataset.status).toBe("error");
   });
 });
 
@@ -436,6 +523,59 @@ describe("Approval cards in the thread", () => {
     expect(live.textContent?.indexOf("Freigabe.")).toBeLessThan(
       live.textContent?.indexOf("Migration anwenden?") ?? -1,
     );
+  });
+
+  it("COPY-01 option buttons on the thread card are German", () => {
+    withAccess(2);
+    seedEntry(
+      [userInput, card({ allowAutoMode: true, rememberScope: { tool: "Bash" } })],
+      "running",
+    );
+    renderView();
+    const approval = screen.getByTestId(CHAT_TEST_IDS.approvalCard);
+    expect(
+      within(approval).getByRole("button", { name: "Genehmigen & Auto-Modus einschalten" }),
+    ).toBeInTheDocument();
+    const remember = within(approval).getByTestId("approval-card-remember");
+    expect(remember).toHaveTextContent("Genehmigen & für Bash nicht mehr fragen");
+    expect(remember).toHaveAttribute(
+      "title",
+      "Bei keinem Bash-Aufruf in dieser Session mehr fragen",
+    );
+    expect(within(approval).queryByText(/switch to auto mode/)).toBeNull();
+    expect(within(approval).queryByText(/don't ask again/)).toBeNull();
+  });
+
+  it.each([
+    [{ allow_auto_mode: true }, "Genehmigt · Auto-Modus", /auto mode/],
+    [{ remember: true }, "Genehmigt · fragt für Bash nicht mehr", /won't ask again/],
+  ])("COPY-01 the resolved option line is German (%j)", (content, german, english) => {
+    withAccess(2);
+    const entry = seedEntry(
+      [userInput, card({ allowAutoMode: true, rememberScope: { tool: "Bash" } })],
+      "running",
+    );
+    renderView();
+    answerCard(entry, content);
+    const approval = screen.getByTestId(CHAT_TEST_IDS.approvalCard);
+    expect(within(approval).getByText(german)).toBeInTheDocument();
+    expect(within(approval).queryByText(english)).toBeNull();
+  });
+
+  it("COPY-01 the resolved plan line is German", () => {
+    withAccess(2);
+    const entry = seedEntry(
+      [
+        userInput,
+        card({ elicitationId: "elic_plan", exitPlanMode: { plan: "# Plan\n\n1. Fix schreiben" } }),
+      ],
+      "running",
+    );
+    renderView();
+    answerCard(entry, { allow_all_edits: true });
+    const review = screen.getByTestId("plan-review");
+    expect(within(review).getByText("Plan genehmigt · Auto-Modus")).toBeInTheDocument();
+    expect(within(review).queryByText(/Plan approved/)).toBeNull();
   });
 
   it("AC-055b a card opened while the thread was closed is there on open", () => {
@@ -628,5 +768,134 @@ describe("Approval cards in the thread", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Genehmigen" })).toBeInTheDocument();
     expect(toastMock.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpenAgentSessionLink (thread header)", () => {
+  function renderLink() {
+    return render(
+      <Providers>
+        <OpenAgentSessionLink sessionId={SESSION} />
+      </Providers>,
+    );
+  }
+
+  it("AC-085a without a grant the Session öffnen link does not render", () => {
+    sessionResult.current = {
+      session: null,
+      isLoading: false,
+      error: new ApiError("not found", 404, null),
+    };
+    renderLink();
+    expect(screen.queryByTestId(CHAT_TEST_IDS.threadOpenSession)).toBeNull();
+  });
+
+  it("AC-085a while the session snapshot loads the link does not render", () => {
+    sessionResult.current = { session: null, isLoading: true, error: null };
+    renderLink();
+    expect(screen.queryByTestId(CHAT_TEST_IDS.threadOpenSession)).toBeNull();
+  });
+
+  it.each([
+    ["read", 1],
+    ["edit", 2],
+  ] as const)("AC-085a a %s grant shows Session öffnen linking to the session", (_name, level) => {
+    withAccess(level);
+    renderLink();
+    const link = screen.getByTestId(CHAT_TEST_IDS.threadOpenSession);
+    expect(link).toHaveTextContent("Session öffnen");
+    expect(link).toHaveAttribute("href", `/c/${SESSION}`);
+  });
+});
+
+describe("Plan approval in the thread (FR-059)", () => {
+  const PLAN = "# Plan\n\n1. Tests lesen\n2. Fix schreiben";
+  const READ_ONLY = "Nur Aufrufer und Bearbeiter können antworten";
+
+  function planItem(status: "pending" | "responded" = "pending") {
+    return {
+      kind: "elicitation" as const,
+      itemId: "item_plan",
+      elicitationId: "elic_plan",
+      message: "Plan freigeben?",
+      phase: "tool_call",
+      policyName: "",
+      contentPreview: "",
+      requestedSchema: {},
+      status,
+      response: status === "responded" ? { action: "accept" as const } : null,
+      exitPlanMode: { plan: PLAN },
+    };
+  }
+
+  function renderPlan(note: string | null) {
+    const onSubmit = vi.fn();
+    render(
+      <Providers>
+        <PlanReview
+          item={planItem()}
+          plan={PLAN}
+          note={note}
+          onSubmit={onSubmit}
+          resolvedBy={null}
+        />
+      </Providers>,
+    );
+    return onSubmit;
+  }
+
+  it("AC-059a a pending plan approval renders ExitPlanModeReview in a pending plan review", () => {
+    renderPlan(null);
+    const review = screen.getByTestId("plan-review");
+    expect(review).toHaveAttribute("data-state", "pending");
+    expect(within(review).getByTestId("exit-plan-mode-review")).toBeInTheDocument();
+    expect(within(review).getByText("Fix schreiben")).toBeInTheDocument();
+  });
+
+  it("AC-059a accepting the plan submits accept for that elicitation", () => {
+    const onSubmit = renderPlan(null);
+    fireEvent.click(screen.getByRole("button", { name: "Yes, manually approve edits" }));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith("elic_plan", "accept");
+  });
+
+  it("AC-059a a READ note disables every plan control and marks the review read-only", async () => {
+    const user = userEvent.setup();
+    const onSubmit = renderPlan(READ_ONLY);
+    const review = screen.getByTestId("plan-review");
+    expect(review).toHaveAttribute("data-state", "read-only");
+    expect(within(review).getByText(READ_ONLY)).toBeInTheDocument();
+    const buttons = within(review).getAllByRole("button");
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const button of buttons) expect(button).toBeDisabled();
+    // A real click on a control in a disabled fieldset does nothing.
+    await user.click(within(review).getByRole("button", { name: "Yes, manually approve edits" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("AC-059a an exit-plan-mode request in the live turn shows the plan review, not the approval card", () => {
+    withAccess(2);
+    seedEntry(
+      [userInput, card({ elicitationId: "elic_plan", exitPlanMode: { plan: PLAN } })],
+      "running",
+    );
+    renderView();
+    const live = screen.getByTestId("agent-thread-live");
+    const review = within(live).getByTestId("plan-review");
+    expect(review).toHaveAttribute("data-state", "pending");
+    expect(within(review).getByTestId("exit-plan-mode-review")).toBeInTheDocument();
+    expect(within(live).queryByTestId(CHAT_TEST_IDS.approvalCard)).toBeNull();
+  });
+
+  it("AC-059a a READ viewer sees the live plan review read-only", () => {
+    withAccess(1);
+    seedEntry(
+      [userInput, card({ elicitationId: "elic_plan", exitPlanMode: { plan: PLAN } })],
+      "running",
+    );
+    renderView({ me: "bob" });
+    const review = screen.getByTestId("plan-review");
+    expect(review).toHaveAttribute("data-state", "read-only");
+    for (const button of within(review).getAllByRole("button")) expect(button).toBeDisabled();
   });
 });

@@ -2,11 +2,23 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox' and extra != 'extra-8-omnigent-databricks' and extra != 'extra-8-omnigent-modal' and extra != 'group-8-omnigent-dev' and extra != 'group-8-omnigent-lint'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra == 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox' and extra != 'extra-8-omnigent-databricks' and extra != 'extra-8-omnigent-modal' and extra != 'group-8-omnigent-dev' and extra != 'group-8-omnigent-lint'",
+    "python_full_version >= '3.15' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.13.*' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.13.*' and extra == 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox' and extra != 'extra-8-omnigent-databricks' and extra != 'extra-8-omnigent-modal' and extra != 'group-8-omnigent-dev' and extra != 'group-8-omnigent-lint'",
+    "python_full_version == '3.13.*' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra == 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox' and extra != 'extra-8-omnigent-databricks' and extra != 'extra-8-omnigent-modal' and extra != 'group-8-omnigent-dev' and extra != 'group-8-omnigent-lint'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra == 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox' and extra != 'extra-8-omnigent-databricks' and extra != 'extra-8-omnigent-modal' and extra != 'group-8-omnigent-dev' and extra != 'group-8-omnigent-lint'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
 ]
 conflicts = [[
     { package = "omnigent", extra = "antigravity" },
@@ -30,12 +42,12 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
+mlflow-skinny = "2026-09-05T00:00:00Z"
 cwsandbox = "2026-06-12T00:00:00Z"
 google-antigravity = "2026-06-12T00:00:00Z"
 mlflow = "2026-09-05T00:00:00Z"
-mlflow-skinny = "2026-09-05T00:00:00Z"
-mlflow-tracing = "2026-09-05T00:00:00Z"
 nimble-python = "2026-07-29T00:00:00Z"
+mlflow-tracing = "2026-09-05T00:00:00Z"
 
 [manifest]
 members = [
@@ -308,6 +320,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
+name = "axe-playwright-python"
+version = "0.1.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "playwright" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/3a/0ac4e97b92a3f8dc98f7dfb3b68c3e8d3811eda630000ccf4f7654e3498a/axe_playwright_python-0.1.8.tar.gz", hash = "sha256:97de160210fd5ce51e552d21d3b0a1cabb850235942737643ee3b9398de81a47", size = 194644, upload-time = "2026-07-24T20:11:06.699Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/c6/5fdb6d5d96653927b6a4763a4b7aaa9e468d4a6eda5048b7c2e158d17bc9/axe_playwright_python-0.1.8-py3-none-any.whl", hash = "sha256:fdd263c998388f1a8e67cad02677e612d946248bd44d163be5e8650ea31f95f8", size = 160681, upload-time = "2026-07-24T20:11:05.228Z" },
 ]
 
 [[package]]
@@ -1040,11 +1064,18 @@ name = "databricks-sdk"
 version = "0.115.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.15' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.13.*' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.13.*' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
 ]
 dependencies = [
     { name = "google-auth", marker = "extra == 'extra-8-omnigent-cwsandbox' or extra == 'extra-8-omnigent-databricks' or extra == 'extra-8-omnigent-modal' or extra == 'group-8-omnigent-dev' or extra == 'group-8-omnigent-lint' or extra != 'extra-8-omnigent-antigravity'" },
@@ -3348,6 +3379,7 @@ vertex = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "axe-playwright-python" },
     { name = "boto3" },
     { name = "build" },
     { name = "filelock" },
@@ -3377,6 +3409,7 @@ lint = [
     { name = "ruff" },
 ]
 test = [
+    { name = "axe-playwright-python" },
     { name = "boto3" },
     { name = "build" },
     { name = "filelock" },
@@ -3496,6 +3529,7 @@ provides-extras = ["claude-sdk", "openai-agents", "cockroachdb", "all", "bedrock
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "axe-playwright-python", specifier = ">=0.1.8" },
     { name = "boto3", specifier = ">=1.30,<2" },
     { name = "build", specifier = ">=1.2" },
     { name = "filelock", specifier = ">=3.0" },
@@ -3525,6 +3559,7 @@ lint = [
     { name = "ruff", specifier = ">=0.6" },
 ]
 test = [
+    { name = "axe-playwright-python", specifier = ">=0.1.8" },
     { name = "boto3", specifier = ">=1.30,<2" },
     { name = "build", specifier = ">=1.2" },
     { name = "filelock", specifier = ">=3.0" },
@@ -4354,11 +4389,18 @@ name = "protobuf"
 version = "6.33.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version >= '3.15' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.13.*' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version == '3.13.*' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform == 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra == 'extra-8-omnigent-cwsandbox'",
+    "python_full_version < '3.13' and sys_platform != 'win32' and extra != 'extra-8-omnigent-antigravity' and extra != 'extra-8-omnigent-cwsandbox'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/70/e908e9c5e52ef7c3a6c7902c9dfbb34c7e29c25d2f81ade3856445fd5c94/protobuf-6.33.6.tar.gz", hash = "sha256:a6768d25248312c297558af96a9f9c929e8c4cee0659cb07e780731095f38135", size = 444531, upload-time = "2026-03-18T19:05:00.988Z" }
 wheels = [

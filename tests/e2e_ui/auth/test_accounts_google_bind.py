@@ -92,12 +92,23 @@ def _register_user(server: AccountsServer) -> None:
 def _skip_google(route: Route, server: AccountsServer) -> None:
     """Follow ``/auth/google/start`` and return straight to the callback.
 
-    The server's own redirect (with its state cookie) is fetched over the
-    loopback address, and the browser is sent to the callback instead of
-    Google's consent page.
+    The browser hits the public loopback alias. A fetch of the same path on
+    ``127.0.0.1`` does not match that origin, so the server bounces back to
+    the alias and does not set the state cookie. Sending the public ``Host``
+    on the loopback fetch makes the start handler redirect to Google.
+    The browser is then sent to the callback instead of Google's consent page.
     """
-    path = urlsplit(route.request.url).path
-    started = route.fetch(url=f"{server.base_url}{path}", max_redirects=0)
+    parts = urlsplit(route.request.url)
+    public_host = urlsplit(server.public_url).netloc
+    start_url = f"{server.base_url}{parts.path}"
+    if parts.query:
+        start_url = f"{start_url}?{parts.query}"
+    started = httpx.get(
+        start_url,
+        headers={"Host": public_host},
+        follow_redirects=False,
+        timeout=10.0,
+    )
     location = started.headers["location"]
     assert location.startswith("https://accounts.google.com/"), location
     query = parse_qs(urlsplit(location).query)
@@ -111,8 +122,9 @@ def _skip_google(route: Route, server: AccountsServer) -> None:
     code = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode()
     target = f"{query['redirect_uri'][0]}?{urlencode({'code': code, 'state': query['state'][0]})}"
     headers = {"location": target}
-    if "set-cookie" in started.headers:
-        headers["set-cookie"] = started.headers["set-cookie"]
+    cookies = started.headers.get_list("set-cookie")
+    if cookies:
+        headers["set-cookie"] = cookies[0]
     route.fulfill(status=302, headers=headers)
 
 

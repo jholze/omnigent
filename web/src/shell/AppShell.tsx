@@ -26,6 +26,7 @@ import { useNewShellHotkey } from "@/hooks/useNewShellHotkey";
 import { useSettingsHotkey } from "@/hooks/useSettingsHotkey";
 import { useIsEmbedded } from "@/lib/embedded";
 import { AgentInfoContent, agentHasInfo } from "@/components/AgentInfo";
+import { useNeedsYouNotifications } from "@/chat/NeedsYouView";
 import { useIdleNotifications } from "@/hooks/useIdleNotifications";
 import { ArcaShutdownToast } from "@/components/ArcaShutdownToast";
 import { useSeedReadState } from "@/hooks/useUnseenConversations";
@@ -100,6 +101,7 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
+import { isAgentThreadSession } from "@/lib/sessionVisibility";
 import { holdsInitialDraft, isTempConvId, useChatStore } from "@/store/chatStore";
 import { supportsSideChat } from "@/lib/sideChat";
 import {
@@ -548,6 +550,9 @@ export function AppShell() {
   // the active conversation id, which suppresses the notification/badge for
   // the session the user is actively viewing.
   useIdleNotifications(conversationId);
+  // Team-chat OS notifications (FR-011): mentions, DMs, agent approvals.
+  // App-wide so they fire whichever page is open; off without `team_chat`.
+  useNeedsYouNotifications(isFeatureEnabled(serverInfo, "team_chat"));
   // Seed the per-user read-state (unread/seen) mirror from the conversation
   // list, so the sidebar dots reflect what the user did on any device.
   // `undefined` while the query is still loading (vs `[]` for a loaded-but-
@@ -637,6 +642,10 @@ export function AppShell() {
   // (embedded Omnigent REPL terminal) have NO wrapper label and must
   // keep regular chat behavior. See TerminalFirstContext.tsx.
   const isNativeWrapper = isNativeWrapperLabel(sessionLabels["omnigent.wrapper"]);
+  // Session chat (FR-029): needs `team_chat`; an Agent-Thread session has
+  // none (AC-029c), the Thread is its chat.
+  const showSessionChat =
+    isFeatureEnabled(serverInfo, "team_chat") && !isAgentThreadSession({ labels: sessionLabels });
   // Used for the header "Back to parent" link, which is hidden on
   // top-level sessions. The Subagents tab itself is always visible —
   // it lists the root's children plus a "main" entry, so the user
@@ -2490,6 +2499,7 @@ export function AppShell() {
                     rightPanelOpen={rightPanelOpen}
                     onToggleRightPanel={toggleRightPanel}
                     pending={pendingConversation}
+                    sessionChat={showSessionChat}
                     mobileMenu={{
                       fileViewerOpen,
                       panelOpen,

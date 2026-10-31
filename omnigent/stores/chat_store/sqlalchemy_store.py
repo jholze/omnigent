@@ -107,6 +107,7 @@ def _to_message(row: SqlChatMessage) -> ChatMessage:
         created_at=row.created_at,
         body=row.body,
         client_id=row.client_id,
+        forward_state=row.forward_state,
     )
 
 
@@ -1162,7 +1163,11 @@ class SqlAlchemyChatStore(ChatStore):
             )
 
     def channel_unread_counts(
-        self, principal_id: str, channel_ids: Collection[str]
+        self,
+        principal_id: str,
+        channel_ids: Collection[str],
+        *,
+        until: int | None = None,
     ) -> dict[str, tuple[int, int]]:
         """Count unread top-level messages and mentions. See the base class."""
         ids = list(channel_ids)
@@ -1178,7 +1183,7 @@ class SqlAlchemyChatStore(ChatStore):
                     SqlChatMessage.channel_id == channel_id,
                     SqlChatMessage.thread_root_id.is_(None),
                     SqlChatMessage.author_id != principal_id,
-                )
+                ) + ((SqlChatMessage.created_at <= until,) if until is not None else ())
                 unread_query = select(func.count()).select_from(SqlChatMessage).where(*base)
                 after = _after_cursor(cursor)
                 if after is not None:

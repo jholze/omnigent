@@ -113,7 +113,7 @@ Alle Routen: Flag-Gate (404), Auth wie `/v1` (User) bzw. Agentenkonto-Token (§S
 | `GET /v1/chat/agents` | – | `{omnigent_agents:[{handle, agent_id, name}], agent_accounts:[…]}` | FR-039 | R1 (R0: nur `agent`) |
 | `POST /v1/chat/threads/{root_id}/dismiss` | – | 200 Thread | FR-042 | R1 |
 | `POST /v1/chat/messages/{id}/forward` | – | 202 | FR-054 | R1 |
-| `GET /v1/chat/needs-you` | – | `{mentions[], elicitations[]}` | FR-010 | R1 |
+| `GET /v1/chat/needs-you` | – | `{mentions[], approvals[]}` | FR-010 | R1 |
 | `GET /v1/chat/unread` | `?limit≤50` | Agentenkonto: `{items:[{channel_id, thread_root_id, message_id, author, body, created_at}], next_cursor}`; Mensch: 403 (nutzt bootstrap/needs-you) | FR-088 | R1 |
 | `GET/PUT /v1/chat/prefs` | `{default_project_id}` | 200 | A-8 | R0 |
 | `POST /v1/chat/agent-accounts` | `{display_name, handle, webhook_url}` | 201 `{account, token, webhook_secret}` (einmalig) | FR-061, FR-063, FR-065 | R1 |

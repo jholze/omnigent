@@ -12,8 +12,18 @@
  * truncates, so the sizer never forces horizontal scroll.
  * "arbeitet im Hintergrund" shares the icon and border of "arbeitet"; only
  * "braucht Antwort" (an open approval) gets the warning accent.
- * No motion yet; the crossfade waits for the motion tokens (T-117).
+ *
+ * Motion (T-117, FR-078/079): on a status change the new label fades in over
+ * `chipCrossfade` (200 ms; reduced motion 120 ms opacity). The first value
+ * is static. Tone colours transition via `colorTransitionStyle` (listed
+ * properties, never `all`).
+ *
+ * T-115: the `LoaderCircle` of startet…/arbeitet/arbeitet im Hintergrund
+ * turns like the active agent step (`spinSeconds`, linear) and stays still
+ * under reduced motion, so chip and step list share one motion language.
  */
+import { useState } from "react";
+import { m } from "motion/react";
 import {
   BotIcon,
   CircleCheckIcon,
@@ -26,6 +36,8 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { chipCrossfade, colorTransitionStyle, spinSeconds } from "../motion";
+import { useChatReducedMotion } from "../MotionRoot";
 import { CHAT_TEST_IDS } from "../testids";
 import { AGENT_CHIP_LABELS, type AgentChipKind, type AgentChipState } from "./agentStatus";
 import { useAgentThreadChip } from "./useAgentThreadChip";
@@ -56,6 +68,9 @@ const TONES: Record<AgentChipKind, string> = {
   closed: "border-border text-muted-foreground",
 };
 
+/** Kinds whose LoaderCircle spins (an agent at work). */
+const SPINNING: ReadonlySet<AgentChipKind> = new Set(["launching", "running", "background"]);
+
 const pendingFormat = new Intl.PluralRules("de-DE");
 
 /** Tooltip text: what the chip is based on, plus the approval count. */
@@ -78,26 +93,53 @@ export interface AgentStatusChipProps {
 
 export function AgentStatusChip({ state, className }: AgentStatusChipProps) {
   const Icon = ICONS[state.kind];
+  const reduced = useChatReducedMotion();
+  // Animate only after the kind changed once; the first value stays static.
+  const [shownKind, setShownKind] = useState(state.kind);
+  const [changed, setChanged] = useState(false);
+  if (shownKind !== state.kind) {
+    setShownKind(state.kind);
+    setChanged(true);
+  }
+  const preset = chipCrossfade(reduced);
+  const spinning = !reduced && SPINNING.has(state.kind);
+  const labelMotion = changed
+    ? {
+        initial: preset.initial,
+        animate: preset.animate,
+        transition: preset.transition,
+        "data-motion": preset.name,
+        "data-motion-duration": preset.durationMs,
+      }
+    : { initial: false as const };
   return (
     <span
       data-testid={CHAT_TEST_IDS.agentStatusChip}
       data-state={state.kind}
       data-source={state.source}
       title={agentChipTitle(state)}
+      style={colorTransitionStyle(reduced)}
       className={cn(
         "inline-flex h-5 max-w-full shrink-0 items-center gap-1 rounded-sm border px-1.5 text-xs font-medium",
         TONES[state.kind],
         className,
       )}
     >
-      <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+      <Icon
+        className={cn("size-3.5 shrink-0", spinning && "animate-spin")}
+        style={spinning ? { animationDuration: `${spinSeconds}s` } : undefined}
+        data-spinning={spinning || undefined}
+        aria-hidden="true"
+      />
       <span className="inline-grid min-w-0 grid-cols-1 overflow-hidden text-left">
         {/* Sizer text mirrors AGENT_CHIP_WIDEST_LABEL (Tailwind needs a literal). */}
         <span
           aria-hidden="true"
           className="invisible col-start-1 row-start-1 truncate before:content-['arbeitet_im_Hintergrund']"
         />
-        <span className="col-start-1 row-start-1 truncate">{AGENT_CHIP_LABELS[state.kind]}</span>
+        <m.span key={state.kind} {...labelMotion} className="col-start-1 row-start-1 truncate">
+          {AGENT_CHIP_LABELS[state.kind]}
+        </m.span>
       </span>
     </span>
   );
@@ -126,7 +168,7 @@ export function AgentThreadStatus({ rootId }: { rootId: string }) {
   const state = useAgentThreadChip(rootId);
   if (state === null) return null;
   return (
-    <span role="status" className="inline-flex min-w-0 items-center">
+    <span role="status" className="inline-flex shrink-0 items-center">
       <span className="sr-only">Agent:</span>
       <AgentStatusChip state={state} />
     </span>
