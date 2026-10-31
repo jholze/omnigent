@@ -18,6 +18,7 @@ name: Fork CI
 # web lint/typecheck/build still run. The Pytest (SQLite) job itself is not
 # skipped: a skipped required check can block merging. The allowlist lives
 # in scripts/fork/ci_pytest_skip.py (*.md outside tests/ and specs/, via git diff).
+# A markdown file read by any test, or a docs/ file with executable code, still runs pytest.
 #
 # The repo is public. Every job is gated so only jholze's same-repo pull
 # requests and his manual dispatches are queued. A cloud-agent push keeps the

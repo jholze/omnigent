@@ -69,7 +69,9 @@ with `launchctl kickstart -k` while interrupting live sessions.
    `Web (lint, typecheck, vitest, build)`, `Pytest (SQLite)`. `E2E UI` is
    non-blocking. Drafts do not run CI. The pytest suite, vitest, and E2E are
    skipped only when every changed file is a `*.md` file outside `tests/` and
-   outside `specs/` (`docs/**/*.md` included). Config, YAML/JSON/TOML, specs,
+   outside `specs/` (`docs/**/*.md` included), no test reads that file, and
+   the file is not under `docs/` with executable code (a shebang or a fenced
+   Python, bash, shell, or TypeScript block). Config, YAML/JSON/TOML, specs,
    fixtures, anything under `tests/`, workflow files, and any other file run
    the full suite. Lint still runs. `Pytest (SQLite)` is not skipped on that
    allowlist: the job reports success without the suite, so the required
