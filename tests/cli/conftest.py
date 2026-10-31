@@ -33,3 +33,4 @@ def _no_ambient_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Clearing OMNIGENT_CONFIG_HOME falls back to $HOME/.omnigent/config.yaml.
     # Fork CI shares that HOME across xdist workers, so each test gets its own.
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr("omnigent.session_host._session_hosts", {})

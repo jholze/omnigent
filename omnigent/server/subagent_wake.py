@@ -261,7 +261,7 @@ async def _mark_delivered(store: ConversationStore, parent_id: str, wake_key: st
     _delivered[(parent_id, wake_key)] = True
     try:
         await asyncio.to_thread(store.set_labels, parent_id, {_label_key(wake_key): "1"})
-    except Exception:  # noqa: BLE001 — marker write must not fail a delivered wake
+    except Exception:  # marker write must not fail a delivered wake
         _logger.warning(
             "Could not persist subagent wake marker for parent=%s",
             parent_id,
@@ -317,7 +317,7 @@ async def _wake_parent(
             },
         )
         await delivery(parent_id, body, user_id)
-    except Exception:  # noqa: BLE001 — parent wake must not fail child completion
+    except Exception:  # parent wake must not fail child completion
         _logger.warning(
             "Subagent return wake failed for parent=%s child=%s",
             parent_id,

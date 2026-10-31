@@ -789,7 +789,7 @@ def _bearer_token(request: HTTPConnection) -> str | None:
     return token or None
 
 
-def _agent_account_principal(request: HTTPConnection) -> str | None | object:
+def _agent_account_principal(request: HTTPConnection) -> str | object | None:
     """Resolve an ``ogc_`` bearer, or :data:`_NOT_AN_AGENT_TOKEN` when it isn't one.
 
     An ``ogc_`` token never falls through to a user cookie or proxy header.
