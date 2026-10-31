@@ -80,7 +80,9 @@ jobs:
       - name: ruff check
         run: .venv/bin/python -m ruff check --force-exclude .
       - name: ruff format --check
-        run: .venv/bin/python -m ruff format --check --force-exclude .
+        # Python only: newer ruff also formats Markdown, and upstream's docs
+        # are not ruff-formatted (upstream's own CI only checks Python).
+        run: git ls-files -z '*.py' '*.pyi' | xargs -0 .venv/bin/python -m ruff format --check --force-exclude
       - name: pyrefly check
         run: .venv/bin/pyrefly check
 
