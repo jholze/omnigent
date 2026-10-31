@@ -30,6 +30,12 @@ on:
       - "epic/**"
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  # Daily run on main (06:30 UTC, after the 05:00 local upstream-sync job) so
+  # a regression on main shows up without waiting for the next pull request.
+  # Schedules run on the default branch only; github.actor is the account
+  # that last changed this cron (jholze), so the job gates below still pass.
+  schedule:
+    - cron: "30 6 * * *"
 
 permissions:
   contents: read
