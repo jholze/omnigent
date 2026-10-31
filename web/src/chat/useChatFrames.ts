@@ -453,17 +453,19 @@ function useBadgeSync(enabled: boolean): void {
         });
     };
 
-    let known = new Set(Object.keys(useTeamChatStore.getState().changes));
-    const unsubscribeStore = useTeamChatStore.subscribe((state, previous) => {
-      if (state.changes === previous.changes) return;
+    // Changes seen before bootstrap loads stay unknown, so the scan replays them once it does.
+    const loaded = queryClient.getQueryData(teamChatQueryKeys.bootstrap) !== undefined;
+    let known = new Set(loaded ? Object.keys(useTeamChatStore.getState().changes) : []);
+    const scan = (changes: Record<string, TeamChatChange>): void => {
       const data = queryClient.getQueryData<BootstrapResponse>(teamChatQueryKeys.bootstrap);
+      if (data === undefined) return;
       const listed = new Set([...(data?.channels ?? []), ...(data?.dms ?? [])].map((c) => c.id));
       const messageChannels = new Set<string>();
       const readChannels = new Set<string>();
-      for (const change of Object.values(state.changes)) {
+      for (const change of Object.values(changes)) {
         const key = teamChatChangeKey(change);
         if (known.has(key)) continue;
-        if (!changeMovesBadges(change, data?.me, listed)) continue;
+        if (!changeMovesBadges(change, data.me, listed)) continue;
         if (change.kind === "read") {
           const cursor = { id: change.id, created_at: change.created_at };
           if (!isCursorAfter(cursor, lastRead.get(change.channel_id) ?? null)) continue;
@@ -475,17 +477,25 @@ function useBadgeSync(enabled: boolean): void {
           messageChannels.add(change.channel_id);
         }
       }
-      known = new Set(Object.keys(state.changes));
+      known = new Set(Object.keys(changes));
       // A message row may already be cached; otherwise its fill resolves it.
       for (const channelId of messageChannels) {
         if (!readChannels.has(channelId)) resolveOrLoad(channelId, false);
       }
       for (const channelId of readChannels) resolveOrLoad(channelId, true);
+    };
+    const unsubscribeStore = useTeamChatStore.subscribe((state, previous) => {
+      if (state.changes !== previous.changes) scan(state.changes);
     });
     const unsubscribeCache = queryClient.getQueryCache().subscribe((event) => {
       if (event.type !== "updated") return;
       const [scope, kind, channelId] = event.query.queryKey as readonly unknown[];
-      if (scope !== "team-chat" || kind !== "messages" || typeof channelId !== "string") return;
+      if (scope !== "team-chat") return;
+      if (kind === teamChatQueryKeys.bootstrap[1]) {
+        if (event.query.state.data !== undefined) scan(useTeamChatStore.getState().changes);
+        return;
+      }
+      if (kind !== "messages" || typeof channelId !== "string") return;
       if (event.query.state.data !== undefined) resolve(channelId);
     });
     return () => {

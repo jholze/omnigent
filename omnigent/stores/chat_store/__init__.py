@@ -594,12 +594,17 @@ class ChatStore(ABC):
 
     @abstractmethod
     def channel_unread_counts(
-        self, principal_id: str, channel_ids: Collection[str]
+        self,
+        principal_id: str,
+        channel_ids: Collection[str],
+        *,
+        until: int | None = None,
     ) -> dict[str, tuple[int, int]]:
         """Return ``(unread_count, mention_count)`` for each channel.
 
         Counts are top-level messages after the caller's channel cursor,
         excluding the caller's own. Mentions are those that name the caller.
+        *until* (epoch-us) excludes messages created after it.
         """
         ...
 
