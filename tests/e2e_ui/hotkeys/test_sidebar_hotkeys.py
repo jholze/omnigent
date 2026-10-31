@@ -15,12 +15,16 @@ Covers the two hook changes end to end:
 from __future__ import annotations
 
 import json
+import sys
 
 from playwright.sync_api import Page, expect
 
 # Mirrors PINNED_CONVERSATION_IDS_STORAGE_KEY in web/src/shell/sidebarNav.ts —
 # pins are client-side state, so the test seeds them where the app reads them.
 _PINNED_KEY = "omnigent:pinned-conversation-ids"
+
+# Only the command modifier fires the chords: Cmd on macOS, Ctrl elsewhere.
+_COMMAND_MODIFIER = "Meta" if sys.platform == "darwin" else "Control"
 
 # Width of the sidebar itself — it's what the collapse chord animates (→0),
 # and it's robust to the inner search control's markup. The old search input
@@ -47,7 +51,7 @@ def test_numeric_chord_jumps_to_pinned_session(
     # appears once the session list has loaded and the pin resolved).
     expect(page.get_by_text("Pinned", exact=True)).to_be_visible(timeout=30_000)
 
-    page.keyboard.press("Control+Alt+Digit1")
+    page.keyboard.press(f"{_COMMAND_MODIFIER}+Alt+Digit1")
     page.wait_for_url(f"**/c/{session_id}", timeout=15_000)
 
 
@@ -58,8 +62,8 @@ def test_bracket_chord_toggles_left_sidebar(page: Page, live_server: str) -> Non
     assert expanded_width > 100, f"sidebar unexpectedly narrow at start ({expanded_width}px)"
 
     # Collapse: the sidebar animates its width to zero.
-    page.keyboard.press("Control+Alt+BracketLeft")
+    page.keyboard.press(f"{_COMMAND_MODIFIER}+Alt+BracketLeft")
     page.wait_for_function(f"() => ({_SIDEBAR_WIDTH_JS})() < 80", timeout=10_000)
     # Expand again.
-    page.keyboard.press("Control+Alt+BracketLeft")
+    page.keyboard.press(f"{_COMMAND_MODIFIER}+Alt+BracketLeft")
     page.wait_for_function(f"() => ({_SIDEBAR_WIDTH_JS})() > 100", timeout=10_000)

@@ -39,6 +39,9 @@ from omnigent.server.dictation import FAKE_SCRIPT as _FAKE_SCRIPT
 # 100 ms; CI machines are slow — a generous ceiling keeps this deflaked.
 _TRANSCRIPT_TIMEOUT_MS = 20_000
 
+# Caret to the start of a textarea: macOS binds Cmd+Up, other platforms Ctrl+Home.
+_TEXTAREA_START_CHORD = "Meta+ArrowUp" if sys.platform == "darwin" else "Control+Home"
+
 
 def _open_server_dictation_page(
     browser: Browser,
@@ -183,9 +186,9 @@ def test_transcript_lands_at_the_caret(
 
     The reported flow: paste a block of context, click above it, dictate the
     instructions that should lead. Drives the real caret through the browser
-    (click + Ctrl+Home) rather than calling the hook, so it also covers the
-    composer's ``onFocus`` wiring and the caret surviving the mic button
-    taking focus on click.
+    (click + the platform go-to-start chord) rather than calling the hook, so
+    it also covers the composer's ``onFocus`` wiring and the caret surviving
+    the mic button taking focus on click.
     """
     base_url, session_id = seeded_session
     context, page = _open_server_dictation_page(
@@ -198,7 +201,7 @@ def test_transcript_lands_at_the_caret(
         # Paste a block of context, then put the caret at the very top.
         composer.fill("PASTED CONTEXT")
         composer.click()
-        page.keyboard.press("Control+Home")
+        page.keyboard.press(_TEXTAREA_START_CHORD)
 
         mic = page.get_by_role("button", name="Voice dictation")
         mic.click()
@@ -220,7 +223,7 @@ def test_transcript_lands_at_the_caret(
         # the onTranscript branch instead of onInterim(""). That path is
         # covered in web/src/hooks/useDictationInsert.test.tsx.)
         composer.click()
-        page.keyboard.press("Control+Home")
+        page.keyboard.press(_TEXTAREA_START_CHORD)
         mic.click()
         expect(mic).to_have_attribute("aria-pressed", "true")
         expect(composer).to_have_value(
