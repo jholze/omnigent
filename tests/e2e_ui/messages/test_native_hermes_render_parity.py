@@ -23,7 +23,10 @@ Gating
 Like goose-native, Hermes authenticates from its own config (``hermes setup`` /
 ``hermes model`` → ``~/.hermes/config.yaml``), which CI does not provision. The
 suite **skips** when ``hermes``/``tmux`` are absent or no Hermes config is
-present, and runs for real where Hermes is configured.
+present, and runs for real where Hermes is configured. A live turn also skips
+(when the Hermes TUI pane reports no inference provider, an auth failure, or an
+unavailable model) so a machine with Hermes but no working provider does not
+fail waiting on an assistant reply it can never produce.
 """
 
 from __future__ import annotations
@@ -144,6 +147,136 @@ def _wait_marker_in_transcript(
     )
 
 
+#: Distinctive no-provider errors Hermes raises at agent init (no API call runs,
+#: so there is no "API call failed" anchor to gate them on).
+_NO_PROVIDER_SIGNATURES = (
+    "no llm provider configured",
+    "no api key was found",
+)
+
+#: Inference-error report anchors. Auth/model signatures below are only trusted
+#: when one of these anchors is also present, so a tool transcript that merely
+#: quotes such words can't false-trigger a skip.
+_PROVIDER_ERROR_ANCHORS = (
+    "api call failed",
+    "non-retryable",
+)
+
+#: Provider-reported inference failures, grouped by the skip-reason phrase they
+#: map to (the reason must name one of these three conditions).
+_PROVIDER_ERROR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "auth failure",
+        (
+            "third-party apps now draw from extra usage",
+            "invalid_request_error",
+            "invalid api key",
+            "invalid_api_key",
+            "authentication",
+            "unauthorized",
+            "invalid token",
+            "token expired",
+            "token revoked",
+            "insufficient credits",
+            "insufficient_quota",
+            "payment required",
+            "billing hard limit",
+            "exceeded your current quota",
+        ),
+    ),
+    (
+        "model unavailable",
+        (
+            "is not a valid model",
+            "invalid model",
+            "model not found",
+            "model_not_found",
+            "no such model",
+            "unknown model",
+            "unsupported model",
+            "does not exist",
+        ),
+    ),
+)
+
+
+def _hermes_provider_error_reason(session_id: str, user_marker: str) -> str | None:
+    """Return a skip reason when the live Hermes pane reports a provider error.
+
+    The runner launches the Hermes TUI in a runner-owned tmux pane and advertises
+    its socket/target under the per-session bridge dir. When inference cannot
+    start — no inference provider, an auth failure, or an unavailable model — the
+    TUI prints the provider's error into that pane. This captures the pane and
+    maps a matching signature to a skip reason, or returns ``None`` when the pane
+    reports no provider error (yet).
+
+    :param session_id: Omnigent session id (keys the runner's bridge dir).
+    :param user_marker: The current turn's user marker; a provider error only
+        skips when this marker is also visible in the pane, tying the error to
+        this turn rather than to stale scrollback.
+    """
+    from omnigent.harnesses.hermes_native.bridge import (
+        bridge_dir_for_session_id,
+        capture_hermes_pane,
+    )
+
+    pane = capture_hermes_pane(bridge_dir_for_session_id(session_id))
+    if not pane:
+        return None
+    lowered = pane.lower()
+    if user_marker not in lowered:
+        return None
+
+    for signature in _NO_PROVIDER_SIGNATURES:
+        if signature in lowered:
+            return (
+                f"hermes-native render-parity skipped: the Hermes pane reported "
+                f"no inference provider (matched {signature!r})."
+            )
+
+    if not any(anchor in lowered for anchor in _PROVIDER_ERROR_ANCHORS):
+        return None
+    for category, signatures in _PROVIDER_ERROR_SIGNATURES:
+        for signature in signatures:
+            if signature in lowered:
+                return (
+                    f"hermes-native render-parity skipped: the Hermes pane reported "
+                    f"{category} (matched {signature!r})."
+                )
+    return None
+
+
+def _wait_assistant_token_or_skip(
+    page: Page,
+    session_id: str,
+    user_marker: str,
+    assistant_token: str,
+    *,
+    timeout_ms: int,
+) -> None:
+    """Wait for the assistant token, skipping when the pane reports a provider error.
+
+    Hermes can be launchable (binary + tmux + config present) yet still produce no
+    reply when its inference provider has no working access; the TUI prints the
+    provider error while the chat view stays on "Working". Poll the pane alongside
+    the token so that condition skips instead of hanging, while a reply that simply
+    lacks the token still fails via the timeout below.
+    """
+    token_bubble = page.locator(_ASSISTANT, has_text=assistant_token).first
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if token_bubble.is_visible():
+            return
+        reason = _hermes_provider_error_reason(session_id, user_marker)
+        if reason is not None:
+            pytest.skip(reason)
+        time.sleep(1.0)
+    raise AssertionError(
+        f"assistant token {assistant_token!r} never appeared within {timeout_ms}ms "
+        f"for session {session_id}."
+    )
+
+
 @pytest.mark.timeout(900)
 def test_native_hermes_message_render_parity(
     page: Page,
@@ -179,11 +312,17 @@ def test_native_hermes_message_render_parity(
     for index in range(1, _COMPOSER_TURNS + 1):
         user_marker, assistant_token = _new_turn(index)
         _send(page, _turn_prompt(index, user_marker, assistant_token))
-        expect(page.locator(_ASSISTANT, has_text=assistant_token).first).to_be_visible(
-            timeout=_NATIVE_TURN_TIMEOUT_MS
+        # The user message must be stored in the transcript (not just the
+        # composer's local pending echo) before any provider-error skip.
+        _wait_marker_in_transcript(base_url, session_id, user_marker, timeout_ms=30_000)
+        _wait_assistant_token_or_skip(
+            page,
+            session_id,
+            user_marker,
+            assistant_token,
+            timeout_ms=_NATIVE_TURN_TIMEOUT_MS,
         )
         expect(page.locator(_WORKING)).to_have_count(0, timeout=_NATIVE_TURN_TIMEOUT_MS)
-        expect(page.locator(_USER)).to_have_count(index, timeout=30_000)
 
     # --- Property 2 & 3: a TUI-originated turn (OUT) surfaces in the web UI. ---
     tui_index = _COMPOSER_TURNS + 1
