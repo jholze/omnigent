@@ -78,17 +78,25 @@ def _spawn_host_daemon(tmp_path: Path, base_url: str) -> tuple[subprocess.Popen[
     omni_dir = tmp_path / ".omnigent"
     omni_dir.mkdir(parents=True, exist_ok=True)
     host_id = uuid.uuid4().hex
+    host_name = f"stuck-launch-{host_id[:8]}"
     (omni_dir / "config.yaml").write_text(
         yaml.safe_dump(
-            {"host": {"host_id": host_id, "name": f"stuck-launch-{host_id[:8]}"}},
+            {"host": {"host_id": host_id, "name": host_name}},
             default_flow_style=False,
             sort_keys=True,
         )
     )
     daemon_log = tmp_path / "host-daemon.log"
+    # Pytest pins CONFIG_HOME and DATA_DIR to one temp dir for the whole
+    # process. The daemon inherits that and would register a different
+    # host_id than the file written above.
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        "OMNIGENT_CONFIG_HOME": str(omni_dir),
+        "OMNIGENT_DATA_DIR": str(omni_dir),
+        "OMNIGENT_HOST_ID": host_id,
+        "OMNIGENT_HOST_NAME": host_name,
         "OMNIGENT_RUNNER_ZYGOTE": "0",
         "PYTHONPATH": os.pathsep.join([str(_REPO_ROOT), os.environ.get("PYTHONPATH", "")]).rstrip(
             os.pathsep
