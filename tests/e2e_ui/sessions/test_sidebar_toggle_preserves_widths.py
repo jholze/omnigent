@@ -13,10 +13,13 @@ turn (and none of the nightly/real-agent markers the approval suites carry).
 
 from __future__ import annotations
 
+import sys
+
 from playwright.sync_api import Page, expect
 
 _CONVERSATIONS = 'aside[aria-label="Conversations"]'
-_LEFT_CHORD = "Control+Alt+BracketLeft"
+# Only the command modifier fires the chord: Cmd on macOS, Ctrl elsewhere.
+_LEFT_CHORD = f"{'Meta' if sys.platform == 'darwin' else 'Control'}+Alt+BracketLeft"
 _CHAT_MIN_PX = 480
 _PANEL_MOTION_SETTLE_MS = 400
 

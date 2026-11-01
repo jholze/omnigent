@@ -17,6 +17,7 @@ tests are deterministic.
 from __future__ import annotations
 
 import shutil
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,6 +29,11 @@ from playwright.sync_api import Page, expect
 # Files land in ``<repo-root>/<session_id>/`` (the agent spec uses
 # ``os_env.cwd: .``), so clean that per-session dir up in teardown.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Monaco cursorTop/cursorBottom: Cmd+Up/Down on macOS, Ctrl+Home/End elsewhere.
+_IS_MAC = sys.platform == "darwin"
+_MONACO_TOP_CHORD = "Meta+ArrowUp" if _IS_MAC else "Control+Home"
+_MONACO_BOTTOM_CHORD = "Meta+ArrowDown" if _IS_MAC else "Control+End"
 
 
 def _cleanup_session_workdir(session_id: str) -> None:
@@ -158,7 +164,7 @@ def test_non_markdown_edit_autosaves(page: Page, seeded_python: tuple[str, str, 
     expect(file_viewer.locator(".view-lines")).to_contain_text("greet", timeout=10_000)
 
     file_viewer.locator(".view-lines").click()
-    page.keyboard.press("Control+End")
+    page.keyboard.press(_MONACO_BOTTOM_CHORD)
     expect(file_viewer.locator(".view-lines")).to_contain_text("file_end_marker")
     expect(
         file_viewer.get_by_text("This file is too large to load fully", exact=False)
@@ -167,7 +173,7 @@ def test_non_markdown_edit_autosaves(page: Page, seeded_python: tuple[str, str, 
     # Place the cursor at the start of the buffer and type a comment line. A
     # leading edit is unambiguous and easy to assert in the persisted file.
     sentinel = "autosaved_py_sentinel_9c2b"
-    page.keyboard.press("Control+Home")
+    page.keyboard.press(_MONACO_TOP_CHORD)
     page.keyboard.type(f"# {sentinel}\n")
 
     # The FileViewer toolbar shows the Monaco auto-save status chip; it
@@ -177,5 +183,5 @@ def test_non_markdown_edit_autosaves(page: Page, seeded_python: tuple[str, str, 
     persisted = _wait_for_persisted(base_url, session_id, _PY_PATH, sentinel)
     assert persisted == f"# {sentinel}\n{original_content}"
 
-    page.keyboard.press("Control+End")
+    page.keyboard.press(_MONACO_BOTTOM_CHORD)
     expect(file_viewer.locator(".view-lines")).to_contain_text("file_end_marker")
