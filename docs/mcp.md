@@ -160,7 +160,7 @@ minutes. `OMNIGENT_STALL_AUTO_INTERRUPT` defaults on. Set it to `0` to keep
 the mark and the `session.stalled` event without interrupting. The behaviour
 is the same whether or not the `team_chat` flag is on.
 
-An event POST from MCP or the Python client retries up to 3 times with
+An event POST from MCP or the Python client makes up to 3 attempts with
 backoff. Every attempt sends the same `Idempotency-Key`. A retry after the
 server has stored the item does not create a second item. An HTTP 4xx is
 not retried.

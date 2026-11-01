@@ -36,7 +36,11 @@ NON_PROGRESS_TYPES = frozenset(
     }
 )
 
-_ACTIVE_STATUSES = frozenset({"running", "waiting"})
+# ``waiting`` is a parent whose own turn has finished while children
+# are still running. It accepts a new message immediately, so it is
+# not an active turn for stall or for the buffered-delivery ack.
+_ACTIVE_STATUSES = frozenset({"running"})
+_TURN_BOUNDARY_TYPES = frozenset({"response.created", "response.in_progress"})
 
 RecoveredListener = Callable[[str, int], None]
 
@@ -71,8 +75,11 @@ class Clock:
     buffered_count: int = 0
     elicitation_pending: bool = False
     stall_epoch: int = 0
+    stall_anchor_ms: int = 0
     pending_recovered: bool = False
     pending_epoch: int = 0
+    pending_anchor_ms: int = 0
+    turn_response_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +93,7 @@ class Decision:
     buffered_starts_next_turn: bool = False
     epoch: int = 0
     seconds_since_last_event: float | None = None
+    anchor_ms: int = 0
 
 
 _logger = logging.getLogger(__name__)
@@ -160,6 +168,23 @@ def update_runtime_facts(
             clock.buffered_count = max(clock.buffered_count, pending_input_count)
 
 
+def _anchor_ms(clock: Clock, now: float) -> int:
+    """Milliseconds of the event this silence is measured from."""
+    anchor = clock.last_event_at if clock.last_event_at is not None else clock.turn_started_at
+    if anchor is None:
+        anchor = now
+    return int(anchor * 1000)
+
+
+def _response_id(event: Mapping[str, Any]) -> str | None:
+    response = event.get("response")
+    if isinstance(response, Mapping):
+        identifier = response.get("id")
+        if isinstance(identifier, str) and identifier:
+            return identifier
+    return None
+
+
 def _silence(clock: Clock, now: float) -> float | None:
     anchor = clock.last_event_at if clock.last_event_at is not None else clock.turn_started_at
     if anchor is None:
@@ -181,12 +206,14 @@ def evaluate(clock: Clock, now: float, settings: StallSettings) -> Decision:
             return Decision(
                 emit_recovered=True,
                 epoch=clock.stall_epoch,
+                anchor_ms=clock.stall_anchor_ms,
                 seconds_since_last_event=silence,
             )
         return Decision(seconds_since_last_event=silence)
 
     emit_stalled = not clock.stalled_emitted
     epoch = clock.stall_epoch + 1 if emit_stalled else clock.stall_epoch
+    anchor_ms = _anchor_ms(clock, now)
     cooldown_open = clock.last_auto_interrupt_at is None or (
         now - clock.last_auto_interrupt_at >= settings.cooldown_s
     )
@@ -202,6 +229,7 @@ def evaluate(clock: Clock, now: float, settings: StallSettings) -> Decision:
         interrupt=interrupt,
         buffered_starts_next_turn=interrupt,
         epoch=epoch,
+        anchor_ms=anchor_ms,
         seconds_since_last_event=silence,
     )
 
@@ -213,6 +241,7 @@ def _commit(clock: Clock, decision: Decision, now: float) -> None:
         clock.pending_recovered = False
     if decision.emit_stalled:
         clock.stall_epoch = decision.epoch
+        clock.stall_anchor_ms = decision.anchor_ms
         clock.stalled = True
         clock.stalled_emitted = True
     if decision.interrupt:
@@ -257,8 +286,27 @@ def observe_published_event(
         clock.last_event_at = moment
         if clock.turn_started_at is None:
             clock.turn_started_at = moment
+        event_type = event.get("type")
+        if event_type in _TURN_BOUNDARY_TYPES:
+            response_id = _response_id(event)
+            # A new response id is the next turn. The runner stays
+            # running while it drains a buffer into that turn, so this
+            # is what clears the buffered count and the turn age.
+            if response_id is not None and response_id != clock.turn_response_id:
+                clock.turn_response_id = response_id
+                clock.buffered_count = 0
+                clock.turn_started_at = moment
+        if event_type == "session.input.consumed":
+            data = event.get("data")
+            cleared = data.get("cleared_pending_id") if isinstance(data, Mapping) else None
+            # Native queues name the drained pending id here. Accepting
+            # a message has no cleared id, so a still-waiting buffer stays.
+            if isinstance(cleared, str) and cleared:
+                clock.buffered_count = 0
+                clock.turn_started_at = moment
         if clock.stalled:
             clock.pending_epoch = clock.stall_epoch
+            clock.pending_anchor_ms = clock.stall_anchor_ms
             clock.stalled = False
             clock.stalled_emitted = False
             clock.pending_recovered = True
@@ -274,12 +322,12 @@ def drain_pending_publishes() -> list[tuple[str, dict[str, Any]]]:
             if clock is None or not clock.pending_recovered:
                 continue
             clock.pending_recovered = False
-            queued.append((session_id, clock.pending_epoch))
+            queued.append((session_id, clock.pending_anchor_ms))
     events: list[tuple[str, dict[str, Any]]] = []
-    for session_id, epoch in queued:
+    for session_id, anchor_ms in queued:
         if listener is not None:
             try:
-                listener(session_id, epoch)
+                listener(session_id, anchor_ms)
             except Exception:
                 _logger.exception("stall recovery listener failed for %s", session_id)
         events.append((session_id, {"type": "session.recovered", "conversation_id": session_id}))

@@ -800,7 +800,11 @@ def register_events_routes(
         entries. Messages count as in flight for the whole request, including
         runner launch.
         """
-        from omnigent.server.event_idempotency import resolve_idempotent
+        from omnigent.server.event_idempotency import (
+            IdempotencyConflict,
+            event_fingerprint,
+            resolve_idempotent,
+        )
 
         headers = getattr(request, "headers", None)
         key = (headers.get("idempotency-key") or "").strip() if headers is not None else ""
@@ -852,7 +856,27 @@ def register_events_routes(
 
         if not key:
             return await _produce()
-        return await resolve_idempotent(session_id, key, _produce)
+        # Authorize before the idempotency cache. A hit returns the stored
+        # ack without running the producer, and the producer is what checks
+        # access. A caller who does not have access must get 404, not the
+        # previous ack.
+        await _authorized_conversation(request, session_id)
+        if isinstance(body, list):
+            payload = [item.model_dump(mode="json") for item in body]
+        else:
+            payload = body.model_dump(mode="json")
+        try:
+            return await resolve_idempotent(
+                session_id,
+                key,
+                _produce,
+                fingerprint=event_fingerprint(payload),
+            )
+        except IdempotencyConflict:
+            raise OmnigentError(
+                "Idempotency-Key was already used for a different event body",
+                code=ErrorCode.CONFLICT,
+            ) from None
 
     router.include_router(event_router)
 
@@ -2523,11 +2547,13 @@ def register_events_routes(
                 _runner_needs_session_init = True
         from omnigent.server.stall_watchdog import annotate_message_ack
 
-        # Read before a relaunch, so a message behind an active turn is
-        # reported as buffered rather than as the turn that just started.
-        _stall_status_before = _session_status_from_cache(
-            session_id, getattr(conv, "live_status", None)
-        )
+        # Raw relay status, read before a relaunch. The list status
+        # collapses ``waiting`` into ``running``. A waiting parent has
+        # already finished its turn, so a message there starts a new one.
+        _cached_status = _session_status_cache.get(session_id)
+        if not isinstance(_cached_status, str):
+            _cached_status = getattr(conv, "live_status", None)
+        _stall_status_before = _cached_status if isinstance(_cached_status, str) else None
         # Track the host's launch verdict for the unavailable response below.
         relaunched_runner_id: str | None = None
         relaunched_launch_acknowledged = False

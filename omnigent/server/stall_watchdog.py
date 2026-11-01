@@ -149,11 +149,11 @@ def _write_label(session_id: str, value: str | None) -> None:
         _logger.exception("stall label write failed for %s", session_id)
 
 
-def _on_recovered(session_id: str, epoch: int) -> None:
+def _on_recovered(session_id: str, anchor_ms: int) -> None:
     """Persist a recovery that a progress event just queued."""
     _write_label(session_id, None)
     try:
-        session_outbox.record_session_recovered(session_id=session_id, epoch=epoch)
+        session_outbox.record_session_recovered(session_id=session_id, anchor_ms=anchor_ms)
     except Exception:
         _logger.exception("session.recovered outbox write failed for %s", session_id)
 
@@ -183,7 +183,7 @@ async def apply_effects(session_id: str, decision: Decision) -> None:
             try:
                 session_outbox.record_session_stalled(
                     session_id=session_id,
-                    epoch=decision.epoch,
+                    anchor_ms=decision.anchor_ms,
                     seconds_since_last_event=decision.seconds_since_last_event,
                 )
             except Exception:
@@ -195,7 +195,9 @@ async def apply_effects(session_id: str, decision: Decision) -> None:
             {"type": "session.recovered", "conversation_id": session_id},
         )
         try:
-            session_outbox.record_session_recovered(session_id=session_id, epoch=decision.epoch)
+            session_outbox.record_session_recovered(
+                session_id=session_id, anchor_ms=decision.anchor_ms
+            )
         except Exception:
             _logger.exception("session.recovered outbox write failed for %s", session_id)
     if decision.interrupt:
@@ -219,7 +221,9 @@ def _seed_running(now: float) -> None:
 
     for session_id in _session_status_cache:
         status = _session_status_cache.get(session_id)
-        if status in ("running", "waiting"):
+        # A waiting parent has no active turn. Seeding it would start
+        # a stall clock for an orchestrator that is only waiting on children.
+        if status == "running":
             stall_progress.note_running(session_id, now)
 
 

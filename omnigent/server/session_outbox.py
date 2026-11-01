@@ -521,13 +521,15 @@ def record_session_failed(
 def record_session_stalled(
     *,
     session_id: str,
-    epoch: int,
+    anchor_ms: int,
     seconds_since_last_event: float | None,
 ) -> None:
-    """Record one ``session.stalled`` for this silence epoch.
+    """Record one ``session.stalled`` for this silence.
 
-    The transition key is the epoch, so a second tick does not insert
-    another row for the same stall.
+    The transition key is the silence anchor in milliseconds. A second
+    tick of the same stall does not insert another row. After a restart
+    the clock starts at discovery time, so the new anchor does not
+    collide with a stall recorded by the previous process.
     """
     config = _active_config()
     if config is None:
@@ -539,14 +541,14 @@ def record_session_stalled(
         config=config,
         session_id=session_id,
         event_type="session.stalled",
-        transition_key=f"stall:{epoch}:stalled",
+        transition_key=f"stall:{anchor_ms}:stalled",
         payload=payload,
         now=now_epoch(),
     )
 
 
-def record_session_recovered(*, session_id: str, epoch: int) -> None:
-    """Record one ``session.recovered`` for the stall epoch that just ended."""
+def record_session_recovered(*, session_id: str, anchor_ms: int) -> None:
+    """Record one ``session.recovered`` for the stall anchor that just ended."""
     config = _active_config()
     if config is None:
         return
@@ -554,7 +556,7 @@ def record_session_recovered(*, session_id: str, epoch: int) -> None:
         config=config,
         session_id=session_id,
         event_type="session.recovered",
-        transition_key=f"stall:{epoch}:recovered",
+        transition_key=f"stall:{anchor_ms}:recovered",
         payload={"session_id": session_id},
         now=now_epoch(),
     )

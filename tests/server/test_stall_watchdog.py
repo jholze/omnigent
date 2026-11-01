@@ -15,7 +15,11 @@ import pytest
 from omnigent.runtime import session_stream, stall_progress
 from omnigent.runtime.stall_progress import Clock, Decision, StallSettings, evaluate
 from omnigent.server import event_idempotency, session_outbox, stall_watchdog
-from omnigent.server.event_idempotency import resolve_idempotent, retry_same_key
+from omnigent.server.event_idempotency import (
+    IdempotencyConflict,
+    resolve_idempotent,
+    retry_same_key,
+)
 from omnigent.server.mcp_endpoint import ToolFailure, _Api
 from omnigent.server.server_config import reset_manager_webhook_config_cache
 from omnigent.server.stall_watchdog import (
@@ -490,3 +494,211 @@ async def test_mcp_event_post_does_not_retry_client_error(
         await api.call("POST", "/v1/sessions/conv_ac7/events", {"type": "message"})
     assert caught.value.http_status == 404
     assert len(_FakeClient.calls) == 1
+
+
+def test_waiting_parent_is_not_an_active_turn() -> None:
+    ack = _ack("conv_waiting", status="waiting", now=50.0)
+    assert ack["delivery"] == "turn_started"
+    assert "active_turn_age_s" not in ack
+
+    _ack("conv_waiting_tick", status="idle", now=0.0)
+    _ack("conv_waiting_tick", status="running", now=10.0)
+    stall_progress.update_runtime_facts(
+        "conv_waiting_tick",
+        status="waiting",
+        elicitation_pending=False,
+        pending_input_count=0,
+    )
+    clock = stall_progress.get_clock("conv_waiting_tick")
+    assert clock is not None
+    assert clock.status == "waiting"
+    assert clock.buffered_count == 0
+    decision = evaluate(clock, 2000.0, StallSettings())
+    assert decision.mark_stalled is False
+    assert decision.interrupt is False
+
+
+def test_seed_skips_waiting_parents() -> None:
+    from omnigent.server.routes._sessions.helpers import _session_status_cache
+
+    _session_status_cache["conv_seed_waiting"] = "waiting"
+    _session_status_cache["conv_seed_running"] = "running"
+    try:
+        stall_watchdog._seed_running(0.0)
+        assert stall_progress.get_clock("conv_seed_waiting") is None
+        seeded = stall_progress.get_clock("conv_seed_running")
+        assert seeded is not None and seeded.status == "running"
+    finally:
+        _session_status_cache.pop("conv_seed_waiting", None)
+        _session_status_cache.pop("conv_seed_running", None)
+
+
+async def test_next_turn_clears_a_buffer_so_silence_does_not_interrupt() -> None:
+    calls: list[str] = []
+
+    async def _interrupt(session_id: str) -> None:
+        calls.append(session_id)
+
+    uninstall = register_interrupt_callback(_interrupt)
+    try:
+        _ack("conv_drain", status="idle", now=0.0)
+        stall_progress.observe_published_event(
+            "conv_drain",
+            {"type": "response.in_progress", "response": {"id": "resp_1"}},
+            now=1.0,
+        )
+        _ack("conv_drain", status="running", now=10.0)
+        clock = stall_progress.get_clock("conv_drain")
+        assert clock is not None and clock.buffered_count == 1
+        stall_progress.observe_published_event(
+            "conv_drain",
+            {"type": "response.in_progress", "response": {"id": "resp_1"}},
+            now=15.0,
+        )
+        assert stall_progress.get_clock("conv_drain").buffered_count == 1  # type: ignore[union-attr]
+        stall_progress.observe_published_event(
+            "conv_drain",
+            {"type": "response.created", "response": {"id": "resp_2"}},
+            now=20.0,
+        )
+        clock = stall_progress.get_clock("conv_drain")
+        assert clock is not None
+        assert clock.buffered_count == 0
+        assert clock.turn_started_at == 20.0
+        ack = _ack("conv_drain", status="running", now=30.0)
+        assert ack["active_turn_age_s"] == 10.0
+        # That ack buffers again. Drop it the way the next turn would,
+        # then sit in silence past the interrupt threshold.
+        stall_progress.observe_published_event(
+            "conv_drain",
+            {"type": "response.in_progress", "response": {"id": "resp_3"}},
+            now=31.0,
+        )
+        decision = await evaluate_session("conv_drain", now=700.0, settings=StallSettings())
+    finally:
+        uninstall()
+    assert decision.interrupt is False
+    assert decision.mark_stalled is True
+    assert calls == []
+
+
+def test_native_consume_clears_only_a_drained_pending() -> None:
+    _ack("conv_native", status="idle", now=0.0)
+    _ack("conv_native", status="running", now=5.0)
+    stall_progress.observe_published_event(
+        "conv_native",
+        {"type": "session.input.consumed", "data": {"item_id": "item_1"}},
+        now=6.0,
+    )
+    clock = stall_progress.get_clock("conv_native")
+    assert clock is not None and clock.buffered_count == 1
+    stall_progress.observe_published_event(
+        "conv_native",
+        {
+            "type": "session.input.consumed",
+            "data": {"item_id": "item_1", "cleared_pending_id": "pending_1"},
+        },
+        now=7.0,
+    )
+    assert stall_progress.get_clock("conv_native").buffered_count == 0  # type: ignore[union-attr]
+
+
+async def test_stall_outbox_key_differs_after_restart(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_webhook(tmp_path, monkeypatch)
+    store = SqlAlchemySessionLifecycleStore(db_uri)
+    session_outbox.configure(store)
+    session_id = uuid.uuid4().hex
+    try:
+        _ack(session_id, status="idle", now=0.0)
+        first = stall_progress.advance(session_id, 400.0, StallSettings(auto_interrupt=False))
+        await apply_effects(session_id, first)
+        stall_progress.reset_for_tests()
+        _ack(session_id, status="idle", now=1000.0)
+        second = stall_progress.advance(session_id, 1400.0, StallSettings(auto_interrupt=False))
+        await apply_effects(session_id, second)
+        rows, _cursor = store.list_deliveries(session_id)
+    finally:
+        session_outbox.reset_for_tests()
+        reset_manager_webhook_config_cache()
+    stalled = [row for row in rows if row.event_type == "session.stalled"]
+    assert len(stalled) == 2
+    assert stalled[0].transition_key != stalled[1].transition_key
+    assert {row.transition_key for row in stalled} == {
+        "stall:0:stalled",
+        "stall:1000000:stalled",
+    }
+
+
+async def test_same_key_with_a_different_body_does_not_store_or_return_the_ack() -> None:
+    stored: list[str] = []
+
+    async def _produce() -> dict[str, str]:
+        stored.append("item")
+        return {"item_id": "item_1"}
+
+    first = await resolve_idempotent("conv_body", "same-key", _produce, fingerprint="aaa")
+    assert first["item_id"] == "item_1"
+    with pytest.raises(IdempotencyConflict):
+        await resolve_idempotent("conv_body", "same-key", _produce, fingerprint="bbb")
+    assert stored == ["item"]
+
+
+async def test_idempotent_event_post_hides_the_ack_from_a_stranger(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    from tests.server.helpers import create_test_agent
+
+    owner = "owner@example.com"
+    agent = await create_test_agent(auth_client, name="stall-idem-auth", user=owner)
+    session_id = agent["_session_id"]
+    body = {
+        "type": "external_conversation_item",
+        "data": {
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello from the owner"}],
+            },
+        },
+    }
+    owner_headers = {"X-Forwarded-Email": owner, "Idempotency-Key": "stall-key-1"}
+    first = await auth_client.post(
+        f"/v1/sessions/{session_id}/events", json=body, headers=owner_headers
+    )
+    assert first.status_code == 202, first.text
+    item_id = first.json()["item_id"]
+    retry = await auth_client.post(
+        f"/v1/sessions/{session_id}/events", json=body, headers=owner_headers
+    )
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["item_id"] == item_id
+    stranger = await auth_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json=body,
+        headers={"X-Forwarded-Email": "stranger@example.com", "Idempotency-Key": "stall-key-1"},
+    )
+    assert stranger.status_code == 404
+    assert item_id not in stranger.text
+    other = {
+        "type": "external_conversation_item",
+        "data": {
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "a different body"}],
+            },
+        },
+    }
+    mismatch = await auth_client.post(
+        f"/v1/sessions/{session_id}/events", json=other, headers=owner_headers
+    )
+    assert mismatch.status_code == 409, mismatch.text
+    listed = await auth_client.get(
+        f"/v1/sessions/{session_id}/items",
+        headers={"X-Forwarded-Email": owner},
+    )
+    assert listed.status_code == 200, listed.text
+    ids = [item["id"] for item in listed.json()["data"]]
+    assert ids.count(item_id) == 1
