@@ -35,7 +35,11 @@ Because CI does not provision a Cursor account by default, this suite is **gated
 to skip** when ``cursor-agent`` is absent or no usable Cursor login is present
 (see :func:`_cursor_unavailable_reason`); it runs for real wherever Cursor is
 logged in (a dev box, or a CI job that installs ``cursor-agent`` and provides a
-``CURSOR_API_KEY`` secret). The ``native_cursor_session`` fixture launches the
+``CURSOR_API_KEY`` secret). A directory under ``$HOME/.cursor`` is enough for
+that gate, so a shared CI server can still launch a session whose stored
+error is a missing Cursor login or provider. That case skips, quoting the
+stored error (:func:`_stored_login_or_provider_error`). Any other launch or
+render failure still fails. The ``native_cursor_session`` fixture launches the
 TUI with ``-f`` so the unattended tmux pane never blocks on Cursor's
 workspace-trust / per-tool approval prompts.
 
@@ -142,6 +146,89 @@ _requires_live_cursor = pytest.mark.skipif(
 )
 
 
+# Phrases that mean Cursor itself has no login or no provider. A generic
+# "terminal failed to start" does not match, so a real launch bug still fails.
+_LOGIN_OR_PROVIDER_MARKERS = (
+    "not logged in",
+    "not authenticated",
+    "isn't signed in",
+    "is not signed in",
+    "no valid credentials",
+    "invalid api key",
+    "authentication_error",
+    "401 unauthorized",
+    "please run /login",
+    "no inference provider",
+    "no llm provider",
+    "no provider configured",
+    "provider is not configured",
+    "no api key was found",
+    "missing api key",
+    "api key not found",
+)
+
+
+def _login_or_provider_quote(text: str) -> str | None:
+    """Return *text* when it reports a missing Cursor login or provider."""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    lowered = stripped.lower()
+    if any(marker in lowered for marker in _LOGIN_OR_PROVIDER_MARKERS):
+        return stripped
+    return None
+
+
+def _stored_login_or_provider_error(base_url: str, session_id: str) -> str | None:
+    """Return the session's stored login/provider error, if that is what it is.
+
+    A failed native launch persists ``last_task_error`` on the session
+    snapshot (the sidebar's "Latest message is an error" when no transcript
+    item exists yet). A later mirror can also persist a ``type="error"``
+    item. Either text is returned only when it says Cursor has no login or
+    no provider. Other stored failures return ``None`` so the connected
+    assertion still fails.
+
+    :param base_url: Spawned server base URL.
+    :param session_id: The cursor-native session/conversation id.
+    :returns: The stored error text to quote in a skip reason, or ``None``.
+    """
+    try:
+        snapshot = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+    except httpx.HTTPError:
+        snapshot = None
+    if snapshot is not None and snapshot.status_code == 200:
+        body = snapshot.json()
+        if body.get("status") == "failed":
+            error = body.get("last_task_error")
+            if isinstance(error, dict):
+                for key in ("message", "cause", "title"):
+                    value = error.get(key)
+                    if isinstance(value, str):
+                        quote = _login_or_provider_quote(value)
+                        if quote is not None:
+                            return quote
+    try:
+        items = httpx.get(
+            f"{base_url}/v1/sessions/{session_id}/items",
+            params={"limit": 20, "order": "desc"},
+            timeout=10.0,
+        )
+    except httpx.HTTPError:
+        return None
+    if items.status_code != 200:
+        return None
+    for item in items.json().get("data", []):
+        if not isinstance(item, dict) or item.get("type") != "error":
+            continue
+        message = item.get("message")
+        if isinstance(message, str):
+            quote = _login_or_provider_quote(message)
+            if quote is not None:
+                return quote
+    return None
+
+
 def _open_terminal_view(page: Page) -> None:
     """Switch a terminal-first session to its Terminal (TUI) view.
 
@@ -153,15 +240,40 @@ def _open_terminal_view(page: Page) -> None:
     _select_view_mode(page, "Terminal")
 
 
-def _wait_terminal_connected(page: Page) -> None:
+def _wait_terminal_connected(page: Page, base_url: str, session_id: str) -> None:
     """Wait until the embedded xterm has attached to the live Cursor TUI.
 
+    The connected attribute is still required. While it is absent, a stored
+    missing-login or missing-provider error skips and quotes that text. Any
+    other miss waits out the same timeout and fails the connected assertion.
+
     :param page: The Playwright page, on the Terminal view.
+    :param base_url: Spawned server base URL.
+    :param session_id: The cursor-native session/conversation id.
     """
     terminal = page.locator(_TERMINAL_VIEW).last
-    expect(terminal).to_have_attribute(
-        "data-state", "connected", timeout=_TERMINAL_READY_TIMEOUT_MS
-    )
+    deadline = time.monotonic() + _TERMINAL_READY_TIMEOUT_MS / 1000.0
+    last_miss: AssertionError | None = None
+    while True:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            break
+        try:
+            expect(terminal).to_have_attribute(
+                "data-state", "connected", timeout=min(2_000, remaining_ms)
+            )
+            return
+        except AssertionError as exc:
+            last_miss = exc
+        quote = _stored_login_or_provider_error(base_url, session_id)
+        if quote is not None:
+            pytest.skip(
+                "cursor-native render-parity skipped: the session stored a missing "
+                f"Cursor login or provider error: {quote!r}"
+            )
+    if last_miss is not None:
+        raise last_miss
+    expect(terminal).to_have_attribute("data-state", "connected", timeout=1_000)
 
 
 def _type_into_tui(page: Page, text: str) -> None:
@@ -250,7 +362,7 @@ def test_native_cursor_message_render_parity(
     # The Terminal view proves cursor-agent actually booted in the session
     # terminal (the runner's cursor-native auto-launch) before we send anything.
     _open_terminal_view(page)
-    _wait_terminal_connected(page)
+    _wait_terminal_connected(page, base_url, session_id)
     _log.info("Cursor TUI attached (terminal-view connected)")
 
     user_markers: list[str] = []
@@ -286,7 +398,7 @@ def test_native_cursor_message_render_parity(
     tui_index = _COMPOSER_TURNS + 1
     tui_marker, tui_token = _new_turn(tui_index)
     _open_terminal_view(page)
-    _wait_terminal_connected(page)
+    _wait_terminal_connected(page, base_url, session_id)
     _log.info(
         "TUI turn %d: typing into xterm (marker=%s token=%s)", tui_index, tui_marker, tui_token
     )
