@@ -40,6 +40,8 @@ export const PINNED_HOTKEY_CODES = [
  * @param orderedPinnedIds Pinned conversation ids in sidebar render order
  *   (empty when the Pinned section is collapsed or there are no pins).
  * @param activeId The open conversation (route param), or undefined off-list.
+ *   Kept for callers. The jump keys off the address bar, because this param
+ *   can still name the session the URL has already left.
  */
 export function usePinnedSessionHotkeys(
   orderedPinnedIds: readonly string[],
@@ -74,13 +76,21 @@ export function usePinnedSessionHotkeys(
       }
       if (index === -1) return;
 
-      const { orderedPinnedIds: ids, activeId: active } = latest.current;
+      const { orderedPinnedIds: ids } = latest.current;
       const targetId = ids[index];
       // No pinned session at that slot: leave the native event untouched.
       if (!targetId) return;
 
       e.preventDefault(); // suppress the browser's native ⌘-digit tab-switch
-      if (targetId !== active) navigate(`/c/${targetId}`);
+      // The address bar decides "already here". The route param can still
+      // name the session the URL has left: history updates before the
+      // sidebar re-renders, and that stale id used to swallow the jump.
+      const path = window.location.pathname;
+      const needle = `/c/${targetId}`;
+      const at = path.lastIndexOf(needle);
+      const next = at >= 0 ? path.charAt(at + needle.length) : "x";
+      if (at >= 0 && (next === "" || next === "/")) return;
+      navigate(`/c/${targetId}`);
     };
 
     window.addEventListener("keydown", handler);
