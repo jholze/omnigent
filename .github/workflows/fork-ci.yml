@@ -390,10 +390,14 @@ jobs:
           . "${RUNNER_TEMP}/fork-e2e-env.sh"
           # Own process, no --maxfail. The suite below stops after four
           # failures, which used to end the job before this directory ran.
+          # -p no:pytest-shard: this job is one process. With -v,
+          # pytest-shard appends every node id to a single line, and that
+          # line hides the rest of the Actions log after collection.
           PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
             uv run pytest tests/e2e_ui/team_chat \
             -v --tb=short -r a \
             -p e2e_tb \
+            -p no:pytest-shard \
             --reruns=1 --reruns-delay=5 --rerun-show-tracebacks \
             --ui-skip-build \
             --junitxml=artifacts/e2e-ui-team-chat.xml \
@@ -410,11 +414,14 @@ jobs:
           # rerun, and the serial suite otherwise hits the job limit
           # before pytest writes the summary. team_chat is excluded because
           # its own step already ran.
+          # -p no:pytest-shard: same reason as the team_chat step. The
+          # unsharded -v list is one line of every selected node id.
           PYTHONPATH="${RUNNER_TEMP}${PYTHONPATH:+:$PYTHONPATH}" \
             uv run pytest tests/e2e_ui \
             --ignore=tests/e2e_ui/team_chat \
             -v --tb=short -r a \
             -p e2e_tb \
+            -p no:pytest-shard \
             --maxfail=4 \
             --reruns=1 --reruns-delay=5 --rerun-show-tracebacks \
             --ui-skip-build \
