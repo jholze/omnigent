@@ -45,6 +45,7 @@ beforeEach(() => {
   navigate.mockClear();
   isNativeShell.mockReturnValue(true);
   document.body.innerHTML = "";
+  window.history.pushState({}, "", "/");
 });
 afterEach(() => {
   document.body.innerHTML = "";
@@ -128,11 +129,20 @@ describe("usePinnedSessionHotkeys", () => {
     expect(e.defaultPrevented).toBe(false); // leaves the native event alone
   });
 
-  it("does not navigate when the digit points at the already-active session", () => {
+  it("does not navigate when the digit points at the already-open session", () => {
+    window.history.pushState({}, "", "/c/a");
     render(ids, "a");
     const e = press("1");
     expect(navigate).not.toHaveBeenCalled();
     expect(e.defaultPrevented).toBe(true); // but still suppresses native tab-switch
+  });
+
+  it("still jumps when the route param is stale after the URL has left that session", () => {
+    window.history.pushState({}, "", "/");
+    render(ids, "a");
+    const e = press("1");
+    expect(navigate).toHaveBeenCalledWith("/c/a");
+    expect(e.defaultPrevented).toBe(true);
   });
 
   it("prevents the browser's native tab-switch when it navigates", () => {

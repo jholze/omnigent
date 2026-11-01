@@ -21,6 +21,12 @@ out: the live ``GET /v1/sessions`` list -> ``useConversations`` -> the
 Pinned section peel -> the window keydown handler -> a client-side
 navigation to ``/c/{id}``. A regression in the shell gate, the digit->slot
 mapping, or the list shape would surface here.
+
+The chord itself is dispatched on ``window`` (see
+``_dispatch_pinned_hotkey``). Chromium reserves Cmd/Ctrl+digit, and
+Playwright's ``keyboard.press`` is swallowed often enough that a real
+press times out even when the handler is fine. Electron claims the chord
+before the browser does; this Chromium harness cannot.
 """
 
 from __future__ import annotations
@@ -107,6 +113,38 @@ def _pin(page: Page, session_id: str) -> None:
     expect(_section(page, "Pinned").locator(f'a[href="/c/{session_id}"]')).to_be_visible()
 
 
+def _dispatch_pinned_hotkey(page: Page, digit: str) -> None:
+    """Deliver the desktop pinned-session chord to the window listener.
+
+    Chromium reserves Cmd/Ctrl+digit for tab switching. Playwright's
+    ``keyboard.press("ControlOrMeta+<digit>")`` sometimes reaches the page
+    and sometimes the browser swallows it, so the same steps pass or time
+    out. The Electron shell claims that chord before Chromium does; this
+    harness only stubs ``window.omnigentDesktop`` and cannot. Dispatch the
+    keydown on ``window`` — the target ``usePinnedSessionHotkeys`` binds —
+    with the platform command modifier (⌘ on Apple, Ctrl elsewhere).
+
+    :param page: Playwright page whose SPA believes it is the desktop shell.
+    :param digit: One character from ``PINNED_HOTKEY_DIGITS`` (``"1"``…``"0"``).
+    """
+    page.evaluate(
+        """(digit) => {
+          const platform = navigator.platform || navigator.userAgent || "";
+          const mac = /Mac|iPhone|iPad|iPod/i.test(platform);
+          const event = new KeyboardEvent("keydown", {
+            key: digit,
+            code: digit === "0" ? "Digit0" : "Digit" + digit,
+            bubbles: true,
+            cancelable: true,
+            metaKey: mac,
+            ctrlKey: !mac,
+          });
+          window.dispatchEvent(event);
+        }""",
+        digit,
+    )
+
+
 def _pinned_slot_ids(page: Page) -> list[str]:
     """Return the pinned conversation ids in sidebar render order.
 
@@ -164,16 +202,16 @@ def test_pinned_hotkey_navigates_under_native_shell(
     page.get_by_test_id("new-chat-button").click()
     page.wait_for_url(lambda url: f"/c/{session_a}" not in url, timeout=10_000)
 
-    # Slot 1 (digit "1") -> the first pinned row. "ControlOrMeta" maps to the
-    # real platform modifier the hook accepts (metaKey on macOS, ctrlKey
-    # elsewhere); the keydown is dispatched at the body and bubbles to the
-    # window listener the hook binds.
-    page.locator("body").press("ControlOrMeta+1")
+    # Slot 1 (digit "1") -> the first pinned row. Wait until the new-session
+    # screen has committed so the sidebar's route param is not still the
+    # conversation we just left.
+    expect(page.get_by_role("heading", name="What should we build?")).to_be_visible()
+    _dispatch_pinned_hotkey(page, "1")
     page.wait_for_url(f"**/c/{slots[0]}", timeout=10_000)
 
     # Slot 2 (digit "2") -> the second pinned row, from a different active
     # session — proves the jump isn't a no-op when already on a pinned page.
-    page.locator("body").press("ControlOrMeta+2")
+    _dispatch_pinned_hotkey(page, "2")
     page.wait_for_url(f"**/c/{slots[1]}", timeout=10_000)
 
 
