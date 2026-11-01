@@ -45,6 +45,8 @@ _PARENT_PROMPT = "NATIVE_IDLE_HANDOFF_PARENT: delegate the check to a general-pu
 _CHILD_PROMPT = "NATIVE_IDLE_HANDOFF_CHILD: finish the delegated check and report the result."
 _CHILD_RESULT = "The delegated check completed successfully."
 _PARENT_RESULT = "The child finished its check."
+# Key a CI ``claude`` shim exports for loopback base URLs (see fork-ci.yml).
+_CI_SHIM_API_KEY = "mock-key"
 
 
 def _get(client: httpx.Client, path: str) -> dict:
@@ -131,6 +133,18 @@ def test_completed_claude_child_survives_stale_status_handoff(
             }
         )
     )
+    # Reject a shim-injected env key up front: Claude otherwise opens its "Detected a
+    # custom API key" dialog, which blocks delivery of the first prompt.
+    claude_config = tmp_path / "claude-config"
+    claude_config.mkdir()
+    (claude_config / ".claude.json").write_text(
+        json.dumps(
+            {
+                "hasCompletedOnboarding": True,
+                "customApiKeyResponses": {"approved": [], "rejected": [_CI_SHIM_API_KEY]},
+            }
+        )
+    )
     base_env = {
         key: value
         for key, value in os.environ.items()
@@ -138,7 +152,7 @@ def test_completed_claude_child_survives_stale_status_handoff(
     }
     env = {
         "OMNIGENT_CONFIG_HOME": str(config),
-        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+        "CLAUDE_CONFIG_DIR": str(claude_config),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "OMNIGENT_SKIP_ONBOARD": "1",
         "OMNIGENT_NO_UPDATE_CHECK": "1",
