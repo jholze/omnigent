@@ -38,7 +38,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.agent_account_tokens import consume_mcp_request
 from omnigent.server.auth import LEVEL_EDIT, AuthProvider
 from omnigent.server.chat_access import principal_kind
-from omnigent.server.event_idempotency import retry_same_key
+from omnigent.server.event_retry import retry_same_key
 from omnigent.server.feature_flags import Feature
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._content_type import require_json_content_type

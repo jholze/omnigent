@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -40,8 +41,11 @@ InterruptCallback = Callable[[str], Awaitable[None] | None]
 _label_writer: LabelWriter | None = None
 _publisher: Publisher = session_stream.publish
 _interrupt: InterruptCallback | None = None
-_stop: asyncio.Event | None = None
-_task: asyncio.Task[None] | None = None
+_guard = threading.Lock()
+# One tick per event loop. A nested TestClient has its own portal loop,
+# and awaiting the other loop's task raises and cancels that tick.
+# custom-lint: disable-next=workspace-scoped-cache -- per-loop task, not tenant data
+_by_loop: dict[int, tuple[asyncio.AbstractEventLoop, asyncio.Event, asyncio.Task[None]]] = {}
 
 
 def load_settings() -> StallSettings:
@@ -275,30 +279,45 @@ async def _loop(stop: asyncio.Event) -> None:
             await asyncio.wait_for(stop.wait(), timeout=_TICK_S)
 
 
+def _drop_loop_task(loop_id: int, task: asyncio.Task[None]) -> None:
+    with _guard:
+        current = _by_loop.get(loop_id)
+        if current is not None and current[2] is task:
+            _by_loop.pop(loop_id, None)
+
+
 def start_stall_watchdog() -> asyncio.Task[None]:
-    """Start the background tick. A second call returns the running task."""
-    global _stop, _task
-    if _task is not None and not _task.done():
-        return _task
-    stop = asyncio.Event()
-    _stop = stop
-    _task = asyncio.create_task(_loop(stop), name="stall-watchdog")
-    return _task
+    """Start the background tick on this event loop.
+
+    A second call on the same loop returns the running task. A call on
+    another loop starts its own tick and leaves the first one running.
+    """
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    with _guard:
+        current = _by_loop.get(loop_id)
+        if current is not None and current[0] is loop and not current[2].done():
+            return current[2]
+        stop = asyncio.Event()
+        task = asyncio.create_task(_loop(stop), name="stall-watchdog")
+        _by_loop[loop_id] = (loop, stop, task)
+    task.add_done_callback(lambda finished, loop_id=loop_id: _drop_loop_task(loop_id, finished))
+    return task
 
 
 async def stop_stall_watchdog() -> None:
-    """Cancel the background tick."""
-    global _stop, _task
-    stop = _stop
-    task = _task
-    _stop = None
-    _task = None
-    if stop is not None:
-        stop.set()
-    if task is not None:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    """Cancel the tick that belongs to this event loop."""
+    loop = asyncio.get_running_loop()
+    with _guard:
+        current = _by_loop.get(id(loop))
+        if current is None or current[0] is not loop:
+            return
+        _by_loop.pop(id(loop), None)
+        stop, task = current[1], current[2]
+    stop.set()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 stall_progress.set_recovered_listener(_on_recovered)

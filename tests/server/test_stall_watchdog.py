@@ -6,6 +6,8 @@ Each test maps to one acceptance criterion from the session-wake spec.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -702,3 +704,68 @@ async def test_idempotent_event_post_hides_the_ack_from_a_stranger(
     assert listed.status_code == 200, listed.text
     ids = [item["id"] for item in listed.json()["data"]]
     assert ids.count(item_id) == 1
+
+
+def test_each_event_loop_owns_its_stall_watchdog() -> None:
+    """A nested app must not await another loop's stall tick.
+
+    Each TestClient lifespan runs on its own portal loop. Reusing one
+    process-global task made the inner client's shutdown await the outer
+    tick and raise ``attached to a different loop``.
+    """
+    loop_a = asyncio.new_event_loop()
+    loop_b = asyncio.new_event_loop()
+
+    async def _start() -> asyncio.Task[None]:
+        return stall_watchdog.start_stall_watchdog()
+
+    try:
+        task_a = loop_a.run_until_complete(_start())
+        task_b = loop_b.run_until_complete(_start())
+        assert task_a is not task_b
+        assert task_a.get_loop() is loop_a
+        assert task_b.get_loop() is loop_b
+        assert loop_a.run_until_complete(_start()) is task_a
+
+        loop_b.run_until_complete(stall_watchdog.stop_stall_watchdog())
+        assert task_b.done()
+        assert not task_a.done()
+
+        loop_a.run_until_complete(stall_watchdog.stop_stall_watchdog())
+        assert task_a.done()
+    finally:
+        for loop in (loop_a, loop_b):
+            if loop.is_closed():
+                continue
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+
+
+def test_client_retry_import_does_not_load_the_database() -> None:
+    """Host startup imports the Python client, which must not load omnigent.db."""
+    code = """
+import importlib.abc
+import sys
+
+class NoDatabaseImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "omnigent.db" or fullname.startswith("omnigent.db."):
+            raise ImportError("client retry must not import " + fullname)
+
+sys.meta_path.insert(0, NoDatabaseImports())
+from omnigent_client._sessions import retry_same_key
+assert retry_same_key.__name__ == "retry_same_key"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -32,7 +32,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import TypeAdapter
 
-from omnigent.server.event_idempotency import retry_same_key
+from omnigent.server.event_retry import retry_same_key
 from omnigent.server.schemas import ServerStreamEvent
 
 from ._child_status import child_summary_busy
