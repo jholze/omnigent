@@ -51,15 +51,60 @@ def _drag_and_measure_jump(page: Page, title: str) -> tuple[float, float]:
     """
     row = page.get_by_role("link", name=title, exact=True)
     expect(row).to_be_visible()
+    # Playwright reports a row scrolled out of the sidebar nav as visible.
+    # Its layout box can sit in the window while overflow clips it, and
+    # mouse.move then misses the row so the DragOverlay never mounts.
+    row.evaluate(
+        """(el) => {
+          const li = el.closest('[data-sidebar-session-id]') ?? el;
+          const nav = li.closest('nav');
+          if (!nav) {
+            li.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+            return;
+          }
+          const navRect = nav.getBoundingClientRect();
+          const rowRect = li.getBoundingClientRect();
+          const rowMid = rowRect.top + rowRect.height / 2;
+          const ideal = Math.min(navRect.top + navRect.height / 2, window.innerHeight - 96);
+          const low = navRect.top + Math.min(rowRect.height, navRect.height) / 2;
+          const high = navRect.bottom - Math.min(rowRect.height, navRect.height) / 2;
+          const targetMid = Math.min(Math.max(ideal, low), high);
+          nav.scrollTop += rowMid - targetMid;
+        }"""
+    )
     box = row.bounding_box()
     assert box is not None
-    grab_x, grab_y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    viewport = page.viewport_size
+    assert viewport is not None
+    left = max(box["x"], 0.0)
+    top = max(box["y"], 0.0)
+    right = min(box["x"] + box["width"], float(viewport["width"]))
+    bottom = min(box["y"] + box["height"], float(viewport["height"]))
+    assert right - left > 1 and bottom - top > 1, (
+        f"row box {box} is outside the {viewport['width']}x{viewport['height']} viewport"
+    )
+    grab_x, grab_y = (left + right) / 2, (top + bottom) / 2
+    hits = row.evaluate(
+        """(el, point) => {
+          const hit = document.elementFromPoint(point.x, point.y);
+          const li = el.closest('[data-sidebar-session-id]');
+          return !!hit && ((li !== null && li.contains(hit)) || el.contains(hit));
+        }""",
+        {"x": grab_x, "y": grab_y},
+    )
+    assert hits, f"grab point ({grab_x:.1f}, {grab_y:.1f}) missed row {title!r} box {box}"
     page.mouse.move(grab_x, grab_y)
     page.mouse.down()
     # Pass the 5px MouseSensor activation distance, then travel.
-    page.mouse.move(grab_x + 4, grab_y + 4)
-    page.mouse.move(grab_x + 12, grab_y + 12)
-    target_x, target_y = grab_x + 60, grab_y + 80
+    # Keep the measured point inside the viewport so the pointer is not clipped.
+    travel_x = min(60.0, viewport["width"] - grab_x - 1)
+    travel_y = min(80.0, viewport["height"] - grab_y - 1)
+    assert travel_x >= 12 and travel_y >= 12, (
+        f"no room to drag from ({grab_x:.1f}, {grab_y:.1f}) inside the viewport"
+    )
+    page.mouse.move(grab_x + min(4.0, travel_x), grab_y + min(4.0, travel_y))
+    page.mouse.move(grab_x + min(12.0, travel_x), grab_y + min(12.0, travel_y))
+    target_x, target_y = grab_x + travel_x, grab_y + travel_y
     page.mouse.move(target_x, target_y, steps=10)
     page.wait_for_timeout(400)
 
