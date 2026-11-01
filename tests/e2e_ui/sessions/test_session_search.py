@@ -37,6 +37,16 @@ def test_session_search_and_general_search(
                 openServerSetup() {},
             };
         """)
+    else:
+        # Browser param runs in real Chromium; on a Mac that reports
+        # navigator.platform === "MacIntel", so Control+Alt+KeyS would be
+        # rejected by hasCommandModifier (which is Meta on Mac). Pin a
+        # non-Mac platform so the Control chord is actually exercised.
+        page.add_init_script("""
+            Object.defineProperty(navigator, "platform", { value: "Win32" });
+            Object.defineProperty(navigator, "userAgentData", { value: { platform: "Windows" } });
+            Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Windows)" });
+        """)
 
     page.goto(f"{base_url}/c/{session_a}")
     composer = page.get_by_placeholder("Send a message…")
