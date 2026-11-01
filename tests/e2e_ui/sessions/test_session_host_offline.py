@@ -60,12 +60,22 @@ def test_offline_native_host_preserves_failed_turn_and_retry(
         _wait_until(lambda: any(host["status"] == "online" for host in hosts()))
         [host] = [host for host in hosts() if host["status"] == "online"]
         host_id = host["host_id"]
-        created = create_native_session(
-            client,
-            stack.base_url,
-            harness=harness,
-            metadata={"host_id": host_id, "workspace": str(stack.workspace)},
-        )
+        try:
+            created = create_native_session(
+                client,
+                stack.base_url,
+                harness=harness,
+                metadata={"host_id": host_id, "workspace": str(stack.workspace)},
+            )
+        except httpx.HTTPStatusError as exc:
+            error = exc.response.json().get("error", {}) if exc.response.status_code == 412 else {}
+            if (
+                harness == "codex"
+                and error.get("code") == "harness_not_configured"
+                and "binary-missing" in error.get("message", "")
+            ):
+                pytest.skip(f"codex-native unavailable on this host: {exc.response.text}")
+            raise
         session_id = created["session_id"]
         snapshot = client.get(f"/v1/sessions/{session_id}").json()
         runner_id = snapshot["runner_id"]
