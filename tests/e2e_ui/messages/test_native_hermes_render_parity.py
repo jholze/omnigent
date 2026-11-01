@@ -200,7 +200,7 @@ _PROVIDER_ERROR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _hermes_provider_error_reason(session_id: str) -> str | None:
+def _hermes_provider_error_reason(session_id: str, user_marker: str) -> str | None:
     """Return a skip reason when the live Hermes pane reports a provider error.
 
     The runner launches the Hermes TUI in a runner-owned tmux pane and advertises
@@ -209,6 +209,11 @@ def _hermes_provider_error_reason(session_id: str) -> str | None:
     TUI prints the provider's error into that pane. This captures the pane and
     maps a matching signature to a skip reason, or returns ``None`` when the pane
     reports no provider error (yet).
+
+    :param session_id: Omnigent session id (keys the runner's bridge dir).
+    :param user_marker: The current turn's user marker; a provider error only
+        skips when this marker is also visible in the pane, tying the error to
+        this turn rather than to stale scrollback.
     """
     from omnigent.harnesses.hermes_native.bridge import (
         bridge_dir_for_session_id,
@@ -219,6 +224,8 @@ def _hermes_provider_error_reason(session_id: str) -> str | None:
     if not pane:
         return None
     lowered = pane.lower()
+    if user_marker not in lowered:
+        return None
 
     for signature in _NO_PROVIDER_SIGNATURES:
         if signature in lowered:
@@ -242,6 +249,7 @@ def _hermes_provider_error_reason(session_id: str) -> str | None:
 def _wait_assistant_token_or_skip(
     page: Page,
     session_id: str,
+    user_marker: str,
     assistant_token: str,
     *,
     timeout_ms: int,
@@ -259,7 +267,7 @@ def _wait_assistant_token_or_skip(
     while time.monotonic() < deadline:
         if token_bubble.is_visible():
             return
-        reason = _hermes_provider_error_reason(session_id)
+        reason = _hermes_provider_error_reason(session_id, user_marker)
         if reason is not None:
             pytest.skip(reason)
         time.sleep(1.0)
@@ -304,11 +312,15 @@ def test_native_hermes_message_render_parity(
     for index in range(1, _COMPOSER_TURNS + 1):
         user_marker, assistant_token = _new_turn(index)
         _send(page, _turn_prompt(index, user_marker, assistant_token))
-        # The user-message mirror is independent of inference: a turn whose user
-        # message never reaches the transcript must still fail (not skip).
-        expect(page.locator(_USER)).to_have_count(index, timeout=30_000)
+        # The user message must be stored in the transcript (not just the
+        # composer's local pending echo) before any provider-error skip.
+        _wait_marker_in_transcript(base_url, session_id, user_marker, timeout_ms=30_000)
         _wait_assistant_token_or_skip(
-            page, session_id, assistant_token, timeout_ms=_NATIVE_TURN_TIMEOUT_MS
+            page,
+            session_id,
+            user_marker,
+            assistant_token,
+            timeout_ms=_NATIVE_TURN_TIMEOUT_MS,
         )
         expect(page.locator(_WORKING)).to_have_count(0, timeout=_NATIVE_TURN_TIMEOUT_MS)
 
