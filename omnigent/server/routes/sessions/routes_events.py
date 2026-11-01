@@ -788,7 +788,7 @@ def register_events_routes(
         request: Request,
         session_id: str,
         body: SessionEventInput | list[SessionEventInput],
-    ) -> dict[str, bool | str] | list[dict[str, bool | str]]:
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         """
         Route entry for :func:`_post_event_impl`.
 
@@ -800,49 +800,83 @@ def register_events_routes(
         entries. Messages count as in flight for the whole request, including
         runner launch.
         """
-        with contextlib.ExitStack() as in_flight:
-            if isinstance(body, list):
-                if not body:
-                    raise OmnigentError(
-                        "session event batch must not be empty",
-                        code=ErrorCode.INVALID_INPUT,
-                    )
-                if len(body) > MAX_SESSION_EVENT_BATCH_EVENTS:
-                    raise OmnigentError(
-                        "session event batch exceeds the 100-event limit",
-                        code=ErrorCode.INVALID_INPUT,
-                    )
-                # A sub-agent transcript arrives as one array of up to 100 items with a
-                # 10 s client timeout, and persisting it per entry on a store with
-                # per-append overhead outlasts that. Each run of batchable entries is
-                # authorized once and appended in one store call; every other entry
-                # keeps the per-entry path, in order.
-                acks: list[dict[str, bool | str]] = []
-                for batchable, run in itertools.groupby(body, key=_is_batchable_external_item):
-                    if not batchable:
-                        for event in run:
-                            acks.append(
-                                await _post_event_impl(
-                                    request,
-                                    session_id,
-                                    event,
-                                    in_flight=in_flight if event.type == "message" else None,
+        from omnigent.server.event_idempotency import (
+            IdempotencyConflict,
+            event_fingerprint,
+            resolve_idempotent,
+        )
+
+        headers = getattr(request, "headers", None)
+        key = (headers.get("idempotency-key") or "").strip() if headers is not None else ""
+
+        async def _produce() -> dict[str, Any] | list[dict[str, Any]]:
+            with contextlib.ExitStack() as in_flight:
+                if isinstance(body, list):
+                    if not body:
+                        raise OmnigentError(
+                            "session event batch must not be empty",
+                            code=ErrorCode.INVALID_INPUT,
+                        )
+                    if len(body) > MAX_SESSION_EVENT_BATCH_EVENTS:
+                        raise OmnigentError(
+                            "session event batch exceeds the 100-event limit",
+                            code=ErrorCode.INVALID_INPUT,
+                        )
+                    # A sub-agent transcript arrives as one array of up to 100 items with a
+                    # 10 s client timeout, and persisting it per entry on a store with
+                    # per-append overhead outlasts that. Each run of batchable entries is
+                    # authorized once and appended in one store call; every other entry
+                    # keeps the per-entry path, in order.
+                    acks: list[dict[str, Any]] = []
+                    for batchable, run in itertools.groupby(body, key=_is_batchable_external_item):
+                        if not batchable:
+                            for event in run:
+                                acks.append(
+                                    await _post_event_impl(
+                                        request,
+                                        session_id,
+                                        event,
+                                        in_flight=in_flight if event.type == "message" else None,
+                                    )
                                 )
-                            )
-                        continue
-                    await _authorized_conversation(request, session_id)
-                    add_audit_attrs(event_type=_EXTERNAL_CONVERSATION_ITEM_TYPE)
-                    item_ids = await _persist_external_conversation_items(
-                        session_id, list(run), conversation_store
-                    )
-                    acks.extend({"queued": False, "item_id": item_id} for item_id in item_ids)
-                return acks
-            return await _post_event_impl(
-                request,
+                            continue
+                        await _authorized_conversation(request, session_id)
+                        add_audit_attrs(event_type=_EXTERNAL_CONVERSATION_ITEM_TYPE)
+                        item_ids = await _persist_external_conversation_items(
+                            session_id, list(run), conversation_store
+                        )
+                        acks.extend({"queued": False, "item_id": item_id} for item_id in item_ids)
+                    return acks
+                return await _post_event_impl(
+                    request,
+                    session_id,
+                    body,
+                    in_flight=in_flight if body.type == "message" else None,
+                )
+
+        if not key:
+            return await _produce()
+        # Authorize before the idempotency cache. A hit returns the stored
+        # ack without running the producer, and the producer is what checks
+        # access. A caller who does not have access must get 404, not the
+        # previous ack.
+        await _authorized_conversation(request, session_id)
+        if isinstance(body, list):
+            payload = [item.model_dump(mode="json") for item in body]
+        else:
+            payload = body.model_dump(mode="json")
+        try:
+            return await resolve_idempotent(
                 session_id,
-                body,
-                in_flight=in_flight if body.type == "message" else None,
+                key,
+                _produce,
+                fingerprint=event_fingerprint(payload),
             )
+        except IdempotencyConflict:
+            raise OmnigentError(
+                "Idempotency-Key was already used for a different event body",
+                code=ErrorCode.CONFLICT,
+            ) from None
 
     router.include_router(event_router)
 
@@ -924,7 +958,7 @@ def register_events_routes(
         session_id: str,
         body: SessionEventInput,
         in_flight: contextlib.ExitStack | None = None,
-    ) -> dict[str, bool | str]:
+    ) -> dict[str, Any]:
         """
         Submit a session event (input message, tool output,
         approval, or interrupt).
@@ -2511,6 +2545,15 @@ def register_events_routes(
             if runner_client is not None:
                 # The source's runner has never initialized this side chat.
                 _runner_needs_session_init = True
+        from omnigent.server.stall_watchdog import annotate_message_ack
+
+        # Raw relay status, read before a relaunch. The list status
+        # collapses ``waiting`` into ``running``. A waiting parent has
+        # already finished its turn, so a message there starts a new one.
+        _cached_status = _session_status_cache.get(session_id)
+        if not isinstance(_cached_status, str):
+            _cached_status = getattr(conv, "live_status", None)
+        _stall_status_before = _cached_status if isinstance(_cached_status, str) else None
         # Track the host's launch verdict for the unavailable response below.
         relaunched_runner_id: str | None = None
         relaunched_launch_acknowledged = False
@@ -3059,7 +3102,12 @@ def register_events_routes(
             )
             if pending_background_title is not None:
                 pending_background_title.schedule(expected_seed_title=conv.title)
-            return {"queued": True, "item_id": item_id}
+            return annotate_message_ack(
+                session_id,
+                {"queued": True, "item_id": item_id},
+                status_before=_stall_status_before,
+                relaunched=relaunched_runner_id is not None,
+            )
         dispatch = await _dispatch_session_event_to_runner(
             session_id,
             conv,
@@ -3097,13 +3145,18 @@ def register_events_routes(
         # stability) and relies on stableKey + FIFO instead.
         if dispatch.pending_id is not None:
             response["pending_id"] = dispatch.pending_id
-        return response
+        return annotate_message_ack(
+            session_id,
+            response,
+            status_before=_stall_status_before,
+            relaunched=relaunched_runner_id is not None,
+        )
 
     async def _deliver_owner_return_wake(
         parent_id: str,
         body: SessionEventInput,
         user_id: str | None,
-    ) -> dict[str, bool | str]:
+    ) -> dict[str, Any]:
         """Post a child-return notice as the parent owner, relaunching if needed."""
         from omnigent.server import subagent_wake as _subagent_wake
 
@@ -3117,6 +3170,30 @@ def register_events_routes(
         )
 
     install_return_wake_delivery(_deliver_owner_return_wake)
+
+    async def _deliver_stall_interrupt(session_id: str) -> None:
+        """Interrupt a stalled turn so a buffered message can start the next one.
+
+        Uses the same interrupt event as an owner Stop. It does not post a
+        second copy of the buffered message, and it does not use the owner-wake
+        queue.
+        """
+        from omnigent.server import subagent_wake as _subagent_wake
+        from omnigent.server.routes._auth_helpers import get_session_owner_id
+
+        app = _subagent_wake._app
+        if app is None:
+            return
+        user_id = await asyncio.to_thread(get_session_owner_id, session_id, permission_store)
+        await _post_event_impl(
+            OwnerWakeContext(app=app, user_id=user_id),
+            session_id,
+            SessionEventInput(type="interrupt"),
+        )
+
+    from omnigent.server.stall_watchdog import register_interrupt_callback
+
+    register_interrupt_callback(_deliver_stall_interrupt)
 
     # ── GET /sessions/{session_id}/stream ────────────────────────
 

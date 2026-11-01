@@ -54,10 +54,10 @@ _TEST_HARNESS_MODULE = "tests.runtime.harnesses._test_scaffold_harnesses"
 _TRUNCATION_MARKER = "[output truncated by omnigent:"
 
 
-def test_default_idle_watchdog_allows_one_hour_progress_free_calls() -> None:
+def test_default_idle_watchdog_is_twenty_minutes() -> None:
     from omnigent.runtime.harnesses import _scaffold
 
-    assert _scaffold._DEFAULT_TURN_IDLE_TIMEOUT_S == 3600.0
+    assert _scaffold._DEFAULT_TURN_IDLE_TIMEOUT_S == 1200.0
 
 
 @dataclass

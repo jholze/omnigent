@@ -126,13 +126,27 @@ _TURN_CONTEXT_DESYNC_CODE = "runner_turn_context_desync"
 # healthy turn can make — notably context compaction, whose summarizing
 # LLM call runs as one long ``await`` emitting no non-heartbeat events
 # (see ``runtime/compaction.py``). On a near-full context that call can
-# exceed the old 240s cap, tripping the watchdog and wedging the session
-# in a "Prompt is too long" → compaction → 240s-timeout loop.
-# Env var name kept for the ops knob; ``<= 0`` disables.
-_DEFAULT_TURN_IDLE_TIMEOUT_S = 3600.0
+# exceed a short cap and wedge the session in a compaction loop.
+# The default is 1200 seconds. ``HARNESS_TURN_TIMEOUT_S`` overrides it;
+# ``<= 0`` disables the watchdog.
+_DEFAULT_TURN_IDLE_TIMEOUT_S = 1200.0
 _TURN_IDLE_TIMEOUT_S = float(
     os.environ.get("HARNESS_TURN_TIMEOUT_S", _DEFAULT_TURN_IDLE_TIMEOUT_S)
 )
+
+
+def resolve_turn_idle_timeout_s() -> float:
+    """Return the idle watchdog window for this process.
+
+    A set ``HARNESS_TURN_TIMEOUT_S`` wins, including ``0`` which disables
+    the watchdog. When the variable is unset or blank, the module default
+    applies so a test can replace ``_TURN_IDLE_TIMEOUT_S`` directly.
+    """
+    raw = os.environ.get("HARNESS_TURN_TIMEOUT_S")
+    if raw is None or raw.strip() == "":
+        return _TURN_IDLE_TIMEOUT_S
+    return float(raw)
+
 
 # Absolute per-turn ceiling on TOTAL turn duration. Progress-aware when
 # the idle watchdog is enabled: every real progress event extends the
@@ -1609,7 +1623,7 @@ class HarnessApp:
         :param request: Forwarded to ``run_turn``.
         :param ctx: Forwarded to ``run_turn``.
         """
-        idle_timeout = _TURN_IDLE_TIMEOUT_S
+        idle_timeout = resolve_turn_idle_timeout_s()
         absolute_timeout = _TURN_ABSOLUTE_TIMEOUT_S
         # ``asyncio.timeout(None)`` is a no-op, so ``<= 0`` disables each.
         absolute_wd = asyncio.timeout(absolute_timeout if absolute_timeout > 0 else None)

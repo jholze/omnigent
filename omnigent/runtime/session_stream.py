@@ -43,7 +43,12 @@ from omnigent.debug_logging import (
 )
 from omnigent.errors import ErrorImpact, ErrorPhase
 from omnigent.native.input_diagnostics import input_attributes
-from omnigent.runtime import disconnect_outcome, inflight_text, pending_elicitations
+from omnigent.runtime import (
+    disconnect_outcome,
+    inflight_text,
+    pending_elicitations,
+    stall_progress,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -332,6 +337,10 @@ def publish(conversation_id: str, event: dict[str, Any]) -> int:
     # server produces — including ones with no live subscriber.
     _log_sse_event(conversation_id, event)
     disconnect_outcome.observe_event(conversation_id, event)
+    # Progress events move the stall clock. A suppressed text delta is
+    # still progress, so this runs before the live-event rewrite. A
+    # recovery queued here is published after the broadcast below.
+    stall_progress.observe_published_event(conversation_id, event)
     # Track reconnect state and centrally suppress or rewrite native deltas
     # before they reach subscribers.
     live_event = inflight_text.record_publish(conversation_id, event)
@@ -341,14 +350,15 @@ def publish(conversation_id: str, event: dict[str, Any]) -> int:
     # type is a single dict lookup and a return. A suppressed event is
     # always a text delta, never an elicitation, so this still runs.
     pending_elicitations.record_publish(conversation_id, event)
-    if live_event is None:
-        return 0
-    with _lock:
-        subs = list(_subscribers.get(conversation_id, ()))
     scheduled = 0
-    for subscriber in subs:
-        if _schedule_delivery(conversation_id, subscriber, live_event):
-            scheduled += 1
+    if live_event is not None:
+        with _lock:
+            subs = list(_subscribers.get(conversation_id, ()))
+        for subscriber in subs:
+            if _schedule_delivery(conversation_id, subscriber, live_event):
+                scheduled += 1
+    for conv_id, recovered in stall_progress.drain_pending_publishes():
+        publish(conv_id, recovered)
     return scheduled
 
 

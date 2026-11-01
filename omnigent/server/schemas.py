@@ -2399,6 +2399,10 @@ class SessionResponse(BaseModel):
     # ``labels``); set/cleared via ``PATCH /v1/sessions/{id}`` and filtered on
     # ``GET /v1/sessions?project=``.
     project_id: str | None = None
+    # True while a running turn has gone quiet past the stall threshold.
+    stalled: bool = False
+    # Seconds since the last progress event this process has observed.
+    seconds_since_last_event: float | None = None
 
 
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]")
@@ -3049,6 +3053,8 @@ class SessionListItem(BaseModel):
     # unfiled. Lets the sidebar group sessions by project without a follow-up
     # GET. Distinct from the legacy ``omni_project`` label in ``labels``.
     project_id: str | None = None
+    # True while a running turn has gone quiet past the stall threshold.
+    stalled: bool = False
 
 
 class SessionList(BaseModel):
@@ -4276,6 +4282,35 @@ class SessionPresenceEvent(_SSEEventBase):
     viewers: list[PresenceViewer]
 
 
+class SessionStalledEvent(_SSEEventBase):
+    """A running turn has gone quiet past the stall threshold.
+
+    Emitted once when the stall watchdog marks the session. The next
+    progress event emits :class:`SessionRecoveredEvent`.
+
+    :param type: Always ``"session.stalled"``.
+    :param conversation_id: The stalled session, e.g. ``"conv_abc123"``.
+    :param seconds_since_last_event: Silence that tripped the mark, when known.
+    """
+
+    type: Literal["session.stalled"]
+    conversation_id: str
+    seconds_since_last_event: float | None = None
+
+
+class SessionRecoveredEvent(_SSEEventBase):
+    """A stalled session emitted progress again.
+
+    Emitted once. The stall label is cleared with this event.
+
+    :param type: Always ``"session.recovered"``.
+    :param conversation_id: The session that resumed progress.
+    """
+
+    type: Literal["session.recovered"]
+    conversation_id: str
+
+
 class ElicitationRequestParams(BaseModel):
     """
     Inner ``params`` block of a :class:`ElicitationRequestEvent`.
@@ -4975,6 +5010,8 @@ ServerStreamEvent = Annotated[
     | SessionSupersededEvent
     | SessionBtwSidechatEvent
     | SessionPresenceEvent
+    | SessionStalledEvent
+    | SessionRecoveredEvent
     # ── Transient (SSE-only) — session resource lifecycle ─────
     | SessionResourceCreatedEvent
     | SessionResourceDeletedEvent

@@ -110,6 +110,7 @@ from omnigent.runtime import (
     inflight_text,
     pending_elicitations,
     pending_inputs,
+    stall_progress,
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import (
@@ -1207,6 +1208,7 @@ def _build_session_list_item(
     # dots straight from the list (no separate fetch). Built per-user here —
     # `user_id` is the requesting caller, never broadcast to other viewers.
     viewer_last_seen, viewer_unread = _read_state_entry(user_id, conv.id)
+    stalled, _stall_seconds = stall_progress.snapshot_fields(conv.id, labels=conv.labels)
     return SessionListItem(
         id=conv.id,
         agent_id=conv.agent_id,
@@ -1256,6 +1258,7 @@ def _build_session_list_item(
         search_snippet=conv.search_snippet,
         parent_session_id=conv.parent_conversation_id,
         project_id=conv.project_id,
+        stalled=stalled,
     )
 
 
@@ -1442,6 +1445,7 @@ def _build_session_response(
     # vanished thread. Computed per-response (not persisted) — self-heals.
     if side_chat_sealed:
         labels = {**labels, CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
+    stalled, seconds_since_last_event = stall_progress.snapshot_fields(conv.id, labels=conv.labels)
     return SessionResponse(
         id=conv.id,
         agent_id=conv.agent_id,
@@ -1531,6 +1535,8 @@ def _build_session_response(
         # sessions whose forwarder stamps a turn id; ``None`` otherwise.
         active_response_id=_session_active_response_cache.get(conv.id),
         project_id=conv.project_id,
+        stalled=stalled,
+        seconds_since_last_event=seconds_since_last_event,
     )
 
 
