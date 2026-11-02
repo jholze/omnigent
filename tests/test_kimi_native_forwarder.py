@@ -19,6 +19,7 @@ import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -1915,6 +1916,13 @@ async def _drive_loop_until(
     home, wire = _wire_home(tmp_path, rows)
     if prepare is not None:
         prepare(bridge, wire)
+
+    async def _no_usage_sync(self: object, client: object) -> None:
+        del self, client
+
+    # sync() hits the real client and a price lookup before the same poll can
+    # notice a hung tool. A slow lookup fails the driver first. Usage delivery
+    # has its own driver and is left on the real sync.
     task = asyncio.create_task(
         forward_kimi_wire_to_session(
             base_url="http://test",
@@ -1931,11 +1939,13 @@ async def _drive_loop_until(
             post_backoff_initial_s=0.01,
         )
     )
+    deadline = time.monotonic() + budget(3.0)
     try:
-        for _ in range(300):
-            if done():
-                return
-            await asyncio.sleep(0.01)
+        with patch.object(_KimiUsageSync, "sync", _no_usage_sync):
+            while time.monotonic() < deadline:
+                if done():
+                    return
+                await asyncio.sleep(0.01)
         raise AssertionError("forward loop never reached the expected state")
     finally:
         task.cancel()
