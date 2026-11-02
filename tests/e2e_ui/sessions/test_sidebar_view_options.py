@@ -10,6 +10,7 @@ import json
 from time import time
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from playwright.sync_api import Locator, Page, Route, WebSocketRoute, expect
 
@@ -213,7 +214,12 @@ def test_grouping_and_show_toggles_persist_across_reload(
 def test_tooltip_fetches_repo_and_pr_only_when_opened(
     page: Page, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Branch resolves without hovering; repo and PR still load only on hover."""
+    """Branch resolves without hovering; repo and PR still load only on hover.
+
+    Project folders leave the row below the viewport. Closing the Show menu
+    returns focus to its trigger, and that focus scrolls the sidebar back to
+    the top, so the row is brought into view only after the trigger blurs.
+    """
     base_url = request.config.getoption("--ui-base-url") or request.getfixturevalue("live_server")
     github_requests: list[str] = []
     worktree_requests: list[str] = []
@@ -248,37 +254,75 @@ def test_tooltip_fetches_repo_and_pr_only_when_opened(
             }
         )
 
-    # Register every route BEFORE navigating, so an eager fetch during mount is
-    # counted — otherwise the empty-request assertion can't detect it.
-    _enable_grouping_ui(page)
-    page.route_web_socket("**/v1/sessions/updates*", lambda _socket: None)
-    page.route("**/v1/sessions?*", _serve_sessions)
-    page.route("**/v1/sessions/*/resources/github*", serve_github)
-    page.route("**/v1/hosts/sidebar-host/worktrees?*", serve_worktrees)
-    page.goto(base_url)
-    expect(page.get_by_text("Idle session", exact=True)).to_be_visible(timeout=30_000)
-    page.wait_for_load_state("networkidle")
-    assert github_requests == []
-    assert worktree_requests == []
+    # Enough folders that the stub session starts below the viewport. The same
+    # list on a shared server is what left the row out of reach of a bare hover.
+    created_project_ids: list[str] = []
+    batch = f"{time():.6f}"
+    try:
+        for index in range(30):
+            response = httpx.post(
+                f"{base_url}/v1/projects",
+                json={"name": f"Tooltip bury {index:02d} {batch}"},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            created_project_ids.append(response.json()["id"])
 
-    _open_view_submenu(page, "session-show-menu")
-    page.get_by_test_id("session-show-branch").click()
-    page.keyboard.press("Escape")
-    row = page.locator("li").filter(has=page.locator(f'a[href="/c/{_IDLE}"]'))
-    expect(row.get_by_test_id("session-row-meta")).to_have_text("fix/payment-retries")
-    assert worktree_requests
-    assert parse_qs(urlparse(worktree_requests[0]).query)["path"] == ["/tmp/sidebar-view-options"]
-    assert github_requests == []
+        # Register every route BEFORE navigating, so an eager fetch during mount is
+        # counted — otherwise the empty-request assertion can't detect it.
+        _enable_grouping_ui(page)
+        page.route_web_socket("**/v1/sessions/updates*", lambda _socket: None)
+        page.route("**/v1/sessions?*", _serve_sessions)
+        page.route("**/v1/sessions/*/resources/github*", serve_github)
+        page.route("**/v1/hosts/sidebar-host/worktrees?*", serve_worktrees)
+        page.goto(base_url)
+        expect(page.get_by_text("Idle session", exact=True)).to_be_visible(timeout=30_000)
+        page.wait_for_load_state("networkidle")
+        assert github_requests == []
+        assert worktree_requests == []
 
-    page.locator(f'a[href="/c/{_IDLE}"]').hover()
-    tooltip = page.get_by_test_id("session-tooltip-content")
-    expect(tooltip.get_by_test_id("session-tooltip-repo")).to_have_text("Repoomnigent")
-    expect(tooltip.get_by_test_id("session-tooltip-pr")).to_have_text("PR#419 · Draft")
-    expect(tooltip.get_by_test_id("session-tooltip-branch")).to_have_text(
-        "Branchfix/payment-retries"
-    )
-    assert github_requests
-    assert all(f"/v1/sessions/{_IDLE}/" in url for url in github_requests)
+        _open_view_submenu(page, "session-show-menu")
+        page.get_by_test_id("session-show-branch").click()
+        page.keyboard.press("Escape")
+        # The menu returns focus to its trigger. Focusing that control scrolls
+        # the sidebar back to the top, which pulls a below-fold row off the pointer.
+        expect(page.get_by_test_id("session-filter")).to_be_focused()
+        page.evaluate(
+            """() => {
+                const active = document.activeElement;
+                if (active instanceof HTMLElement) active.blur();
+            }"""
+        )
+        row = page.locator("li").filter(has=page.locator(f'a[href="/c/{_IDLE}"]'))
+        expect(row.get_by_test_id("session-row-meta")).to_have_text("fix/payment-retries")
+        assert worktree_requests
+        assert parse_qs(urlparse(worktree_requests[0]).query)["path"] == [
+            "/tmp/sidebar-view-options"
+        ]
+        assert github_requests == []
+
+        link = page.locator(f'a[href="/c/{_IDLE}"]')
+        expect(link).not_to_be_in_viewport()
+        link.evaluate(
+            "element => element.scrollIntoView({ block: 'center', behavior: 'instant' })"
+        )
+        expect(link).to_be_in_viewport(ratio=1)
+        link.hover()
+        expect(link).to_be_in_viewport(ratio=1)
+        tooltip = page.get_by_test_id("session-tooltip-content")
+        expect(tooltip.get_by_test_id("session-tooltip-repo")).to_have_text("Repoomnigent")
+        expect(tooltip.get_by_test_id("session-tooltip-pr")).to_have_text("PR#419 · Draft")
+        expect(tooltip.get_by_test_id("session-tooltip-branch")).to_have_text(
+            "Branchfix/payment-retries"
+        )
+        assert github_requests
+        assert all(f"/v1/sessions/{_IDLE}/" in url for url in github_requests)
+    finally:
+        for project_id in created_project_ids:
+            try:
+                httpx.delete(f"{base_url}/v1/projects/{project_id}", timeout=10.0)
+            except httpx.HTTPError:
+                continue
 
 
 def test_created_ordering_persists_and_flag_off_uses_updated(
