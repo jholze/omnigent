@@ -103,13 +103,20 @@ def test_workflow_keeps_an_already_formatted_body_unchanged(tmp_path: Path) -> N
     )
     source = tmp_path / "body.md"
     destination = tmp_path / "formatted.md"
+    # stdin is closed and the wait is bounded. The extracted jq line is
+    # self-contained; if it ever blocks on stdin, an open xdist pipe holds
+    # the worker until pytest-timeout kills the whole worker at 300s.
     subprocess.run(
         ["bash", "-euo", "pipefail", "-c", extraction[0]],
         env={**os.environ, "pr_json": json.dumps({"body": body}), "body_file": str(source)},
+        stdin=subprocess.DEVNULL,
+        timeout=30,
         check=True,
     )
     subprocess.run(
         [sys.executable, str(_SCRIPT), str(source), str(destination)],
+        stdin=subprocess.DEVNULL,
+        timeout=30,
         check=True,
     )
 
