@@ -25,6 +25,7 @@ import httpx
 import pytest
 from playwright.async_api import async_playwright, expect
 
+from omnigent.harnesses.opencode_native.client import OPENCODE_MIN_VERSION
 from tests._helpers.async_thread import run_in_fresh_loop as _run_in_fresh_loop
 from tests.e2e_ui.chat.test_credentialless_host_harness_readiness import (
     _REPO_ROOT,
@@ -145,6 +146,21 @@ async def _drive_opencode_readiness(base_url: str, host: dict[str, Any]) -> None
     host_row = _fetch_host_row(base_url, host["name"])
     assert host_row is not None, "Bedrock OpenCode host dropped offline before the UI drive"
     readiness = (host_row.get("configured_harnesses") or {}).get(_HARNESS)
+    if readiness == "version-too-low":
+        try:
+            raw_version = subprocess.check_output(
+                ["opencode", "--version"], text=True, stderr=subprocess.DEVNULL
+            )
+        except (OSError, subprocess.CalledProcessError):
+            raw_version = ""
+        installed = next(
+            (line.strip() for line in raw_version.splitlines() if line.strip()), "unknown"
+        )
+        pytest.skip(
+            "opencode CLI is older than opencode-native requires "
+            f"(installed {installed or 'unknown'}, need >={OPENCODE_MIN_VERSION}; "
+            "configured_harnesses['opencode-native'] is 'version-too-low')"
+        )
     assert readiness is True, (
         "host with OpenCode configured for amazon-bedrock must report opencode-native "
         f"ready, got {readiness!r}"
