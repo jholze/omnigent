@@ -1,7 +1,10 @@
 """Configuration and transport regressions for workflow-owned reproduction."""
 
+import ast
+import inspect
 import json
 import socket
+import textwrap
 import threading
 from pathlib import Path
 from unittest.mock import Mock
@@ -11,6 +14,8 @@ import pytest
 from dev.repro_env.runtime import isolated_env
 from dev.repro_env.transport import Relay
 from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
+from tests import budgets
+from tests.budgets import budget
 
 
 def test_isolates_inherited_native_state(tmp_path):
@@ -124,6 +129,11 @@ def test_relay_requires_private_socket_directory(tmp_path):
     assert not path.exists()
 
 
+def _half_close_wait() -> float:
+    """Hang guard for the half-close relay test, scaled when called."""
+    return budget(5)
+
+
 def test_relay_preserves_half_closed_connection_during_collection():
     import asyncio
     import gc
@@ -135,18 +145,18 @@ def test_relay_preserves_half_closed_connection_during_collection():
     with socket.socket() as service:
         service.bind(("127.0.0.1", 0))
         service.listen()
-        service.settimeout(5)
+        service.settimeout(_half_close_wait())
 
         def respond():
             conn, _ = service.accept()
             with conn:
-                conn.settimeout(5)
+                conn.settimeout(_half_close_wait())
                 request = b""
                 while data := conn.recv(65536):
                     request += data
                 received.append(request)
                 request_received.set()
-                if respond_now.wait(5):
+                if respond_now.wait(_half_close_wait()):
                     conn.sendall(payload)
 
         async def collect():
@@ -159,11 +169,15 @@ def test_relay_preserves_half_closed_connection_during_collection():
         thread.start()
         try:
             with Relay(tcp_target=service.getsockname()) as relay:
-                with socket.create_connection(("127.0.0.1", relay.port), timeout=5) as client:
+                with socket.create_connection(
+                    ("127.0.0.1", relay.port), timeout=_half_close_wait()
+                ) as client:
                     client.sendall(b"request")
                     client.shutdown(socket.SHUT_WR)
-                    assert request_received.wait(5)
-                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(timeout=5)
+                    assert request_received.wait(_half_close_wait())
+                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(
+                        timeout=_half_close_wait()
+                    )
                     respond_now.set()
                     response = b""
                     while data := client.recv(65536):
@@ -171,9 +185,34 @@ def test_relay_preserves_half_closed_connection_during_collection():
                     assert response == payload
         finally:
             respond_now.set()
-            thread.join(timeout=5)
+            thread.join(timeout=_half_close_wait())
         assert not thread.is_alive()
         assert received == [b"request"]
+
+
+def test_half_close_wait_follows_the_ci_scale(monkeypatch):
+    monkeypatch.setenv("OMNIGENT_TEST_TIMEOUT_SCALE", "4")
+    monkeypatch.setattr(budgets, "_TIMEOUT_SCALE", budgets._read_timeout_scale())
+    assert _half_close_wait() == 20
+
+    waits = {"settimeout", "wait", "result", "join", "create_connection"}
+    source = textwrap.dedent(
+        inspect.getsource(test_relay_preserves_half_closed_connection_during_collection)
+    )
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in waits
+    ]
+    assert {call.func.attr for call in calls} == waits
+    for call in calls:
+        timeouts = [
+            keyword.value for keyword in call.keywords if keyword.arg == "timeout"
+        ] or call.args[-1:]
+        timeout_sources = [ast.unparse(value) for value in timeouts]
+        assert timeout_sources == ["_half_close_wait()"], ast.unparse(call)
 
 
 def test_serve_rejects_previous_attempt_without_discarding_stop(tmp_path):
