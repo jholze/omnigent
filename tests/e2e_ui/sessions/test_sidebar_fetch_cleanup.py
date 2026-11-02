@@ -553,6 +553,12 @@ def test_opaque_cursor_survives_removing_last_visible_session(
     )
     page.goto(base_url)
     row = page.locator("li").filter(has=page.get_by_text("Remove this session", exact=True))
+    # Earlier tests leave real projects on the shared server. That list pushes
+    # the sessions sentinel below the fold, and empty pages auto-load only
+    # while Load more intersects the sidebar. Bring it into view first.
+    load_more = page.get_by_role("button", name="Load more", exact=True)
+    expect(load_more).to_be_attached()
+    load_more.scroll_into_view_if_needed()
     expect(row).to_be_visible()
     page.wait_for_load_state("networkidle")
     assert afters == [None, *tokens[:3]]
