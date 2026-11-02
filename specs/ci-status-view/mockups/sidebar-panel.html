@@ -1,0 +1,66 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><title>Sidebar-Panel · Omnigent CI-Status</title>
+<meta name="viewport" content="width=1440"><link rel="stylesheet" href="ci.css"></head><body><div class="shell with-panel"><aside class="sb">
+  <div class="sb-ws"><span class="sb-logo"></span><b>Omnigent</b><span class="sp faint" style="font-size:11px">⌄</span></div>
+  <div class="sb-search">Suchen …<span class="kbd">⌘K</span></div>
+  <div class="sb-item">Inbox<span class="cnt">3</span></div>
+  <div class="sb-item active">Sessions<span class="cnt">12</span></div>
+  <div class="sb-item ">Team-Chat</div>
+  <div class="sb-item">Agenten</div>
+  <div class="sb-item">Hosts</div>
+  <div class="sb-group"><span class="section-label">Aktive Sessions</span><div class="sb-sess active"><span class="ellipsis">remove session human chat</span><span class="dotb run" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">docs: import omnigent specs</span><span class="dotb run" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">CI merge fixes</span><span class="dotb queued" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">Rebind an idle session's workspace…</span><span class="dotb soft" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">pyrefly config cleanup</span><span style="width:8px"></span></div><div class="sb-sess "><span class="ellipsis">host heartbeat backoff</span><span class="dotb pass" style="width:8px;height:8px"></span></div></div>
+  <div class="sb-bottom">
+    <div class="sb-ci open"><span class="pulse"></span><span class="n">CI <b>3</b> aktiv</span><span class="s">2 Runner · 2 wartend</span></div>
+    <div class="sb-user"><span class="avatar sm av-user">JH</span>Jens Holze</div>
+  </div></aside><main class="main">
+ <div class="topbar"><span class="crumb">Sessions / <b>remove session human chat</b></span>
+  <span class="sp row gap-8"><span class="pill sm run"><span class="st sm run"></span>CI läuft · 3/4</span><span class="btn sm">PR #30 <span style="font-size:11px">↗</span></span></span></div>
+ <div class="transcript"><div class="tx-inner">
+  <div class="msg"><span class="avatar av-user">JH</span><div class="body"><div class="who"><b>Jens Holze</b><span class="tm">14:10</span></div>
+   <div class="text">Passt. Bitte pushen und die CI im Blick behalten.</div></div></div>
+  <div class="msg"><span class="avatar av-coder">OC</span><div class="body"><div class="who"><b>omnigent-coder</b><span class="role">Agent</span><span class="tm">14:12</span></div>
+   <div class="text">Gepusht: <code>cursor/remove-session-human-chat-f216</code> (<code>e752ad1</code>)</div>
+   <div class="attach"><div class="ci-card  ">
+  <div class="ci-head"><span style="color:var(--run);display:flex;margin-top:0"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span>
+    <div class="grow"><div class="t ellipsis">remove session human chat<span class="num">#30</span></div>
+      <div class="meta"><span class="mono ellipsis" style="max-width:290px">cursor/remove-session-human-chat-f216</span><span class="dotsep"></span><span class="mono">e752ad1</span><span class="dotsep"></span><span>gestartet 14:12</span></div></div>
+    <div class="ci-eta"><span class="v tnum">~8 Min</span><span class="l">fertig ca. 14:36</span></div>
+  </div>
+  <div class="ci-progress"><div class="seg thick"><i class="pass"></i><i class="pass"></i><i class="run" style="--p:58%"></i><i class="queued"></i></div><div class="ci-legend"><span class="">Lint 24 s</span><span class="">Web 2:03</span><span class="on">Pytest 11/~19 Min</span><span class="">E2E · ausstehend</span></div></div>
+  <div class="ci-summary"><span class="pill sm run"><span class="st sm run"></span>Läuft</span><span class="ellipsis"><b>2/3</b> Pflicht-Checks grün · Pytest läuft <b>11:04</b> von typ. ~19 Min</span><span class="sp row gap-12"><span class="toggle">Details <span class="chev"></span></span></span></div></div></div></div></div>
+  <div class="msg"><span class="avatar av-coder">OC</span><div class="body"><div class="who"><b>omnigent-coder</b><span class="role">Agent</span><span class="tm">14:13</span></div>
+   <div class="text">Während Pytest läuft, schaue ich mir die übrigen Referenzen auf <code>human_chat</code> im Frontend an. Bisher 3 Treffer in <code>web/src/session/</code>.</div></div></div>
+ </div></div>
+ <div class="composer"><div class="ph">Nachricht an omnigent-coder …</div><div class="tools"><span class="tag">omnigent-coder</span><span class="tag">mac-studio</span><span class="sp btn primary sm">Senden</span></div></div>
+</main><aside class="panel">
+ <div class="panel-head"><span class="pulse"></span><b>CI-Status</b><span class="subtle" style="font-size:12px">omnigent/omnigent</span>
+   <span class="sp row gap-4"><span class="live-tag">Live</span><span class="btn ghost sm" style="padding:0 6px">⤢</span><span class="btn ghost sm" style="padding:0 6px">✕</span></span></div>
+ <div class="panel-tabs"><span class="on">Pull Requests <span class="subtle">4</span></span><span>Runner</span><span>Verlauf</span><span class="sp" style="color:var(--tx-3)">Nur meine</span></div>
+ <div class="panel-body">
+  <div class="grp"><div class="grp-h"><span class="st sm run"></span>Läuft<span class="c">2</span></div>
+    <div class="pr hl"><span class="st  run" aria-hidden="true"></span><div class="title ellipsis"><span class="num">#30</span>remove session human chat</div><span class="eta">~8 Min<br><span class="subtle" style="font-size:11px;font-weight:400">ETA 14:36</span></span>
+      <div class="r2"><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip run">PY</span><span class="chip queued">E2E</span></span><span class="ellipsis">Pytest 11:04 / ~19 Min</span></div></div><div class="pr "><span class="st  run" aria-hidden="true"></span><div class="title ellipsis"><span class="num">#28</span>docs: import omnigent specs</div><span class="eta">~11 Min<br><span class="subtle" style="font-size:11px;font-weight:400">ETA 14:39</span></span>
+      <div class="r2"><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip run">PY</span><span class="chip queued">E2E</span></span><span class="ellipsis">Pytest 8:02 / ~19 Min</span></div></div></div>
+  <div class="grp"><div class="grp-h"><span class="st sm queued"></span>Wartet<span class="c">1</span></div><div class="pr "><span class="st  queued" aria-hidden="true"></span><div class="title ellipsis"><span class="num">#29</span>CI merge fixes</div><span class="eta">Start<br><span class="subtle" style="font-size:11px;font-weight:400">ca. 14:36</span></span>
+      <div class="r2"><span class="chips"><span class="chip queued">LINT</span><span class="chip queued">WEB</span><span class="chip queued">PY</span><span class="chip queued">E2E</span></span><span class="ellipsis">Warteschlange #1–2</span></div></div></div>
+  <div class="grp"><div class="grp-h"><span class="st sm pass"></span>Fertig<span class="c">1</span><span class="sp" style="text-transform:none;letter-spacing:0;font-weight:500">letzte 2 h</span></div><div class="pr "><span class="st  pass" aria-hidden="true"></span><div class="title ellipsis"><span class="num">#34</span>Rebind an idle session's workspace and host</div><span class="pill xs soft"><span class="st sm soft"></span>E2E</span>
+      <div class="r2"><span class="chips"><span class="chip pass">LINT</span><span class="chip pass">WEB</span><span class="chip pass">PY</span><span class="chip soft">E2E</span></span><span class="ellipsis">beendet 14:12 · 23:24 Min</span></div></div></div>
+  <div style="padding:8px 16px 0"><div class="divider"></div>
+   <div class="row" style="margin:8px 0"><span class="section-label">Runner</span><span class="sp subtle" style="font-size:11.5px">2/2 beschäftigt · self-hosted macOS</span></div>
+   <div class="runner"><div class="row gap-8"><span class="pulse" style="width:6px;height:6px"></span><span class="rn">actions-runner-omnigent</span>
+      <span class="sp pill xs run">beschäftigt</span></div>
+      <div class="job"><span class="chip run">PY</span><span style="color:var(--tx)">#30</span><span class="ellipsis">Pytest (SQLite)</span></div>
+      <div style="margin-top:8px" class="bar run"><b style="--p:58%"></b></div>
+      <div class="tm"><span>11:04 vergangen</span><span>~8 Min verbleibend</span></div></div>
+   <div class="runner"><div class="row gap-8"><span class="pulse" style="width:6px;height:6px"></span><span class="rn">actions-runner-omnigent-2</span>
+      <span class="sp pill xs run">beschäftigt</span></div>
+      <div class="job"><span class="chip run">PY</span><span style="color:var(--tx)">#28</span><span class="ellipsis">Pytest (SQLite)</span></div>
+      <div style="margin-top:8px" class="bar run"><b style="--p:42%"></b></div>
+      <div class="tm"><span>8:02 vergangen</span><span>~11 Min verbleibend</span></div></div>
+   <div class="load" style="margin-top:8px"><span class="subtle" style="align-self:center;white-space:nowrap">Mac-Last</span>
+     <div class="lv"><div class="row"><span>CPU</span><b>92 %</b></div><div class="bar run"><b style="--p:92%"></b></div></div>
+     <div class="lv"><div class="row"><span>RAM</span><b>55 %</b></div><div class="bar accent"><b style="--p:55%"></b></div></div></div>
+   <div class="row" style="margin:16px 0 4px"><span class="section-label">Warteschlange</span><span class="subtle" style="font-size:11.5px;margin-left:8px">2 Jobs</span><span class="sp subtle" style="font-size:11.5px">nächster Start ca. 14:36</span></div>
+   <div class="q"><span class="pos">1</span><span class="chip queued">LINT</span><span style="color:var(--tx)">#29</span><span class="ellipsis">Python lint (ruff, pyrefly)</span><span class="sp subtle">wartet 4 Min</span></div>
+   <div class="q"><span class="pos">2</span><span class="chip queued">WEB</span><span style="color:var(--tx)">#29</span><span class="ellipsis">Web (lint, typecheck, vitest, build)</span><span class="sp subtle">wartet 4 Min</span></div>
+  </div>
+ </div></aside></div><div class="demo-flag left">Beispieldaten</div></body></html>

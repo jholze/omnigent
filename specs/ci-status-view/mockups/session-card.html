@@ -1,0 +1,63 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><title>Session-Karte · Omnigent CI-Status</title>
+<meta name="viewport" content="width=1440"><link rel="stylesheet" href="ci.css"></head><body><div class="page">
+ <div class="page-h"><div><div class="eyebrow">Variante 1 · session-card</div><h1>CI-Statuskarte im Session-Transkript</h1>
+ <p>Erscheint direkt unter der Agenten-Nachricht nach einem Push. Dieselbe Komponente wird später im Team-Chat wiederverwendet.</p></div>
+ <div class="sp row gap-16"><span class="annot">Segment je Check · Breite gleich, Füllung = Laufzeit / typische Dauer</span></div></div>
+ <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start">
+  <div><div class="state-label"><span class="n">1a</span>Eingeklappt · Standard</div>
+   <div class="frame"><div class="frame-bar"><span class="dotb run" style="width:6px;height:6px;box-shadow:none"></span>Session · <span style="color:var(--tx-2)">remove session human chat</span><span class="sp mono faint" style="font-size:11px">mac-studio · ~/omnigent</span></div><div class="col gap-16" style="padding:20px 24px 24px">
+  <div class="msg"><span class="avatar av-user">JH</span><div class="body">
+    <div class="who"><b>Jens Holze</b><span class="tm">14:10</span></div>
+    <div class="text">Passt. Bitte pushen und die CI im Blick behalten.</div></div></div>
+  <div class="msg"><span class="avatar av-coder">OC</span><div class="body">
+    <div class="who"><b>omnigent-coder</b><span class="role">Agent</span><span class="tm">14:12</span></div>
+    <div class="tool" style="margin:4px 0 8px"><span class="st sm pass"></span><span class="mono">git push -u origin HEAD</span><span class="faint">· 1,4 s</span></div>
+    <div class="text">Gepusht: <code>cursor/remove-session-human-chat-f216</code> (<code>e752ad1</code>)</div>
+    <div class="attach"><div class="ci-card  ">
+  <div class="ci-head"><span style="color:var(--run);display:flex;margin-top:0"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span>
+    <div class="grow"><div class="t ellipsis">remove session human chat<span class="num">#30</span></div>
+      <div class="meta"><span class="mono ellipsis" style="max-width:290px">cursor/remove-session-human-chat-f216</span><span class="dotsep"></span><span class="mono">e752ad1</span><span class="dotsep"></span><span>gestartet 14:12</span></div></div>
+    <div class="ci-eta"><span class="v tnum">~8 Min</span><span class="l">fertig ca. 14:36</span></div>
+  </div>
+  <div class="ci-progress"><div class="seg thick"><i class="pass"></i><i class="pass"></i><i class="run" style="--p:58%"></i><i class="queued"></i></div><div class="ci-legend"><span class="">Lint 24 s</span><span class="">Web 2:03</span><span class="on">Pytest 11/~19 Min</span><span class="">E2E · ausstehend</span></div></div>
+  <div class="ci-summary"><span class="pill sm run"><span class="st sm run"></span>Läuft</span><span class="ellipsis"><b>2/3</b> Pflicht-Checks grün · Pytest läuft <b>11:04</b> von typ. ~19 Min</span><span class="sp row gap-12"><span class="toggle">Details <span class="chev"></span></span></span></div></div></div></div></div>
+</div></div>
+   <div style="margin-top:24px"><div class="state-label"><span class="n">1c</span>Eingeklappt · abgeschlossen (Pflicht grün, E2E rot nicht blockierend)</div>
+  <div class="ci-card  ">
+  <div class="ci-head"><span style="color:var(--ok);display:flex;margin-top:0"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span>
+    <div class="grow"><div class="t ellipsis">Rebind an idle session's workspace and host<span class="num">#34</span></div>
+      <div class="meta"><span class="mono ellipsis" style="max-width:290px">cursor/rebind-idle-session-0c3e</span><span class="dotsep"></span><span class="mono">9a6f15d</span><span class="dotsep"></span><span>beendet 14:12</span></div></div>
+    <div class="ci-eta"><span class="v tnum">23:24</span><span class="l">Gesamtdauer</span></div>
+  </div>
+  <div class="ci-progress"><div class="seg thick"><i class="pass"></i><i class="pass"></i><i class="pass"></i><i class="soft"></i></div><div class="ci-legend"><span class="">Lint 21 s</span><span class="">Web 1:49</span><span class="">Pytest 18:42</span><span class="">E2E rot · 4:12</span></div></div>
+  <div class="ci-summary"><span class="pill sm pass"><span class="st sm pass"></span>Pflicht grün</span><span class="pill sm soft"><span class="st sm soft"></span>E2E rot · nicht blockierend</span><span class="ellipsis"><b>3/3</b> Pflicht-Checks grün · E2E rot, <b>blockiert nicht</b></span><span class="sp row gap-12"><span class="toggle">Details <span class="chev"></span></span></span></div></div></div></div>
+  <div><div class="state-label"><span class="n">1b</span>Ausgeklappt · nach Klick auf „Details“</div>
+   <div class="frame"><div class="frame-bar"><span class="dotb run" style="width:6px;height:6px;box-shadow:none"></span>Session · <span style="color:var(--tx-2)">remove session human chat</span><span class="sp mono faint" style="font-size:11px">mac-studio · ~/omnigent</span></div><div class="col gap-16" style="padding:20px 24px 24px">
+  <div class="msg"><span class="avatar av-user">JH</span><div class="body">
+    <div class="who"><b>Jens Holze</b><span class="tm">14:10</span></div>
+    <div class="text">Passt. Bitte pushen und die CI im Blick behalten.</div></div></div>
+  <div class="msg"><span class="avatar av-coder">OC</span><div class="body">
+    <div class="who"><b>omnigent-coder</b><span class="role">Agent</span><span class="tm">14:12</span></div>
+    <div class="tool" style="margin:4px 0 8px"><span class="st sm pass"></span><span class="mono">git push -u origin HEAD</span><span class="faint">· 1,4 s</span></div>
+    <div class="text">Gepusht: <code>cursor/remove-session-human-chat-f216</code> (<code>e752ad1</code>)</div>
+    <div class="attach"><div class="ci-card  ">
+  <div class="ci-head"><span style="color:var(--run);display:flex;margin-top:0"><svg class="ci-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span>
+    <div class="grow"><div class="t ellipsis">remove session human chat<span class="num">#30</span></div>
+      <div class="meta"><span class="mono ellipsis" style="max-width:290px">cursor/remove-session-human-chat-f216</span><span class="dotsep"></span><span class="mono">e752ad1</span><span class="dotsep"></span><span>gestartet 14:12</span></div></div>
+    <div class="ci-eta"><span class="v tnum">~8 Min</span><span class="l">fertig ca. 14:36</span></div>
+  </div>
+  <div class="ci-progress"><div class="seg thick"><i class="pass"></i><i class="pass"></i><i class="run" style="--p:58%"></i><i class="queued"></i></div><div class="ci-legend"><span class="">Lint 24 s</span><span class="">Web 2:03</span><span class="on">Pytest 11/~19 Min</span><span class="">E2E · ausstehend</span></div></div>
+  <div class="ci-summary"><span class="pill sm run"><span class="st sm run"></span>Läuft</span><span class="ellipsis"><b>2/3</b> Pflicht-Checks grün · Pytest läuft <b>11:04</b> von typ. ~19 Min</span><span class="sp row gap-12"><span class="toggle">Weniger <span class="chev up"></span></span></span></div><div class="ci-checks"><div class="ci-check "><span class="st  pass" aria-hidden="true"></span>
+      <div style="min-width:0"><div class="name ellipsis">Python lint (ruff, pyrefly)</div><div class="sub"><span class="tag req">Pflicht</span><span class="mono subtle ellipsis" style="font-size:11px">actions-runner-omnigent</span></div></div>
+      <div class="bar "><b style="--p:100%"></b></div><div class="time"><span>24 s</span><small>typ. ~25 s</small></div><a class="link log">Log</a></div><div class="ci-check "><span class="st  pass" aria-hidden="true"></span>
+      <div style="min-width:0"><div class="name ellipsis">Web (lint, typecheck, vitest, build)</div><div class="sub"><span class="tag req">Pflicht</span><span class="mono subtle ellipsis" style="font-size:11px">actions-runner-omnigent</span></div></div>
+      <div class="bar "><b style="--p:100%"></b></div><div class="time"><span>2:03 Min</span><small>typ. ~2 Min</small></div><a class="link log">Log</a></div><div class="ci-check running"><span class="st  run" aria-hidden="true"></span>
+      <div style="min-width:0"><div class="name ellipsis">Pytest (SQLite)</div><div class="sub"><span class="tag req">Pflicht</span><span class="mono subtle ellipsis" style="font-size:11px">actions-runner-omnigent</span></div></div>
+      <div class="bar run"><b style="--p:58%"></b></div><div class="time"><span style="color:var(--tx)">11:04 / ~19:00</span><small>ETA ~8 Min · 14:36</small></div><a class="link log">Log</a></div><div class="ci-check "><span class="st  queued" aria-hidden="true"></span>
+      <div style="min-width:0"><div class="name ellipsis">E2E UI (Playwright, non-blocking)</div><div class="sub"><span class="tag nb">nicht blockierend</span><span class="subtle">startet nach Pytest</span></div></div>
+      <div class="bar" style="background:repeating-linear-gradient(90deg,var(--bg-4) 0 4px,transparent 4px 7px)"></div><div class="time"><span>—</span><small>typ. ~6 Min</small></div><span class="faint" style="font-size:12px">Log</span></div></div>
+  <div class="ci-foot"><span>Workflow <span class="mono" style="color:var(--tx-2)">ci.yml</span></span><span class="dotsep"></span><span>Lauf #412</span>
+    <span class="sp row gap-4"><span class="btn ghost sm">In Team-Chat teilen</span><span class="btn sm">Auf GitHub <span style="font-size:11px">↗</span></span></span></div></div></div></div></div>
+</div></div></div>
+ </div>
+</div><div class="demo-flag">Beispieldaten</div></body></html>

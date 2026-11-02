@@ -1,0 +1,90 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><title>Runner-Zeitleiste · Omnigent CI-Status</title>
+<meta name="viewport" content="width=1440"><link rel="stylesheet" href="ci.css"></head><body><style>
+.tl{position:relative}
+.tl-grid{display:grid;grid-template-columns:216px 1fr}
+.tl-lab{padding:0 16px;display:flex;flex-direction:column;justify-content:center;border-bottom:1px solid var(--line);height:80px}
+.tl-lab .rn{font:500 12px/16px var(--mono);color:var(--tx)}
+.tl-lab .sub{font-size:11.5px;color:var(--tx-3);margin-top:2px;display:flex;align-items:center;gap:6px}
+.tl-track{position:relative;height:80px;border-bottom:1px solid var(--line);
+  background-image:linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:calc(100%/8) 100%;background-position:calc(100%*2/40*1) 0}
+.tl-bar{position:absolute;top:24px;height:32px;border-radius:6px;display:flex;align-items:center;padding:0 8px;overflow:hidden;
+  font:500 11.5px/1 var(--sans);white-space:nowrap;min-width:3px}
+.tl-bar span{overflow:hidden;text-overflow:ellipsis}
+.tl-bar.pass{background:rgba(62,207,142,.16);border:1px solid rgba(62,207,142,.38);color:#8be3b9}
+.tl-bar.pass:not(:has(span:not(:empty))){padding:0}
+.tl-bar.soft{background:repeating-linear-gradient(-45deg,rgba(224,123,83,.18) 0 5px,rgba(224,123,83,.07) 5px 10px);border:1px dashed var(--soft-line);color:#f0a585}
+.tl-bar.run{background:repeating-linear-gradient(-45deg,rgba(245,165,36,.32) 0 6px,rgba(245,165,36,.18) 6px 12px);border:1px solid rgba(245,165,36,.6);color:#ffd58f;border-radius:6px 0 0 6px;border-right:0}
+.tl-bar.sel{box-shadow:0 0 0 2px rgba(245,165,36,.35),0 0 18px rgba(245,165,36,.25)}
+.tl-bar.fc{background:transparent;border:1px dashed var(--line-3);color:var(--tx-3)}
+.tl-bar.run-fc{border:1px dashed rgba(245,165,36,.45);border-left:0;border-radius:0 6px 6px 0;color:rgba(249,197,110,.75);background:rgba(245,165,36,.05)}
+.tl-bar.clip{border-top-left-radius:0;border-bottom-left-radius:0;border-left-style:dashed}
+.tl-future{position:absolute;top:0;bottom:0;right:0;background:repeating-linear-gradient(135deg,rgba(255,255,255,.018) 0 6px,transparent 6px 12px);border-left:0}
+.tl-now{position:absolute;top:-28px;bottom:0;width:2px;background:var(--accent);z-index:4;box-shadow:0 0 12px rgba(124,131,255,.6)}
+.tl-now b{position:absolute;top:0;left:50%;transform:translateX(-50%);background:var(--accent);color:#0b0b1a;font:600 11px/1 var(--sans);padding:4px 6px;border-radius:4px;white-space:nowrap}
+.tl-axis{position:relative;height:28px;border-bottom:1px solid var(--line)}
+.tick{position:absolute;top:8px;transform:translateX(-50%);font:500 11px/1 var(--mono);color:var(--tx-3)}
+.stat{padding:16px;border:1px solid var(--line);border-radius:var(--r-3);background:var(--bg-1)}
+.stat .v{font:600 22px/28px var(--sans);letter-spacing:-.01em;font-variant-numeric:tabular-nums;margin-top:4px}
+.stat .v small{font-size:13px;color:var(--tx-3);font-weight:500}
+.leg{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--tx-3)}
+.leg i{width:16px;height:10px;border-radius:3px;display:inline-block}
+</style><div class="shell"><aside class="sb">
+  <div class="sb-ws"><span class="sb-logo"></span><b>Omnigent</b><span class="sp faint" style="font-size:11px">⌄</span></div>
+  <div class="sb-search">Suchen …<span class="kbd">⌘K</span></div>
+  <div class="sb-item">Inbox<span class="cnt">3</span></div>
+  <div class="sb-item active">Sessions<span class="cnt">12</span></div>
+  <div class="sb-item ">Team-Chat</div>
+  <div class="sb-item">Agenten</div>
+  <div class="sb-item">Hosts</div>
+  <div class="sb-group"><span class="section-label">Aktive Sessions</span><div class="sb-sess active"><span class="ellipsis">remove session human chat</span><span class="dotb run" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">docs: import omnigent specs</span><span class="dotb run" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">CI merge fixes</span><span class="dotb queued" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">Rebind an idle session's workspace…</span><span class="dotb soft" style="width:8px;height:8px"></span></div><div class="sb-sess "><span class="ellipsis">pyrefly config cleanup</span><span style="width:8px"></span></div><div class="sb-sess "><span class="ellipsis">host heartbeat backoff</span><span class="dotb pass" style="width:8px;height:8px"></span></div></div>
+  <div class="sb-bottom">
+    <div class="sb-ci open"><span class="pulse"></span><span class="n">CI <b>3</b> aktiv</span><span class="s">2 Runner · 2 wartend</span></div>
+    <div class="sb-user"><span class="avatar sm av-user">JH</span>Jens Holze</div>
+  </div></aside><main class="main">
+ <div class="topbar"><span class="crumb">CI / <b>Runner</b></span><span class="sp row gap-8"><span class="pill sm run"><span class="st sm run"></span>3 PRs aktiv</span><span class="btn sm">Listenansicht</span></span></div>
+ <div style="padding:24px"><div class="card tl" style="overflow:visible">
+ <div class="row gap-12" style="padding:16px 20px;border-bottom:1px solid var(--line)">
+   <div><div class="row gap-8"><span class="pulse"></span><b style="font-weight:600;font-size:14px">Runner-Zeitleiste</b><span class="live-tag">Live</span></div>
+   <div class="subtle" style="font-size:12px;margin-top:2px">Letzte 30 Min + 10 Min Prognose · self-hosted macOS · <span class="mono">mac-studio</span></div></div>
+   <div class="sp row gap-16"><span class="leg"><i style="background:rgba(62,207,142,.4)"></i>erfolgreich</span><span class="leg"><i style="background:repeating-linear-gradient(-45deg,var(--run) 0 3px,#a8670a 3px 6px)"></i>läuft</span>
+   <span class="leg"><i style="border:1px dashed var(--soft)"></i>rot, nicht blockierend</span><span class="leg"><i style="border:1px dashed var(--tx-3)"></i>Prognose</span>
+   <span class="panel-tabs" style="border:0;padding:0;margin-left:8px"><span>15 Min</span><span class="on">30 Min</span><span>2 h</span></span></span></div>
+ </div>
+ <div class="tl-grid">
+   <div class="tl-lab" style="height:28px;padding-top:0"></div>
+   <div class="tl-axis"><span class="tick" style="left:5.00%">14:00</span><span class="tick" style="left:17.50%">14:05</span><span class="tick" style="left:30.00%">14:10</span><span class="tick" style="left:42.50%">14:15</span><span class="tick" style="left:55.00%">14:20</span><span class="tick" style="left:67.50%">14:25</span><span class="tick" style="left:80.00%">14:30</span><span class="tick" style="left:92.50%">14:35</span></div>
+   <div class="tl-lab"><span class="rn">actions-runner-omnigent</span><span class="sub"><span class="pill xs run">beschäftigt</span>#30 Pytest</span></div>
+   <div class="tl-track"><div class="tl-future" style="left:75.0%"></div><div class="tl-bar pass clip" style="left:0.00%;width:25.50%" ><span>#34 Pytest</span></div><div class="tl-bar soft " style="left:25.83%;width:10.50%" ><span>#34 E2E</span></div><div class="tl-bar pass " style="left:36.67%;width:1.00%" ><span></span></div><div class="tl-bar pass " style="left:37.92%;width:5.13%" ><span>#30 Web</span></div><div class="tl-bar pass " style="left:43.33%;width:0.92%" ><span></span></div><div class="tl-bar run sel " style="left:47.50%;width:27.50%" ><span>#30 Pytest (SQLite) · 11:04</span></div><div class="tl-bar fc run-fc " style="left:75.00%;width:20.00%" ><span>ETA 14:36</span></div><div class="tl-bar fc " style="left:95.42%;width:1.04%" ><span></span></div><div class="tl-bar fc " style="left:96.67%;width:5.00%" ><span>#29 Web</span></div></div>
+   <div class="tl-lab"><span class="rn">actions-runner-omnigent-2</span><span class="sub"><span class="pill xs run">beschäftigt</span>#28 Pytest</span></div>
+   <div class="tl-track"><div class="tl-future" style="left:75.0%"></div><div class="tl-bar pass clip" style="left:0.00%;width:45.00%" ><span>#33 Pytest (SQLite) · 18:30</span></div><div class="tl-bar pass " style="left:45.42%;width:4.88%" ><span>#28 Web</span></div><div class="tl-bar run " style="left:55.00%;width:20.00%" ><span>#28 Pytest · 8:02</span></div><div class="tl-bar fc run-fc " style="left:75.00%;width:25.00%" ><span>ETA 14:39 →</span></div></div>
+   <div class="tl-lab"><span class="rn" style="font-family:var(--sans)">Warteschlange</span><span class="sub">2 Jobs · #29</span></div>
+   <div class="tl-track"><div class="tl-future" style="left:75.0%"></div>
+     <div class="tl-bar fc " style="left:65.00%;width:10.00%" ><span></span></div><span style="position:absolute;right:35.60%;top:31px;font-size:11.5px;color:var(--tx-2);white-space:nowrap"><span class="chip queued">LINT</span> <span class="chip queued">WEB</span> #29 wartet seit 14:24 →</span></div>
+   <div class="tl-lab" style="border-bottom:0;height:88px"><span class="rn" style="font-family:var(--sans)">Mac-Last</span><span class="sub"><span style="color:#f9c56e">CPU 92 %</span>·<span style="color:var(--accent-2)">RAM 55 %</span></span></div>
+   <div class="tl-track" style="height:88px;border-bottom:0"><div class="tl-future" style="left:75.0%"></div>
+     <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="position:absolute;inset:10px 0 6px 0;width:100%;height:calc(100% - 16px)">
+       <defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#f5a524" stop-opacity=".35"/><stop offset="1" stop-color="#f5a524" stop-opacity="0"/></linearGradient></defs>
+       <line x1="0" x2="100" y1="10" y2="10" stroke="#3a3a42" stroke-dasharray="1 1" stroke-width=".4" vector-effect="non-scaling-stroke"/>
+       <polygon points="0,100 0.00,62.0 2.50,58.0 5.00,45.0 7.50,39.0 10.00,42.0 12.50,36.0 15.00,40.0 17.50,43.0 20.00,37.0 22.50,30.0 25.00,34.0 27.50,38.0 30.00,42.0 32.50,28.0 35.00,22.0 37.50,26.0 40.00,31.0 42.50,12.0 45.00,9.0 47.50,7.0 50.00,10.0 52.50,6.0 55.00,8.0 57.50,5.0 60.00,9.0 62.50,7.0 65.00,8.0 67.50,6.0 70.00,8.0 72.50,8.0 75.00,8.0 75.00,100" fill="url(#g)"/>
+       <polyline points="0.00,62.0 2.50,58.0 5.00,45.0 7.50,39.0 10.00,42.0 12.50,36.0 15.00,40.0 17.50,43.0 20.00,37.0 22.50,30.0 25.00,34.0 27.50,38.0 30.00,42.0 32.50,28.0 35.00,22.0 37.50,26.0 40.00,31.0 42.50,12.0 45.00,9.0 47.50,7.0 50.00,10.0 52.50,6.0 55.00,8.0 57.50,5.0 60.00,9.0 62.50,7.0 65.00,8.0 67.50,6.0 70.00,8.0 72.50,8.0 75.00,8.0" fill="none" stroke="#f5a524" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+       <polyline points="0.00,59.0 2.50,58.0 5.00,56.0 7.50,54.0 10.00,55.0 12.50,53.0 15.00,54.0 17.50,54.0 20.00,52.0 22.50,51.0 25.00,51.0 27.50,52.0 30.00,53.0 32.50,50.0 35.00,48.0 37.50,48.0 40.00,49.0 42.50,46.0 45.00,45.0 47.50,44.0 50.00,45.0 52.50,45.0 55.00,44.0 57.50,45.0 60.00,45.0 62.50,44.0 65.00,45.0 67.50,45.0 70.00,45.0 72.50,45.0 75.00,45.0" fill="none" stroke="#7c83ff" stroke-width="1.5" stroke-dasharray="3 2" vector-effect="non-scaling-stroke"/>
+     </svg>
+     <span style="position:absolute;left:55.00%;top:2px;font-size:10.5px;color:#f9c56e;transform:translateX(-50%);background:var(--bg-1);padding:0 4px">2× Pytest parallel</span></div>
+ </div>
+ <div class="tl-now" style="left:calc(216px + (100% - 216px) * 0.7500 - 1px);top:73px;bottom:0"><b>jetzt 14:28</b></div>
+ 
+ <div style="position:absolute;left:216px;right:0;top:101px;bottom:0;pointer-events:none"><div class="tip below" style="left:calc(100% - 304px);top:64px;--ax:48px;width:296px">
+  <div class="row gap-8"><span class="st run"></span><b style="font-weight:600">Pytest (SQLite)</b><span class="sp tag req">Pflicht</span></div>
+  <div class="muted" style="margin-top:4px">#30 · remove session human chat</div>
+  <div style="margin-top:10px" class="bar run"><b style="--p:58%"></b></div>
+  <dl><dt>Gestartet</dt><dd>14:17:00</dd><dt>Vergangen</dt><dd>11:04 Min</dd><dt>Typisch (letzte 20)</dt><dd>~19 Min</dd>
+  <dt>ETA</dt><dd style="color:#f9c56e">~8 Min · 14:36</dd><dt>Runner</dt><dd class="mono" style="font-size:11px">actions-runner-omnigent</dd></dl>
+  <div class="row gap-8" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><a class="link log">Log</a><span class="faint">·</span><a class="link">Session öffnen</a><span class="sp kbd">L</span></div></div></div>
+</div><div style="display:grid;grid-template-columns:repeat(3,1fr) 1.6fr;gap:16px;margin-top:16px">
+ <div class="stat"><span class="section-label">Auslastung · 30 Min</span><div class="v">96 <small>%</small></div><div class="subtle" style="font-size:12px">omnigent: 94 % · -2: 97 %</div></div>
+ <div class="stat"><span class="section-label">Warteschlange</span><div class="v">2 <small>Jobs</small></div><div class="subtle" style="font-size:12px">ø Wartezeit heute 3:40 Min</div></div>
+ <div class="stat"><span class="section-label">Nächster freier Runner</span><div class="v">14:36 <small>· in ~8 Min</small></div><div class="subtle mono" style="font-size:11px">actions-runner-omnigent</div></div>
+ <div class="card" style="padding:16px 20px">
+  <div class="row gap-8"><span class="section-label">Warum ist der Mac ausgelastet?</span></div>
+  <div style="margin-top:8px;font-size:13px;line-height:20px;color:#d6d6db">Beide Runner führen gleichzeitig <b>Pytest (SQLite)</b> aus (#30 und #28) – typisch je ~19 Min und CPU-lastig. Dadurch warten die zwei Jobs von <b>#29</b> seit 4 Min. Erster freier Runner voraussichtlich <b class="tnum">14:36</b>.</div>
+  <div class="row gap-8" style="margin-top:12px"><span class="btn sm">#29 priorisieren</span><span class="btn ghost sm">Typische Dauern ansehen</span></div></div></div></div></main></div><div class="demo-flag">Beispieldaten</div></body></html>
