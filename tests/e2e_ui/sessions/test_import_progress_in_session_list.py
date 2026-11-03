@@ -14,15 +14,41 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.compat import runner_executable
 from tests._helpers.host import isolated_host
 
 pytestmark = pytest.mark.min_server_version("0.16.0")
 
-# Enough sessions for the import to stay in flight for several seconds (about 30 ms
-# per session end to end); the picker count below must cover them.
+# The picker count below must cover these. A fast host persists the batch before
+# the list can poll, so the fixture holds the import open first (_IMPORT_HOLD_S).
 _SEEDED_SESSIONS = 600
 _LIMIT_OPTION = "Last 1000"
 _IMPORT_TIMEOUT_S = 300.0
+# Outlasts the trip from Import back to the session list. The indicator is only
+# asserted while this hold (and the batch after it) is still running.
+_IMPORT_HOLD_S = 15.0
+# Pauses HostProcess._handle_import_local before any transcript is sent.
+# python -c leaves --server in sys.argv for the daemon parser.
+_SLOW_IMPORT_BOOTSTRAP = f"""
+import asyncio
+
+import omnigent.host.connect as connect
+
+_HOLD_S = {_IMPORT_HOLD_S!r}
+_orig = connect.HostProcess._handle_import_local
+
+
+async def _hold_import(self, ws, frame):
+    await asyncio.sleep(_HOLD_S)
+    await _orig(self, ws, frame)
+
+
+connect.HostProcess._handle_import_local = _hold_import
+
+from omnigent.host._daemon_entry import main
+
+main()
+"""
 # Harness homes that would redirect the host's transcript scan away from its HOME.
 _HARNESS_HOME_ENV = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "QWEN_HOME", "PI_CODING_AGENT_DIR")
 
@@ -71,6 +97,13 @@ def import_host(live_server: str, tmp_path: Path) -> Iterator[_ImportHost]:
         live_server,
         name=name,
         env=dict.fromkeys(_HARNESS_HOME_ENV),
+        command=[
+            runner_executable(),
+            "-c",
+            _SLOW_IMPORT_BOOTSTRAP,
+            "--server",
+            live_server,
+        ],
     ) as host:
         title_prefix = f"Seeded Claude transcript {tag}"
         _seed_claude_transcripts(host.home, _SEEDED_SESSIONS, title_prefix)
