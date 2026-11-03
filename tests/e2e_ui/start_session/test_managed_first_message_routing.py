@@ -26,6 +26,7 @@ import pytest
 from playwright.async_api import async_playwright, expect
 
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME, CODEX_NATIVE_AGENT_NAME
+from omnigent.onboarding.harness_readiness import harness_is_configured
 from tests.e2e_ui.conftest import _find_free_port, configure_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.start_session._managed_replica_server import terminate
 from tests.e2e_ui.start_session.test_start_session import _run_in_fresh_loop
@@ -579,7 +580,9 @@ def test_first_native_message_outlasts_a_long_sandbox_launch(
     """
     A Claude Code or Codex session's first message stays pending through a launch
     longer than the browser's model wait and the server's hold. Codex then sends
-    it once; Claude Code also waits for its model, which needs real inference.
+    it once when the CLI is configured; a host without the Codex CLI proves the
+    launch fails closed and the pending message is not sent. Claude Code also
+    waits for its model, which needs real inference.
     """
     _run_in_fresh_loop(_drive_long_launch(managed_replicas, agent_name, sends_once_ready))
 
@@ -631,16 +634,34 @@ async def _drive_long_launch(
                 return
 
             (await client.post(f"{rig.b}/__test/provision/release")).raise_for_status()
-            rows = await _poll(
-                client,
-                network_url,
-                lambda rows: any(row["status"] == 202 for row in posts(rows)),
-                timeout=120,
-            )
-            [sent] = posts(rows)
-            assert json.loads(sent["request"])["data"]["content"] == [
-                {"type": "input_text", "text": _NATIVE_PROMPT}
-            ]
+            if harness_is_configured("codex-native"):
+                rows = await _poll(
+                    client,
+                    network_url,
+                    lambda rows: any(row["status"] == 202 for row in posts(rows)),
+                    timeout=120,
+                )
+                [sent] = posts(rows)
+                assert json.loads(sent["request"])["data"]["content"] == [
+                    {"type": "input_text", "text": _NATIVE_PROMPT}
+                ]
+                return
+
+            # The runner has no Codex CLI. The host must refuse the launch, and
+            # the browser must not post the message that was waiting on it.
+            deadline = time.monotonic() + 60
+            failed: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                failed = (await client.get(rig.b + session_path)).json()
+                if (failed.get("sandbox_status") or {}).get("stage") == "failed":
+                    break
+                await asyncio.sleep(0.5)
+            sandbox = failed.get("sandbox_status") or {}
+            assert sandbox.get("stage") == "failed", sandbox
+            assert "not configured" in str(sandbox.get("error") or ""), sandbox
+            traffic = (await client.get(network_url)).json()
+            sent = [row for row in posts(traffic) if row.get("status") == 202]
+            assert sent == []
         finally:
             for url in (rig.a, rig.b):
                 await client.post(f"{url}/__test/provision/release")
