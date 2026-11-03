@@ -31,11 +31,13 @@ def _row(page: Page, session_id: str) -> Locator:
 # Records the row's rendered title once per animation frame, so a title that is
 # only wrong for a frame is still observable. Reads the title span's own text
 # nodes to skip the screen-reader "(unread)" suffix, and flags whether the
-# inline edit field was mounted at that frame.
+# inline edit field was mounted at that frame. The first sample is synchronous:
+# the editor is already open when the sampler starts, and Enter can unmount it
+# before the next animation frame.
 _FRAME_SAMPLER = """
 (sessionId) => {
   window.__renameSamples = [];
-  const tick = () => {
+  const sample = () => {
     const link = document.querySelector(`a[href="/c/${sessionId}"]`);
     const span = link && (link.querySelector('span.relative') || link.querySelector('span'));
     window.__renameSamples.push({
@@ -48,8 +50,12 @@ _FRAME_SAMPLER = """
         : null,
       editing: !!document.querySelector('[data-testid="rename-conversation-input"]'),
     });
+  };
+  const tick = () => {
+    sample();
     window.__renameRaf = requestAnimationFrame(tick);
   };
+  sample();
   window.__renameRaf = requestAnimationFrame(tick);
 }
 """
