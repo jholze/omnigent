@@ -158,6 +158,11 @@ _LOGIN_OR_PROVIDER_MARKERS = (
     "authentication_error",
     "401 unauthorized",
     "please run /login",
+    # cursor-agent's own wording, seen when the CI host has no keychain login:
+    # "Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY".
+    "authentication required",
+    "agent login",
+    "cursor_api_key",
     "no inference provider",
     "no llm provider",
     "no provider configured",
@@ -177,6 +182,18 @@ def _login_or_provider_quote(text: str) -> str | None:
     if any(marker in lowered for marker in _LOGIN_OR_PROVIDER_MARKERS):
         return stripped
     return None
+
+
+def test_cursor_agent_auth_text_is_a_login_skip() -> None:
+    """cursor-agent's unauthenticated stderr is a login skip, not a launch bug."""
+    quote = _login_or_provider_quote(
+        "Error: Authentication required. Please run 'agent login' first, "
+        "or set CURSOR_API_KEY environment variable."
+    )
+    assert quote is not None
+    assert (
+        _login_or_provider_quote("Native Cursor terminal failed to start (RuntimeError)") is None
+    )
 
 
 def _stored_login_or_provider_error(base_url: str, session_id: str) -> str | None:
@@ -199,15 +216,16 @@ def _stored_login_or_provider_error(base_url: str, session_id: str) -> str | Non
         snapshot = None
     if snapshot is not None and snapshot.status_code == 200:
         body = snapshot.json()
-        if body.get("status") == "failed":
-            error = body.get("last_task_error")
-            if isinstance(error, dict):
-                for key in ("message", "cause", "title"):
-                    value = error.get(key)
-                    if isinstance(value, str):
-                        quote = _login_or_provider_quote(value)
-                        if quote is not None:
-                            return quote
+        # The resume panel can show after the terminal exits while status is
+        # no longer "failed". The stored text still decides the skip.
+        error = body.get("last_task_error")
+        if isinstance(error, dict):
+            for key in ("message", "cause", "title"):
+                value = error.get(key)
+                if isinstance(value, str):
+                    quote = _login_or_provider_quote(value)
+                    if quote is not None:
+                        return quote
     try:
         items = httpx.get(
             f"{base_url}/v1/sessions/{session_id}/items",
