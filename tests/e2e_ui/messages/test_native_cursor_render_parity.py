@@ -30,16 +30,16 @@ Claude Code and Codex derive their model auth from the runner's own Databricks
 gateway credentials (CI exchanges Databricks OAuth before pytest), so those
 suites run unconditionally in CI. ``cursor-agent`` has **no Databricks-gateway
 path** — it talks only to Cursor's backend and authenticates from the ambient
-``cursor-agent login`` (``$HOME/.cursor``) or an ambient ``CURSOR_API_KEY``.
+``cursor-agent login`` or an ambient ``CURSOR_API_KEY``.
 Because CI does not provision a Cursor account by default, this suite is **gated
-to skip** when ``cursor-agent`` is absent or no usable Cursor login is present
-(see :func:`_cursor_unavailable_reason`); it runs for real wherever Cursor is
-logged in (a dev box, or a CI job that installs ``cursor-agent`` and provides a
-``CURSOR_API_KEY`` secret). A directory under ``$HOME/.cursor`` is enough for
-that gate, so a shared CI server can still launch a session whose stored
-error is a missing Cursor login or provider. That case skips, quoting the
-stored error (:func:`_stored_login_or_provider_error`). Any other launch or
-render failure still fails. The ``native_cursor_session`` fixture launches the
+to skip** when ``cursor-agent`` is absent or ``cursor-agent status`` reports no
+login (see :func:`_cursor_unavailable_reason`); it runs for real wherever that
+status is authenticated (a dev box, or a CI job that provides a
+``CURSOR_API_KEY`` secret). A ``$HOME/.cursor`` directory is not a login: the
+IDE and MCP config create it on a shared runner. A launch that does start and
+then stores a missing-login or missing-provider error still skips, quoting that
+text (:func:`_stored_login_or_provider_error`). Any other launch or render
+failure still fails. The ``native_cursor_session`` fixture launches the
 TUI with ``-f`` so the unattended tmux pane never blocks on Cursor's
 workspace-trust / per-tool approval prompts.
 
@@ -62,9 +62,9 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -108,41 +108,77 @@ _TERMINAL_READY_TIMEOUT_MS = 120_000
 _COMPOSER_TURNS = 2
 
 
+def _skip_reason_from_cursor_status(returncode: int, stdout: str) -> str | None:
+    """Return a skip reason unless *stdout* says cursor-agent is authenticated.
+
+    ``cursor-agent status --format json`` exits 0 for both states. An empty
+    home reports ``isAuthenticated: false`` and ``message: "Not logged in"``.
+    A ``~/.cursor`` directory does not appear in that payload, so it cannot
+    count as a login.
+
+    :param returncode: Process exit code. Nonzero without JSON is a skip.
+    :param stdout: The status command's stdout.
+    :returns: ``None`` when ``isAuthenticated`` is true, otherwise the skip text.
+    """
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("isAuthenticated") is True:
+        return None
+    detail = "not authenticated"
+    if isinstance(payload, dict):
+        message = payload.get("message") or payload.get("status")
+        if isinstance(message, str) and message.strip():
+            detail = message.strip()
+    elif returncode != 0:
+        detail = f"cursor-agent status exited {returncode}"
+    return (
+        "cursor-native render-parity needs a Cursor login "
+        f"({detail}). Export CURSOR_API_KEY or run `cursor-agent login`. "
+        "Skipped (not failed) because a ~/.cursor directory is not a login "
+        "and CI does not provision a Cursor account by default."
+    )
+
+
 def _cursor_unavailable_reason() -> str | None:
     """Return a skip reason when the cursor-native prerequisites are absent.
 
-    cursor-native needs (1) the ``cursor-agent`` binary on PATH and (2) a usable
-    Cursor login — either an ambient ``CURSOR_API_KEY`` or a prior
-    ``cursor-agent login`` whose state lives under ``$HOME/.cursor``. Either
-    missing is a clean **skip** (CI does not provision a Cursor account), so the
-    e2e-ui shards stay green while the suite runs for real wherever Cursor is
-    logged in.
+    cursor-native needs the ``cursor-agent`` and ``tmux`` binaries, plus a
+    login ``cursor-agent status`` itself reports. A ``$HOME/.cursor`` directory
+    is not that login. A missing login is a clean **skip** (CI does not
+    provision a Cursor account).
 
-    :returns: A human-readable skip reason, or ``None`` when both prerequisites
-        are present.
+    :returns: A human-readable skip reason, or ``None`` when the CLI is logged in.
     """
     if shutil.which("cursor-agent") is None:
         return "cursor-native render-parity needs the `cursor-agent` binary on PATH."
     if shutil.which("tmux") is None:
         return "cursor-native render-parity needs `tmux` on PATH (runner-owned TUI pane)."
-    has_api_key = bool(os.environ.get("CURSOR_API_KEY"))
-    has_login = (Path.home() / ".cursor").is_dir()
-    if not (has_api_key or has_login):
-        return (
-            "cursor-native render-parity needs a Cursor login: export CURSOR_API_KEY "
-            "or run `cursor-agent login` (state under $HOME/.cursor). Skipped (not "
-            "failed) because CI does not provision a Cursor account by default."
+    try:
+        completed = subprocess.run(
+            ["cursor-agent", "status", "--format", "json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
-    return None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return (
+            "cursor-native render-parity needs a Cursor login, and "
+            f"`cursor-agent status` did not finish ({exc})."
+        )
+    return _skip_reason_from_cursor_status(completed.returncode, completed.stdout)
 
 
 # Gate the LIVE render-parity test (it drives a real cursor-agent TUI) on a
 # usable Cursor login. This is a per-test mark, NOT a module-level ``pytestmark``,
 # so the store-stub mirror test below — which needs no live agent — still runs in
 # CI on every PR. See ``test_native_cursor_mirror_renders_without_live_agent``.
+_CURSOR_UNAVAILABLE_REASON = _cursor_unavailable_reason()
 _requires_live_cursor = pytest.mark.skipif(
-    _cursor_unavailable_reason() is not None,
-    reason=_cursor_unavailable_reason() or "",
+    _CURSOR_UNAVAILABLE_REASON is not None,
+    reason=_CURSOR_UNAVAILABLE_REASON or "",
 )
 
 
@@ -196,6 +232,72 @@ def test_cursor_agent_auth_text_is_a_login_skip() -> None:
     )
 
 
+_UNAUTHENTICATED_STATUS = (
+    '{"status":"unauthenticated","isAuthenticated":false,'
+    '"hasAccessToken":false,"message":"Not logged in"}'
+)
+_ERROR_TEXT_KEYS = ("message", "cause", "title", "remediation")
+
+
+def test_unauthenticated_cursor_status_is_a_skip() -> None:
+    """``cursor-agent status`` with no login is a skip, even when it exits 0."""
+    reason = _skip_reason_from_cursor_status(0, _UNAUTHENTICATED_STATUS)
+    assert reason is not None
+    assert "Not logged in" in reason
+
+
+def test_authenticated_cursor_status_is_not_a_skip() -> None:
+    """An authenticated status payload runs the live test."""
+    assert _skip_reason_from_cursor_status(0, '{"isAuthenticated": true}') is None
+
+
+def test_non_json_cursor_status_is_a_skip() -> None:
+    """A status command that does not return JSON is not a usable login."""
+    reason = _skip_reason_from_cursor_status(1, "not json")
+    assert reason is not None
+    assert "exited 1" in reason
+
+
+def test_flat_error_fields_keep_a_generic_launch_failure_red() -> None:
+    """The items API spreads error fields on the item. A generic failure stays red."""
+    generic = {"type": "error", "message": "Native Cursor terminal failed to start (RuntimeError)"}
+    assert _quote_from_mapping(generic) is None
+    assert _quote_from_mapping({"message": "The harness is not running."}) is None
+    auth = {
+        "type": "error",
+        "message": (
+            "Error: Authentication required. Please run 'agent login' first, "
+            "or set CURSOR_API_KEY environment variable."
+        ),
+    }
+    assert _quote_from_mapping(auth) == auth["message"]
+
+
+def _quote_from_mapping(payload: object) -> str | None:
+    """Return the first login/provider sentence in a flat error payload."""
+    if not isinstance(payload, dict):
+        return None
+    for key in _ERROR_TEXT_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str):
+            quote = _login_or_provider_quote(value)
+            if quote is not None:
+                return quote
+    return None
+
+
+def _error_strings(payload: object) -> list[str]:
+    """Collect stored error sentences from a flat error payload."""
+    if not isinstance(payload, dict):
+        return []
+    found: list[str] = []
+    for key in _ERROR_TEXT_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            found.append(value.strip())
+    return found
+
+
 def _stored_login_or_provider_error(base_url: str, session_id: str) -> str | None:
     """Return the session's stored login/provider error, if that is what it is.
 
@@ -218,14 +320,18 @@ def _stored_login_or_provider_error(base_url: str, session_id: str) -> str | Non
         body = snapshot.json()
         # The resume panel can show after the terminal exits while status is
         # no longer "failed". The stored text still decides the skip.
-        error = body.get("last_task_error")
-        if isinstance(error, dict):
-            for key in ("message", "cause", "title"):
-                value = error.get(key)
-                if isinstance(value, str):
-                    quote = _login_or_provider_quote(value)
-                    if quote is not None:
-                        return quote
+        quote = _quote_from_mapping(body.get("last_task_error"))
+        if quote is not None:
+            return quote
+    for item in _error_items(base_url, session_id):
+        quote = _quote_from_mapping(item)
+        if quote is not None:
+            return quote
+    return None
+
+
+def _error_items(base_url: str, session_id: str) -> list[dict]:
+    """Return persisted ``type=error`` items, or an empty list when unread."""
     try:
         items = httpx.get(
             f"{base_url}/v1/sessions/{session_id}/items",
@@ -233,18 +339,34 @@ def _stored_login_or_provider_error(base_url: str, session_id: str) -> str | Non
             timeout=10.0,
         )
     except httpx.HTTPError:
-        return None
+        return []
     if items.status_code != 200:
-        return None
+        return []
+    found: list[dict] = []
     for item in items.json().get("data", []):
-        if not isinstance(item, dict) or item.get("type") != "error":
-            continue
-        message = item.get("message")
-        if isinstance(message, str):
-            quote = _login_or_provider_quote(message)
-            if quote is not None:
-                return quote
-    return None
+        if isinstance(item, dict) and item.get("type") == "error":
+            found.append(item)
+    return found
+
+
+def _describe_stored_errors(base_url: str, session_id: str) -> str:
+    """Quote stored failure text so a non-login miss stays diagnosable."""
+    parts: list[str] = []
+    try:
+        snapshot = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+    except httpx.HTTPError as exc:
+        parts.append(f"snapshot unread: {exc}")
+    else:
+        if snapshot.status_code != 200:
+            parts.append(f"snapshot HTTP {snapshot.status_code}")
+        else:
+            error = snapshot.json().get("last_task_error")
+            parts.append("last_task_error: " + "; ".join(_error_strings(error) or ["none"]))
+    item_texts = [
+        text for item in _error_items(base_url, session_id) for text in _error_strings(item)
+    ]
+    parts.append("error items: " + ("; ".join(item_texts) if item_texts else "none"))
+    return "\n".join(parts)
 
 
 def _open_terminal_view(page: Page) -> None:
@@ -290,7 +412,8 @@ def _wait_terminal_connected(page: Page, base_url: str, session_id: str) -> None
                 f"Cursor login or provider error: {quote!r}"
             )
     if last_miss is not None:
-        raise last_miss
+        stored = _describe_stored_errors(base_url, session_id)
+        raise AssertionError(f"{last_miss}\n\nStored session errors:\n{stored}") from last_miss
     expect(terminal).to_have_attribute("data-state", "connected", timeout=1_000)
 
 
