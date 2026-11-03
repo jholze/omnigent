@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ import pytest
 
 from omnigent.harnesses.cursor_native import forwarder as fwd
 from omnigent.harnesses.cursor_native.forwarder import _persist_native_compaction_item
+from tests.budgets import budget
 
 # Real cursor chat ids are UUIDs. Use UUID-shaped ids in fixtures so the
 # persist side (forwarder) and the resume side (runner's strict
@@ -649,14 +651,24 @@ async def _drive_forwarder(
     Stubs discovery/claim so the loop binds *store* at once and routes every
     POST through *poster*, then polls ``until(bridge_dir)`` (which inspects the
     persisted cursor and/or *poster*) and cancels the loop. Raises if the
-    condition is never reached within *max_ticks* — i.e. the loop wedged.
-    *claim* overrides the default never-claimed stub (e.g. to inject failures).
+    condition is never reached within the scaled hang guard — i.e. the loop
+    wedged. *claim* overrides the default never-claimed stub.
     """
     bridge_dir = tmp_path / "cursor-native" / "sess"
     bridge_dir.mkdir(parents=True)
     monkeypatch.setattr(fwd, "_discover_store", lambda workspace, launch_ms: store)
     monkeypatch.setattr(fwd, "_chat_claimed_by_other", claim or (lambda *a, **k: False))
     monkeypatch.setattr(fwd, "_post_conversation_item", poster)
+
+    async def _no_network(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    # Those three calls use the real client (30s timeout) against "http://test".
+    # A slow lookup outlives the hang guard and looks like a wedged mirror.
+    # Tests that own the requests stub them on their own loop.
+    monkeypatch.setattr(fwd, "_patch_external_session_id", _no_network)
+    monkeypatch.setattr(fwd, "_persist_native_compaction_item", _no_network)
+    monkeypatch.setattr(fwd, "_post_model_change_if_new", _no_network)
     task = asyncio.create_task(
         fwd.forward_cursor_store_to_session(
             base_url="http://test",
@@ -669,8 +681,11 @@ async def _drive_forwarder(
             poll_interval_s=0.001,
         )
     )
+    # One second of the old yield loop, scaled. Callers that pass max_ticks
+    # still widen the guard; they do not race a fixed 2s yield count.
+    deadline = time.monotonic() + budget(max(1.0, max_ticks * 0.001))
     try:
-        for _ in range(max_ticks):
+        while time.monotonic() < deadline:
             if until(bridge_dir):
                 break
             await asyncio.sleep(0.001)
