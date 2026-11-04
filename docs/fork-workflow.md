@@ -67,7 +67,15 @@ with `launchctl kickstart -k` while interrupting live sessions.
 3. Fork CI (`.github/workflows/fork-ci.yml`, the only enabled workflow) runs on
    the two self-hosted Mac runners. Required: `Python lint (ruff, pyrefly)`,
    `Web (lint, typecheck, vitest, build)`, `Pytest (SQLite)`. `E2E UI` is
-   non-blocking. Drafts do not run CI.
+   non-blocking. Drafts do not run CI. The pytest suite, vitest, and E2E are
+   skipped only when every changed file is a `*.md` file outside `tests/` and
+   outside `specs/` (`docs/**/*.md` included), no test reads that file, and
+   the file is not under `docs/` with executable code (a shebang or a fenced
+   Python, bash, shell, or TypeScript block). Config, YAML/JSON/TOML, specs,
+   fixtures, anything under `tests/`, workflow files, and any other file run
+   the full suite. Lint still runs. `Pytest (SQLite)` is not skipped on that
+   allowlist: the job reports success without the suite, so the required
+   check can pass.
 4. Merge with a merge commit (`gh pr merge N --merge --match-head-commit SHA`),
    then delete the merged branch.
 
