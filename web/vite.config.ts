@@ -256,6 +256,10 @@ export default defineConfig(({ command }) => ({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
+    // Node 26 turns on a global localStorage that stays undefined unless a
+    // storage file flag is set, and that getter shadows jsdom. Disable it so
+    // tests call jsdom's Storage (matches fork CI). Do not pass a storage file.
+    execArgv: ["--no-experimental-webstorage"],
     // Scope discovery to src/ — the web suite lives there. Without this,
     // vitest's default glob descends into the nested electron package and
     // tries to run its node:test files (which aren't vitest suites).

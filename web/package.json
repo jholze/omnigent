@@ -15,9 +15,9 @@
     "lint:fix": "oxlint --fix .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test": "NODE_OPTIONS=--no-experimental-webstorage LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 vitest run",
+    "test:watch": "NODE_OPTIONS=--no-experimental-webstorage LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 vitest",
+    "test:coverage": "NODE_OPTIONS=--no-experimental-webstorage LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 vitest run --coverage",
     "build:overlay": "vite build --config vite.update-overlay.config.ts",
     "build:server-selector-v2": "vite build --config vite.server-selector-v2.config.ts",
     "dev:server-selector-v2": "vite --config vite.server-selector-v2.config.ts"
