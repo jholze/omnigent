@@ -29,6 +29,7 @@ from omnigent.server.agent_onboarding_secrets import contains_secret
 from omnigent.server.feature_flags import FEATURES_ENV_VAR, Feature, resolve_feature_flags
 from omnigent.stores.chat_store import AccountStatus
 from omnigent.stores.chat_store.sqlalchemy_store import SqlAlchemyChatStore
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.onboarding_store import OnboardingStore
 from tests.server.chat_testkit import (
     AGENT_SECRET,
@@ -664,6 +665,16 @@ def test_hidden_projects_and_unscoped_agents_are_not_found(
     stranger = Caller("stranger@example.com", "user", False)
     with pytest.raises(OnboardingError, match="not_found"):
         service.start(stranger, account_ref=bot.handle, project_id=project_id)
+    with pytest.raises(OnboardingError, match="not_found"):
+        service.import_existing(
+            _owner(), account_ref=bot.handle, project_id=foreign_id, now_us=_NOW
+        )
+    assert OnboardingStore(db_uri).get(bot.id, foreign_id) is None
+    with pytest.raises(OnboardingError, match="not_found"):
+        service.import_existing(
+            _owner(), account_ref=unscoped.handle, project_id=project_id, now_us=_NOW
+        )
+    assert OnboardingStore(db_uri).list_for_account(unscoped.id) == ()
 
 
 def test_access_failed_and_offline_host_keep_invited(
@@ -978,3 +989,94 @@ async def test_offline_host_blocks_session_create_before_onboarding_required(
         )
     )
     assert blocked["code"] == "host_offline"
+
+
+async def test_write_gate_follows_the_named_project(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-active row blocks that project, not the account's other project."""
+    del runtime_init
+    project_p = uuid.uuid4().hex
+    project_q = uuid.uuid4().hex
+    guides = tmp_path / "guides"
+    _write_guide(guides, project_p)
+    _write_guide(guides, project_q)
+    monkeypatch.setenv(FEATURES_ENV_VAR, "agent_onboarding")
+    monkeypatch.setenv("OMNIGENT_CHAT_AGENT_SECRET", AGENT_SECRET)
+    monkeypatch.setenv("OMNIGENT_ONBOARDING_ALLOW_CLOCK", "1")
+    monkeypatch.setenv("OMNIGENT_ONBOARDING_GUIDES_DIR", str(guides))
+    _project(db_uri, project_p, "gate-p")
+    _project(db_uri, project_q, "gate-q")
+    bot, bot_token = _account(db_uri, "gate-bot", (project_p, project_q))
+    service = _service(db_uri, guides)
+    service.start(_owner(), account_ref=bot.handle, project_id=project_p, now_us=_NOW)
+    service.start(_owner(), account_ref=bot.handle, project_id=project_q, now_us=_NOW)
+    store = OnboardingStore(db_uri)
+    active = store.get(bot.id, project_p)
+    other = store.get(bot.id, project_q)
+    assert active is not None and other is not None
+    active.status = "active"
+    other.status = "refresh_required"
+    store.save(active)
+    store.save(other)
+    filed = SqlAlchemyConversationStore(db_uri).create_conversation(
+        title="filed-in-p", project_id=project_p
+    )
+    app = build_chat_app(db_uri, tmp_path)
+    transport = httpx.ASGITransport(app=app)
+
+    async def call(client: httpx.AsyncClient, name: str, arguments: dict) -> dict[str, object]:
+        return _tool_error(await tools_call(client, name, arguments, token=bot_token))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        allowed = await call(
+            client, "create_session", {"agent_name": "missing-agent", "project_id": project_p}
+        )
+        blocked = await call(
+            client, "create_session", {"agent_name": "missing-agent", "project_id": project_q}
+        )
+        unnamed = await call(client, "create_session", {"agent_name": "missing-agent"})
+        foreign = await call(
+            client,
+            "create_session",
+            {"agent_name": "missing-agent", "project_id": uuid.uuid4().hex},
+        )
+        filed_response = await tools_call(
+            client,
+            "send_message",
+            {"session_id": filed.id, "text": "hello"},
+            token=bot_token,
+        )
+        other.host_check = "offline"
+        store.save(other)
+        offline = await call(
+            client, "create_session", {"agent_name": "missing-agent", "project_id": project_q}
+        )
+        open_while_other_offline = await call(
+            client, "create_session", {"agent_name": "missing-agent", "project_id": project_p}
+        )
+        other.status = "suspended"
+        other.host_check = None
+        store.save(other)
+        still_open = await call(
+            client, "create_session", {"agent_name": "missing-agent", "project_id": project_p}
+        )
+        suspended = await call(
+            client, "create_session", {"agent_name": "missing-agent", "project_id": project_q}
+        )
+    filed_payload = filed_response.json()
+    assert "error" not in filed_payload
+    filed_result = filed_payload["result"]
+    if filed_result.get("isError") is True:
+        assert (filed_result.get("structuredContent") or {}).get("code") != "onboarding_required"
+    assert allowed["code"] not in {"onboarding_required", "suspended", "host_offline"}
+    assert blocked["code"] == "onboarding_required"
+    assert unnamed["code"] == "onboarding_required"
+    assert foreign["code"] == "onboarding_required"
+    assert offline["code"] == "host_offline"
+    assert open_while_other_offline["code"] != "host_offline"
+    assert still_open["code"] not in {"suspended", "onboarding_required"}
+    assert suspended["code"] == "suspended"

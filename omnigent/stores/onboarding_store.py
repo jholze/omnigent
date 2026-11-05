@@ -14,6 +14,7 @@ from omnigent.db.db_models import (
     SqlAgentOnboarding,
     SqlAgentOnboardingAudit,
     SqlChatAgentAccount,
+    SqlConversationMetadata,
     SqlProject,
     current_workspace_id,
 )
@@ -203,6 +204,22 @@ class OnboardingStore:
             for row in rows:
                 if row.handle == ref or row.id == ref:
                     return _to_account(row)
+        return None
+
+    def session_project_id(self, session_id: str) -> str | None:
+        """Return the project a session is filed in, if it has one."""
+        with self._session("onboarding_session_project") as session:
+            row = session.execute(
+                select(SqlConversationMetadata.project_id).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == session_id,
+                )
+            ).first()
+        if row is None:
+            return None
+        project_id = row[0]
+        if isinstance(project_id, str) and project_id:
+            return project_id
         return None
 
     def project_owned(self, user_id: str, project_id: str) -> bool:

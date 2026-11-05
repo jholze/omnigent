@@ -8,11 +8,12 @@ Decisions for this version, where the spec left a question open:
 * ``onboarding_approve`` accepts a human owner or an admin. An ``ogc_`` token
   is forbidden. The orchestrator is a human owner or an agent whose handle is
   listed on the guide or in ``OMNIGENT_ONBOARDING_ORCHESTRATOR_HANDLES``.
-* Until status is ``active``, the bot's write tools are refused. ``chat_*``
-  stays allowed so a later chat product can post, but this server never calls
-  chat. Findings and owner notices are returned by ``onboarding_status``.
-* A bot with no onboarding row is not gated, so existing accounts keep working
-  until ``onboarding_start`` or ``onboarding_import``.
+* Until the target project's row is ``active``, writes for that project are
+  refused. A call names the project via ``project_id``, a filed session, or
+  the account's only project. Several projects and no target stay fail-closed.
+  ``chat_*`` stays allowed. Findings come back from ``onboarding_status``.
+* A bot with no onboarding row for that project is not gated, so existing
+  accounts keep working until ``onboarding_start`` or ``onboarding_import``.
 * Clocks advance when status is read. ``now_us`` is accepted only when
   ``OMNIGENT_ONBOARDING_ALLOW_CLOCK`` is true. There is no chat scheduler.
 * Host offline keeps status ``invited`` and refuses ``create_session`` without
@@ -448,6 +449,8 @@ class OnboardingService:
         """Mark an existing bot ``refresh_required`` so it confirms the delta."""
         account = self._require_account(account_ref, include_revoked=False)
         self._require_orchestrator(caller, account, project_id)
+        if account.project_ids is None or project_id not in account.project_ids:
+            raise OnboardingError("not_found")
         guide = self._guide(project_id)
         now = self._now(now_us)
         existing = self._store.get(account.id, project_id)
@@ -928,16 +931,64 @@ def onboarding_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _in_account_scope(account: AccountRef, project_id: str) -> bool:
+    if account.project_ids is None:
+        return True
+    return project_id in account.project_ids
+
+
+def _resolve_gate_project(
+    account: AccountRef,
+    args: Mapping[str, Any],
+    rows: tuple[OnboardingRecord, ...],
+    session_project_id: str | None,
+) -> tuple[str | None, bool]:
+    """Return ``(project_id, specific)`` for the write gate.
+
+    ``specific`` is true when the write belongs to one project. An empty
+    row match for that project is not gated. ``specific`` false keeps every
+    row, so a foreign id or an unscoped multi-project write stays fail-closed.
+    """
+    named = _text(args.get("project_id"))
+    if named is not None:
+        if _in_account_scope(account, named):
+            return named, True
+        return None, False
+    alias = _text(args.get("project"))
+    if alias is not None and any(row.project_id == alias for row in rows):
+        if _in_account_scope(account, alias):
+            return alias, True
+        return None, False
+    if session_project_id and _in_account_scope(account, session_project_id):
+        return session_project_id, True
+    ids = account.project_ids
+    if ids is not None and len(set(ids)) == 1:
+        return ids[0], True
+    return None, False
+
+
+def _session_project_id(store: OnboardingStore, args: Mapping[str, Any]) -> str | None:
+    session_id = _text(args.get("session_id"))
+    if session_id is None:
+        return None
+    try:
+        return store.session_project_id(session_id)
+    except Exception:  # noqa: BLE001 — a lookup failure stays fail-closed
+        _logger.info("onboarding gate could not read the session project")
+        return None
+
+
 def reject_blocked_write(
     request: Any,
     auth_provider: Any,
     name: str,
     args: Mapping[str, Any],
 ) -> None:
-    """Refuse a non-active bot's write, and a session create while the host is offline.
+    """Refuse a write while the target project's onboarding row is not active.
 
-    Chat tools and onboarding tools are left to their own handlers. A bot with
-    no onboarding row is not gated.
+    The target is ``project_id``, else the session's project, else the
+    account's only project. Several projects and no target keep every row.
+    Chat and onboarding tools are not gated. No row means not gated.
     """
     from omnigent.server.mcp_endpoint import ToolFailure
 
@@ -957,14 +1008,23 @@ def reject_blocked_write(
     rows = store.list_for_account(account.id)
     if not rows:
         return
+    session_project = None
+    if _text(args.get("project_id")) is None:
+        session_project = _session_project_id(store, args)
+    target, specific = _resolve_gate_project(account, args, rows, session_project)
+    relevant = rows
+    if specific and target is not None:
+        relevant = tuple(row for row in rows if row.project_id == target)
+        if not relevant:
+            return
     if name == "create_session" and not _text(args.get("host_id")):
-        if any(row.host_check == "offline" for row in rows):
+        if any(row.host_check == "offline" for row in relevant):
             raise ToolFailure("host offline", code="host_offline")
     if not _write_attempt(name, args):
         return
-    if any(row.status == "suspended" for row in rows):
+    if any(row.status == "suspended" for row in relevant):
         raise ToolFailure("suspended", code="suspended")
-    if any(row.status != "active" for row in rows):
+    if any(row.status != "active" for row in relevant):
         raise ToolFailure("onboarding_required", code="onboarding_required")
 
 
