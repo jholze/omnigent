@@ -576,7 +576,10 @@ async def _dispatch(
     params: dict[str, Any],
 ) -> Any:
     if method == "initialize":
-        return _initialize_result(params)
+        result = _initialize_result(params)
+        if _onboarding_enabled(request):
+            result["capabilities"]["resources"] = {"listChanged": False}
+        return result
     if method == "ping":
         return {}
     if method.startswith("notifications/"):
@@ -584,7 +587,26 @@ async def _dispatch(
     if method == "tools/list":
         return {"tools": _visible_tools(request, auth_provider)}
     if method == "resources/list":
-        return {"resources": []}
+        if not _onboarding_enabled(request):
+            return {"resources": []}
+        from omnigent.server.agent_onboarding import list_onboarding_resources
+
+        return {"resources": list_onboarding_resources()}
+    if method == "resources/read":
+        if not _onboarding_enabled(request):
+            raise _RpcFailure(-32601, f"Method not found: {method}")
+        from omnigent.server.agent_onboarding import (
+            OnboardingError,
+            read_onboarding_resource,
+        )
+
+        uri = params.get("uri")
+        if not isinstance(uri, str) or not uri:
+            raise _RpcFailure(-32602, "uri is required")
+        try:
+            return read_onboarding_resource(request, auth_provider, uri)
+        except OnboardingError as exc:
+            raise _RpcFailure(-32002, exc.code) from None
     if method == "prompts/list":
         return {"prompts": []}
     if method == "tools/call":
@@ -658,6 +680,15 @@ def _unsupported_protocol_header(request: Request) -> JSONResponse | None:
     )
 
 
+def _onboarding_enabled(request: Request) -> bool:
+    """Whether this process was started with the agent_onboarding flag."""
+    flags = getattr(request.app.state, "feature_flags", None)
+    enabled = getattr(flags, "enabled", None)
+    if enabled is None:
+        return False
+    return bool(enabled(Feature.AGENT_ONBOARDING))
+
+
 def _team_chat_enabled(request: Request) -> bool:
     """Whether this process was started with the team_chat flag."""
     flags = getattr(request.app.state, "feature_flags", None)
@@ -688,6 +719,10 @@ def _visible_tools(request: Request, auth_provider: AuthProvider | None) -> list
     from omnigent.server.mcp_chat import chat_tool_definitions
 
     tools = tool_definitions()
+    if _onboarding_enabled(request):
+        from omnigent.server.agent_onboarding import onboarding_tool_definitions
+
+        tools = [*tools, *onboarding_tool_definitions()]
     if _team_chat_enabled(request):
         include_schema = _structured_output(request_protocol_version(request))
         tools = [
@@ -876,6 +911,9 @@ async def _perform_call(
                 version=version,
             )
         try:
+            from omnigent.server.agent_onboarding import reject_blocked_write
+
+            reject_blocked_write(request, auth_provider, name, args)
             data = await _call_tool(request, auth_provider, name, args)
         except ToolFailure as exc:
             code = exc.code or ("validation_error" if name in CHAT_TOOL_NAMES else None)
@@ -1278,8 +1316,12 @@ async def _call_tool(
     args: dict[str, Any],
 ) -> Any:
     api = _Api(request, auth_provider)
+    from omnigent.server.agent_onboarding import NOT_ONBOARDING, call_onboarding_tool
     from omnigent.server.mcp_chat import NOT_A_CHAT_TOOL, call_chat_tool
 
+    onboarding_result = await call_onboarding_tool(request, auth_provider, name, args)
+    if onboarding_result is not NOT_ONBOARDING:
+        return onboarding_result
     chat_result = await call_chat_tool(api, name, args)
     if chat_result is not NOT_A_CHAT_TOOL:
         return chat_result
