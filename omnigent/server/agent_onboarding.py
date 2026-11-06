@@ -937,45 +937,83 @@ def _in_account_scope(account: AccountRef, project_id: str) -> bool:
     return project_id in account.project_ids
 
 
-def _resolve_gate_project(
-    account: AccountRef,
-    args: Mapping[str, Any],
-    rows: tuple[OnboardingRecord, ...],
-    session_project_id: str | None,
-) -> tuple[str | None, bool]:
-    """Return ``(project_id, specific)`` for the write gate.
-
-    ``specific`` is true when the write belongs to one project. An empty
-    row match for that project is not gated. ``specific`` false keeps every
-    row, so a foreign id or an unscoped multi-project write stays fail-closed.
-    """
-    named = _text(args.get("project_id"))
-    if named is not None:
-        if _in_account_scope(account, named):
-            return named, True
-        return None, False
-    alias = _text(args.get("project"))
-    if alias is not None and any(row.project_id == alias for row in rows):
-        if _in_account_scope(account, alias):
-            return alias, True
-        return None, False
-    if session_project_id and _in_account_scope(account, session_project_id):
-        return session_project_id, True
+def _only_account_project(account: AccountRef) -> frozenset[str] | None:
     ids = account.project_ids
     if ids is not None and len(set(ids)) == 1:
-        return ids[0], True
-    return None, False
+        return frozenset(ids)
+    return None
 
 
-def _session_project_id(store: OnboardingStore, args: Mapping[str, Any]) -> str | None:
-    session_id = _text(args.get("session_id"))
-    if session_id is None:
+def _resolve_gate_projects(
+    account: AccountRef, name: str, args: Mapping[str, Any]
+) -> frozenset[str] | None:
+    """Return the projects a write lands in, or ``None`` to keep every row.
+
+    A ``session_id`` write follows that session's root project and ignores
+    ``project_id``, except a ``manage_session`` update that moves the session
+    into a named project. A sub-agent create adds its parent's root project to
+    a named ``project_id``. An unresolved or foreign target keeps every row.
+    """
+    if args.get("session_id") is not None:
+        moved_to = None
+        if name == "manage_session" and args.get("action") == "update":
+            moved_to = _text(args.get("project_id"))
+            if moved_to is not None and not _in_account_scope(account, moved_to):
+                return None
+        root = _session_root_project_id(args.get("session_id"))
+        if root is not None and _in_account_scope(account, root):
+            return frozenset({root} if moved_to is None else {root, moved_to})
+        return _only_account_project(account)
+    targets: set[str] = set()
+    if args.get("parent_session_id") is not None:
+        root = _session_root_project_id(args.get("parent_session_id"))
+        if root is None or not _in_account_scope(account, root):
+            return None
+        targets.add(root)
+    named = _text(args.get("project_id"))
+    if named is not None:
+        if not _in_account_scope(account, named):
+            return None
+        targets.add(named)
+    if targets:
+        return frozenset(targets)
+    return _only_account_project(account)
+
+
+def _gate_conversation_store() -> Any | None:
+    from omnigent.server.agent_project_scope import current_project_scope
+
+    scope = current_project_scope()
+    if scope is not None and scope.conversation_store is not None:
+        return scope.conversation_store
+    try:
+        from omnigent.runtime import get_conversation_store
+
+        return get_conversation_store()
+    except RuntimeError:
+        return None
+
+
+def _session_root_project_id(session_id: object) -> str | None:
+    """Return the project of *session_id*'s root session, as ``session_in_scope`` reads it."""
+    from omnigent.server.agent_project_scope import _root_conversation
+
+    session_text = _text(session_id)
+    if session_text is None:
+        return None
+    store = _gate_conversation_store()
+    if store is None:
         return None
     try:
-        return store.session_project_id(session_id)
+        conversation = store.get_conversation(session_text)
+        root = None if conversation is None else _root_conversation(store, conversation)
     except Exception:  # noqa: BLE001 — a lookup failure stays fail-closed
         _logger.info("onboarding gate could not read the session project")
         return None
+    project_id = getattr(root, "project_id", None)
+    if isinstance(project_id, str) and project_id:
+        return project_id
+    return None
 
 
 def reject_blocked_write(
@@ -986,9 +1024,10 @@ def reject_blocked_write(
 ) -> None:
     """Refuse a write while the target project's onboarding row is not active.
 
-    The target is ``project_id``, else the session's project, else the
-    account's only project. Several projects and no target keep every row.
-    Chat and onboarding tools are not gated. No row means not gated.
+    The target is the root project of ``session_id``; else ``project_id``
+    plus the root project of ``parent_session_id``; else the account's only
+    project. Several projects and no target keep every row. Chat and
+    onboarding tools are not gated. No row means not gated.
     """
     from omnigent.server.mcp_endpoint import ToolFailure
 
@@ -1008,13 +1047,10 @@ def reject_blocked_write(
     rows = store.list_for_account(account.id)
     if not rows:
         return
-    session_project = None
-    if _text(args.get("project_id")) is None:
-        session_project = _session_project_id(store, args)
-    target, specific = _resolve_gate_project(account, args, rows, session_project)
+    targets = _resolve_gate_projects(account, name, args)
     relevant = rows
-    if specific and target is not None:
-        relevant = tuple(row for row in rows if row.project_id == target)
+    if targets is not None:
+        relevant = tuple(row for row in rows if row.project_id in targets)
         if not relevant:
             return
     if name == "create_session" and not _text(args.get("host_id")):

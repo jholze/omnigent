@@ -1080,3 +1080,153 @@ async def test_write_gate_follows_the_named_project(
     assert open_while_other_offline["code"] != "host_offline"
     assert still_open["code"] not in {"suspended", "onboarding_required"}
     assert suspended["code"] == "suspended"
+
+
+def _gate_code(response: httpx.Response) -> str | None:
+    """Return the tool error code, or ``None`` when the call was not refused."""
+    payload = response.json()
+    assert "error" not in payload, payload
+    result = payload["result"]
+    if result.get("isError") is not True:
+        return None
+    return (result.get("structuredContent") or {}).get("code")
+
+
+async def test_write_gate_follows_the_session_root_project(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session write is gated on its root's project; extra project args are ignored."""
+    del runtime_init
+    project_p = uuid.uuid4().hex
+    project_q = uuid.uuid4().hex
+    guides = tmp_path / "guides"
+    _write_guide(guides, project_p)
+    _write_guide(guides, project_q)
+    monkeypatch.setenv(FEATURES_ENV_VAR, "agent_onboarding")
+    monkeypatch.setenv("OMNIGENT_CHAT_AGENT_SECRET", AGENT_SECRET)
+    monkeypatch.setenv("OMNIGENT_ONBOARDING_ALLOW_CLOCK", "1")
+    monkeypatch.setenv("OMNIGENT_ONBOARDING_GUIDES_DIR", str(guides))
+    _project(db_uri, project_p, "root-p")
+    _project(db_uri, project_q, "root-q")
+    bot, bot_token = _account(db_uri, "root-bot", (project_p, project_q))
+    service = _service(db_uri, guides)
+    service.start(_owner(), account_ref=bot.handle, project_id=project_p, now_us=_NOW)
+    service.start(_owner(), account_ref=bot.handle, project_id=project_q, now_us=_NOW)
+    store = OnboardingStore(db_uri)
+    active = store.get(bot.id, project_p)
+    pending = store.get(bot.id, project_q)
+    assert active is not None and pending is not None
+    active.status = "active"
+    pending.status = "refresh_required"
+    store.save(active)
+    store.save(pending)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    root_q = conversations.create_conversation(title="root-in-q", project_id=project_q)
+    root_p = conversations.create_conversation(title="root-in-p", project_id=project_p)
+    child_filed_p_under_q = conversations.create_conversation(
+        title="child-under-q",
+        parent_conversation_id=root_q.id,
+        project_id=project_p,
+    )
+    app = build_chat_app(db_uri, tmp_path)
+    transport = httpx.ASGITransport(app=app)
+
+    async def code(client: httpx.AsyncClient, name: str, arguments: dict) -> str | None:
+        return _gate_code(await tools_call(client, name, arguments, token=bot_token))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # send_message into a Q-root session
+        into_q = await code(client, "send_message", {"session_id": root_q.id, "text": "hi"})
+        into_q_named_p = await code(
+            client,
+            "send_message",
+            {"session_id": root_q.id, "text": "hi", "project_id": project_p},
+        )
+        into_q_alias_p = await code(
+            client,
+            "send_message",
+            {"session_id": root_q.id, "text": "hi", "project": project_p},
+        )
+        # send_message into a child filed on P whose root is filed on Q
+        into_child = await code(
+            client, "send_message", {"session_id": child_filed_p_under_q.id, "text": "hi"}
+        )
+        # create_session under a Q-root parent
+        under_q = await code(
+            client,
+            "create_session",
+            {"agent_name": "missing-agent", "parent_session_id": root_q.id},
+        )
+        under_q_named_p = await code(
+            client,
+            "create_session",
+            {
+                "agent_name": "missing-agent",
+                "parent_session_id": root_q.id,
+                "project_id": project_p,
+            },
+        )
+        # create_session under a P-root parent
+        under_p_named_p = await code(
+            client,
+            "create_session",
+            {
+                "agent_name": "missing-agent",
+                "parent_session_id": root_p.id,
+                "project_id": project_p,
+            },
+        )
+        under_p_named_q = await code(
+            client,
+            "create_session",
+            {
+                "agent_name": "missing-agent",
+                "parent_session_id": root_p.id,
+                "project_id": project_q,
+            },
+        )
+        # send_message into a P-root session
+        into_p = await code(client, "send_message", {"session_id": root_p.id, "text": "hi"})
+        into_p_named_q = await code(
+            client,
+            "send_message",
+            {"session_id": root_p.id, "text": "hi", "project_id": project_q},
+        )
+        # manage_session update moving a P-root session; runs last since it may refile
+        move_p_into_q = await code(
+            client,
+            "manage_session",
+            {
+                "action": "update",
+                "session_id": root_p.id,
+                "project_id": project_q,
+                "confirm": True,
+            },
+        )
+        move_p_into_p = await code(
+            client,
+            "manage_session",
+            {
+                "action": "update",
+                "session_id": root_p.id,
+                "project_id": project_p,
+                "confirm": True,
+            },
+        )
+
+    gate_codes = {"onboarding_required", "suspended", "host_offline"}
+    assert into_q == "onboarding_required"
+    assert into_q_named_p == "onboarding_required"
+    assert into_q_alias_p == "onboarding_required"
+    assert into_child == "onboarding_required"
+    assert under_q == "onboarding_required"
+    assert under_q_named_p == "onboarding_required"
+    assert under_p_named_p not in gate_codes
+    assert under_p_named_q == "onboarding_required"
+    assert into_p not in gate_codes
+    assert into_p_named_q not in gate_codes
+    assert move_p_into_q == "onboarding_required"
+    assert move_p_into_p not in gate_codes
