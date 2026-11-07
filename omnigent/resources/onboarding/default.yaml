@@ -1,0 +1,59 @@
+version: "0.1"
+integration_branch: staging
+workspace: null
+repo: null
+host_id: null
+orchestrator_handles: []
+merge_exceptions:
+  trading-bot: staging
+rules:
+  - "Coder model is Grok 4.7. First review is DeepSeek. Final review is Opus."
+  - "Do not merge to main unless the guide names an exception."
+  - "Protected paths stay untouched: live entrypoints, execution/, risk/, *.live.json."
+  - "Tokens stay in the credentials file. Only the owner rotates them."
+  - "Findings and owner notices are returned by onboarding_status. Chat is not used."
+questions:
+  - id: understood_model_rule
+    prompt: "Name the coder model, the first reviewer, and the final reviewer."
+    required: true
+  - id: understood_merge_rule
+    prompt: "Which branch is the integration branch, and when is main forbidden?"
+    required: true
+  - id: integration_branch
+    prompt: "Which integration branch did you verify for this project?"
+    required: true
+    matches: integration_branch
+  - id: list_projects_count
+    prompt: "How many projects does list_projects show for this account?"
+    required: true
+    matches_const: "1"
+  - id: protected_paths
+    prompt: "Name one protected path you will not change."
+    required: true
+  - id: token_rule
+    prompt: "Where is the token stored, and who may rotate it?"
+    required: true
+  - id: scope_ack
+    prompt: "Confirm you will call tools only for this project."
+    required: true
+  - id: host_ack
+    prompt: "What do you do when the host is offline?"
+    required: true
+  - id: secret_ack
+    prompt: "What do you do if a secret appears in a draft answer?"
+    required: true
+  - id: escalation_ack
+    prompt: "Who can set this account to active?"
+    required: true
+delta_questions:
+  - id: ack_delta
+    prompt: "Confirm you read the guide change and will follow it."
+    required: true
+timeouts:
+  remind_1_us: 86400000000
+  remind_2_us: 172800000000
+  stall_us: 259200000000
+  owner_digest_us: 86400000000
+  owner_wait_us: 259200000000
+client_retry_s: [10, 60, 300]
+stall_after_s: 1800

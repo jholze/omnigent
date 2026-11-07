@@ -15,8 +15,8 @@ from alembic.script import ScriptDirectory
 from omnigent.db.utils import _build_alembic_config, clear_engine_cache
 
 _HEAD = "dx1a2b3c4d5e"
-# The agent-account project allow-list revises the drop and is the current head.
-_ALEMBIC_HEAD = "ps1a2b3c4d5e"
+# Onboarding revises the agent-account project allow-list and is the current head.
+_ALEMBIC_HEAD = "ob1a2b3c4d5e"
 _PARENT = "td1a2b3c4d5e"
 _TABLE = "session_chat_messages"
 

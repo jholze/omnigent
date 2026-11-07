@@ -27,6 +27,7 @@ class Feature(StrEnum):
     IMPORT_REVIEW = "import_review"
     CUSTOM_AGENTS_SETTINGS_UI = "custom_agents_settings_ui"
     TEAM_CHAT = "team_chat"
+    AGENT_ONBOARDING = "agent_onboarding"
     SIDEBAR_GROUPING_UI = "sidebar_grouping_ui"
 
 
@@ -85,6 +86,13 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         owner="web",
         review_by_release="0.20.0",
         frontend_visible=True,
+    ),
+    FeatureDefinition(
+        feature=Feature.AGENT_ONBOARDING,
+        description="MCP agent onboarding: guide, answers, review, and owner approval",
+        owner="server",
+        review_by_release="0.22.0",
+        frontend_visible=False,
     ),
     FeatureDefinition(
         feature=Feature.SIDEBAR_GROUPING_UI,
