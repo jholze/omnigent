@@ -15,8 +15,8 @@ from alembic.script import ScriptDirectory
 from omnigent.db.utils import _build_alembic_config, clear_engine_cache
 
 _HEAD = "dx1a2b3c4d5e"
-# Stall and recovery event codes revise the allow-list and are the current head.
-_ALEMBIC_HEAD = "st1a2b3c4d5e"
+# Onboarding sits on the stall event-code revision and is the current head.
+_ALEMBIC_HEAD = "ob1a2b3c4d5e"
 _PARENT = "td1a2b3c4d5e"
 _TABLE = "session_chat_messages"
 

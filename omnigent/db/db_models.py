@@ -2165,6 +2165,88 @@ class SqlChatAgentAccount(OmnigentBase):
     )
 
 
+class SqlAgentOnboarding(OmnigentBase):
+    """One live onboarding record for an agent account and a project.
+
+    Answers are stored only after the secret scan passes. A rejected secret
+    leaves ``answers_json`` empty. ``archive_json`` keeps prior answer hashes
+    and statuses after a reset, not token material.
+    """
+
+    __tablename__ = "agent_onboarding"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    account_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    guide_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    guide_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    answers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answers_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rework_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    findings_json: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_notices_json: Mapped[str] = mapped_column(Text, nullable=False)
+    bot_notices_json: Mapped[str] = mapped_column(Text, nullable=False)
+    review_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_json: Mapped[str] = mapped_column(Text, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    previous_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    opened_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    submitted_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    host_check: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_agent_onboarding_account_project",
+            "workspace_id",
+            "account_id",
+            "project_id",
+            unique=True,
+        ),
+    )
+
+
+class SqlAgentOnboardingAudit(OmnigentBase):
+    """Append-only onboarding audit. Detail is codes and counts, never bodies."""
+
+    __tablename__ = "agent_onboarding_audit"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    onboarding_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    status_after: Mapped[str] = mapped_column(String(32), nullable=False)
+    guide_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    detail_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_agent_onboarding_audit_record",
+            "workspace_id",
+            "onboarding_id",
+            "at",
+        ),
+    )
+
+
 class SqlChatAgentOutbox(OmnigentBase):
     """Transactional outbox of agent-account webhook events.
 
