@@ -57,15 +57,23 @@ _CUSTOM_TURN_TIMEOUT_MS = 90_000
 
 
 def _send(page: Page, text: str) -> None:
-    """Type *text* into the composer and click Send.
+    """Type *text* into the composer and submit it.
+
+    Idle sessions show Send. A turn still marked streaming (runner abort
+    before Stop) swaps that button for Interrupt and uses the queued
+    placeholder; Enter still queues the follow-up.
 
     :param page: The Playwright page, on the session's chat surface.
     :param text: The message body to send.
     """
-    composer = page.get_by_placeholder(_COMPOSER)
+    composer = page.get_by_role("textbox", name="Message the agent")
     expect(composer).to_be_visible(timeout=30_000)
     composer.fill(text)
-    page.get_by_role("button", name="Send", exact=True).click()
+    send = page.get_by_role("button", name="Send", exact=True)
+    if send.count() > 0 and send.first.is_visible():
+        send.click()
+        return
+    composer.press("Enter")
 
 
 def _select_view_mode(page: Page, option: str) -> None:
