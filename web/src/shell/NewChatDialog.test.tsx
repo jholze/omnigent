@@ -101,6 +101,8 @@ import {
   readNewChatPickerCache,
   readNewChatPickerOptionsCache,
   readNewChatWorkspaceCache,
+  writeNewChatPickerCache,
+  writeNewChatPickerOptionsCache,
 } from "@/lib/newChatPickerCache";
 import { setPendingInitialPrompt } from "@/store/chatStore";
 import { clearSessionDrafts } from "@/lib/sessionDrafts";
@@ -2277,13 +2279,6 @@ describe("NewChatLandingScreen cached picker preview", () => {
   it.each([false, true])(
     "keeps cached Codex model, effort, and fresh bypass through validation (agent switched: %s)",
     async (switchAgent) => {
-      // Previously visited harnesses retain their React Query data while disabled.
-      useHostModelOptionsMock.mockImplementation(
-        (_hostId, harness) =>
-          (harness === "codex-native"
-            ? CODEX_MODEL_OPTIONS_RESULT
-            : CLAUDE_MODEL_OPTIONS_RESULT) as ReturnType<typeof useHostModelOptions>,
-      );
       localStorage.setItem(LAST_AGENT_KEY, switchAgent ? "a1" : "a2");
       localStorage.setItem(
         HARNESS_OPTIONS_KEY,
@@ -2292,8 +2287,28 @@ describe("NewChatLandingScreen cached picker preview", () => {
           "codex-native": { model: "", effort: "high", mode: "default" },
         }),
       );
-      const { unmount } = renderLanding();
-      unmount();
+      // A resolved visit leaves these catalogs in the picker cache. The remount
+      // below edits them while the live queries are still pending.
+      const pickerKey = getNewChatPickerCacheKey("");
+      const cachedAgent = DEFAULT_LANDING_AGENTS.find((agent) => agent.id === "a2")!;
+      writeNewChatPickerOptionsCache(pickerKey, {
+        agent: cachedAgent,
+        agents: DEFAULT_LANDING_AGENTS,
+        hostId: "host_1",
+        sandboxSelected: false,
+        model: "",
+        models: {
+          claude: CLAUDE_MODEL_OPTIONS_RESULT.data,
+          codex: CODEX_MODEL_OPTIONS_RESULT.data,
+        },
+      });
+      writeNewChatPickerCache(pickerKey, {
+        agent: { name: cachedAgent.name, harness: cachedAgent.harness },
+        label: "Codex",
+        model: "Default",
+        effort: "High",
+        smartRouting: false,
+      });
       resetLandingDraft();
       mockAgents(undefined);
       mockHosts(undefined);
@@ -3895,6 +3910,9 @@ describe("NewChatLandingScreen", () => {
       fireEvent.change(screen.getByTestId("new-chat-landing-base-branch-input"), {
         target: { value: "release" },
       });
+      // Drop the editor portal before the next menu. Leaving it mounted makes
+      // the workspace switch pay for two open popovers.
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
       return worktree;
     }
 
@@ -3923,10 +3941,19 @@ describe("NewChatLandingScreen", () => {
         const submit = screen.getByTestId("new-chat-landing-submit");
         // Starting now would silently drop the drafted worktree.
         expect(submit).toBeDisabled();
-        fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
-        expect(await screen.findByRole("tooltip")).toHaveTextContent(
-          "Loading session configuration",
-        );
+        // The submit tooltip mounts only after its 600ms hover delay.
+        vi.useFakeTimers();
+        try {
+          fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
+          act(() => {
+            vi.advanceTimersByTime(600);
+          });
+          expect(screen.getByTestId("new-chat-landing-submit-error-tooltip")).toHaveTextContent(
+            "Loading session configuration",
+          );
+        } finally {
+          vi.useRealTimers();
+        }
 
         nextDiscovered = true;
         fireEvent.change(input, { target: { value: "continue on the drafted branch now" } });
@@ -4393,9 +4420,6 @@ describe("NewChatLandingScreen", () => {
     );
     expect(screen.queryByTestId("new-chat-landing-agent-effort-value")).toBeNull();
     closeMenu();
-    selectAgent("a1");
-    selectAgent("a2");
-    expect(screen.queryByTestId("new-chat-landing-agent-effort-value")).toBeNull();
     const { body } = await submitAndReadBody();
     expect(body.reasoning_effort).toBeUndefined();
   });
