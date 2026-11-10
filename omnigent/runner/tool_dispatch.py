@@ -1897,12 +1897,23 @@ def _strip_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]
     return stripped
 
 
+def _create_is_subagent_name_collision(resp: httpx.Response) -> bool:
+    """Whether a 409 is a child-title collision, not a host/project failure."""
+    return "sub-agent name already exists under parent" in resp.text
+
+
 def _should_retry_create_without_inherited_bindings(
     resp: httpx.Response,
     inherited: dict[str, str],
 ) -> bool:
     """Whether a failed create should be retried without inherited bindings."""
-    return bool(inherited) and resp.status_code in _SPAWN_INHERIT_RETRY_STATUSES
+    if not inherited or resp.status_code not in _SPAWN_INHERIT_RETRY_STATUSES:
+        return False
+    # Title collision is also 409. Keep the bindings and let the ordinal
+    # loop pick a new name instead of spawning an unbound child.
+    if resp.status_code == 409 and _create_is_subagent_name_collision(resp):
+        return False
+    return True
 
 
 def _subagent_reasoning_effort_from_args(args: _JsonObject) -> str | None:
@@ -2890,6 +2901,7 @@ async def _execute_subagent_tool(
             "labels": {_subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY: work_id},
         }
         inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+        source_inherited = dict(inherited_bindings)
         _apply_inherited_spawn_bindings(create_body, inherited_bindings)
         if harness_override_canonical is not None:
             create_body["harness_override"] = harness_override_canonical
@@ -2982,6 +2994,9 @@ async def _execute_subagent_tool(
                     and _auto_ordinal
                     and _ordinal_attempt < _max_ordinal_retries
                 ):
+                    if source_inherited:
+                        _apply_inherited_spawn_bindings(create_body, source_inherited)
+                        inherited_bindings = dict(source_inherited)
                     ordinal = _subagent_work.next_subagent_ordinal(
                         conversation_id,
                         str(sub_agent_name),
