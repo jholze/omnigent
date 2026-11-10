@@ -295,6 +295,7 @@ async def test_ac_113d_agent_token_cannot_create_on_ungated_route_flag_off_or_on
     [
         ("pm-omit", _OMIT_WEBHOOK, 201, ""),
         ("pm-null", None, 201, ""),
+        ("pm-ws", "   ", 201, ""),
         ("pm-ok", WEBHOOK_OK, 201, WEBHOOK_OK),
         ("pm-http", "http://bot.example.com/hook", 422, None),
         ("pm-internal", "https://10.0.0.5/hook", 422, None),
@@ -308,7 +309,7 @@ async def test_ungated_create_webhook_url_optional_and_ssrf(
     status: int,
     stored: str | None,
 ) -> None:
-    """Omitted or null webhook_url is 201; a set unsafe URL stays 422."""
+    """Omitted, null, or whitespace-only webhook_url is 201; a set unsafe URL stays 422."""
     project = _project(db_uri, JENS, "FT Max")
     ensure_live_user(db_uri, JENS)
     response = await flag_off_client.post(
