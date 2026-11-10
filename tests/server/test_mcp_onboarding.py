@@ -166,6 +166,8 @@ def test_secret_scan_rejects_tokens_and_keeps_hex_digests() -> None:
     assert contains_secret(_FAKE_SECRET) is True
     assert contains_secret({"note": "-----BEGIN PRIVATE KEY-----"}) is True
     assert contains_secret("sk-" + "a" * 12) is True
+    assert contains_secret({_FAKE_SECRET: "yes"}) is True
+    assert contains_secret({"q": {_FAKE_SECRET: "yes"}}) is True
     assert contains_secret(digest) is False
     assert contains_secret("staging") is False
 
@@ -332,6 +334,39 @@ def test_secret_submit_stores_nothing_and_can_be_replaced(
         now_us=_NOW + 2,
     )
     assert replaced["status"] == "submitted"
+
+
+def test_secret_in_answer_key_is_rejected_and_not_stored(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_CHAT_AGENT_SECRET", AGENT_SECRET)
+    monkeypatch.setenv("OMNIGENT_ONBOARDING_ALLOW_CLOCK", "1")
+    project_id = uuid.uuid4().hex
+    guides = tmp_path / "guides"
+    _write_guide(guides, project_id)
+    _project(db_uri, project_id, "secret-key-project")
+    bot, _token = _account(db_uri, "secret-key-bot", (project_id,))
+    service = _service(db_uri, guides)
+    service.start(_owner(), account_ref=bot.handle, project_id=project_id, now_us=_NOW)
+    service.status(_agent(bot), account_ref=None, project_id=project_id, now_us=_NOW)
+    guide = service.get_guide(_agent(bot), project_id)
+    with pytest.raises(OnboardingError, match="secret_detected"):
+        service.submit(
+            _agent(bot),
+            project_id=project_id,
+            guide_hash=guide["guide_hash"],
+            answers={**_answers(), _FAKE_SECRET: "yes"},
+            now_us=_NOW + 1,
+        )
+    stored = OnboardingStore(db_uri).get(bot.id, project_id)
+    assert stored is not None
+    assert stored.status == "rejected_auto"
+    assert stored.answers is None
+    owner_view = service.status(
+        _owner(), account_ref=bot.handle, project_id=project_id, now_us=_NOW + 1
+    )
+    assert any(item["code"] == "secret_detected" for item in owner_view["owner_notices"])
+    assert _FAKE_SECRET not in json.dumps(owner_view)
 
 
 def test_incomplete_and_guide_mismatch_leave_the_status_unchanged(

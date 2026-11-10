@@ -34,7 +34,7 @@ def _flatten(value: object) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        return " ".join(_flatten(item) for item in value.values())
+        return " ".join(_flatten(item) for item in (*value.keys(), *value.values()))
     if isinstance(value, list | tuple):
         return " ".join(_flatten(item) for item in value)
     return ""
