@@ -1861,12 +1861,10 @@ async def _parent_spawn_bindings(
     bindings: dict[str, str] = {}
     host = snap.get("host_id")
     workspace = snap.get("workspace")
-    host_ok = isinstance(host, str) and bool(host)
-    workspace_ok = isinstance(workspace, str) and bool(workspace)
-    if host_ok and workspace_ok:
+    if isinstance(host, str) and host and isinstance(workspace, str) and workspace:
         bindings["host_id"] = host
         bindings["workspace"] = workspace
-    elif workspace_ok:
+    elif isinstance(workspace, str) and workspace:
         bindings["workspace"] = workspace
     project = snap.get("project_id")
     if isinstance(project, str) and project:

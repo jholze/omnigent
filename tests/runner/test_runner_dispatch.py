@@ -4150,8 +4150,9 @@ async def test_sys_session_send_inherits_parent_host_workspace_project(
     [
         (400, {"error": {"code": "invalid_input", "message": "host is offline"}}),
         (404, {"detail": "host not found"}),
+        (409, {"error": {"code": "conflict", "message": "host is offline"}}),
     ],
-    ids=["400", "404"],
+    ids=["400", "404", "409"],
 )
 async def test_sys_session_send_retries_without_inherited_bindings_on_host_reject(
     monkeypatch: pytest.MonkeyPatch,
