@@ -4145,6 +4145,161 @@ async def test_sys_session_send_inherits_parent_host_workspace_project(
 
 
 @pytest.mark.asyncio
+async def test_sys_session_send_retries_without_inherited_bindings_on_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 400 from inherited host/workspace falls back to an unbound child.
+
+    Live workspace validation can reject a copied host_id. Spawn must
+    still succeed the way it did before inherit, rather than fail the
+    dispatch.
+    """
+    from omnigent.onboarding import harness_install
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    create_bodies: list[dict[str, Any]] = []
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(subagent_work, "register_child_session", lambda *a, **k: None)
+    monkeypatch.setattr(harness_install, "missing_harness_cli", lambda _harness: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_retry/child_sessions"
+        ):
+            return httpx.Response(200, json={"data": []})
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_retry":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_parent_retry",
+                    "host_id": "host_bound",
+                    "workspace": "/Users/jholze/dev/example",
+                    "project_id": "proj_bound",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            body = json.loads(request.content)
+            create_bodies.append(body)
+            if "host_id" in body:
+                return httpx.Response(
+                    400,
+                    json={"error": {"code": "invalid_input", "message": "host is offline"}},
+                )
+            return httpx.Response(201, json={"id": "conv_child_retry_unbound"})
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/sessions/conv_child_retry_unbound/events"
+        ):
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps(
+                    {
+                        "agent": "worker",
+                        "title": "retry-unbound",
+                        "args": {"input": "run the tests"},
+                    }
+                ),
+                server_client=server_client,
+                conversation_id="conv_parent_retry",
+                agent_spec=_spec_with_subagent_harness("claude-native"),
+                session_inbox=session_inbox,
+            )
+        finally:
+            subagent_work.unregister_subagent_work("conv_child_retry_unbound")
+            subagent_work._session_inboxes_ref.pop("conv_parent_retry", None)
+
+    payload = json.loads(output)
+    assert payload["status"] == "launching", output
+    assert len(create_bodies) == 2
+    assert create_bodies[0]["host_id"] == "host_bound"
+    assert "host_id" not in create_bodies[1]
+    assert "workspace" not in create_bodies[1]
+    assert "project_id" not in create_bodies[1]
+
+
+@pytest.mark.asyncio
+async def test_sys_session_send_does_not_copy_host_without_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parent host_id without workspace is not copied onto the child."""
+    from omnigent.onboarding import harness_install
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    create_bodies: list[dict[str, Any]] = []
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(subagent_work, "register_child_session", lambda *a, **k: None)
+    monkeypatch.setattr(harness_install, "missing_harness_cli", lambda _harness: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_host_only/child_sessions"
+        ):
+            return httpx.Response(200, json={"data": []})
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_host_only":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_parent_host_only",
+                    "host_id": "host_bound",
+                    "workspace": None,
+                    "project_id": "proj_bound",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            create_bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={"id": "conv_child_host_only"})
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/sessions/conv_child_host_only/events"
+        ):
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps(
+                    {
+                        "agent": "worker",
+                        "title": "host-only",
+                        "args": {"input": "run the tests"},
+                    }
+                ),
+                server_client=server_client,
+                conversation_id="conv_parent_host_only",
+                agent_spec=_spec_with_subagent_harness("claude-native"),
+                session_inbox=session_inbox,
+            )
+        finally:
+            subagent_work.unregister_subagent_work("conv_child_host_only")
+            subagent_work._session_inboxes_ref.pop("conv_parent_host_only", None)
+
+    assert json.loads(output)["status"] == "launching", output
+    assert len(create_bodies) == 1
+    assert "host_id" not in create_bodies[0]
+    assert "workspace" not in create_bodies[0]
+    assert create_bodies[0]["project_id"] == "proj_bound"
+
+
+@pytest.mark.asyncio
 async def test_sys_session_send_blocks_fresh_dispatch_when_harness_cli_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

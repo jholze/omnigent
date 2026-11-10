@@ -1828,6 +1828,7 @@ async def _inherited_parent_model(
 
 
 _SPAWN_INHERIT_KEYS = ("host_id", "workspace", "project_id")
+_SPAWN_INHERIT_RETRY_STATUSES = frozenset({400, 422})
 
 
 async def _parent_spawn_bindings(
@@ -1840,6 +1841,10 @@ async def _parent_spawn_bindings(
     these fields. Copying them at create time is how a child stays bound
     to the same machine and filing. A missing parent snapshot returns an
     empty dict so the child stays unset rather than inventing defaults.
+
+    ``host_id`` and ``workspace`` are copied as a pair (or neither). A
+    host without a workspace would be rejected by session create.
+    Workspace without a host is valid and is copied alone.
     """
     try:
         resp = await server_client.get(
@@ -1855,19 +1860,50 @@ async def _parent_spawn_bindings(
     if snap is None:
         return {}
     bindings: dict[str, str] = {}
-    for key in _SPAWN_INHERIT_KEYS:
-        value = snap.get(key)
-        if isinstance(value, str) and value:
-            bindings[key] = value
+    host = snap.get("host_id")
+    workspace = snap.get("workspace")
+    host_ok = isinstance(host, str) and bool(host)
+    workspace_ok = isinstance(workspace, str) and bool(workspace)
+    if host_ok and workspace_ok:
+        bindings["host_id"] = host
+        bindings["workspace"] = workspace
+    elif workspace_ok:
+        bindings["workspace"] = workspace
+    project = snap.get("project_id")
+    if isinstance(project, str) and project:
+        bindings["project_id"] = project
     return bindings
 
 
 def _apply_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]) -> None:
-    """Fill host/workspace/project from the parent when the child omitted them."""
+    """Fill host/workspace/project from the parent when the child omitted them.
+
+    Native spawn tools do not currently expose these fields, so the child
+    body has no explicit value. The skip-if-set guard is
+    forward-compatible if a later schema adds them.
+    """
     for key, value in inherited.items():
         existing = body.get(key)
         if existing is None or existing == "":
             body[key] = value
+
+
+def _strip_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]) -> bool:
+    """Remove inherited keys that still match *inherited*. Return True if any were removed."""
+    stripped = False
+    for key, value in inherited.items():
+        if body.get(key) == value:
+            body.pop(key, None)
+            stripped = True
+    return stripped
+
+
+def _should_retry_create_without_inherited_bindings(
+    resp: httpx.Response,
+    inherited: dict[str, str],
+) -> bool:
+    """Whether a failed create should be retried without inherited bindings."""
+    return bool(inherited) and resp.status_code in _SPAWN_INHERIT_RETRY_STATUSES
 
 
 def _subagent_reasoning_effort_from_args(args: _JsonObject) -> str | None:
@@ -2854,10 +2890,8 @@ async def _execute_subagent_tool(
             "sub_agent_name": sub_agent_name,
             "labels": {_subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY: work_id},
         }
-        _apply_inherited_spawn_bindings(
-            create_body,
-            await _parent_spawn_bindings(server_client, conversation_id),
-        )
+        inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+        _apply_inherited_spawn_bindings(create_body, inherited_bindings)
         if harness_override_canonical is not None:
             create_body["harness_override"] = harness_override_canonical
         if model is not None:
@@ -2952,6 +2986,10 @@ async def _execute_subagent_tool(
                     session_name = f"{sub_agent_name}-{ordinal}"
                     create_body["title"] = f"{sub_agent_name}:{session_name}"
                     continue
+                if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+                    _strip_inherited_spawn_bindings(create_body, inherited_bindings)
+                    inherited_bindings = {}
+                    resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
                 break
         except httpx.ReadTimeout as _exc:
             _create_timeout_exc = _exc
@@ -3674,12 +3712,13 @@ async def _execute_session_create(
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
     )
-    _apply_inherited_spawn_bindings(
-        body,
-        await _parent_spawn_bindings(server_client, conversation_id),
-    )
+    inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+    _apply_inherited_spawn_bindings(body, inherited_bindings)
     try:
         resp = await server_client.post("/v1/sessions", json=body, timeout=30.0)
+        if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+            _strip_inherited_spawn_bindings(body, inherited_bindings)
+            resp = await server_client.post("/v1/sessions", json=body, timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_create failed: {exc}"})
     if resp.status_code == 404:
@@ -3801,10 +3840,8 @@ async def _upload_config_bundle(
     title = args.get("title")
     if isinstance(title, str) and title:
         metadata["title"] = title
-    _apply_inherited_spawn_bindings(
-        metadata,
-        await _parent_spawn_bindings(server_client, conversation_id),
-    )
+    inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+    _apply_inherited_spawn_bindings(metadata, inherited_bindings)
     try:
         resp = await server_client.post(
             "/v1/sessions",
@@ -3812,6 +3849,14 @@ async def _upload_config_bundle(
             files={"bundle": (f"{source.name}.tar.gz", bundle_bytes, "application/gzip")},
             timeout=60.0,
         )
+        if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+            _strip_inherited_spawn_bindings(metadata, inherited_bindings)
+            resp = await server_client.post(
+                "/v1/sessions",
+                data={"metadata": json.dumps(metadata)},
+                files={"bundle": (f"{source.name}.tar.gz", bundle_bytes, "application/gzip")},
+                timeout=60.0,
+            )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_create failed: {exc}"})
     if resp.status_code in (401, 403):

@@ -229,6 +229,50 @@ async def test_without_project_id_response_is_unchanged(
     assert body == SessionResponse.model_validate(body).model_dump(mode="json")
 
 
+async def test_child_create_with_inherited_bindings_persists_on_get(
+    project_create_client: httpx.AsyncClient,
+) -> None:
+    """GET /v1/sessions/{child} shows the parent's project and workspace.
+
+    Native spawn copies those fields onto POST /v1/sessions. This hits
+    the real create route (not a mock body) so a later GET matches
+    issue #179's acceptance line.
+    """
+    project_id = await _project(
+        project_create_client,
+        {"agent_id": CUSTOM_AGENT_ID, "workspace": "/work/project"},
+    )
+    parent = await project_create_client.post(
+        "/v1/sessions", json={"project_id": project_id}, headers=_headers()
+    )
+    assert parent.status_code == 201, parent.text
+    parent_body = parent.json()
+    child = await project_create_client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": OTHER_AGENT_ID,
+            "parent_session_id": parent_body["id"],
+            "title": "worker:inherit-1",
+            "sub_agent_name": "worker",
+            "project_id": parent_body["project_id"],
+            "workspace": parent_body["workspace"],
+        },
+        headers=_headers(),
+    )
+    assert child.status_code == 201, child.text
+    got = await project_create_client.get(
+        f"/v1/sessions/{child.json()['id']}",
+        params={"include_items": "false"},
+        headers=_headers(),
+    )
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["parent_session_id"] == parent_body["id"]
+    assert body["agent_id"] == OTHER_AGENT_ID
+    assert body["project_id"] == parent_body["project_id"] == project_id
+    assert body["workspace"] == parent_body["workspace"] == "/work/project"
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
