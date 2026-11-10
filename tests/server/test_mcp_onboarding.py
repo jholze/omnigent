@@ -206,12 +206,12 @@ def test_revision_is_the_only_child_of_the_previous_head() -> None:
     versions = Path(__file__).resolve().parents[2] / "omnigent" / "db" / "migrations" / "versions"
     text = (versions / "ob1a2b3c4d5e_add_agent_onboarding.py").read_text(encoding="utf-8")
     assert 'revision: str = "ob1a2b3c4d5e"' in text
-    assert 'down_revision: str | None = "ps1a2b3c4d5e"' in text
+    assert 'down_revision: str | None = "st1a2b3c4d5e"' in text
     parents = [
         path.name
         for path in versions.glob("*.py")
-        if 'down_revision: str | None = "ps1a2b3c4d5e"' in path.read_text(encoding="utf-8")
-        or 'down_revision: str | tuple[str, ...] | None = "ps1a2b3c4d5e"'
+        if 'down_revision: str | None = "st1a2b3c4d5e"' in path.read_text(encoding="utf-8")
+        or 'down_revision: str | tuple[str, ...] | None = "st1a2b3c4d5e"'
         in path.read_text(encoding="utf-8")
     ]
     assert parents == ["ob1a2b3c4d5e_add_agent_onboarding.py"]

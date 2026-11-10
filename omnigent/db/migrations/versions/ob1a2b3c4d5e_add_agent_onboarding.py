@@ -1,7 +1,7 @@
 """agent onboarding status and audit
 
 Revision ID: ob1a2b3c4d5e
-Revises: ps1a2b3c4d5e
+Revises: st1a2b3c4d5e
 Create Date: 2026-11-05 12:00:00.000000
 
 Onboarding state for an agent account and one project. The audit table stores
@@ -18,7 +18,7 @@ from alembic import op
 from omnigent.db.db_models import Uuid16
 
 revision: str = "ob1a2b3c4d5e"
-down_revision: str | None = "ps1a2b3c4d5e"
+down_revision: str | None = "st1a2b3c4d5e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -882,6 +882,8 @@ def test_native_claude_lost_message_does_not_duplicate_the_next_one(
         _select_view_mode(fresh, "Chat")
         expect(fresh.locator(_USER, has_text=next_marker)).to_have_count(1, timeout=30_000)
         expect(fresh.locator(_USER)).to_have_count(3, timeout=30_000)
+        for marker in markers:
+            expect(fresh.locator(_USER, has_text=marker)).to_have_count(1, timeout=30_000)
     finally:
         fresh.close()
     _log.info("lost message surfaced once as undelivered; next message rendered once")

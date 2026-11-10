@@ -33,6 +33,10 @@ import psutil
 # shutdown path (which also tears down its zygote children), short enough
 # to keep session teardown snappy.
 _REAP_TIMEOUT_S = 10.0
+# psutil's libproc wrappers on macOS can raise SystemError when a process
+# exits mid-read (``proc_cmdline`` / ``proc_environ``). That is not a
+# psutil.Error or OSError, so treat it like an unreadable process.
+_PROC_UNREADABLE = (psutil.Error, OSError, SystemError)
 # Post-SIGKILL wait: KILL is not ignorable, so survivors vanish fast; a
 # short bound keeps total teardown near the TERM grace, not double it.
 _KILL_WAIT_S = 5.0
@@ -47,7 +51,7 @@ def _proc_argv(proc: psutil.Process) -> list[str]:
     """
     try:
         return proc.cmdline()
-    except (psutil.Error, OSError):
+    except _PROC_UNREADABLE:
         return []
 
 
@@ -59,7 +63,7 @@ def _proc_environ(proc: psutil.Process) -> dict[str, str]:
     """
     try:
         return proc.environ()
-    except (psutil.Error, OSError):
+    except _PROC_UNREADABLE:
         return {}
 
 
@@ -121,18 +125,21 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
     me = os.getpid()
     leaked: list[psutil.Process] = []
     for proc in psutil.process_iter():
-        if proc.pid == me:
+        try:
+            if proc.pid == me:
+                continue
+            argv = _proc_argv(proc)
+            cmdline = " ".join(argv)
+            if "omnigent" not in cmdline or _is_pytest_process(argv):
+                continue
+            env = _proc_environ(proc)
+            if env.get("OMNIGENT_DATA_DIR", "").rstrip(os.sep) != needle and not (
+                _cmdline_references_dir(argv, needle)
+            ):
+                continue
+            leaked.append(proc)
+        except _PROC_UNREADABLE:
             continue
-        argv = _proc_argv(proc)
-        cmdline = " ".join(argv)
-        if "omnigent" not in cmdline or _is_pytest_process(argv):
-            continue
-        env = _proc_environ(proc)
-        if env.get("OMNIGENT_DATA_DIR", "").rstrip(os.sep) != needle and not (
-            _cmdline_references_dir(argv, needle)
-        ):
-            continue
-        leaked.append(proc)
     return leaked
 
 

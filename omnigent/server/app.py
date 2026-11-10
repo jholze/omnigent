@@ -1849,6 +1849,18 @@ def create_app(
                 otel_publisher=server_metrics_otel,
             )
         )
+        from omnigent.runtime.stall_progress import STALL_LABEL_KEY
+        from omnigent.server.stall_watchdog import install_label_writer, start_stall_watchdog
+
+        def _write_stall_label(session_id: str, value: str | None) -> None:
+            # A missing value clears the stall label. The key is one row.
+            if value is None:
+                conversation_store.delete_label(session_id, STALL_LABEL_KEY)
+            else:
+                conversation_store.set_labels(session_id, {STALL_LABEL_KEY: value})
+
+        install_label_writer(_write_stall_label)
+        start_stall_watchdog()
         webhook_dispatcher_task: asyncio.Task[None] | None = None
         if lifecycle_store is not None:
             from omnigent.server.manager_webhook_dispatcher import start_dispatcher
@@ -1950,6 +1962,9 @@ def create_app(
             metrics_publish_task.cancel()
             with suppress(asyncio.CancelledError):
                 await metrics_publish_task
+            from omnigent.server.stall_watchdog import stop_stall_watchdog
+
+            await stop_stall_watchdog()
             if webhook_dispatcher_task is not None:
                 from omnigent.server.manager_webhook_dispatcher import cancel_dispatcher
 
@@ -1970,6 +1985,9 @@ def create_app(
             from omnigent.server.subagent_wake import uninstall_return_wake_delivery
 
             uninstall_return_wake_delivery()
+            from omnigent.server.stall_watchdog import uninstall_interrupt_callback
+
+            uninstall_interrupt_callback()
             set_resource_registry(None)
             set_runner_ws_factory(None)
             set_runner_direct_attach_resolver(None)

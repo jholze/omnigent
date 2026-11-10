@@ -538,7 +538,10 @@ async def test_interrupt_posts_interrupt_event_literal() -> None:
 
 @pytest.mark.asyncio
 async def test_post_event_404_raises() -> None:
+    calls = {"n": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         return httpx.Response(
             404,
             json={"error": {"code": "not_found", "message": "no session"}},
@@ -550,6 +553,27 @@ async def test_post_event_404_raises() -> None:
             await ns.post_event("conv_x", {"type": "message", "data": {}})
     finally:
         await client.aclose()
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_post_event_retries_timeout_with_the_same_idempotency_key() -> None:
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers["idempotency-key"])
+        if len(keys) == 1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(202, json={"queued": True, "item_id": "item_1"})
+
+    ns, client = _make_namespace(handler)
+    try:
+        ack = await ns.post_event("conv_abc", {"type": "message", "data": {}})
+    finally:
+        await client.aclose()
+    assert ack["item_id"] == "item_1"
+    assert len(keys) == 2
+    assert keys[0] == keys[1]
 
 
 # ── stream() ──────────────────────────────────────────────────────────
