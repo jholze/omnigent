@@ -245,10 +245,20 @@ def _harness_interrupt_clears_buffer(session_id: str) -> bool | None:
     from omnigent.harness_aliases import canonicalize_harness
     from omnigent.runtime._globals import _conversation_store
     from omnigent.server.routes._sessions.helpers import _resolve_harness
+    from omnigent.util.uuid import InvalidUuidError
 
     if _conversation_store is None:
         return None
-    conv = _conversation_store.get_conversation(session_id)
+    try:
+        conv = _conversation_store.get_conversation(session_id)
+    except InvalidUuidError:
+        return None
+    except Exception as exc:
+        # SQLAlchemy wraps the uuid error in StatementError. A bad key is
+        # still an unknown session, not a failed tick.
+        if not isinstance(exc.__cause__, InvalidUuidError):
+            raise
+        return None
     if conv is None:
         return None
     harness = _resolve_harness(conv)

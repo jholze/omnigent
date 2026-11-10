@@ -44,11 +44,24 @@ from omnigent.stores.session_lifecycle_store.sqlalchemy_store import (
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+# 32-char hex. A ConversationStore rejects anything shorter.
+_SID_AC3 = "0000000000000000000000000000ac03"
+_SID_AC4 = "0000000000000000000000000000ac04"
+_SID_AC4B = "00000000000000000000000000ac004b"
+_SID_AC4_CN = "0000000000000000000000000000a4c1"
+_SID_AC5 = "0000000000000000000000000000ac05"
+_SID_DRAIN = "0000000000000000000000000000d7a1"
+
+
 @pytest.fixture(autouse=True)
 def _isolate_stall_state():
     previous_publisher = stall_watchdog._publisher
     previous_writer = stall_watchdog._label_writer
     previous_interrupt = stall_watchdog._interrupt
+    # Server tests leave a ConversationStore installed. These cases must
+    # not inherit it; a short id would abort get_conversation.
+    previous_store = runtime_globals._conversation_store
+    runtime_globals._conversation_store = None
     stall_progress.reset_for_tests()
     event_idempotency.reset_for_tests()
     yield
@@ -57,6 +70,7 @@ def _isolate_stall_state():
     stall_watchdog._publisher = previous_publisher
     stall_watchdog._label_writer = previous_writer
     stall_watchdog._interrupt = previous_interrupt
+    runtime_globals._conversation_store = previous_store
 
 
 def _ack(session_id: str, *, status: str, now: float, relaunched: bool = False) -> dict:
@@ -103,9 +117,9 @@ async def test_ac3_watchdog_marks_and_emits_once() -> None:
     uninstall_publisher = install_publisher(lambda sid, event: events.append(event))
     uninstall_writer = install_label_writer(lambda sid, value: labels.append((sid, value)))
     try:
-        _ack("conv_ac3", status="idle", now=0.0)
-        first = await evaluate_session("conv_ac3", now=300.0, settings=StallSettings())
-        second = await evaluate_session("conv_ac3", now=301.0, settings=StallSettings())
+        _ack(_SID_AC3, status="idle", now=0.0)
+        first = await evaluate_session(_SID_AC3, now=300.0, settings=StallSettings())
+        second = await evaluate_session(_SID_AC3, now=301.0, settings=StallSettings())
     finally:
         uninstall_publisher()
         uninstall_writer()
@@ -113,8 +127,8 @@ async def test_ac3_watchdog_marks_and_emits_once() -> None:
     assert first.emit_stalled is True
     assert second.emit_stalled is False
     assert [event["type"] for event in events] == ["session.stalled"]
-    assert labels == [("conv_ac3", "stalled")]
-    clock = stall_progress.get_clock("conv_ac3")
+    assert labels == [(_SID_AC3, "stalled")]
+    clock = stall_progress.get_clock(_SID_AC3)
     assert clock is not None and clock.stalled is True
 
 
@@ -130,16 +144,14 @@ async def test_ac4_buffered_silence_interrupts_once_and_starts_next_turn() -> No
 
     uninstall = register_interrupt_callback(_interrupt)
     try:
-        _ack("conv_ac4", status="idle", now=0.0)
-        _ack("conv_ac4", status="running", now=700.0)
-        task = asyncio.create_task(
-            evaluate_session("conv_ac4", now=700.0, settings=StallSettings())
-        )
+        _ack(_SID_AC4, status="idle", now=0.0)
+        _ack(_SID_AC4, status="running", now=700.0)
+        task = asyncio.create_task(evaluate_session(_SID_AC4, now=700.0, settings=StallSettings()))
         await asyncio.wait_for(started.wait(), timeout=2)
-        clock = stall_progress.get_clock("conv_ac4")
+        clock = stall_progress.get_clock(_SID_AC4)
         assert clock is not None
         assert clock.last_auto_interrupt_at == 700.0
-        during = await evaluate_session("conv_ac4", now=701.0, settings=StallSettings())
+        during = await evaluate_session(_SID_AC4, now=701.0, settings=StallSettings())
         assert during.interrupt is False
         release.set()
         decision = await task
@@ -147,7 +159,7 @@ async def test_ac4_buffered_silence_interrupts_once_and_starts_next_turn() -> No
         uninstall()
     assert decision.interrupt is True
     assert decision.buffered_starts_next_turn is True
-    assert calls == ["conv_ac4"]
+    assert calls == [_SID_AC4]
 
 
 async def test_ac4_buffer_between_thresholds_marks_without_interrupt() -> None:
@@ -158,9 +170,9 @@ async def test_ac4_buffer_between_thresholds_marks_without_interrupt() -> None:
 
     uninstall = register_interrupt_callback(_interrupt)
     try:
-        _ack("conv_ac4b", status="idle", now=0.0)
-        _ack("conv_ac4b", status="running", now=450.0)
-        decision = await evaluate_session("conv_ac4b", now=450.0, settings=StallSettings())
+        _ack(_SID_AC4B, status="idle", now=0.0)
+        _ack(_SID_AC4B, status="running", now=450.0)
+        decision = await evaluate_session(_SID_AC4B, now=450.0, settings=StallSettings())
     finally:
         uninstall()
     assert decision.mark_stalled is True
@@ -178,16 +190,16 @@ async def test_ac4_claude_native_marks_without_interrupt() -> None:
 
     uninstall = register_interrupt_callback(_interrupt)
     try:
-        _ack("conv_ac4_cn", status="idle", now=0.0)
-        _ack("conv_ac4_cn", status="running", now=700.0)
+        _ack(_SID_AC4_CN, status="idle", now=0.0)
+        _ack(_SID_AC4_CN, status="running", now=700.0)
         stall_progress.update_runtime_facts(
-            "conv_ac4_cn",
+            _SID_AC4_CN,
             status="running",
             elicitation_pending=False,
             pending_input_count=1,
             interrupt_clears_buffer=True,
         )
-        decision = await evaluate_session("conv_ac4_cn", now=700.0, settings=StallSettings())
+        decision = await evaluate_session(_SID_AC4_CN, now=700.0, settings=StallSettings())
     finally:
         uninstall()
     assert decision.mark_stalled is True
@@ -207,8 +219,8 @@ async def test_ac4_tick_resolves_harness_from_installed_conversation_store(
         "OMNIGENT_STALL_AUTO_INTERRUPT",
     ):
         monkeypatch.delenv(name, raising=False)
-    claude_id = f"conv_tick_cn_{uuid.uuid4().hex}"
-    codex_id = f"conv_tick_cx_{uuid.uuid4().hex}"
+    claude_id = uuid.uuid4().hex
+    codex_id = uuid.uuid4().hex
     conversations = {
         claude_id: SimpleNamespace(harness_override="claude-native"),
         codex_id: SimpleNamespace(harness_override="codex-native"),
@@ -239,6 +251,40 @@ async def test_ac4_tick_resolves_harness_from_installed_conversation_store(
     assert calls.count(codex_id) == 1
 
 
+async def test_real_store_evaluates_a_uuid_and_skips_an_invalid_id(db_uri: str) -> None:
+    """A real ConversationStore must not abort evaluate_session or tick.
+
+    The full suite installs one. A 32-char hex id that is not a row is an
+    unknown harness. A short id raises InvalidUuidError inside the store
+    and is treated the same way, so the rest of the tick still runs.
+    """
+    from omnigent.util.uuid import InvalidUuidError
+
+    store = SqlAlchemyConversationStore(db_uri)
+    valid = "0123456789abcdef0123456789abcdef"
+    invalid = "conv_ac3"
+    assert store.get_conversation(valid) is None
+    with pytest.raises(Exception) as raised:
+        store.get_conversation(invalid)
+    cause = raised.value.__cause__
+    assert isinstance(raised.value, InvalidUuidError) or isinstance(cause, InvalidUuidError)
+
+    previous_store = runtime_globals._conversation_store
+    runtime_globals._conversation_store = store
+    try:
+        _ack(valid, status="idle", now=0.0)
+        _ack(invalid, status="idle", now=0.0)
+        valid_decision = await evaluate_session(valid, now=300.0, settings=StallSettings())
+        invalid_decision = await evaluate_session(invalid, now=300.0, settings=StallSettings())
+        await stall_watchdog.tick(now=301.0)
+    finally:
+        runtime_globals._conversation_store = previous_store
+    assert valid_decision.mark_stalled is True
+    assert invalid_decision.mark_stalled is True
+    assert stall_progress.get_clock(valid) is not None
+    assert stall_progress.get_clock(invalid) is not None
+
+
 async def test_ac5_cooldown_blocks_a_second_interrupt() -> None:
     calls: list[str] = []
 
@@ -249,12 +295,12 @@ async def test_ac5_cooldown_blocks_a_second_interrupt() -> None:
     events: list[dict] = []
     uninstall_publisher = install_publisher(lambda sid, event: events.append(event))
     try:
-        _ack("conv_ac5", status="idle", now=0.0)
-        _ack("conv_ac5", status="running", now=700.0)
-        clock = stall_progress.get_clock("conv_ac5")
+        _ack(_SID_AC5, status="idle", now=0.0)
+        _ack(_SID_AC5, status="running", now=700.0)
+        clock = stall_progress.get_clock(_SID_AC5)
         assert clock is not None
         clock.last_auto_interrupt_at = 640.0
-        decision = await evaluate_session("conv_ac5", now=700.0, settings=StallSettings())
+        decision = await evaluate_session(_SID_AC5, now=700.0, settings=StallSettings())
     finally:
         uninstall()
         uninstall_publisher()
@@ -617,40 +663,40 @@ async def test_next_turn_clears_a_buffer_so_silence_does_not_interrupt() -> None
 
     uninstall = register_interrupt_callback(_interrupt)
     try:
-        _ack("conv_drain", status="idle", now=0.0)
+        _ack(_SID_DRAIN, status="idle", now=0.0)
         stall_progress.observe_published_event(
-            "conv_drain",
+            _SID_DRAIN,
             {"type": "response.in_progress", "response": {"id": "resp_1"}},
             now=1.0,
         )
-        _ack("conv_drain", status="running", now=10.0)
-        clock = stall_progress.get_clock("conv_drain")
+        _ack(_SID_DRAIN, status="running", now=10.0)
+        clock = stall_progress.get_clock(_SID_DRAIN)
         assert clock is not None and clock.buffered_count == 1
         stall_progress.observe_published_event(
-            "conv_drain",
+            _SID_DRAIN,
             {"type": "response.in_progress", "response": {"id": "resp_1"}},
             now=15.0,
         )
-        assert stall_progress.get_clock("conv_drain").buffered_count == 1  # type: ignore[union-attr]
+        assert stall_progress.get_clock(_SID_DRAIN).buffered_count == 1  # type: ignore[union-attr]
         stall_progress.observe_published_event(
-            "conv_drain",
+            _SID_DRAIN,
             {"type": "response.created", "response": {"id": "resp_2"}},
             now=20.0,
         )
-        clock = stall_progress.get_clock("conv_drain")
+        clock = stall_progress.get_clock(_SID_DRAIN)
         assert clock is not None
         assert clock.buffered_count == 0
         assert clock.turn_started_at == 20.0
-        ack = _ack("conv_drain", status="running", now=30.0)
+        ack = _ack(_SID_DRAIN, status="running", now=30.0)
         assert ack["active_turn_age_s"] == 10.0
         # That ack buffers again. Drop it the way the next turn would,
         # then sit in silence past the interrupt threshold.
         stall_progress.observe_published_event(
-            "conv_drain",
+            _SID_DRAIN,
             {"type": "response.in_progress", "response": {"id": "resp_3"}},
             now=31.0,
         )
-        decision = await evaluate_session("conv_drain", now=700.0, settings=StallSettings())
+        decision = await evaluate_session(_SID_DRAIN, now=700.0, settings=StallSettings())
     finally:
         uninstall()
     assert decision.interrupt is False
