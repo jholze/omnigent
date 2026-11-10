@@ -3812,6 +3812,10 @@ describe("sidebar_grouping_ui release flag", () => {
   });
 
   it("selects project, Shared and Sessions rows together from the Projects header", () => {
+    // The default slice is "My sessions", which hides Shared. The persisted
+    // filter is what a reload uses, so the case does not have to open the
+    // Display submenu just to reach All sessions.
+    localStorage.setItem("omnigent:session-filter", "all");
     projectsMock.push("Alpha");
     mockConversations([
       conv("conv_filed", "Claude Code", { labels: { omni_project: "Alpha" } }),
@@ -3819,21 +3823,27 @@ describe("sidebar_grouping_ui release flag", () => {
       conv("conv_shared", "Claude Code", { owner: "other@example.com" }),
     ]);
     renderGroupingSidebar();
-    selectSessionFilter("all");
-    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+    fireEvent.click(screen.getByText("Alpha"));
 
     // The Projects menu no longer offers its own, folder-only selection.
-    openProjectsMenu();
+    fireEvent.pointerDown(screen.getByTestId("project-list-actions"), {
+      button: 0,
+      ctrlKey: false,
+    });
     expect(screen.queryByTestId("projects-select-sessions")).toBeNull();
-    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
 
-    const projects = screen.getByRole("button", { name: "Projects" }).closest("section")!;
+    const projects = screen.getByText("Projects").closest("section")!;
     fireEvent.click(within(projects).getByTestId("toggle-selection-mode"));
     for (const name of ["conv_filed", "conv_mine", "conv_shared"]) {
-      fireEvent.click(screen.getByRole("link", { name: new RegExp(name) }));
+      const row = screen.getByText(name).closest("a");
+      expect(row).not.toBeNull();
+      fireEvent.click(row!);
     }
     // One bulk bar, under the Projects header, counting all three.
-    expect(screen.getAllByRole("button", { name: "Exit selection mode" })).toHaveLength(1);
+    const exitButtons = screen.getAllByTestId("toggle-selection-mode");
+    expect(exitButtons).toHaveLength(1);
+    expect(exitButtons[0]).toHaveAttribute("aria-label", "Exit selection mode");
     expect(within(projects).getByText("3 selected")).toBeInTheDocument();
   });
 

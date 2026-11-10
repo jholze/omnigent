@@ -146,14 +146,17 @@ def test_relay_preserves_half_closed_connection_during_collection():
                     request += data
                 received.append(request)
                 request_received.set()
-                if respond_now.wait(5):
-                    conn.sendall(payload)
+                # Released by the test after collection. A timed wait here races
+                # that collection and drops the response.
+                respond_now.wait()
+                conn.sendall(payload)
 
-        async def collect():
-            # Let the request-side copy and its completion callbacks finish.
+        async def settle_request_copy():
+            # Yield so the request copy finishes on the relay loop.
+            # gc.collect() of the pytest heap stays on this thread; on the
+            # loop it exceeds Future.result's wait and raises TimeoutError.
             await asyncio.sleep(0)
             await asyncio.sleep(0)
-            gc.collect()
 
         thread = threading.Thread(target=respond, daemon=True)
         thread.start()
@@ -163,7 +166,10 @@ def test_relay_preserves_half_closed_connection_during_collection():
                     client.sendall(b"request")
                     client.shutdown(socket.SHUT_WR)
                     assert request_received.wait(5)
-                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(timeout=5)
+                    asyncio.run_coroutine_threadsafe(settle_request_copy(), relay.loop).result(
+                        timeout=5
+                    )
+                    gc.collect()
                     respond_now.set()
                     response = b""
                     while data := client.recv(65536):
