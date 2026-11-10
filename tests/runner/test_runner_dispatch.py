@@ -4071,6 +4071,80 @@ async def test_sys_session_send_model_lands_in_child_create_body(
 
 
 @pytest.mark.asyncio
+async def test_sys_session_send_inherits_parent_host_workspace_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A named native spawn copies the parent's host, workspace, and project.
+
+    The send schema does not expose those fields. If the create body
+    omits them, the child row is unbound even when the parent is filed
+    on a host.
+    """
+    from omnigent.onboarding import harness_install
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    create_bodies: list[dict[str, Any]] = []
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(subagent_work, "register_child_session", lambda *a, **k: None)
+    monkeypatch.setattr(harness_install, "missing_harness_cli", lambda _harness: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_bound/child_sessions"
+        ):
+            return httpx.Response(200, json={"data": []})
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_bound":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_parent_bound",
+                    "host_id": "host_bound",
+                    "workspace": "/Users/jholze/dev/example",
+                    "project_id": "proj_bound",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            create_bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={"id": "conv_child_bound"})
+        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_bound/events":
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps(
+                    {
+                        "agent": "worker",
+                        "title": "inherit-bindings",
+                        "args": {"input": "run the tests"},
+                    }
+                ),
+                server_client=server_client,
+                conversation_id="conv_parent_bound",
+                agent_spec=_spec_with_subagent_harness("claude-native"),
+                session_inbox=session_inbox,
+            )
+        finally:
+            subagent_work.unregister_subagent_work("conv_child_bound")
+            subagent_work._session_inboxes_ref.pop("conv_parent_bound", None)
+
+    payload = json.loads(output)
+    assert payload["status"] == "launching", output
+    assert len(create_bodies) == 1
+    assert create_bodies[0]["host_id"] == "host_bound"
+    assert create_bodies[0]["workspace"] == "/Users/jholze/dev/example"
+    assert create_bodies[0]["project_id"] == "proj_bound"
+
+
+@pytest.mark.asyncio
 async def test_sys_session_send_blocks_fresh_dispatch_when_harness_cli_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8343,6 +8417,103 @@ async def test_sys_session_create_spawns_child_under_caller() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sys_session_create_inherits_parent_host_workspace_project() -> None:
+    """``sys_session_create`` by agent_id copies parent bindings when omitted."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    captured: dict[str, Any] = {}
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_caller":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_caller",
+                    "host_id": "host_bound",
+                    "workspace": "/Users/jholze/dev/example",
+                    "project_id": "proj_bound",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                201,
+                json={"id": "conv_child_inherit", "agent_id": "ag_x", "agent_name": "researcher"},
+            )
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "ag_x", "title": "auth"}),
+                server_client=server_client,
+                conversation_id="conv_caller",
+            )
+        finally:
+            subagent_work.unregister_child_session("conv_child_inherit")
+            subagent_work._session_inboxes_ref.pop("conv_caller", None)
+
+    handle = json.loads(output)
+    assert handle["conversation_id"] == "conv_child_inherit"
+    assert captured["agent_id"] == "ag_x"
+    assert captured["parent_session_id"] == "conv_caller"
+    assert captured["host_id"] == "host_bound"
+    assert captured["workspace"] == "/Users/jholze/dev/example"
+    assert captured["project_id"] == "proj_bound"
+
+
+@pytest.mark.asyncio
+async def test_sys_session_create_leaves_bindings_unset_when_parent_has_none() -> None:
+    """An unbound parent does not invent host, workspace, or project on the child."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    captured: dict[str, Any] = {}
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_unbound":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_unbound",
+                    "host_id": None,
+                    "workspace": None,
+                    "project_id": None,
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                201,
+                json={"id": "conv_child_unbound", "agent_id": "ag_x", "agent_name": "researcher"},
+            )
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "ag_x"}),
+                server_client=server_client,
+                conversation_id="conv_unbound",
+            )
+        finally:
+            subagent_work.unregister_child_session("conv_child_unbound")
+            subagent_work._session_inboxes_ref.pop("conv_unbound", None)
+
+    assert json.loads(output)["conversation_id"] == "conv_child_unbound"
+    assert "host_id" not in captured
+    assert "workspace" not in captured
+    assert "project_id" not in captured
+
+
+@pytest.mark.asyncio
 async def test_sys_session_create_without_message_does_not_track_a_turn() -> None:
     """A child with no first message has no turn to deliver.
 
@@ -9055,6 +9226,7 @@ async def test_sys_session_get_info_projects_metadata_and_runner_connectivity() 
                     "llm_model": "anthropic/claude-sonnet-4-6",
                     "model_override": "claude-opus-4-8",
                     "workspace": "/repo",
+                    "project_id": "proj_filed",
                     "git_branch": "feature/x",
                     "pending_elicitations": [{"id": "el_1"}, {"id": "el_2"}],
                 },
@@ -9091,6 +9263,7 @@ async def test_sys_session_get_info_projects_metadata_and_runner_connectivity() 
     # None here would mean the best-effort status call was skipped.
     assert info["runner_online"] is True
     assert info["host_id"] == "host_1"
+    assert info["project_id"] == "proj_filed"
     assert info["configured_harnesses"] == {
         "codex-native": True,
         "cursor-native": False,
@@ -9108,6 +9281,37 @@ async def test_sys_session_get_info_projects_metadata_and_runner_connectivity() 
     assert info["pending_elicitations"] == [{"id": "el_1"}, {"id": "el_2"}]
     # Metadata-only: the full transcript is never embedded.
     assert "items" not in info
+
+
+@pytest.mark.asyncio
+async def test_sys_session_get_info_includes_null_project_id_when_unfiled() -> None:
+    """Unfiled sessions still expose ``project_id`` so callers can tell.
+
+    Reviewers that only have this tool cannot fall back to
+    ``GET /v1/sessions/{id}``. Omitting the key looks the same as a
+    projector bug; ``null`` is the unfiled value.
+    """
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_unfiled":
+            return httpx.Response(200, json={"id": "conv_unfiled", "project_id": None})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        output = await execute_tool(
+            tool_name="sys_session_get_info",
+            arguments=json.dumps({"session_id": "conv_unfiled"}),
+            server_client=server_client,
+            conversation_id="conv_caller",
+        )
+
+    info = json.loads(output)
+    assert "project_id" in info
+    assert info["project_id"] is None
 
 
 @pytest.mark.asyncio

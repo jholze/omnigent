@@ -1827,6 +1827,49 @@ async def _inherited_parent_model(
     return parent_model
 
 
+_SPAWN_INHERIT_KEYS = ("host_id", "workspace", "project_id")
+
+
+async def _parent_spawn_bindings(
+    server_client: httpx.AsyncClient,
+    conversation_id: str,
+) -> dict[str, str]:
+    """Return the parent's host, workspace, and project when they are set.
+
+    Native ``sys_session_send`` / ``sys_session_create`` do not expose
+    these fields. Copying them at create time is how a child stays bound
+    to the same machine and filing. A missing parent snapshot returns an
+    empty dict so the child stays unset rather than inventing defaults.
+    """
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}",
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=10.0,
+        )
+    except (httpx.HTTPError, RuntimeError):
+        return {}
+    if resp.status_code != 200:
+        return {}
+    snap = _string_object_dict(resp.json())
+    if snap is None:
+        return {}
+    bindings: dict[str, str] = {}
+    for key in _SPAWN_INHERIT_KEYS:
+        value = snap.get(key)
+        if isinstance(value, str) and value:
+            bindings[key] = value
+    return bindings
+
+
+def _apply_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]) -> None:
+    """Fill host/workspace/project from the parent when the child omitted them."""
+    for key, value in inherited.items():
+        existing = body.get(key)
+        if existing is None or existing == "":
+            body[key] = value
+
+
 def _subagent_reasoning_effort_from_args(args: _JsonObject) -> str | None:
     """
     Extract the optional ``reasoning_effort`` from
@@ -2811,6 +2854,10 @@ async def _execute_subagent_tool(
             "sub_agent_name": sub_agent_name,
             "labels": {_subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY: work_id},
         }
+        _apply_inherited_spawn_bindings(
+            create_body,
+            await _parent_spawn_bindings(server_client, conversation_id),
+        )
         if harness_override_canonical is not None:
             create_body["harness_override"] = harness_override_canonical
         if model is not None:
@@ -3627,6 +3674,10 @@ async def _execute_session_create(
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
     )
+    _apply_inherited_spawn_bindings(
+        body,
+        await _parent_spawn_bindings(server_client, conversation_id),
+    )
     try:
         resp = await server_client.post("/v1/sessions", json=body, timeout=30.0)
     except Exception as exc:  # noqa: BLE001
@@ -3750,6 +3801,10 @@ async def _upload_config_bundle(
     title = args.get("title")
     if isinstance(title, str) and title:
         metadata["title"] = title
+    _apply_inherited_spawn_bindings(
+        metadata,
+        await _parent_spawn_bindings(server_client, conversation_id),
+    )
     try:
         resp = await server_client.post(
             "/v1/sessions",
@@ -5085,9 +5140,9 @@ async def _session_get_info_via_rest(
     snapshot, and projects the metadata fields — status, title, agent
     binding, runner binding, host and its reported harness readiness,
     reasoning effort, effective model,
-    parent linkage, workspace / git branch, persisted last-activity time,
-    and the outstanding approval prompts (the prompts themselves plus a
-    count). Runner connectivity
+    parent linkage, workspace / git branch, project filing, persisted
+    last-activity time, and the outstanding approval prompts (the prompts
+    themselves plus a count). Runner connectivity
     is resolved best-effort via
     ``GET /v1/runners/{id}/status`` (``runner_online`` is ``None`` when
     the lookup fails or no runner is bound); host readiness is likewise
@@ -5160,6 +5215,7 @@ async def _session_get_info_via_rest(
             # agent spec's default; both may be None when unset.
             "model": snap.get("model_override") or snap.get("llm_model"),
             "workspace": snap.get("workspace"),
+            "project_id": _optional_string(snap.get("project_id")),
             "git_branch": snap.get("git_branch"),
             # The outstanding approval prompts themselves (original
             # elicitation-request event dicts), plus a count for quick
