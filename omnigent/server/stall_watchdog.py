@@ -248,7 +248,7 @@ def _harness_interrupt_clears_buffer(session_id: str) -> bool | None:
 
     if _conversation_store is None:
         return None
-    conv = _conversation_store.get(session_id)
+    conv = _conversation_store.get_conversation(session_id)
     if conv is None:
         return None
     harness = _resolve_harness(conv)

@@ -10,10 +10,13 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from omnigent.runtime import _globals as runtime_globals
 from omnigent.runtime import session_stream, stall_progress
 from omnigent.runtime.stall_progress import Clock, Decision, StallSettings, evaluate
 from omnigent.server import event_idempotency, session_outbox, stall_watchdog
@@ -33,6 +36,7 @@ from omnigent.server.stall_watchdog import (
     load_settings,
     register_interrupt_callback,
 )
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.session_lifecycle_store.sqlalchemy_store import (
     SqlAlchemySessionLifecycleStore,
 )
@@ -191,6 +195,48 @@ async def test_ac4_claude_native_marks_without_interrupt() -> None:
     assert decision.interrupt is False
     assert decision.buffered_starts_next_turn is False
     assert calls == []
+
+
+async def test_ac4_tick_resolves_harness_from_installed_conversation_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tick looks up the harness via ``get_conversation`` on the real store API."""
+    for name in (
+        "OMNIGENT_STALL_AFTER_S",
+        "OMNIGENT_STALL_INTERRUPT_AFTER_S",
+        "OMNIGENT_STALL_AUTO_INTERRUPT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    claude_id = f"conv_tick_cn_{uuid.uuid4().hex}"
+    codex_id = f"conv_tick_cx_{uuid.uuid4().hex}"
+    conversations = {
+        claude_id: SimpleNamespace(harness_override="claude-native"),
+        codex_id: SimpleNamespace(harness_override="codex-native"),
+    }
+    store = MagicMock(spec=SqlAlchemyConversationStore)
+    store.get_conversation.side_effect = conversations.get
+    calls: list[str] = []
+
+    async def _interrupt(session_id: str) -> None:
+        calls.append(session_id)
+
+    previous_store = runtime_globals._conversation_store
+    runtime_globals._conversation_store = store
+    uninstall_interrupt = register_interrupt_callback(_interrupt)
+    uninstall_writer = install_label_writer(lambda sid, value: None)
+    try:
+        for session_id in (claude_id, codex_id):
+            _ack(session_id, status="idle", now=0.0)
+            _ack(session_id, status="running", now=700.0)
+        await stall_watchdog.tick(now=700.0)
+    finally:
+        uninstall_writer()
+        uninstall_interrupt()
+        runtime_globals._conversation_store = previous_store
+    claude_clock = stall_progress.get_clock(claude_id)
+    assert claude_clock is not None and claude_clock.stalled is True
+    assert calls.count(claude_id) == 0
+    assert calls.count(codex_id) == 1
 
 
 async def test_ac5_cooldown_blocks_a_second_interrupt() -> None:
