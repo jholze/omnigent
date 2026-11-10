@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from omnigent.db.db_models import SqlConversationItem
+from omnigent.db.db_models import SqlChatAgentAccount, SqlConversationItem
 from omnigent.db.utils import get_or_create_engine
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
@@ -119,11 +119,41 @@ def _item_count(db_uri: str, session_id: str) -> int:
         )
 
 
+_OMIT_WEBHOOK = object()
+
+
 def _account_body(handle: str, project_ids: list[str] | None = None) -> dict:
     body: dict = {"display_name": "PM bot", "handle": handle, "webhook_url": WEBHOOK_OK}
     if project_ids is not None:
         body["project_ids"] = project_ids
     return body
+
+
+def _create_body(handle: str, project_ids: list[str], webhook_url: object) -> dict:
+    body: dict = {"display_name": "PM bot", "handle": handle, "project_ids": project_ids}
+    if webhook_url is not _OMIT_WEBHOOK:
+        body["webhook_url"] = webhook_url
+    return body
+
+
+def _stored_webhook(db_uri: str, handle: str) -> str:
+    with Session(get_or_create_engine(db_uri)) as session:
+        row = session.scalars(
+            select(SqlChatAgentAccount).where(SqlChatAgentAccount.handle == handle)
+        ).one()
+        return row.webhook_url
+
+
+def _account_count_for_handle(db_uri: str, handle: str) -> int:
+    with Session(get_or_create_engine(db_uri)) as session:
+        return (
+            session.scalar(
+                select(func.count())
+                .select_from(SqlChatAgentAccount)
+                .where(SqlChatAgentAccount.handle == handle)
+            )
+            or 0
+        )
 
 
 async def _create(
@@ -258,3 +288,84 @@ async def test_ac_113d_agent_token_cannot_create_on_ungated_route_flag_off_or_on
         )
     assert bot_on.status_code == 401, bot_on.text
     assert human_on.status_code == 201, human_on.text
+
+
+@pytest.mark.parametrize(
+    ("handle", "webhook_url", "status", "stored"),
+    [
+        ("pm-omit", _OMIT_WEBHOOK, 201, ""),
+        ("pm-null", None, 201, ""),
+        ("pm-ok", WEBHOOK_OK, 201, WEBHOOK_OK),
+        ("pm-http", "http://bot.example.com/hook", 422, None),
+        ("pm-internal", "https://10.0.0.5/hook", 422, None),
+    ],
+)
+async def test_ungated_create_webhook_url_optional_and_ssrf(
+    flag_off_client: httpx.AsyncClient,
+    db_uri: str,
+    handle: str,
+    webhook_url: object,
+    status: int,
+    stored: str | None,
+) -> None:
+    """Omitted or null webhook_url is 201; a set unsafe URL stays 422."""
+    project = _project(db_uri, JENS, "FT Max")
+    ensure_live_user(db_uri, JENS)
+    response = await flag_off_client.post(
+        UNGATED,
+        json=_create_body(handle, [project], webhook_url),
+        headers=headers_for(JENS),
+    )
+    assert response.status_code == status, response.text
+    if status == 201:
+        assert response.json()["token"].startswith("ogc_")
+        assert _stored_webhook(db_uri, handle) == stored
+        return
+    assert response.json()["error"]["code"] == "invalid_webhook"
+    assert _account_count_for_handle(db_uri, handle) == 0
+
+
+async def test_chat_alias_create_allows_omitted_or_null_webhook_url(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team-chat alias shares the same omit/null contract."""
+    del runtime_init
+    monkeypatch.setenv(FEATURES_ENV_VAR, "team_chat")
+    monkeypatch.setenv("OMNIGENT_CHAT_AGENT_SECRET", AGENT_SECRET)
+    project = _project(db_uri, JENS, "FT Max")
+    ensure_live_user(db_uri, JENS)
+    try:
+        async with _client_for(_build_app(db_uri, tmp_path / "chat-alias")) as client:
+            omitted = await client.post(
+                CHAT_ALIAS,
+                json=_create_body("pm-chat-omit", [project], _OMIT_WEBHOOK),
+                headers=headers_for(JENS),
+            )
+            nulled = await client.post(
+                CHAT_ALIAS,
+                json=_create_body("pm-chat-null", [project], None),
+                headers=headers_for(JENS),
+            )
+            valid = await client.post(
+                CHAT_ALIAS,
+                json=_create_body("pm-chat-ok", [project], WEBHOOK_OK),
+                headers=headers_for(JENS),
+            )
+            unsafe = await client.post(
+                CHAT_ALIAS,
+                json=_create_body("pm-chat-http", [project], "http://bot.example.com/hook"),
+                headers=headers_for(JENS),
+            )
+    finally:
+        reset_chat_rate_limits()
+    assert omitted.status_code == 201, omitted.text
+    assert nulled.status_code == 201, nulled.text
+    assert valid.status_code == 201, valid.text
+    assert _stored_webhook(db_uri, "pm-chat-omit") == ""
+    assert _stored_webhook(db_uri, "pm-chat-null") == ""
+    assert _stored_webhook(db_uri, "pm-chat-ok") == WEBHOOK_OK
+    assert unsafe.status_code == 422, unsafe.text
+    assert unsafe.json()["error"]["code"] == "invalid_webhook"

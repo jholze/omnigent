@@ -217,8 +217,9 @@ def register_agent_account_routes(
         display_name = _validate_display_name(body.display_name)
         handle = _validate_handle(body.handle)
         project_ids = _validate_project_ids(body.project_ids)
-        webhook = body.webhook_url or ""
-        if await asyncio.to_thread(webhook_url_rejected, webhook):
+        webhook = (body.webhook_url or "").strip()
+        # Omitted or null is stored empty; only a provided URL is SSRF-checked.
+        if webhook and await asyncio.to_thread(webhook_url_rejected, webhook):
             raise OmnigentError("webhook_url is invalid", code=ErrorCode.INVALID_WEBHOOK)
         result = await asyncio.to_thread(
             chat_store.create_agent_account,
