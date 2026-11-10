@@ -288,11 +288,9 @@ def observe_published_event(
     with _lock:
         clock = _clocks.get(session_id)
         if clock is None:
-            clock = Clock(status="running", turn_started_at=moment)
+            clock = Clock(status="idle")
             _clocks[session_id] = clock
         clock.last_event_at = moment
-        if clock.turn_started_at is None:
-            clock.turn_started_at = moment
         event_type = event.get("type")
         if event_type in _TURN_BOUNDARY_TYPES:
             response_id = _response_id(event)

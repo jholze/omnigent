@@ -383,6 +383,22 @@ def test_heartbeat_does_not_reset_the_stall_clock() -> None:
     assert clock.last_event_at == 0.0
 
 
+def test_progress_without_status_entry_does_not_stall() -> None:
+    stall_progress.observe_published_event(
+        "conv_no_status", {"type": "session.changed_files.invalidated"}, now=1000.0
+    )
+    stall_progress.update_runtime_facts(
+        "conv_no_status", status=None, elicitation_pending=False, pending_input_count=0
+    )
+    decision = stall_progress.advance("conv_no_status", 1301.0, StallSettings())
+    clock = stall_progress.get_clock("conv_no_status")
+    assert clock is not None
+    assert decision.mark_stalled is False
+    assert decision.emit_stalled is False
+    assert clock.stalled is False
+    assert clock.status == "idle"
+
+
 def test_ac9_idle_watchdog_default_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     from omnigent.runtime.harnesses import _scaffold
 
