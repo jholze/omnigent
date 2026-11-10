@@ -3024,8 +3024,11 @@ describe("Sidebar collapsed marker", () => {
 
 it("caps Shared display independently of Mine while revealing cached rows", async () => {
   isServerLocalMock.mockReturnValue(false);
-  const owned = Array.from({ length: 40 }, (_, i) => conv(`owned-${i}`, "agent"));
-  const shared = Array.from({ length: 70 }, (_, i) =>
+  // Keep the lists just past one Shared page so the cap, "Load more", and
+  // the Mine/Shared independence are still proven, without rendering 110
+  // rows (that case regularly exceeded the 5s default under a full CI run).
+  const owned = Array.from({ length: 8 }, (_, i) => conv(`owned-${i}`, "agent"));
+  const shared = Array.from({ length: 12 }, (_, i) =>
     conv(`shared-${i}`, "agent", {
       owner: "other@example.com",
       permission_level: 1,
@@ -3035,20 +3038,20 @@ it("caps Shared display independently of Mine while revealing cached rows", asyn
   mockConversations([...owned, ...shared]);
   renderSidebar(true, "/", undefined, undefined, [], vi.fn(), {
     ...sidebarConfig,
-    sharedDisplayPageSize: 30,
+    sharedDisplayPageSize: 5,
   });
   selectSessionFilter("mine");
-  expect(screen.getByText("owned-39", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText("owned-7", { exact: true })).toBeInTheDocument();
   showSharedTab();
-  expect(screen.getByText("shared-29", { exact: true })).toBeInTheDocument();
-  expect(screen.queryByText("shared-30", { exact: true })).toBeNull();
+  expect(screen.getByText("shared-4", { exact: true })).toBeInTheDocument();
+  expect(screen.queryByText("shared-5", { exact: true })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
-  await waitFor(() => expect(screen.getByText("shared-59", { exact: true })).toBeInTheDocument());
-  expect(screen.queryByText("shared-60", { exact: true })).toBeNull();
+  await waitFor(() => expect(screen.getByText("shared-9", { exact: true })).toBeInTheDocument());
+  expect(screen.queryByText("shared-10", { exact: true })).toBeNull();
   selectSessionFilter("mine");
-  expect(screen.getByText("owned-39", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText("owned-7", { exact: true })).toBeInTheDocument();
   showSharedTab();
-  expect(screen.queryByText("shared-30", { exact: true })).toBeNull();
+  expect(screen.queryByText("shared-5", { exact: true })).toBeNull();
 });
 
 /** Render the sidebar with the sidebar_grouping_ui release flag on. */
