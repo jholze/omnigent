@@ -1827,6 +1827,93 @@ async def _inherited_parent_model(
     return parent_model
 
 
+_SPAWN_INHERIT_RETRY_STATUSES = frozenset({400, 403, 404, 409, 422})
+
+
+async def _parent_spawn_bindings(
+    server_client: httpx.AsyncClient,
+    conversation_id: str,
+) -> dict[str, str]:
+    """Return the parent's host, workspace, and project when they are set.
+
+    Native ``sys_session_send`` / ``sys_session_create`` do not expose
+    these fields. Copying them at create time is how a child stays bound
+    to the same machine and filing. A missing parent snapshot returns an
+    empty dict so the child stays unset rather than inventing defaults.
+
+    ``host_id`` and ``workspace`` are copied as a pair (or neither). A
+    host without a workspace would be rejected by session create.
+    Workspace without a host is valid and is copied alone.
+    """
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}",
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=10.0,
+        )
+    except (httpx.HTTPError, RuntimeError):
+        return {}
+    if resp.status_code != 200:
+        return {}
+    snap = _string_object_dict(resp.json())
+    if snap is None:
+        return {}
+    bindings: dict[str, str] = {}
+    host = snap.get("host_id")
+    workspace = snap.get("workspace")
+    if isinstance(host, str) and host and isinstance(workspace, str) and workspace:
+        bindings["host_id"] = host
+        bindings["workspace"] = workspace
+    elif isinstance(workspace, str) and workspace:
+        bindings["workspace"] = workspace
+    project = snap.get("project_id")
+    if isinstance(project, str) and project:
+        bindings["project_id"] = project
+    return bindings
+
+
+def _apply_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]) -> None:
+    """Fill host/workspace/project from the parent when the child omitted them.
+
+    Native spawn tools do not currently expose these fields, so the child
+    body has no explicit value. The skip-if-set guard is
+    forward-compatible if a later schema adds them.
+    """
+    for key, value in inherited.items():
+        existing = body.get(key)
+        if existing is None or existing == "":
+            body[key] = value
+
+
+def _strip_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]) -> bool:
+    """Remove inherited keys that still match *inherited*. Return True if any were removed."""
+    stripped = False
+    for key, value in inherited.items():
+        if body.get(key) == value:
+            body.pop(key, None)
+            stripped = True
+    return stripped
+
+
+def _create_is_subagent_name_collision(resp: httpx.Response) -> bool:
+    """Whether a 409 is a child-title collision, not a host/project failure."""
+    return "sub-agent name already exists under parent" in resp.text
+
+
+def _should_retry_create_without_inherited_bindings(
+    resp: httpx.Response,
+    inherited: dict[str, str],
+) -> bool:
+    """Whether a failed create should be retried without inherited bindings."""
+    if not inherited or resp.status_code not in _SPAWN_INHERIT_RETRY_STATUSES:
+        return False
+    # Title collision is also 409. Keep the bindings and let the ordinal
+    # loop pick a new name instead of spawning an unbound child.
+    if resp.status_code == 409 and _create_is_subagent_name_collision(resp):
+        return False
+    return True
+
+
 def _subagent_reasoning_effort_from_args(args: _JsonObject) -> str | None:
     """
     Extract the optional ``reasoning_effort`` from
@@ -2811,6 +2898,9 @@ async def _execute_subagent_tool(
             "sub_agent_name": sub_agent_name,
             "labels": {_subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY: work_id},
         }
+        inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+        source_inherited = dict(inherited_bindings)
+        _apply_inherited_spawn_bindings(create_body, inherited_bindings)
         if harness_override_canonical is not None:
             create_body["harness_override"] = harness_override_canonical
         if model is not None:
@@ -2893,11 +2983,18 @@ async def _execute_subagent_tool(
         try:
             for _ordinal_attempt in range(_max_ordinal_retries + 1):
                 resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
+                if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+                    _strip_inherited_spawn_bindings(create_body, inherited_bindings)
+                    inherited_bindings = {}
+                    resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
                 if (
                     resp.status_code == 409
                     and _auto_ordinal
                     and _ordinal_attempt < _max_ordinal_retries
                 ):
+                    if source_inherited:
+                        _apply_inherited_spawn_bindings(create_body, source_inherited)
+                        inherited_bindings = dict(source_inherited)
                     ordinal = _subagent_work.next_subagent_ordinal(
                         conversation_id,
                         str(sub_agent_name),
@@ -3627,8 +3724,13 @@ async def _execute_session_create(
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
     )
+    inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+    _apply_inherited_spawn_bindings(body, inherited_bindings)
     try:
         resp = await server_client.post("/v1/sessions", json=body, timeout=30.0)
+        if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+            _strip_inherited_spawn_bindings(body, inherited_bindings)
+            resp = await server_client.post("/v1/sessions", json=body, timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_create failed: {exc}"})
     if resp.status_code == 404:
@@ -3750,6 +3852,8 @@ async def _upload_config_bundle(
     title = args.get("title")
     if isinstance(title, str) and title:
         metadata["title"] = title
+    inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+    _apply_inherited_spawn_bindings(metadata, inherited_bindings)
     try:
         resp = await server_client.post(
             "/v1/sessions",
@@ -3757,6 +3861,14 @@ async def _upload_config_bundle(
             files={"bundle": (f"{source.name}.tar.gz", bundle_bytes, "application/gzip")},
             timeout=60.0,
         )
+        if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+            _strip_inherited_spawn_bindings(metadata, inherited_bindings)
+            resp = await server_client.post(
+                "/v1/sessions",
+                data={"metadata": json.dumps(metadata)},
+                files={"bundle": (f"{source.name}.tar.gz", bundle_bytes, "application/gzip")},
+                timeout=60.0,
+            )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_create failed: {exc}"})
     if resp.status_code in (401, 403):
@@ -5085,9 +5197,9 @@ async def _session_get_info_via_rest(
     snapshot, and projects the metadata fields — status, title, agent
     binding, runner binding, host and its reported harness readiness,
     reasoning effort, effective model,
-    parent linkage, workspace / git branch, persisted last-activity time,
-    and the outstanding approval prompts (the prompts themselves plus a
-    count). Runner connectivity
+    parent linkage, workspace / git branch, project filing, persisted
+    last-activity time, and the outstanding approval prompts (the prompts
+    themselves plus a count). Runner connectivity
     is resolved best-effort via
     ``GET /v1/runners/{id}/status`` (``runner_online`` is ``None`` when
     the lookup fails or no runner is bound); host readiness is likewise
@@ -5160,6 +5272,7 @@ async def _session_get_info_via_rest(
             # agent spec's default; both may be None when unset.
             "model": snap.get("model_override") or snap.get("llm_model"),
             "workspace": snap.get("workspace"),
+            "project_id": _optional_string(snap.get("project_id")),
             "git_branch": snap.get("git_branch"),
             # The outstanding approval prompts themselves (original
             # elicitation-request event dicts), plus a count for quick

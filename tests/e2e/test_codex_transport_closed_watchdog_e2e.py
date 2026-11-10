@@ -4,7 +4,7 @@ The request-driven ``codex`` harness owns a ``codex app-server`` subprocess and
 reads its JSON-RPC stream in ``_CodexAppServerSession._reader_loop``. If stdout
 hits EOF while a turn is in flight, pending RPC futures and the turn-event
 consumer must be woken promptly with an error; a build without EOF wake-up
-leaves the turn idle until the scaffold's idle watchdog (3600s by default).
+leaves the turn idle until the scaffold's idle watchdog (1200s by default).
 
 These tests drive the real ``CodexExecutor`` against a scripted app-server
 child that closes stdout mid-turn, mirroring the fake-``codex`` pattern of
@@ -27,7 +27,7 @@ from omnigent import errors as omnigent_errors
 from omnigent.inner.codex_executor import CodexExecutor
 from omnigent.inner.executor import ExecutorError, ExecutorEvent
 
-# Bound well under the 3600s idle watchdog but far above a prompt EOF wake:
+# Bound well under the 1200s idle watchdog but far above a prompt EOF wake:
 # a build without EOF wake-up hangs indefinitely (times out here); a fixed
 # build wakes the waiter within one poll interval, so this cleanly separates
 # the two.

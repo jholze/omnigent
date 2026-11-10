@@ -1781,7 +1781,7 @@ class SqlSessionLifecycleOutbox(OmnigentBase):
 
     __table_args__ = (
         CheckConstraint(
-            "event_type IN (1, 2, 3, 4, 5)",
+            "event_type IN (1, 2, 3, 4, 5, 6, 7)",
             name="ck_session_lifecycle_outbox_event_type",
         ),
         CheckConstraint(

@@ -178,6 +178,45 @@ def test_blank_data_dir_matches_nothing() -> None:
     assert find_leaked_omnigent_processes("/") == []
 
 
+def test_find_skips_process_when_cmdline_raises_systemerror(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dying process whose cmdline() raises SystemError is skipped, not fatal.
+
+    On macOS, psutil's ``proc_cmdline`` can raise SystemError if the process
+    exits mid-read. The reaper must keep walking and still attribute a live leak.
+    """
+    child = _spawn(_SLEEP_CHILD, "omnigent-daemon-marker", f"{data_dir}/chat.db")
+
+    class DyingProcess:
+        pid = -1
+
+        def cmdline(self) -> list[str]:
+            raise SystemError(
+                "<built-in function proc_cmdline> returned a result with an exception set"
+            )
+
+        def environ(self) -> dict[str, str]:
+            raise SystemError(
+                "<built-in function proc_environ> returned a result with an exception set"
+            )
+
+    real_iter = psutil.process_iter
+
+    def patched_iter(*_args: object, **_kwargs: object):
+        yield DyingProcess()
+        # Production find() calls process_iter() with no arguments.
+        yield from real_iter()
+
+    monkeypatch.setattr("omnigent.testing.process_reaper.psutil.process_iter", patched_iter)
+    try:
+        found = find_leaked_omnigent_processes(data_dir)
+        assert child.pid in {p.pid for p in found}
+        assert all(getattr(p, "pid", None) != -1 for p in found)
+    finally:
+        _kill_quietly(child)
+
+
 def test_reap_terminates_leaked_process(data_dir: Path) -> None:
     """reap TERMs an attributed process and reports its command line."""
     child = _spawn(_SLEEP_CHILD, "omnigent-daemon-marker", f"{data_dir}/chat.db")
