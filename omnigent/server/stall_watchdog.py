@@ -231,6 +231,32 @@ def _seed_running(now: float) -> None:
             stall_progress.note_running(session_id, now)
 
 
+_INTERRUPT_CLEARS_BUFFER = frozenset({"claude-native"})
+
+
+def _harness_interrupt_clears_buffer(session_id: str) -> bool | None:
+    """Whether Stop on this session's harness drops the runner message buffer.
+
+    claude-native's interrupt path pops ``_session_message_buffers``. An
+    automatic stall interrupt would delete the queued follow-up instead of
+    letting it start the next turn (FR-3). Codex-native and SDK harnesses
+    keep the buffer. ``None`` means the harness is unknown; leave the clock.
+    """
+    from omnigent.harness_aliases import canonicalize_harness
+    from omnigent.runtime._globals import _conversation_store
+    from omnigent.server.routes._sessions.helpers import _resolve_harness
+
+    if _conversation_store is None:
+        return None
+    conv = _conversation_store.get(session_id)
+    if conv is None:
+        return None
+    harness = _resolve_harness(conv)
+    if not isinstance(harness, str) or not harness:
+        return None
+    return (canonicalize_harness(harness) or harness) in _INTERRUPT_CLEARS_BUFFER
+
+
 def _refresh(session_id: str) -> None:
     pending_count = len(pending_inputs.pending_ids(session_id))
     stall_progress.update_runtime_facts(
@@ -238,6 +264,7 @@ def _refresh(session_id: str) -> None:
         status=_raw_status(session_id),
         elicitation_pending=pending_elicitations.count_for(session_id) > 0,
         pending_input_count=pending_count,
+        interrupt_clears_buffer=_harness_interrupt_clears_buffer(session_id),
     )
 
 

@@ -165,6 +165,34 @@ async def test_ac4_buffer_between_thresholds_marks_without_interrupt() -> None:
     assert calls == []
 
 
+async def test_ac4_claude_native_marks_without_interrupt() -> None:
+    """Auto-interrupt would drop claude-native's runner buffer (FR-3)."""
+    calls: list[str] = []
+
+    async def _interrupt(session_id: str) -> None:
+        calls.append(session_id)
+
+    uninstall = register_interrupt_callback(_interrupt)
+    try:
+        _ack("conv_ac4_cn", status="idle", now=0.0)
+        _ack("conv_ac4_cn", status="running", now=700.0)
+        stall_progress.update_runtime_facts(
+            "conv_ac4_cn",
+            status="running",
+            elicitation_pending=False,
+            pending_input_count=1,
+            interrupt_clears_buffer=True,
+        )
+        decision = await evaluate_session("conv_ac4_cn", now=700.0, settings=StallSettings())
+    finally:
+        uninstall()
+    assert decision.mark_stalled is True
+    assert decision.emit_stalled is True
+    assert decision.interrupt is False
+    assert decision.buffered_starts_next_turn is False
+    assert calls == []
+
+
 async def test_ac5_cooldown_blocks_a_second_interrupt() -> None:
     calls: list[str] = []
 

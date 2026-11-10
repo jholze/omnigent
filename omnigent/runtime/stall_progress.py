@@ -80,6 +80,9 @@ class Clock:
     pending_epoch: int = 0
     pending_anchor_ms: int = 0
     turn_response_id: str | None = None
+    # True when a Stop/interrupt on this harness drops the runner buffer
+    # (claude-native). Auto-interrupt would delete the queued follow-up.
+    interrupt_clears_buffer: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +156,7 @@ def update_runtime_facts(
     status: str | None,
     elicitation_pending: bool,
     pending_input_count: int,
+    interrupt_clears_buffer: bool | None = None,
 ) -> None:
     """Refresh facts the tick reads from other subsystems."""
     with _lock:
@@ -166,6 +170,8 @@ def update_runtime_facts(
         clock.elicitation_pending = elicitation_pending
         if pending_input_count > 0:
             clock.buffered_count = max(clock.buffered_count, pending_input_count)
+        if interrupt_clears_buffer is not None:
+            clock.interrupt_clears_buffer = interrupt_clears_buffer
 
 
 def _anchor_ms(clock: Clock, now: float) -> int:
@@ -222,6 +228,7 @@ def evaluate(clock: Clock, now: float, settings: StallSettings) -> Decision:
         and clock.buffered_count > 0
         and silence >= settings.interrupt_after_s
         and cooldown_open
+        and not clock.interrupt_clears_buffer
     )
     return Decision(
         mark_stalled=emit_stalled,

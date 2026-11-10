@@ -3176,11 +3176,15 @@ def register_events_routes(
 
         Uses the same interrupt event as an owner Stop. It does not post a
         second copy of the buffered message, and it does not use the owner-wake
-        queue.
+        queue. Harnesses whose Stop drops the runner buffer (claude-native)
+        are mark-only: posting interrupt here would delete the follow-up.
         """
+        from omnigent.server import stall_watchdog as _stall_watchdog
         from omnigent.server import subagent_wake as _subagent_wake
         from omnigent.server.routes._auth_helpers import get_session_owner_id
 
+        if _stall_watchdog._harness_interrupt_clears_buffer(session_id) is True:
+            return
         app = _subagent_wake._app
         if app is None:
             return
