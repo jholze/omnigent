@@ -720,13 +720,16 @@ def branding_config() -> dict[str, Any]:
 
 # Event names the manager webhook can emit. The first four match the
 # upstream lifecycle push. ``session.decision_resolved`` is a fork extension
-# emitted when a human verdict is durably recorded.
+# emitted when a human verdict is durably recorded. ``session.stalled`` and
+# ``session.recovered`` report a quiet running turn and the next progress.
 MANAGER_WEBHOOK_EVENT_TYPES: tuple[str, ...] = (
     "session.completed",
     "session.failed",
     "session.awaiting_decision",
     "session.resumed",
     "session.decision_resolved",
+    "session.stalled",
+    "session.recovered",
 )
 
 _RESERVED_WEBHOOK_HEADERS = frozenset(

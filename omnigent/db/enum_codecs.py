@@ -130,12 +130,16 @@ SCHEDULED_TASK_RUN_STATUS: dict[str, int] = {
 # Manager-webhook outbox event types. Codes 1–4 match the upstream
 # durable session-lifecycle push so a receiver can switch later.
 # Code 5 is a fork extension (``session.decision_resolved``).
+# Codes 6 and 7 are a quiet turn (``session.stalled``) and the next
+# progress event (``session.recovered``).
 SESSION_LIFECYCLE_EVENT_TYPE: dict[str, int] = {
     "session.completed": 1,
     "session.failed": 2,
     "session.awaiting_decision": 3,
     "session.resumed": 4,
     "session.decision_resolved": 5,
+    "session.stalled": 6,
+    "session.recovered": 7,
 }
 
 SESSION_LIFECYCLE_OUTBOX_STATUS: dict[str, int] = {
