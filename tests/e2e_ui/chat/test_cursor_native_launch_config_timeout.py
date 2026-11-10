@@ -2,38 +2,32 @@
 
 Regression test for the cursor-native terminal auto-create failure signature
 ``Failed to auto-create cursor terminal for <session>`` (runner logger
-``omnigent.runner.app`` / ``_launch_native_terminal``): on bind, the
-runner's cursor launch path
-reads the session snapshot exactly once --
-``_pi_native_launch_config`` in ``omnigent/runner/native/orchestration.py``
-issues a single ``GET /v1/sessions/{id}`` with a hard 10s read budget and no
-retry -- so one slow response (a genuine ``httpx.ReadTimeout``: a saturated
-uplink, a briefly stalled server, a laptop waking from sleep) permanently
-fails the whole terminal auto-create. The runner catches the resulting
-``RuntimeError: Could not fetch Pi launch config for '<id>'.``, logs
-``Failed to auto-create cursor terminal for <id>`` and publishes
-``session.status: failed`` ("Native Cursor terminal failed to start; see the
-runner log ...") with no terminal and no retry, even though the degradation
-cleared seconds later. The user sees the session go failed (the SPA error
-pill) instead of the cursor-agent TUI.
+``omnigent.runner.app`` / ``_launch_native_terminal``). A current server
+sends a session_init envelope, and the runner caches that snapshot, so bind
+does not issue the older pair of ``GET /v1/sessions/{id}`` reads.
+``_pi_native_launch_config`` still fetches launch config itself
+(``_fetch_native_launch_snapshot``): one ``GET /v1/sessions/{id}?…`` per
+attempt, with ``_LAUNCH_CONFIG_FETCH_TIMEOUT_S`` (20s) and
+``_LAUNCH_CONFIG_FETCH_ATTEMPTS`` (3). A read that returns inside that
+budget never exercises the retry. A genuine ``httpx.ReadTimeout`` on the
+first attempt used to fail the whole auto-create with no second try; the
+runner logged ``Could not fetch Pi launch config`` / ``Failed to
+auto-create cursor terminal`` and published ``session.status: failed``.
 
 The journey this drives is the reported one: start a Cursor wrapper session
 (the exact terminal-first spec ``omnigent cursor`` ships), open it in the web
 app, and let the runner bind + auto-create the terminal while the runner's
 network path to the server is briefly degraded. The degradation is injected
-by a loopback TCP proxy interposed between the runner and the server that
-forwards the two bind/init snapshot reads untouched and then holds ONLY the
-launch-config GET for this session past the fetch's 10s read budget --
-disarming itself the instant it captures that one request, so exactly one
-fetch is degraded (a single transient timeout, matching the field signature:
-a handful of events, no broad outage).
+by a loopback TCP proxy interposed between the runner and the server. It
+forwards the leading snapshot reads (none, while init uses the envelope)
+and then holds ONLY the launch-config GET past one attempt's budget —
+disarming itself the instant it captures that one request, so the retry's
+next GET flows immediately.
 
-While the bug is live the launch dies on that one slow read and this test
-FAILS with the launch-config error (session ``failed``, no terminal); once the
-fetch tolerates a transient slow read (a retry, a saner budget), the terminal
-comes up and the test passes. The proxy has already disarmed by the time a fix
-retries, so the retry's second GET flows instantly -- the fixed path recovers
-and the test transitions fail -> pass.
+While the retry is broken the launch dies on that one slow read and this
+test FAILS with the launch-config error (no terminal). With the retry in
+place the terminal comes up and the test passes. ``stall_count >= 1``
+rejects a run that never injected the fault.
 
 The rig mirrors ``test_native_pinned_model_namespace_launch.py``: a dedicated
 server + runner pair with isolated ``HOME`` / ``OMNIGENT_CONFIG_HOME`` so no
@@ -64,35 +58,32 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from omnigent.runner.native.orchestration import _LAUNCH_CONFIG_FETCH_TIMEOUT_S
 from tests._helpers.native_session import create_native_session
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Boot budget for the spawned server + proxy + runner trio.
 _HEALTH_TIMEOUT_S = 120.0
-# Launch outcome budget: bind-time snapshot reads each ride out the injected
-# delay before the launch-config fetch runs, plus the tmux/CLI boot on the
-# fixed path.
+# Launch outcome budget: one stalled attempt burns the fetch timeout, then
+# the retry and the tmux/CLI boot on the fixed path.
 _OUTCOME_TIMEOUT_S = 240.0
-# How long the degraded path holds a session-snapshot GET. Must exceed the
-# launch-config fetch's 10s read budget so that caller times out for real,
-# while callers with no read timeout only see a slow server and are served
-# late (they ride the stall out).
-_STALL_S = 12.0
+# How long the degraded path holds a session-snapshot GET. Must exceed
+# ``_LAUNCH_CONFIG_FETCH_TIMEOUT_S`` so the first launch-config attempt
+# times out and the existing retry runs. A shorter hold is absorbed by
+# that budget and never proves the retry. Callers with no read timeout
+# only see a slow server and are served late (they ride the stall out).
+_STALL_S = _LAUNCH_CONFIG_FETCH_TIMEOUT_S + 5.0
 
-#: Number of leading ``GET /v1/sessions/{id}`` reads the bind/init path issues
-#: BEFORE the launch-config fetch under test. On bind the runner reads the
-#: session snapshot twice (the bind/init handler, then
-#: ``_resolve_session_agent_spec_or_none``) and only then does
-#: ``_auto_create_cursor_terminal`` -> ``_pi_native_launch_config`` issue the
-#: launch-config fetch. These leading reads use no read budget (they ride out a
-#: slow server); the launch-config fetch has the hard 10s budget under test. So
-#: the proxy forwards the first two matches untouched and degrades only the
-#: third -- the launch-config fetch -- so the fault lands where the bug lives
-#: (not on init, which would merely hang the launch). Observed stable across
-#: runs; if the init path changes its read count the ``stall_count >= 1`` guard
-#: fires loudly rather than passing silently.
-_INIT_SNAPSHOT_READS = 2
+#: Number of leading ``GET /v1/sessions/{id}?`` reads bind issues BEFORE the
+#: launch-config fetch. A current server's session_init envelope fills
+#: ``_session_snapshot_cache``, so ``_resolve_session_agent_spec_or_none``
+#: does not GET. ``_auto_create_cursor_terminal`` then calls
+#: ``_pi_native_launch_config``, which always GETs. The proxy therefore
+#: stalls match #1 — that launch-config fetch — and leaves init alone.
+#: ``CURSOR_LAUNCH_E2E_STALL_AFTER`` overrides this when the read count
+#: moves; ``stall_count >= 1`` still fails a run that never stalled.
+_INIT_SNAPSHOT_READS = 0
 
 _ERROR_PILL = '[data-testid="error-pill"]'
 
@@ -172,7 +163,7 @@ class _SnapshotDelayProxy:
     ``/v1/sessions/<sid>/agent`` do not match) is held :data:`_STALL_S`
     seconds instead of being forwarded, so its response never arrives inside
     that window. A caller whose read budget is shorter (the launch-config
-    fetch's 10s) observes a genuine ``httpx.ReadTimeout`` on its own socket and
+    fetch) observes a genuine ``httpx.ReadTimeout`` on its own socket and
     closes the connection; a caller with no read timeout (the best-effort
     snapshot cache) rides the stall out and is served late once the held bytes
     are forwarded. All other traffic (other routes, the WebSocket tunnel that
@@ -596,15 +587,13 @@ def test_transient_slow_snapshot_read_does_not_brick_cursor_launch(
 
     Journey (the reported one): create a Cursor wrapper session, open it in the
     web app, and bind the runner while the runner -> server path is briefly
-    degraded so the single ``GET /v1/sessions/{id}`` launch-config fetch reads
-    slower than its 10s budget.
+    degraded so the first launch-config ``GET /v1/sessions/{id}`` exceeds
+    ``_LAUNCH_CONFIG_FETCH_TIMEOUT_S``. The retry then sees a disarmed proxy.
 
     The original bug fails the whole terminal auto-create on that one slow read
-    (session ``failed``, no terminal, no retry) -- this test FAILS with the
-    launch-config error while the bug is live. A fix that tolerates the
-    transient slow read (retry / saner budget) brings the terminal up; the
-    transient proxy has disarmed by then, so the retry succeeds and the test
-    passes. Skips without the cursor CLI on PATH (the fixed path launches it).
+    (no terminal) -- this test FAILS with the launch-config error while that
+    bug is live. The shipped retry brings the terminal up. Skips without the
+    cursor CLI on PATH (the fixed path launches it).
     """
     if shutil.which("cursor-agent") is None:
         pytest.skip("cursor-agent CLI is required for the cursor-native launch e2e")
@@ -665,10 +654,14 @@ def test_transient_slow_snapshot_read_does_not_brick_cursor_launch(
         # Prove the fault was actually exercised: the launch-config fetch must
         # have hit the degraded path. A green pass with stall_count == 0 would
         # be a false pass (the request never went through the proxy).
+        # match_count shows whether stall_after still lines up with bind.
         if not os.environ.get("CURSOR_LAUNCH_E2E_NO_ARM"):
             assert rig.proxy.stall_count >= 1, (
                 "the launch-config fetch never traversed the degraded proxy path "
-                f"(stall_count=0); the reproduction did not inject its fault.\n"
+                f"(stall_count={rig.proxy.stall_count}, "
+                f"timed_out_count={rig.proxy.timed_out_count}, "
+                f"match_count={rig.proxy.match_count}); "
+                "the reproduction did not inject its fault.\n"
                 f"Runner log tail:\n{_real_runner_log(rig.work)[-3000:]}"
             )
 
