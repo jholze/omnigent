@@ -235,8 +235,8 @@ async def test_child_create_with_inherited_bindings_persists_on_get(
     """GET /v1/sessions/{child} shows the parent's project and workspace.
 
     Native spawn copies those fields onto POST /v1/sessions. This hits
-    the real create route (not a mock body) so a later GET matches
-    issue #179's acceptance line.
+    the real create route (not a mock body) so a later GET shows the
+    same project and workspace as the parent.
     """
     project_id = await _project(
         project_create_client,

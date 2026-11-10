@@ -4145,14 +4145,24 @@ async def test_sys_session_send_inherits_parent_host_workspace_project(
 
 
 @pytest.mark.asyncio
-async def test_sys_session_send_retries_without_inherited_bindings_on_400(
+@pytest.mark.parametrize(
+    ("reject_status", "reject_body"),
+    [
+        (400, {"error": {"code": "invalid_input", "message": "host is offline"}}),
+        (404, {"detail": "host not found"}),
+    ],
+    ids=["400", "404"],
+)
+async def test_sys_session_send_retries_without_inherited_bindings_on_host_reject(
     monkeypatch: pytest.MonkeyPatch,
+    reject_status: int,
+    reject_body: dict[str, Any],
 ) -> None:
-    """A 400 from inherited host/workspace falls back to an unbound child.
+    """A rejected inherited host falls back to an unbound child.
 
-    Live workspace validation can reject a copied host_id. Spawn must
-    still succeed the way it did before inherit, rather than fail the
-    dispatch.
+    Live host lookup can 400 or 404 (stale host_id). Spawn must still
+    succeed the way it did before inherit, rather than fail the dispatch
+    or report agent_not_found.
     """
     from omnigent.onboarding import harness_install
     from omnigent.runner import app as runner_app
@@ -4184,10 +4194,7 @@ async def test_sys_session_send_retries_without_inherited_bindings_on_400(
             body = json.loads(request.content)
             create_bodies.append(body)
             if "host_id" in body:
-                return httpx.Response(
-                    400,
-                    json={"error": {"code": "invalid_input", "message": "host is offline"}},
-                )
+                return httpx.Response(reject_status, json=reject_body)
             return httpx.Response(201, json={"id": "conv_child_retry_unbound"})
         if (
             request.method == "POST"
@@ -8619,6 +8626,58 @@ async def test_sys_session_create_inherits_parent_host_workspace_project() -> No
     assert captured["host_id"] == "host_bound"
     assert captured["workspace"] == "/Users/jholze/dev/example"
     assert captured["project_id"] == "proj_bound"
+
+
+@pytest.mark.asyncio
+async def test_sys_session_create_retries_without_inherited_bindings_on_404() -> None:
+    """A 404 from a stale inherited host falls back instead of agent_not_found."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    captured: list[dict[str, Any]] = []
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_caller":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_caller",
+                    "host_id": "host_stale",
+                    "workspace": "/Users/jholze/dev/example",
+                    "project_id": "proj_bound",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            body = json.loads(request.content)
+            captured.append(body)
+            if "host_id" in body:
+                return httpx.Response(404, json={"detail": "host not found"})
+            return httpx.Response(
+                201,
+                json={"id": "conv_child_fallback", "agent_id": "ag_x", "agent_name": "researcher"},
+            )
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "ag_x", "title": "auth"}),
+                server_client=server_client,
+                conversation_id="conv_caller",
+            )
+        finally:
+            subagent_work.unregister_child_session("conv_child_fallback")
+            subagent_work._session_inboxes_ref.pop("conv_caller", None)
+
+    handle = json.loads(output)
+    assert handle.get("error") != "agent_not_found", output
+    assert handle["conversation_id"] == "conv_child_fallback"
+    assert len(captured) == 2
+    assert captured[0]["host_id"] == "host_stale"
+    assert "host_id" not in captured[1]
 
 
 @pytest.mark.asyncio

@@ -1827,8 +1827,7 @@ async def _inherited_parent_model(
     return parent_model
 
 
-_SPAWN_INHERIT_KEYS = ("host_id", "workspace", "project_id")
-_SPAWN_INHERIT_RETRY_STATUSES = frozenset({400, 422})
+_SPAWN_INHERIT_RETRY_STATUSES = frozenset({400, 403, 404, 409, 422})
 
 
 async def _parent_spawn_bindings(
@@ -2974,6 +2973,10 @@ async def _execute_subagent_tool(
         try:
             for _ordinal_attempt in range(_max_ordinal_retries + 1):
                 resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
+                if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
+                    _strip_inherited_spawn_bindings(create_body, inherited_bindings)
+                    inherited_bindings = {}
+                    resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
                 if (
                     resp.status_code == 409
                     and _auto_ordinal
@@ -2986,10 +2989,6 @@ async def _execute_subagent_tool(
                     session_name = f"{sub_agent_name}-{ordinal}"
                     create_body["title"] = f"{sub_agent_name}:{session_name}"
                     continue
-                if _should_retry_create_without_inherited_bindings(resp, inherited_bindings):
-                    _strip_inherited_spawn_bindings(create_body, inherited_bindings)
-                    inherited_bindings = {}
-                    resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
                 break
         except httpx.ReadTimeout as _exc:
             _create_timeout_exc = _exc
