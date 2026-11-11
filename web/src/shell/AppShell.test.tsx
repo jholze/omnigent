@@ -2013,11 +2013,16 @@ describe("Workspace rail maximize", () => {
     fireEvent.pointerEnter(screen.getByRole("button", { name: /open sidebar/i }));
     await waitFor(() => expect(screen.getByTestId("sidebar")).toHaveAttribute("data-peek", "true"));
 
-    // Pointer over something that is not the card, the trigger, or a popper.
-    fireEvent.pointerMove(screen.getByTestId("url-params"));
-    await waitFor(() =>
-      expect(screen.getByTestId("sidebar")).toHaveAttribute("data-peek", "false"),
-    );
+    // The dismiss listener is attached in an effect after peek becomes true.
+    // A single pointermove can land before that effect, leaving data-peek
+    // stuck at "true". Keep sending a bubbling pointermove on a node outside
+    // the peek surface until the 200ms grace can fire.
+    const elsewhere = screen.getByTestId("url-params");
+    await waitFor(() => {
+      fireEvent.pointerMove(elsewhere);
+      elsewhere.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, composed: true }));
+      expect(screen.getByTestId("sidebar")).toHaveAttribute("data-peek", "false");
+    });
   });
 
   it("keeps peeking while the pointer is over the card itself", async () => {
