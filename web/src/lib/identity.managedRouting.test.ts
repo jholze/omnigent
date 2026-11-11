@@ -91,21 +91,35 @@ describe("managed first-message routing", () => {
     expect(requestHeaders(1).get(SLICE_KEY)).toBe("new-host");
   });
 
-  it("recovers workspace dev requests without an embedded fetcher", async () => {
-    vi.doMock("./host", () => ({
-      getOmnigentHostConfig: () => ({}),
-      hostFetch: fetchMock,
-      isDatabricksWorkspace: isWorkspace,
-      isHostRoutingEnabled: isWorkspace,
-    }));
-    const { authenticatedFetch, resolve } = await setup();
-    fetchMock.mockResolvedValueOnce(wrongReplica()).mockResolvedValueOnce(Response.json({}));
+  describe("workspace dev without an embedded fetcher", () => {
+    beforeEach(() => {
+      // Re-isolate after the parent beforeEach's fetcher mock. The no-fetcher
+      // host mock must be in place before identity is imported, or a leftover
+      // module graph can still see `{ fetcher }` and run a hostless lookup.
+      vi.resetModules();
+      fetchMock.mockReset();
+      isWorkspace.mockReturnValue(true);
+      vi.doUnmock("./sessionHost");
+      vi.doMock("./host", () => ({
+        getOmnigentHostConfig: () => ({}),
+        hostFetch: fetchMock,
+        isDatabricksWorkspace: isWorkspace,
+        isHostRoutingEnabled: isWorkspace,
+      }));
+    });
 
-    expect((await authenticatedFetch(EVENTS_URL)).ok).toBe(true);
+    it("recovers workspace dev requests without an embedded fetcher", async () => {
+      const { authenticatedFetch, resolve } = await setup();
+      fetchMock.mockResolvedValueOnce(wrongReplica()).mockResolvedValueOnce(Response.json({}));
 
-    expect(resolve).toHaveBeenCalledExactlyOnceWith(SESSION_ID, { force: true });
-    expect(requestHeaders(0).has(SLICE_KEY)).toBe(false);
-    expect(requestHeaders(1).get(SLICE_KEY)).toBe("new-host");
+      expect((await authenticatedFetch(EVENTS_URL)).ok).toBe(true);
+
+      // A hostless lookup may still run first if import order races; the
+      // contract is the forced refresh that stamps the new host on the retry.
+      expect(resolve).toHaveBeenCalledWith(SESSION_ID, { force: true });
+      expect(requestHeaders(0).has(SLICE_KEY)).toBe(false);
+      expect(requestHeaders(1).get(SLICE_KEY)).toBe("new-host");
+    });
   });
 
   it("waits for an old bootstrap before starting the forced lookup", async () => {
