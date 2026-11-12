@@ -390,6 +390,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "type": "string",
                         "description": (
                             "Project id from list_projects to file the session in. "
+                            "Omitted with parent_session_id, the parent's project is used; "
+                            '"" files the session in no project. '
                             "A project-scoped agent account must name an allowed project."
                         ),
                     },
@@ -1607,15 +1609,20 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
     host_id = _optional_str(args.get("host_id"), "host_id")
     workspace = _optional_str(args.get("workspace"), "workspace")
     title = _optional_str(args.get("title"), "title")
-    project_id = _blank_to_none(_optional_str(args.get("project_id"), "project_id"))
-    if project_id is not None:
-        project_id = _require_id(project_id, "project_id")
+    project_id = _optional_str(args.get("project_id"), "project_id")
+    # "" files the session in no project and skips inheriting the parent's.
+    if project_id is not None and not project_id.strip():
+        project_id = ""
+    elif project_id is not None:
+        project_id = _require_id(project_id.strip(), "project_id")
     parent_session_id = _blank_to_none(
         _optional_str(args.get("parent_session_id"), "parent_session_id")
     )
     sub_agent_name = _blank_to_none(_optional_str(args.get("sub_agent_name"), "sub_agent_name"))
     if parent_session_id is not None:
         parent_session_id = _require_id(parent_session_id, "parent_session_id")
+        if project_id is None:
+            project_id = await _parent_project_id(api, parent_session_id)
     message = args.get("message")
     if message is not None:
         message = _require_text(message)
@@ -1632,7 +1639,7 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
         body["workspace"] = workspace
     if title:
         body["title"] = title
-    if project_id:
+    if project_id is not None:
         body["project_id"] = project_id
     if parent_session_id:
         body["parent_session_id"] = parent_session_id
@@ -1641,6 +1648,22 @@ async def _build_create_body(api: _Api, args: Mapping[str, Any]) -> dict[str, An
     if message:
         body["initial_items"] = [_user_message_event(message)]
     return body
+
+
+async def _parent_project_id(api: _Api, parent_session_id: str) -> str | None:
+    """The parent's project id, or ``None``. Access errors surface in ``_require_parent_edit``."""
+    try:
+        parent = await api.call(
+            "GET",
+            _with_query(
+                _session_path(parent_session_id),
+                {"include_items": False, "include_usage": False, "include_liveness": False},
+            ),
+        )
+    except ToolFailure:
+        return None
+    project_id = parent.get("project_id") if isinstance(parent, dict) else None
+    return project_id if isinstance(project_id, str) and project_id else None
 
 
 async def _require_parent_edit(api: _Api, parent_session_id: str) -> None:

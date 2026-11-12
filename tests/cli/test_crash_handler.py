@@ -446,3 +446,117 @@ def test_issue_url_keeps_short_body_intact(data_dir: Path) -> None:
     body = up.parse_qs(up.urlparse(url).query).get("description", [""])[0]
     assert "truncated" not in body
     assert "ValueError: boom" in body
+
+
+# --------------------------------------------------------------------------- #
+# Fork overrides: issue repo and the interactive prompt, read from the env
+# --------------------------------------------------------------------------- #
+class _StopAfterInstall(Exception):
+    """Raised right after ``omnigent.cli.main`` installs the crash handler."""
+
+
+def _install_like_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install the handler through the CLI entry point, then stop."""
+    import threading
+
+    from omnigent import cli
+
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
+
+    def stop() -> None:
+        raise _StopAfterInstall
+
+    monkeypatch.setattr(cli, "_enforce_wrapper_guard", stop)
+    with pytest.raises(_StopAfterInstall):
+        cli.main()
+
+
+def _printed_issue_url(monkeypatch: pytest.MonkeyPatch) -> str:
+    """The issue link the non-interactive crash notice prints."""
+    stream = io.StringIO()
+    monkeypatch.setattr(ch, "real_stderr", lambda: stream)
+    ch.handle_crash(_make_exc("repo-override"), interactive=False, source="test")
+    match = re.search(r"File an issue: (\S+)", _strip_ansi(stream.getvalue()))
+    assert match, stream.getvalue()
+    return match.group(1)
+
+
+def test_ac_115a_crash_repo_env_sets_the_issue_repo(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_CRASH_REPO", "jholze/omnigent")
+    _install_like_cli(monkeypatch)
+
+    url = _printed_issue_url(monkeypatch)
+
+    assert url.startswith("https://github.com/jholze/omnigent/issues/new?"), url
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "   ",
+        "https://github.com/jholze/omnigent",
+        "jholze/ omnigent",
+        "jholze",
+        "jholze/omnigent/extra",
+    ],
+    ids=["unset", "empty", "blank", "scheme", "space", "no-slash", "two-slashes"],
+)
+def test_ac_115a_unset_or_invalid_crash_repo_keeps_the_default(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is None:
+        monkeypatch.delenv("OMNIGENT_CRASH_REPO", raising=False)
+    else:
+        monkeypatch.setenv("OMNIGENT_CRASH_REPO", value)
+    _install_like_cli(monkeypatch)
+
+    url = _printed_issue_url(monkeypatch)
+
+    assert url.startswith("https://github.com/omnigent-ai/omnigent/issues/new?"), url
+
+
+def _interactive_crash(monkeypatch: pytest.MonkeyPatch, calls: dict) -> str:
+    """Run an interactive crash with stubbed clipboard, browser and stdin."""
+    monkeypatch.setattr(ch, "_copy_to_clipboard", lambda text: True)
+    monkeypatch.setattr(ch, "_open_browser", lambda url: calls.__setitem__("url", url) or True)
+    stream = FakeTTY()
+    monkeypatch.setattr(ch, "real_stderr", lambda: stream)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    ch.handle_crash(_make_exc("prompt-off"), interactive=True, source="test")
+    return _strip_ansi(stream.getvalue())
+
+
+def test_ac_115b_crash_prompt_off_skips_the_question_and_prints_path_and_link(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_CRASH_PROMPT", "0")
+    monkeypatch.delenv("OMNIGENT_CRASH_REPO", raising=False)
+    _install_like_cli(monkeypatch)
+    calls: dict = {}
+
+    out = _interactive_crash(monkeypatch, calls)
+
+    report = next((data_dir / "crashes").glob("crash-*.md"))
+    assert "file a GitHub issue" not in out
+    assert "url" not in calls
+    assert str(report) in out.replace("\n", "").replace(" ", "")
+    assert "https://github.com/omnigent-ai/omnigent/issues/new?" in out
+
+
+def test_ac_115b_crash_prompt_unset_still_asks(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OMNIGENT_CRASH_PROMPT", raising=False)
+    monkeypatch.delenv("OMNIGENT_CRASH_REPO", raising=False)
+    _install_like_cli(monkeypatch)
+    calls: dict = {}
+
+    out = _interactive_crash(monkeypatch, calls)
+
+    assert "file a GitHub issue" in out
+    assert calls["url"].startswith("https://github.com/omnigent-ai/omnigent/issues/new?")

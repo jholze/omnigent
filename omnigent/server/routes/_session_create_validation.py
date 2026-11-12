@@ -41,19 +41,30 @@ async def resolve_project_session_create(
     body: Any,
     user_id: str | None,
     project_store: ProjectStore | None,
+    conversation_store: ConversationStore | None = None,
 ) -> ProjectCreateResolution:
     """Apply opt-in project defaults before any create-side validation.
 
-    Field presence, rather than value, controls defaulting.  Consequently an
-    explicit JSON ``null`` remains explicit and is never replaced by a project
-    hint.  Unknown and foreign projects deliberately share one 404 response.
+    Field presence, rather than value, controls config defaulting, so an
+    explicit JSON ``null`` never picks up project hints.  Unknown and foreign
+    projects deliberately share one 404 response.  With *conversation_store*,
+    a child create without ``project_id`` (omitted or ``null``) is filed in
+    its parent's project; ``""`` files it in no project.
     """
     fields_set = set(body.model_fields_set)
     project_id = getattr(body, "project_id", None)
-    if "project_id" not in fields_set or project_id is None:
-        if getattr(body, "agent_id", None) is None and "agent_id" in body.__class__.model_fields:
-            raise OmnigentError("agent_id is required", code=ErrorCode.INVALID_INPUT)
+    if project_id == "":
+        _require_agent_id(body)
         return ProjectCreateResolution(body=body)
+    if "project_id" not in fields_set or project_id is None:
+        _require_agent_id(body)
+        inherited = await _inherited_project_id(
+            body=body,
+            user_id=user_id,
+            project_store=project_store,
+            conversation_store=conversation_store,
+        )
+        return ProjectCreateResolution(body=body, project_id=inherited)
     if project_store is None:
         raise OmnigentError(
             "Project not found",
@@ -91,6 +102,34 @@ async def resolve_project_session_create(
         )
 
     return ProjectCreateResolution(body=resolved, project_id=project_id)
+
+
+def _require_agent_id(body: Any) -> None:
+    if getattr(body, "agent_id", None) is None and "agent_id" in body.__class__.model_fields:
+        raise OmnigentError("agent_id is required", code=ErrorCode.INVALID_INPUT)
+
+
+async def _inherited_project_id(
+    *,
+    body: Any,
+    user_id: str | None,
+    project_store: ProjectStore | None,
+    conversation_store: ConversationStore | None,
+) -> str | None:
+    """The parent's project for a child create, or ``None`` when there is none.
+
+    Only the project id is inherited, not its config hints. A parent project
+    the caller cannot see (a shared parent's) leaves the child unfiled.
+    """
+    parent_session_id = getattr(body, "parent_session_id", None)
+    if not parent_session_id or conversation_store is None or project_store is None:
+        return None
+    parent = await asyncio.to_thread(conversation_store.get_conversation, parent_session_id)
+    parent_project_id = getattr(parent, "project_id", None) if parent is not None else None
+    if not parent_project_id:
+        return None
+    project = await asyncio.to_thread(project_store.get, parent_project_id, user_id=user_id)
+    return parent_project_id if project is not None else None
 
 
 # Claude Code's ``--permission-mode`` launch vocabulary — every value the CLI

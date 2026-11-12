@@ -10981,8 +10981,13 @@ async def _create_session_from_existing_agent(
         body=body,
         user_id=user_id,
         project_store=project_store,
+        conversation_store=conversation_store,
     )
     body = project_resolution.body
+    # The inherited project is known only now; check it before any row exists.
+    from omnigent.server.agent_project_scope import require_project_in_scope
+
+    require_project_in_scope(project_resolution.project_id)
     creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
     assert body.agent_id is not None
 

@@ -547,6 +547,109 @@ async def test_shared_chokepoint_is_reusable_by_non_route_creators(
     assert resolved.body.workspace == "/scheduled"
 
 
+def _filed_parent(db_uri: str, project_id: str) -> str:
+    """A root session of Alice's filed in *project_id*."""
+    return (
+        SqlAlchemyConversationStore(db_uri)
+        .create_conversation(agent_id=CUSTOM_AGENT_ID, project_id=project_id)
+        .id
+    )
+
+
+def _parent_project_store(db_uri: str) -> tuple[SqlAlchemyProjectStore, str, str]:
+    """Alice's project store with a parent project and another project."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    parent_project = project_store.create("587b7cb7ac30abf4debfaa578d052ec6", "parent", ALICE, {})
+    other_project = project_store.create("687b7cb7ac30abf4debfaa578d052ec6", "other", ALICE, {})
+    return project_store, parent_project.id, other_project.id
+
+
+async def test_ac_114a_resolver_inherits_the_parent_project_when_omitted(db_uri: str) -> None:
+    project_store, parent_project, _ = _parent_project_store(db_uri)
+    parent_id = _filed_parent(db_uri, parent_project)
+
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(agent_id=CUSTOM_AGENT_ID, parent_session_id=parent_id),
+        user_id=ALICE,
+        project_store=project_store,
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+    )
+
+    assert resolved.project_id == parent_project
+
+
+async def test_ac_114b_resolver_explicit_project_wins_over_the_parent(db_uri: str) -> None:
+    project_store, parent_project, other_project = _parent_project_store(db_uri)
+    parent_id = _filed_parent(db_uri, parent_project)
+
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(
+            agent_id=CUSTOM_AGENT_ID, parent_session_id=parent_id, project_id=other_project
+        ),
+        user_id=ALICE,
+        project_store=project_store,
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+    )
+
+    assert resolved.project_id == other_project
+
+
+async def test_ac_114c_resolver_empty_project_means_none_and_skips_inheritance(
+    db_uri: str,
+) -> None:
+    project_store, parent_project, _ = _parent_project_store(db_uri)
+    parent_id = _filed_parent(db_uri, parent_project)
+
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(
+            agent_id=CUSTOM_AGENT_ID, parent_session_id=parent_id, project_id=""
+        ),
+        user_id=ALICE,
+        project_store=project_store,
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+    )
+
+    assert resolved.project_id is None
+
+
+async def _http_child(
+    client: httpx.AsyncClient, extra: dict[str, object]
+) -> tuple[str, httpx.Response]:
+    """Alice files a parent in a project, then creates a child with *extra*."""
+    project_id = await _project(client, {})
+    parent = await client.post(
+        "/v1/sessions",
+        json={"agent_id": CUSTOM_AGENT_ID, "project_id": project_id},
+        headers=_headers(),
+    )
+    assert parent.status_code == 201, parent.text
+    child = await client.post(
+        "/v1/sessions",
+        json={"agent_id": CUSTOM_AGENT_ID, "parent_session_id": parent.json()["id"], **extra},
+        headers=_headers(),
+    )
+    return project_id, child
+
+
+@pytest.mark.parametrize("extra", [{}, {"project_id": None}], ids=["omitted", "null"])
+async def test_ac_114a_owner_child_create_inherits_the_parent_project(
+    project_create_client: httpx.AsyncClient, extra: dict[str, object]
+) -> None:
+    parent_project, child = await _http_child(project_create_client, extra)
+
+    assert child.status_code == 201, child.text
+    assert child.json()["project_id"] == parent_project
+
+
+async def test_ac_114c_owner_child_create_with_empty_project_files_nowhere(
+    project_create_client: httpx.AsyncClient,
+) -> None:
+    _, child = await _http_child(project_create_client, {"project_id": ""})
+
+    assert child.status_code == 201, child.text
+    assert child.json()["project_id"] is None
+
+
 def _import_payload(external_session_id: str, **extra: object) -> dict[str, object]:
     return {
         "source": "claude",

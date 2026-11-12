@@ -86,6 +86,19 @@ _FH_FILE: BinaryIO | None = None
 # always carries the full report as a backup when we truncate.
 _MAX_URL_LENGTH = 8000
 
+_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def crash_repo_from_env(default: str) -> str:
+    """``OMNIGENT_CRASH_REPO`` when it is ``owner/repo``, else *default*."""
+    value = os.environ.get("OMNIGENT_CRASH_REPO", "").strip()
+    return value if _REPO_PATTERN.match(value) else default
+
+
+def _prompt_disabled() -> bool:
+    """``OMNIGENT_CRASH_PROMPT=0`` skips the file-an-issue question."""
+    return os.environ.get("OMNIGENT_CRASH_PROMPT") == "0"
+
 
 # --------------------------------------------------------------------------- #
 # Installation
@@ -262,7 +275,7 @@ def handle_crash(
 
         if interactive is None:
             interactive = _is_interactive(stream)
-        if interactive:
+        if interactive and not _prompt_disabled():
             _interactive_flow(report_md, report_path, exc, tb_text, stream)
         else:
             _fallback_notice(report_path, exc, tb_text, stream)
