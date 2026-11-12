@@ -63,6 +63,7 @@ YAML usage::
             read_repos: ["my-org/service-a", "my-org/service-b"]
             write_repos: ["my-org/service-a"]
             write_branches: ["main", "develop"]
+            unparseable_action: ask
 """
 
 from __future__ import annotations
@@ -1061,6 +1062,7 @@ def github_policy(
     allow_destructive: bool = False,
     deny_tag_push: bool = True,
     deny_force_push: bool = True,
+    unparseable_action: str = "ask",
     mcp_tool_prefixes: list[str] | None = None,
     shell_tools: list[str] | None = None,
     deny_reason: str = "GitHub operation blocked by policy.",
@@ -1092,6 +1094,14 @@ def github_policy(
         (e.g. ``-uf``), and ``+refspec`` force prefixes are denied regardless
         of repo/branch allowlists. Set to ``False`` to allow force pushes
         through normal repo/branch gating.
+    :param unparseable_action: How to handle a shell command that mentions
+        ``git`` / ``gh`` but cannot be parsed into a classified operation
+        (here-documents, ``$(...)`` / backtick substitutions, unsupported
+        quoting, or opaque ``sh`` without ``-c``). One of ``"ask"`` (default —
+        return an ASK for human approval), ``"allow"`` (abstain — no card; a
+        real write must then be caught by a separate policy on the raw command
+        string), or ``"deny"`` (return a DENY because the command could not be
+        parsed). Any other value raises ``ValueError`` at factory time.
     :param mcp_tool_prefixes: GitHub MCP server name-prefixes to strip when
         canonicalizing MCP tool names. ``None`` uses the standard
         ``mcp__github__`` / ``github__``.
@@ -1106,6 +1116,11 @@ def github_policy(
     :returns: A one-argument policy callable returning a :class:`PolicyResponse`
         or ``None`` (abstain → ALLOW).
     """
+    if unparseable_action not in ("ask", "allow", "deny"):
+        raise ValueError(
+            f"Invalid unparseable_action={unparseable_action!r}; "
+            f"expected one of 'ask', 'allow', 'deny'."
+        )
     allowed_read_repos = _normalize_repos(read_repos)
     allowed_write_repos = _normalize_repos(write_repos)
     allowed_write_branches = _normalize_branches(write_branches)
@@ -1265,6 +1280,13 @@ def github_policy(
         :returns: ``None`` to allow, or a DENY / ASK decision.
         """
         if op.kind == "unparseable":
+            if unparseable_action == "allow":
+                return None
+            if unparseable_action == "deny":
+                return _deny(
+                    f"{deny_reason} Could not parse a git/gh command ({op.detail!r}) "
+                    f"to check it against the GitHub policy, so it is denied."
+                )
             return _ask(
                 f"Could not parse a git/gh command ({op.detail!r}) to check it against "
                 f"the GitHub policy. Approve to run it?"
@@ -1414,6 +1436,14 @@ POLICY_REGISTRY: list[dict[str, Any]] = [  # type: ignore[explicit-any]
                     "--force-with-lease, --force-if-includes), bundled short flags "
                     "(-uf), and +refspec force prefixes. Default true.",
                     "default": True,
+                },
+                "unparseable_action": {
+                    "type": "string",
+                    "enum": ["ask", "allow", "deny"],
+                    "description": "Action when a git/gh shell command cannot be parsed: "
+                    "'ask' (default, ASK for approval), 'allow' (abstain), or 'deny' "
+                    "(block).",
+                    "default": "ask",
                 },
                 "mcp_tool_prefixes": {
                     "type": "array",

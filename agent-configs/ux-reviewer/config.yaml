@@ -51,7 +51,7 @@ guardrails:
         path: omnigent.policies.builtins.cel.cel_policy
         arguments:
           expression: |-
-            event.type == "tool_call" && event.data.name in ["Bash","Shell","bash","shell","sys_os_shell","terminal","developer__shell"] && has(event.data.arguments.command) && event.data.arguments.command.matches("(^|[;&|(`\\s])(git\\s+(-C\\s+\\S+\\s+)?(commit|push|merge|rebase|reset|checkout|switch|stash|cherry-pick|revert|tag|am|apply|add|rm|mv|restore|clean|branch\\s+-|worktree\\s+(add|remove|prune))|gh\\s+(pr\\s+(create|merge|comment|review|edit|close|ready|reopen|checkout)|issue|release|repo|api|workflow\\s+run)|pnpm\\s+(add|install|i|remove|up|update)(\\s|$)|npm\\s+(install|i|uninstall)(\\s|$)|uv\\s+(add|remove|pip\\s+install))") ? {"result": "DENY", "reason": "ux-reviewer is read-only: no git mutations, installs or GitHub writes. Put the change into a design plan under docs/ux/design-plans/ instead."} : {"result": "ALLOW"}
+            event.type == "tool_call" && event.data.name in ["Bash","Shell","bash","shell","sys_os_shell","terminal","developer__shell"] && has(event.data.arguments.command) && event.data.arguments.command.matches("(^|[;&|(`\"'\\s])(git\\s+(-C\\s+\\S+\\s+)?(commit|push|merge|rebase|reset|checkout|switch|stash|cherry-pick|revert|tag|am|apply|add|rm|mv|restore|clean|branch\\s+-|worktree\\s+(add|remove|prune))|gh\\s+(pr\\s+(create|merge|comment|review|edit|close|ready|reopen|checkout)|issue|release|repo|api|workflow\\s+run)|pnpm\\s+(add|install|i|remove|up|update)(\\s|$)|npm\\s+(install|i|uninstall)(\\s|$)|uv\\s+(add|remove|pip\\s+install))") ? {"result": "DENY", "reason": "ux-reviewer is read-only: no git mutations, installs or GitHub writes. Put the change into a design plan under docs/ux/design-plans/ instead."} : {"result": "ALLOW"}
     blast_radius:
       type: function
       on: [tool_call]
@@ -70,6 +70,7 @@ guardrails:
           write_repos: []
           deny_force_push: true
           deny_tag_push: true
+          unparseable_action: allow
 
 tools:
   # Process memory for the Omnigent fork (Hindsight). Recall/search only --
