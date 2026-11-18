@@ -52,6 +52,7 @@ guardrails:
           write_repos: []
           deny_force_push: true
           deny_tag_push: true
+          unparseable_action: allow
     # Hard stop for local merges, hard resets, branch/worktree deletion and
     # any push/gh write that the policies above might classify as ASK.
     ux_builder_git:
@@ -61,7 +62,7 @@ guardrails:
         path: omnigent.policies.builtins.cel.cel_policy
         arguments:
           expression: |-
-            event.type == "tool_call" && event.data.name in ["Bash","Shell","bash","shell","sys_os_shell","terminal","developer__shell"] && has(event.data.arguments.command) && event.data.arguments.command.matches("(^|[;&|(`\\s])(git\\s+(-C\\s+\\S+\\s+)?(merge|push|reset\\s+--hard|tag\\s+-|branch\\s+-[dD]|worktree\\s+remove|clean\\s+-[a-zA-Z]*f)|gh\\s+(pr\\s+(create|merge|comment|review|edit|close|ready|reopen)|issue|release|repo|api|workflow\\s+run))") ? {"result": "DENY", "reason": "ux-builder: no push, merge, hard reset, branch/worktree deletion or GitHub writes. Commit locally on your feature branch and report back."} : {"result": "ALLOW"}
+            event.type == "tool_call" && event.data.name in ["Bash","Shell","bash","shell","sys_os_shell","terminal","developer__shell"] && has(event.data.arguments.command) && event.data.arguments.command.matches("(^|[;&|(`\"'\\s])(git\\s+(-C\\s+\\S+\\s+)?(merge|push|reset\\s+--hard|tag\\s+-|branch\\s+-[dD]|worktree\\s+remove|clean\\s+-[a-zA-Z]*f)|gh\\s+(pr\\s+(create|merge|comment|review|edit|close|ready|reopen)|issue|release|repo|api|workflow\\s+run))") ? {"result": "DENY", "reason": "ux-builder: no push, merge, hard reset, branch/worktree deletion or GitHub writes. Commit locally on your feature branch and report back."} : {"result": "ALLOW"}
 
 tools:
   # Process memory for the Omnigent fork (Hindsight). Recall/search only --
