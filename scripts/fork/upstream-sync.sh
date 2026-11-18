@@ -35,6 +35,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATUS_FILE="${UPSTREAM_SYNC_STATUS_FILE:-${HOME}/.omnigent/upstream-sync-status.json}"
 ENV_FILE="${UPSTREAM_SYNC_ENV_FILE:-${HOME}/.config/omnigent/upstream-sync.env}"
 STALE_DAYS="${UPSTREAM_SYNC_STALE_DAYS:-7}"
+case "${STALE_DAYS}" in
+  ''|*[!0-9.]*) echo "UPSTREAM_SYNC_STALE_DAYS must be a number, got '${STALE_DAYS}'; using 7" >&2; STALE_DAYS=7 ;;
+esac
 
 # write_status STATE MESSAGE [PR_JSON]: overwrite the status file atomically.
 write_status() {
@@ -71,8 +74,9 @@ notify() {
   local payload code
   payload="$(python3 -c 'import json,sys; print(json.dumps({"source": "omnigent-upstream-sync", "repo": sys.argv[2], "text": sys.argv[1]}))' "$1" "${FORK}")"
   if [ -n "${key}" ]; then
-    code="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${key}" \
-      -H 'Content-Type: application/json' -d "${payload}" "${url}" 2>/dev/null || true)"
+    # Key goes through a curl config on stdin so it never shows up in argv / ps.
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "${key}" | curl -sS --max-time 15 -o /dev/null \
+      -w '%{http_code}' -K - -H 'Content-Type: application/json' -d "${payload}" "${url}" 2>/dev/null || true)"
   else
     code="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
       -H 'Content-Type: application/json' -d "${payload}" "${url}" 2>/dev/null || true)"

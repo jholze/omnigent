@@ -21,11 +21,11 @@ upstream.
 `--dry-run` does the merge locally and reports conflicts and alembic heads
 without pushing.
 
-A stuck sync PR must not block the job silently. Every run writes
+A stuck sync PR must not block the job silently. Every non-dry run writes
 `~/.omnigent/upstream-sync-status.json` (`state`: `current`, `pr_opened`,
 `open_pr`, `blocked`, `conflict`; plus the PR number, age, mergeability and
 failing required checks) for the crash-report routine to read. A blocked PR
-(exit 4) and a merge conflict (exit 2) also log a `WARNING:` line and POST a
+(exit 4) and a merge conflict (exit 2, non-dry runs) also log a `WARNING:` line and POST a
 short notice to the webhook back channel configured in
 `~/.config/omnigent/upstream-sync.env` (mode 600, never committed):
 
@@ -52,7 +52,7 @@ without it launchd runs the job daily) or let PM HUB run it on its
 daily loop (`mkdir -p ~/.omnigent/logs` first for the launchd log). On a
 conflict the script removes its scratch branch; recreate `sync/upstream-*`
 by hand to resolve. The sync PR goes through the same review and CI as any PR.
-launchd runs the script from the `--repo` checkout, so keep that checkout on
+launchd runs the script file from the live checkout (`~/dev/omnigent-src`), so keep that checkout on
 current `main` (`git pull --ff-only`) or fixes to the script never reach it.
 
 ```xml

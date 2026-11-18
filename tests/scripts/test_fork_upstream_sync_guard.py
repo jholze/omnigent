@@ -184,7 +184,8 @@ def test_healthy_open_sync_pr_exits_3_without_notifying(tmp_path: Path) -> None:
 
 
 def test_blocked_sync_pr_without_webhook_still_writes_status(tmp_path: Path) -> None:
-    repo, env = _fake_env(tmp_path, [_pr(createdAt="2026-10-31T18:38:18Z")])
+    created = (dt.datetime.now(dt.UTC) - dt.timedelta(days=18)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repo, env = _fake_env(tmp_path, [_pr(createdAt=created)])
     proc = subprocess.run(
         ["bash", str(SCRIPT), "--repo", str(repo)],
         env=env,
