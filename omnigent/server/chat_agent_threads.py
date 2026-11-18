@@ -802,7 +802,7 @@ async def _start_impl(
     else:
         create_kwargs["host_id"] = host_id
     body = ProjectSessionCreateRequest(**create_kwargs)
-    response, conversation = await _create_session_from_existing_agent(
+    response, conversation, _create_input = await _create_session_from_existing_agent(
         conversation_store,
         agent_store,
         getattr(acting.app.state, "runner_router", None),
