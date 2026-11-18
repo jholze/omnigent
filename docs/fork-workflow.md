@@ -15,10 +15,27 @@ upstream.
 |---|---|
 | 0 | PR opened, or `main` already contains `upstream/main` |
 | 2 | Merge conflict. Files are listed; nothing is pushed |
-| 3 | An open `sync/upstream-*` PR exists. Finish it first |
+| 3 | An open `sync/upstream-*` PR exists and is healthy. Finish it first |
+| 4 | The open sync PR is blocked: older than 7 days (`UPSTREAM_SYNC_STALE_DAYS`), conflicting, or a required check failed |
 
 `--dry-run` does the merge locally and reports conflicts and alembic heads
 without pushing.
+
+A stuck sync PR must not block the job silently. Every non-dry run writes
+`~/.omnigent/upstream-sync-status.json` (`state`: `current`, `pr_opened`,
+`open_pr`, `blocked`, `conflict`; plus the PR number, age, mergeability and
+failing required checks) for the crash-report routine to read. A blocked PR
+(exit 4) and a merge conflict (exit 2, non-dry runs) also log a `WARNING:` line and POST a
+short notice to the webhook back channel configured in
+`~/.config/omnigent/upstream-sync.env` (mode 600, never committed):
+
+```sh
+UPSTREAM_SYNC_WEBHOOK_URL=<webhook url>
+UPSTREAM_SYNC_WEBHOOK_KEY=<bearer key>
+```
+
+Without that file the job only logs and writes the status file. The script
+never prints either value.
 
 Conflicts are resolved by hand (or by a PM HUB coder) on a
 `sync/upstream-*` branch, then the PR is opened. Rules for a resolution:
@@ -30,10 +47,13 @@ Conflicts are resolved by hand (or by a PM HUB coder) on a
   (`uv run python scripts/dump_openapi.py`, `pnpm install`).
 
 Schedule: weekly is enough while the fork carries its own features. Run it
-from a launchd agent at 05:00 (template below) or let PM HUB run it on its
+from a launchd agent on Mondays at 05:00 (template below; keep `Weekday` 1,
+without it launchd runs the job daily) or let PM HUB run it on its
 daily loop (`mkdir -p ~/.omnigent/logs` first for the launchd log). On a
 conflict the script removes its scratch branch; recreate `sync/upstream-*`
 by hand to resolve. The sync PR goes through the same review and CI as any PR.
+launchd runs the script file from the live checkout (`~/dev/omnigent-src`), so keep that checkout on
+current `main` (`git pull --ff-only`) or fixes to the script never reach it.
 
 ```xml
 <!-- ~/Library/LaunchAgents/ai.omnigent.upstream-sync.plist -->
