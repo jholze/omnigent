@@ -2249,9 +2249,9 @@ def main() -> None:
     # traceback, version, and OS in the Description field).
     # Installed first so crashes anywhere below — argv shorthands, Click
     # dispatch, imports — are all caught. See omnigent/crash_handler.py.
-    from omnigent.crash_handler import install_crash_handler
+    from omnigent.crash_handler import crash_repo_from_env, install_crash_handler
 
-    install_crash_handler(app_name="omnigent", repo="omnigent-ai/omnigent")
+    install_crash_handler(app_name="omnigent", repo=crash_repo_from_env("omnigent-ai/omnigent"))
 
     # Operators can force all use through a wrapper (e.g. `isaac omni`) by
     # setting OMNIGENT_REQUIRE_WRAPPER; the wrapper sets OMNIGENT_WRAPPER_BYPASS

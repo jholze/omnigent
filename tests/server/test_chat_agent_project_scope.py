@@ -415,6 +415,64 @@ async def test_ac_107b_child_of_an_out_of_scope_root_is_404(world) -> None:
     assert _outcome(read) == ("error", "not_found"), read.text
 
 
+async def _bot_spawn(world: _World, parent_id: str, **extra: object) -> httpx.Response:
+    """The scoped bot creates a sub-agent session under *parent_id*."""
+    agent_id = _register_agent(world.db_uri, "coder")
+    arguments = {"agent_id": agent_id, "parent_session_id": parent_id, "confirm": True, **extra}
+    return await tools_call(world.client, "create_session", arguments, token=world.token)
+
+
+async def test_ac_114a_scoped_spawn_without_project_inherits_the_parents(world) -> None:
+    spawned = await _bot_spawn(world, world.ft_session)
+
+    assert _outcome(spawned) == ("ok",), spawned.text
+    session = json.loads(spawned.json()["result"]["content"][0]["text"])["session"]
+    assert _project_of(world.db_uri, session["id"]) == world.ft_max
+
+
+async def test_ac_114a_create_session_dry_run_body_carries_the_inherited_project(world) -> None:
+    agent_id = _register_agent(world.db_uri, "coder")
+
+    preview = await tools_call(
+        world.client,
+        "create_session",
+        {"agent_id": agent_id, "parent_session_id": world.ft_session},
+        user=JENS,
+    )
+
+    assert _outcome(preview) == ("ok",), preview.text
+    planned = json.loads(preview.json()["result"]["content"][0]["text"])
+    assert planned["body"].get("project_id") == world.ft_max
+
+
+async def test_ac_114d_scoped_spawn_under_an_unfiled_parent_is_out_of_scope(world) -> None:
+    unfiled_child = _session(world.db_uri, JENS, None, parent=world.ft_session)
+    before = _conversation_count(world.db_uri)
+
+    spawned = await _bot_spawn(world, unfiled_child)
+
+    assert _outcome(spawned) == ("error", "out_of_scope"), spawned.text
+    assert _conversation_count(world.db_uri) == before
+
+
+async def test_ac_114d_scoped_spawn_with_an_explicit_other_project_is_not_found(world) -> None:
+    before = _conversation_count(world.db_uri)
+
+    spawned = await _bot_spawn(world, world.ft_session, project_id=world.product_os)
+
+    assert _outcome(spawned) == ("error", "not_found"), spawned.text
+    assert _conversation_count(world.db_uri) == before
+
+
+async def test_ac_114d_scoped_spawn_with_empty_project_is_out_of_scope(world) -> None:
+    before = _conversation_count(world.db_uri)
+
+    spawned = await _bot_spawn(world, world.ft_session, project_id="")
+
+    assert _outcome(spawned) == ("error", "out_of_scope"), spawned.text
+    assert _conversation_count(world.db_uri) == before
+
+
 async def test_ac_108a_session_moved_by_the_owner_is_404_on_the_next_request(world) -> None:
     arguments = {"session_id": world.ft_session}
     before = await tools_call(world.client, "get_session", arguments, token=world.token)
