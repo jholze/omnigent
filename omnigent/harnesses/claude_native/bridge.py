@@ -10295,7 +10295,6 @@ def _attachment_transcript_items_from_entry(
         scheduled wake.
     :returns: Updated active response id and parsed items.
     """
-    dropped_id = _response_id_after_dropped_user(current_response_id, settled_response_id)
     attachment = entry.get("attachment")
     if not isinstance(attachment, dict):
         return current_response_id, []
@@ -10322,6 +10321,11 @@ def _attachment_transcript_items_from_entry(
         ]
     if attachment.get("commandMode") != "prompt":
         return current_response_id, []
+    dropped_id = (
+        _response_id_after_dropped_user(current_response_id, settled_response_id)
+        if isinstance(prompt, str) and _is_resume_chrome_text([prompt])
+        else current_response_id
+    )
     if attachment.get("isMeta") is True:
         return dropped_id, []
     origin = attachment.get("origin")
@@ -10330,7 +10334,7 @@ def _attachment_transcript_items_from_entry(
     ):
         return dropped_id, []
     source_key = _transcript_source_key(entry, line_number, record_offset)
-    prompt_text = _normalize_mirrored_user_text(prompt)
+    prompt_text = _normalize_mirrored_user_text(prompt, origin=origin)
     if not prompt_text:
         return dropped_id, []
     item = ClaudeTranscriptItem(
@@ -10407,28 +10411,55 @@ def _unwrap_pasted_content_markers(text: str) -> str:
 # Claude Code prepends these to a resumed or injected prompt. They are not
 # user-typed; leaving them on the mirrored bubble breaks pending-input
 # matching (FIFO then drains a stale head) and shows CLI chrome in chat.
+# Only resume reminders and command caveats are stripped: other reminders
+# (e.g. nested rules) stay with the text the person sent, as upstream keeps them.
 _VENDOR_INJECTED_XML_RE = re.compile(
     r"<(system-reminder|local-command-caveat)(?:\s[^>]*)?>.*?</\1(?:\s[^>]*)?>",
     re.DOTALL | re.IGNORECASE,
 )
+_RESUME_CHROME_MARKERS: tuple[str, ...] = (
+    "session was resumed",
+    "<local-command-caveat",
+)
 
 
-def _normalize_mirrored_user_text(text: str) -> str:
+def _is_resume_chrome_block(block: str) -> bool:
+    lowered = block.lower()
+    return any(marker in lowered for marker in _RESUME_CHROME_MARKERS)
+
+
+def _normalize_mirrored_user_text(text: str, *, origin: object = None) -> str:
     """
-    Strip Claude-injected wrappers from a mirrored user prompt.
+    Strip Claude-injected resume wrappers from a mirrored user prompt.
 
-    Paste markers are removed first, then ``<system-reminder>`` /
-    ``<local-command-caveat>`` blocks. The remainder is the text the person
-    sent. Empty when the record was only CLI chrome.
+    Paste markers are removed first, then ``--resume`` ``<system-reminder>``
+    and ``<local-command-caveat>`` blocks. The remainder is the text the
+    person sent. Empty when the record was only resume chrome. A prompt of
+    human origin is kept as typed.
 
     :param text: Raw user text from a Claude transcript record.
+    :param origin: The record's ``origin``, if any.
     :returns: The typed prompt, or ``""`` when nothing user-authored remains.
     """
     unwrapped = _unwrap_pasted_content_markers(text)
+    if isinstance(origin, dict) and origin.get("kind") == "human":
+        return unwrapped
     lowered = unwrapped.lower()
     if "<system-reminder" not in lowered and "<local-command-caveat" not in lowered:
         return unwrapped
-    return _VENDOR_INJECTED_XML_RE.sub("", unwrapped).strip()
+    stripped = _VENDOR_INJECTED_XML_RE.sub(
+        lambda m: "" if _is_resume_chrome_block(m.group(0)) else m.group(0), unwrapped
+    )
+    return stripped.strip() if stripped != unwrapped else unwrapped
+
+
+def _is_resume_chrome_text(texts: list[str]) -> bool:
+    """Whether a dropped user record carried ``--resume`` chrome."""
+    return any(
+        _is_resume_chrome_block(m.group(0))
+        for text in texts
+        for m in _VENDOR_INJECTED_XML_RE.finditer(text)
+    )
 
 
 def _response_id_after_dropped_user(
@@ -11139,7 +11170,11 @@ def _user_transcript_items_from_entry(
         else []
     )
     # Keep hidden completion provenance so the parent can link the returned child.
-    dropped_id = _response_id_after_dropped_user(current_response_id, settled_response_id)
+    dropped_id = (
+        _response_id_after_dropped_user(current_response_id, settled_response_id)
+        if _is_resume_chrome_text(notification_texts)
+        else current_response_id
+    )
     if (
         entry.get("isMeta") is True
         and return_id is None
@@ -11244,7 +11279,7 @@ def _user_transcript_items_from_entry(
         # of leaking as user bubbles.
         if any(stripped.startswith(m) for m in _CLI_SCAFFOLDING_MARKERS):
             return dropped_id, []
-        prompt_text = _normalize_mirrored_user_text(content)
+        prompt_text = _normalize_mirrored_user_text(content, origin=entry.get("origin"))
         if not prompt_text:
             return dropped_id, []
         items.append(
@@ -11303,7 +11338,7 @@ def _user_transcript_items_from_entry(
                 or _is_system_reminder_text(text, origin=entry.get("origin"))
             ):
                 continue
-            prompt_text = _normalize_mirrored_user_text(text)
+            prompt_text = _normalize_mirrored_user_text(text, origin=entry.get("origin"))
             if not prompt_text:
                 continue
             user_blocks.append({"type": "input_text", "text": prompt_text})

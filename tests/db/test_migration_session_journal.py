@@ -133,8 +133,9 @@ def test_upgrade_matches_models_and_downgrade_drops_tables(tmp_path: Path) -> No
     assert {"inbox_items", "scheduled_task_shares"} <= tables
     assert "kind" in {column["name"] for column in rolled_back.get_columns("scheduled_tasks")}
     with engine.connect() as connection:
-        assert connection.execute(
-            sa.text("SELECT version_num FROM alembic_version")
-        ).scalars().all() == ["27d16059fab9"]
+        # The branch-scoped downgrade leaves the fork's own chain at its head.
+        assert sorted(
+            connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalars().all()
+        ) == ["27d16059fab9", "ob1a2b3c4d5e"]
     engine.dispose()
     clear_engine_cache()

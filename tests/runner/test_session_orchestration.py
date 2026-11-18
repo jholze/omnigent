@@ -313,6 +313,11 @@ async def test_create_placement(placement, monkeypatch, profile, capability, num
         return
     assert "error" not in result, result
     requests = [request for request in requests if request.url.path != "/v1/info"]
+    if placement == "child":
+        # Fork: a child first reads the parent snapshot to inherit its
+        # host/workspace/project bindings (none set here).
+        assert (requests[0].method, requests[0].url.path) == ("GET", "/v1/sessions/manager")
+        requests = requests[1:]
     assert result["conversation_id"] == session_id
     body = json.loads(requests[0].content)
     assert not {"project_id", "workspace", "git"} & body.keys()

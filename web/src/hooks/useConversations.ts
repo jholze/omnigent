@@ -2620,12 +2620,6 @@ export function useMoveToProject() {
               .getQueryData<ProjectSummary[]>(["projects"])
               ?.find((p) => p.name === project) ?? undefined);
       if (target === undefined) return undefined;
-      // Cancel in-flight list refetches so a response that started before the
-      // overlay can't resolve after it and snap the row back to its old spot.
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: ["conversations"] }),
-        queryClient.cancelQueries({ queryKey: ["project-sessions"] }),
-      ]);
       const row = findCachedConversationRow(queryClient, id);
       if (!row || row.family) return undefined;
       // Wholesale snapshots for rollback: the overlay also drops the row from
@@ -2638,18 +2632,40 @@ export function useMoveToProject() {
           queryKey: ["project-sessions"],
         }),
         backfill: queryClient.getQueryData<Conversation | null>(["conversation-backfill", id]),
+        pinned: queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY),
       };
-      const baseLabels = Object.fromEntries(
-        Object.entries(row.labels).filter(([labelKey]) => labelKey !== PROJECT_LABEL_KEY),
-      );
       // A label-only folder has no first-class id to overlay yet, so its
       // membership is written through the legacy label — the sidebar
       // dual-reads it into the same folder the eventual PATCH files into.
-      const labels =
-        target !== null && target.id === null
+      const membershipLabels = (source: Conversation) => {
+        const baseLabels = Object.fromEntries(
+          Object.entries(source.labels).filter(([labelKey]) => labelKey !== PROJECT_LABEL_KEY),
+        );
+        return target !== null && target.id === null
           ? { ...baseLabels, [PROJECT_LABEL_KEY]: project }
           : baseLabels;
-      overlayMembership(row, target?.id ?? null, labels, project === "" ? null : project);
+      };
+      const labels = membershipLabels(row);
+      const applyOverlay = (source: Conversation) =>
+        overlayMembership(
+          row,
+          target?.id ?? null,
+          membershipLabels(source),
+          project === "" ? null : project,
+        );
+      // Overlay before yielding so a same-tick unpin cannot paint "unpinned, no
+      // project" (React 19 commits the in-between cache). Cancel in-flight list
+      // refetches so a response that started before the overlay can't resolve
+      // after it and snap the row back; re-apply after cancel, rebuilding labels
+      // from the current row so a later pass doesn't restore the pin key.
+      applyOverlay(row);
+      const cancel = Promise.all([
+        queryClient.cancelQueries({ queryKey: ["conversations"] }),
+        queryClient.cancelQueries({ queryKey: ["project-sessions"] }),
+      ]);
+      applyOverlay(findCachedConversationRow(queryClient, id) ?? row);
+      await cancel;
+      applyOverlay(findCachedConversationRow(queryClient, id) ?? row);
       const move: MoveTombstone = {
         project: project === "" ? null : project,
         projectId: target?.id ?? null,
@@ -2665,6 +2681,9 @@ export function useMoveToProject() {
         if (data !== undefined) queryClient.setQueryData(key, data);
       }
       restoreOpenSessionRow(queryClient, id, previous.backfill);
+      if (previous.pinned !== undefined) {
+        queryClient.setQueryData(PINNED_CONVERSATIONS_KEY, previous.pinned);
+      }
     },
     onSuccess: (updated, { id, project }, previous) => {
       markConversationSeen(updated.id, updated.updated_at);

@@ -9506,7 +9506,10 @@ async def test_sys_session_create_config_path_checks_effort_against_the_bundle_h
     creates: list[httpx.Request] = []
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
-        creates.append(request)
+        # The fork reads the parent snapshot (GET) for inherited bindings
+        # before the create; only the POST is the create under test.
+        if request.method == "POST":
+            creates.append(request)
         return httpx.Response(201, json={"session_id": "conv_child", "agent_id": "ag_new"})
 
     async with httpx.AsyncClient(

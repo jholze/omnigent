@@ -677,8 +677,13 @@ export function TerminalView({
       return () => {
         cancelled = true;
         upgradeCtl.abort();
-        terminalSession?.dispose();
-        sessionRef.current = null;
+        // React 19 runs this ref cleanup even when a redial already disposed
+        // the session through disposeActiveSession; dispose only if it is
+        // still the live one so it isn't torn down twice.
+        if (terminalSession !== null && sessionRef.current === terminalSession) {
+          terminalSession.dispose();
+          sessionRef.current = null;
+        }
         onStateChangeRef.current?.(null);
       };
     },

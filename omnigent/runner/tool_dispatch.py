@@ -2108,7 +2108,12 @@ async def _parent_spawn_bindings(
         return {}
     if resp.status_code != 200:
         return {}
-    snap = _string_object_dict(resp.json())
+    try:
+        payload = resp.json()
+    except ValueError:
+        # A proxy error page or other non-JSON body is "no snapshot".
+        return {}
+    snap = _string_object_dict(payload)
     if snap is None:
         return {}
     bindings: dict[str, str] = {}

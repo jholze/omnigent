@@ -86,6 +86,7 @@
     "duplicate-prs.yml",
     "finalize-release.yml",
     "flake-stress.yml",
+    "fork-ci.yml",
     "github-release.yml",
     "homebrew-tap-pr.yml",
     "kustomize-validate.yml",

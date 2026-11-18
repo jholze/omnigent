@@ -2529,7 +2529,7 @@ def test_host_web_ui_opens_public_base_url_for_local_server(
         patch("omnigent.host.connect.run_host_process", lambda server_url, **kwargs: None),
         patch(
             "omnigent.conversation_browser.open_conversation_url",
-            lambda url: opened.append(url) or True,
+            lambda url, **_: opened.append(url) or True,
         ),
     ):
         result = CliRunner().invoke(
@@ -2560,7 +2560,7 @@ def test_host_remote_web_ui_ignores_public_base_url(
         patch("omnigent.host.connect.run_host_process", lambda server_url, **kwargs: None),
         patch(
             "omnigent.conversation_browser.open_conversation_url",
-            lambda url: opened.append(url) or True,
+            lambda url, **_: opened.append(url) or True,
         ),
     ):
         result = CliRunner().invoke(

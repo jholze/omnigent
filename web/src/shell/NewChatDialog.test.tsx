@@ -4757,19 +4757,15 @@ describe("NewChatLandingScreen", () => {
         const submit = screen.getByTestId("new-chat-landing-submit");
         // Starting now would silently drop the drafted worktree.
         expect(submit).toBeDisabled();
-        // The submit tooltip mounts only after its 600ms hover delay.
-        vi.useFakeTimers();
-        try {
-          fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
-          act(() => {
-            vi.advanceTimersByTime(600);
-          });
-          expect(screen.getByTestId("new-chat-landing-submit-error-tooltip")).toHaveTextContent(
-            "Loading session configuration",
-          );
-        } finally {
-          vi.useRealTimers();
-        }
+        // The submit tooltip mounts only after its 600ms hover delay. Wait on
+        // real timers: under React 19 the fake-timer advance does not commit
+        // the tooltip inside the same act scope.
+        fireEvent.pointerMove(submit.parentElement!, { pointerType: "mouse" });
+        expect(
+          await screen.findByTestId("new-chat-landing-submit-error-tooltip", undefined, {
+            timeout: 3000,
+          }),
+        ).toHaveTextContent("Loading session configuration");
 
         nextDiscovered = true;
         fireEvent.change(input, { target: { value: "continue on the drafted branch now" } });

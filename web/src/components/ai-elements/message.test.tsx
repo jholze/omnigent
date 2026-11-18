@@ -529,17 +529,25 @@ it("leaves Escape to the fullscreen diagram while a question waits", async () =>
         />
       </>,
     );
-    await waitFor(() => expect(document.querySelector('svg[id^="mermaid-"]')).not.toBeNull(), {
-      timeout: 10_000,
-    });
+    // Wait for the diagram inside the block: under React 19 Mermaid's
+    // off-screen render svg can appear in the document before the block commits.
+    await waitFor(
+      () =>
+        expect(
+          document.querySelector('[data-streamdown="mermaid-block"] svg[id^="mermaid-"]'),
+        ).not.toBeNull(),
+      { timeout: 10_000 },
+    );
     fireEvent.click(screen.getByTitle("View fullscreen"));
-    expect(screen.getByTitle("Exit fullscreen")).toBeInTheDocument();
+    // React 19 commits the overlay after the click's act scope; wait for it.
+    expect(await screen.findByTitle("Exit fullscreen")).toBeInTheDocument();
     // Focus stays on the page, outside the overlay.
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
 
     // Also when focus was tabbed back into the question behind the overlay.
     fireEvent.click(screen.getByTitle("View fullscreen"));
+    await screen.findByTitle("Exit fullscreen");
     const custom = screen.getByTestId("ask-user-question-custom-input");
     custom.focus();
     fireEvent.keyDown(custom, { key: "Escape" });
