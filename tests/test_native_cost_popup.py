@@ -468,14 +468,18 @@ def test_tmux_window_activity_at_none_on_unparseable_output(
 def _drain_pty(pty_fd: int) -> None:
     """Discard pending output on *pty_fd* so the tmux client behind it never blocks."""
     import os
-    import select
+    import selectors
 
-    try:
-        while select.select([pty_fd], [], [], 0)[0]:
-            if not os.read(pty_fd, 65536):
-                return
-    except OSError:  # the child exited; Linux reports EIO on the master side
-        return
+    # A selector, not select.select(): a long-lived xdist worker can hold more
+    # than FD_SETSIZE (1024) descriptors, and select() rejects any fd above it.
+    with selectors.DefaultSelector() as readable:
+        readable.register(pty_fd, selectors.EVENT_READ)
+        try:
+            while readable.select(0):
+                if not os.read(pty_fd, 65536):
+                    return
+        except OSError:  # the child exited; Linux reports EIO on the master side
+            return
 
 
 def _wait_for_tmux_clients(socket_path: str, count: int, pty_fd: int | None = None) -> None:

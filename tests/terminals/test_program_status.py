@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import os
-import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -383,10 +383,15 @@ def test_query_replies_stop_queueing_at_the_limit_and_resume(tmp_path: Path) -> 
             # The relay forwards this marker only after handling every earlier query.
             output = b""
             deadline = time.monotonic() + 10
-            while b"flooded" not in output:
-                assert time.monotonic() < deadline, output
-                if select.select([process.stdout], [], [], 0.1)[0]:
-                    output += os.read(process.stdout.fileno(), 65536)
+            # A selector, not select.select(): a long-lived xdist worker can
+            # hold more than FD_SETSIZE (1024) descriptors, and select()
+            # rejects any fd above it.
+            with selectors.DefaultSelector() as readable:
+                readable.register(process.stdout, selectors.EVENT_READ)
+                while b"flooded" not in output:
+                    assert time.monotonic() < deadline, output
+                    if readable.select(0.1):
+                        output += os.read(process.stdout.fileno(), 65536)
             resume.touch()
             rest, _ = process.communicate(timeout=15)
             assert process.returncode == 0, output + rest
