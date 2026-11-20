@@ -1,0 +1,115 @@
+name: Fork CI (Linux)
+
+# Fork-only Linux pytest lane for jholze/omnigent, next to fork-ci.yml (macOS,
+# self-hosted). A few upstream tests depend on Linux behaviour (accept-queue
+# semantics, GNU tooling) and skip on darwin with a reason naming this job;
+# here they run in full, together with the rest of the SQLite suite.
+#
+# GitHub-hosted runner: pull requests to main/epic/** and pushes to main only.
+# Same gate as fork-ci.yml: jholze's same-repo pull requests (fork pull
+# requests skip before a runner starts) and pushes to main. pull_request_target
+# is not used and the token stays contents:read. ubuntu-24.04 rather than
+# ubuntu-latest: upstream ci.yml pins it because coreutils on 26.04 breaks the
+# host env-wrapper tests.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "epic/**"
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+concurrency:
+  group: fork-ci-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest-linux:
+    name: Pytest (SQLite, Linux)
+    if: ${{ (github.event_name == 'push' && github.repository == 'jholze/omnigent') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up uv
+        uses: ./.github/actions/setup-uv
+        with:
+          enable-cache: true
+
+      - name: Set up Node.js for local relay tests
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install test system dependencies
+        # Same as upstream ci.yml: ripgrep for the Grep tool, bubblewrap for
+        # the linux_bwrap sandbox, tmux for terminal tests. Ubuntu 24.04 blocks
+        # the unprivileged user namespaces bwrap needs; scope is this runner.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap tmux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install dependencies
+        run: uv sync --locked --extra all --extra postgres --group test
+
+      - name: Run pytest (SQLite, not databricks)
+        shell: bash
+        env:
+          PYTHONFAULTHANDLER: "1"
+          OMNIGENT_TEST_TIMEOUT_SCALE: "4"
+          PYTEST_PROGRESS_LOG_DIR: artifacts/progress
+        run: |
+          mkdir -p artifacts artifacts/progress
+          unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
+          run_suite() {
+            local name="$1"
+            shift
+            uv run pytest "$@" \
+              -m "not databricks" \
+              --timeout=300 \
+              --junitxml="artifacts/pytest-${name}.xml" \
+              -v --tb=short -r a \
+              || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in ${name}; treating as a pass." || exit "$rc"; }
+          }
+          # Same three processes as fork-ci.yml: tests/inner mutates sys.path
+          # and loads a worker watchdog, and integration shares one mock server.
+          run_suite main tests \
+            --ignore=tests/e2e \
+            --ignore=tests/e2e_ui \
+            --ignore=tests/codex_parity \
+            --ignore=tests/integration \
+            --ignore=tests/inner \
+            -n 4 \
+            --dist=worksteal
+          run_suite inner tests/inner -n 4 --dist=worksteal
+          run_suite integration tests/integration
+
+      - name: Upload pytest artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: fork-pytest-linux-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
