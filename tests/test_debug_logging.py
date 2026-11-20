@@ -31,6 +31,19 @@ def _configured_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_request_audit_attrs() -> Iterator[None]:
+    # The audit-attribute bag is a ContextVar. Sync tests share the worker's
+    # context, so a bag another test (or module) left set leaks in and makes
+    # "outside a request" assertions order-dependent. Start every test with
+    # no bag and restore whatever was there afterwards.
+    token = dl._audit_attrs_var.set(None)
+    try:
+        yield
+    finally:
+        dl._audit_attrs_var.reset(token)
+
+
+@pytest.fixture(autouse=True)
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         dl.CLIENT_ID_ENV_VAR,
