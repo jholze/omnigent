@@ -16571,8 +16571,9 @@ async def test_turn_ends_session_rotation_and_a_missing_relay_run_the_python_hoo
 @pytest.mark.skipif(
     sys.platform == "darwin",
     reason=(
-        "macOS /usr/bin/curl (8.7.1) reports %{size_request}=0 after an empty reply, so the "
-        "hook cannot tell a sent request from an unsent one; covered by the Linux CI job"
+        "known macOS product gap: /usr/bin/curl 8.7.1 reports %{size_request}=0 after an "
+        "empty reply, so the hook cannot tell a sent request from an unsent one and may "
+        "record the event twice; covered by the Linux CI job"
     ),
 )
 def test_lifecycle_hook_runs_python_only_when_the_relay_missed_the_event(tmp_path: Path) -> None:

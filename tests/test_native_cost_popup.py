@@ -473,8 +473,8 @@ def _drain_pty(pty_fd: int) -> None:
     # A selector, not select.select(): a long-lived xdist worker can hold more
     # than FD_SETSIZE (1024) descriptors, and select() rejects any fd above it.
     with selectors.DefaultSelector() as readable:
-        readable.register(pty_fd, selectors.EVENT_READ)
         try:
+            readable.register(pty_fd, selectors.EVENT_READ)
             while readable.select(0):
                 if not os.read(pty_fd, 65536):
                     return
