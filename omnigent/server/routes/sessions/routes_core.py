@@ -1907,10 +1907,7 @@ def register_core_routes(
                 project_families, conversation_store, permission_store, [conv], user_id
             )
             resp.family = families.get(conv.id)
-        # Fork: resolve through the module so audit spies (AC-103b) observe it.
-        import omnigent.debug_logging as debug_logging
-
-        debug_logging.add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
+        add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
         return resp
 
     async def _create_bundled_session_from_multipart(

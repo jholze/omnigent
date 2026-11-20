@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import omnigent.debug_logging as debug_logging
 import omnigent.server.mcp_endpoint as mcp_endpoint
+import omnigent.server.routes.sessions.routes_core as routes_core
 from omnigent.db.db_models import SqlChatThread, SqlConversation, SqlUser
 from omnigent.db.utils import get_or_create_engine, now_epoch_us
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ
@@ -516,6 +517,9 @@ async def test_ac_103b_inprocess_session_create_audits_the_new_session(
         real(**attrs)
 
     monkeypatch.setattr(debug_logging, "add_audit_attrs", spy)
+    # The session-create route imports add_audit_attrs by name (upstream
+    # style), so spy on that binding too instead of reshaping product code.
+    monkeypatch.setattr(routes_core, "add_audit_attrs", spy)
     called = await tools_call(
         chat_client,
         "create_session",
