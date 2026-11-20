@@ -16312,6 +16312,14 @@ def unaccepting_relay_url() -> Iterator[str]:
             yield f"http://127.0.0.1:{server.getsockname()[1]}"
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "needs Linux accept-queue semantics (listen(0) + a full queue drops SYNs so connect "
+        "hangs); macOS raises the backlog to somaxconn and resets instead; covered by the "
+        "Linux CI job"
+    ),
+)
 def test_policy_hook_runs_python_soon_when_the_relay_accepts_no_connections(
     tmp_path: Path, unaccepting_relay_url: str
 ) -> None:
@@ -16560,6 +16568,13 @@ async def test_turn_ends_session_rotation_and_a_missing_relay_run_the_python_hoo
     assert claude_native_bridge.read_hook_events_since(bridge_dir, 0)[1] == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "macOS /usr/bin/curl (8.7.1) reports %{size_request}=0 after an empty reply, so the "
+        "hook cannot tell a sent request from an unsent one; covered by the Linux CI job"
+    ),
+)
 def test_lifecycle_hook_runs_python_only_when_the_relay_missed_the_event(tmp_path: Path) -> None:
     """Python records the event when curl couldn't send it, not after a dropped answer.
 
@@ -16655,6 +16670,14 @@ def test_lifecycle_hook_runs_python_after_a_timeout_that_sent_nothing(
     assert payload in runs.read_text()
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "needs Linux accept-queue semantics (listen(0) + a full queue drops SYNs so connect "
+        "hangs); macOS raises the backlog to somaxconn and resets instead; covered by the "
+        "Linux CI job"
+    ),
+)
 def test_lifecycle_hook_runs_python_soon_when_the_relay_accepts_no_connections(
     tmp_path: Path, unaccepting_relay_url: str
 ) -> None:
