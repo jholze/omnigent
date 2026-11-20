@@ -1646,9 +1646,18 @@ def _init_git_with_commit(tmp_path: Path, name: str, content: str) -> dict[str, 
 def _trusted_test_git(
     argv: list[str], cwd: Path, timeout: float
 ) -> subprocess.CompletedProcess[bytes]:
-    """Execute Git only for repositories created by these tests."""
+    """Execute Git only for repositories created by these tests.
+
+    Like the sandbox helper's Git reads (``omnigent/inner/os_env.py``), force
+    the C locale: the registry tells a missing HEAD path from other failures
+    by Git's English stderr, which a localized Git (e.g. German) would not emit.
+    """
     return subprocess.run(
-        ["git", *argv], cwd=cwd, timeout=timeout, capture_output=True, env=_git_env()
+        ["git", *argv],
+        cwd=cwd,
+        timeout=timeout,
+        capture_output=True,
+        env={**_git_env(), "LC_ALL": "C"},
     )
 
 
