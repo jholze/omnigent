@@ -29,7 +29,7 @@ from omnigent.db.utils import (
     now_epoch_us,
     run_write_transaction,
 )
-from omnigent.server.agent_account_tokens import mint_agent_token
+from omnigent.server.agent_account_tokens import agent_account_limit, mint_agent_token
 from omnigent.server.chat_access import principal_kind
 from omnigent.server.chat_mentions import parse_mentions
 from omnigent.stores.chat_store import (
@@ -56,7 +56,6 @@ from omnigent.stores.chat_store import (
 
 _MAX_PARTICIPANTS = 5
 _BOT_STREAK_LIMIT = 5
-_AGENT_ACCOUNT_LIMIT = 5
 _LAST_SEEN_INTERVAL_US = 60_000_000
 _BRAKE_BODY = "Bots warten auf einen Menschen"
 _BRAKE_CODE = "bot_streak_limit"
@@ -756,7 +755,7 @@ class SqlAlchemyChatStore(ChatStore):
                     SqlChatAgentAccount.revoked_at.is_(None),
                 )
             )
-            if active is not None and int(active) >= _AGENT_ACCOUNT_LIMIT:
+            if active is not None and int(active) >= agent_account_limit():
                 return AccountWriteResult(AccountStatus.LIMIT)
             if project_ids is not None and not _owner_has_projects(session, owner_id, project_ids):
                 return AccountWriteResult(AccountStatus.PROJECT_NOT_FOUND)
