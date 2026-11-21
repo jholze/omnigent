@@ -115,8 +115,10 @@ from omnigent.tools.builtins.timer import (
 from omnigent.tools.builtins.update_comment import UpdateCommentTool
 from omnigent.tools.builtins.upload_file import UploadFileTool, safe_resolve
 from omnigent.util.session_lifecycle import (
+    ARCHIVED_BY_PARENT_LABEL_KEY,
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
+    audit_session_archive,
     is_session_closed,
     title_without_closed_marker,
 )
@@ -6714,10 +6716,6 @@ async def _session_close_via_rest(
     )
 
 
-# Label recording which parent session archived a child via
-# ``sys_session_archive`` (persisted audit trail on the child row).
-ARCHIVED_BY_PARENT_LABEL_KEY = "omnigent.archived_by_parent"
-
 # Snapshot ``status`` values that mean the child has no live turn. ``running``
 # and ``waiting`` (parked on an elicitation / input) are NOT ended.
 _ARCHIVE_ENDED_STATUSES = frozenset({"idle", "failed"})
@@ -6757,32 +6755,6 @@ def _archive_running_reason(target_snap: _JsonObject, target_id: str) -> str | N
     return None
 
 
-def _audit_session_archive(
-    *, caller_id: str, target_id: str, outcome: str, reason: str | None = None
-) -> None:
-    """
-    Emit one structured audit record for a ``sys_session_archive`` attempt.
-
-    Logged at INFO on ``omnigent.audit.session_archive`` for every attempt
-    (success and refusal), carrying only ids and the outcome; no message
-    bodies or titles. Successful archives are also stamped on the child
-    row via :data:`ARCHIVED_BY_PARENT_LABEL_KEY`.
-
-    :param caller_id: The archiving parent session id.
-    :param target_id: The requested child session id.
-    :param outcome: ``"archived"``, ``"already_archived"``, or the error
-        code returned to the LLM, e.g. ``"session_running"``.
-    :param reason: Optional refusal detail, e.g. ``"status=running"``.
-    """
-    logging.getLogger("omnigent.audit.session_archive").info(
-        "sys_session_archive caller=%s target=%s outcome=%s reason=%s",
-        caller_id,
-        target_id,
-        outcome,
-        reason or "-",
-    )
-
-
 async def _session_archive_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -6798,7 +6770,7 @@ async def _session_archive_via_rest(
     the child's harness processes), tombstones the child exactly like
     close (closed label + freed title slot) and stamps
     :data:`ARCHIVED_BY_PARENT_LABEL_KEY` with the caller id. Every attempt
-    is audited via :func:`_audit_session_archive`. Already-archived
+    is audited via :func:`audit_session_archive`. Already-archived
     children return success with ``already_archived: true`` and no write.
 
     :param args: Parsed tool arguments; requires ``conversation_id``.
@@ -6815,18 +6787,26 @@ async def _session_archive_via_rest(
         return json.dumps({"error": f"{tool_name} requires a non-empty 'conversation_id' string"})
     target_snap = await _fetch_close_target(target_id, server_client, tool_name)
     if isinstance(target_snap, str):
-        _audit_session_archive(
-            caller_id=conversation_id, target_id=target_id, outcome="lookup_failed"
+        try:
+            raw_error = json.loads(target_snap).get("error")
+            lookup_error = str(raw_error) if raw_error else None
+        except (ValueError, AttributeError):
+            lookup_error = None
+        audit_session_archive(
+            caller_id=conversation_id,
+            target_id=target_id,
+            outcome="lookup_failed",
+            reason=lookup_error,
         )
         return target_snap
     parent_id = target_snap.get("parent_session_id")
     if parent_id is None:
-        _audit_session_archive(
+        audit_session_archive(
             caller_id=conversation_id, target_id=target_id, outcome="session_not_a_sub_agent"
         )
         return json.dumps({"error": "session_not_a_sub_agent", "conversation_id": target_id})
     if parent_id != conversation_id:
-        _audit_session_archive(
+        audit_session_archive(
             caller_id=conversation_id, target_id=target_id, outcome="session_out_of_tree"
         )
         return json.dumps(
@@ -6840,7 +6820,7 @@ async def _session_archive_via_rest(
             }
         )
     if target_snap.get("archived") is True:
-        _audit_session_archive(
+        audit_session_archive(
             caller_id=conversation_id, target_id=target_id, outcome="already_archived"
         )
         return json.dumps(
@@ -6848,7 +6828,7 @@ async def _session_archive_via_rest(
         )
     running = _archive_running_reason(target_snap, target_id)
     if running is not None:
-        _audit_session_archive(
+        audit_session_archive(
             caller_id=conversation_id,
             target_id=target_id,
             outcome="session_running",
@@ -6865,6 +6845,9 @@ async def _session_archive_via_rest(
                 ),
             }
         )
+    # A send could in theory start between the status read above and the
+    # PATCH below. Accepted: the closed label written here blocks new user
+    # input, and the archiving parent is normally the child's only sender.
     labels: dict[str, str] = {ARCHIVED_BY_PARENT_LABEL_KEY: conversation_id}
     body: _JsonObject = {"archived": True, "labels": labels}
     raw_labels = target_snap.get("labels")
@@ -6879,12 +6862,12 @@ async def _session_archive_via_rest(
     try:
         patch = await server_client.patch(f"/v1/sessions/{target_id}", json=body, timeout=30.0)
     except Exception as exc:  # noqa: BLE001
-        _audit_session_archive(
+        audit_session_archive(
             caller_id=conversation_id, target_id=target_id, outcome="patch_failed"
         )
         return json.dumps({"error": f"{tool_name} failed: {exc}"})
     if patch.status_code != 200:
-        _audit_session_archive(
+        audit_session_archive(
             caller_id=conversation_id,
             target_id=target_id,
             outcome="patch_failed",
@@ -6893,7 +6876,7 @@ async def _session_archive_via_rest(
         if patch.status_code in (401, 403):
             return json.dumps({"error": "session_out_of_tree", "conversation_id": target_id})
         return json.dumps({"error": f"{tool_name} returned {patch.status_code}"})
-    _audit_session_archive(caller_id=conversation_id, target_id=target_id, outcome="archived")
+    audit_session_archive(caller_id=conversation_id, target_id=target_id, outcome="archived")
     return json.dumps(
         {
             "archived": True,

@@ -17,11 +17,12 @@ from typing import Any
 import httpx
 import pytest
 
-from omnigent.runner.tool_dispatch import (
+from omnigent.runner.tool_dispatch import _execute_session_query_tool
+from omnigent.util.session_lifecycle import (
     ARCHIVED_BY_PARENT_LABEL_KEY,
-    _execute_session_query_tool,
+    CLOSED_LABEL_KEY,
+    CLOSED_LABEL_VALUE,
 )
-from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 
 HUB = "conv_hub"
 CHILD = "conv_child"
@@ -138,7 +139,8 @@ async def test_archive_ended_direct_child(caplog: pytest.LogCaptureFixture) -> N
     ]
     # Never a DELETE: the handler would raise on any other verb.
     assert any(
-        f"caller={HUB} target={CHILD} outcome=archived" in r.getMessage() for r in caplog.records
+        f"caller={HUB!r} target={CHILD!r} outcome='archived'" in r.getMessage()
+        for r in caplog.records
     )
 
 
@@ -220,3 +222,34 @@ async def test_archive_maps_patch_forbidden() -> None:
     patches: list[dict[str, Any]] = []
     out = await _call("sys_session_archive", _snap(), patches, patch_status=403)
     assert out == {"error": "session_out_of_tree", "conversation_id": CHILD}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "title,agent,label,stored",
+    [
+        ("Fix: auth", "Fix", " auth", f"Fix: auth:closed:{CHILD}"),
+        ("ui:claude-native-ui:1", "claude-native-ui", "1", f"claude-native-ui:1:closed:{CHILD}"),
+        (None, "equent-coder", "", f":closed:{CHILD}"),
+    ],
+)
+async def test_close_title_shapes(title: Any, agent: str, label: str, stored: str) -> None:
+    """Colon-containing verbatim, ui:-prefixed and missing titles all close."""
+    patches: list[dict[str, Any]] = []
+    out = await _call("sys_session_close", _snap(title=title), patches)
+    assert out["agent"] == agent and out["title"] == label
+    assert patches[0]["title"] == stored
+
+
+@pytest.mark.asyncio
+async def test_archive_refusal_is_audited_with_quoted_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="omnigent.audit.session_archive")
+    patches: list[dict[str, Any]] = []
+    await _call("sys_session_archive", _snap(id="conv_x\nforged", parent_session_id="o"), patches)
+    messages = [r.getMessage() for r in caplog.records]
+    # Exactly one audit record, with the model-supplied newline escaped.
+    assert len(messages) == 1
+    assert "target='conv_x\\nforged'" in messages[0]
+    assert "\n" not in messages[0]

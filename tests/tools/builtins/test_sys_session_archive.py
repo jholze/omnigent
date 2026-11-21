@@ -23,11 +23,11 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 from omnigent.tools.base import ToolContext
 from omnigent.tools.builtins.spawn import (
     _CLOSED_TITLE_INFIX,
-    ARCHIVED_BY_PARENT_LABEL_KEY,
     SysSessionArchiveTool,
     SysSessionCloseTool,
 )
 from omnigent.util.session_lifecycle import (
+    ARCHIVED_BY_PARENT_LABEL_KEY,
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
     title_without_closed_marker,
@@ -136,7 +136,7 @@ def test_archive_ended_direct_child_archives_closes_and_audits(
     assert row.labels[CLOSED_LABEL_KEY] == CLOSED_LABEL_VALUE
     assert row.labels[ARCHIVED_BY_PARENT_LABEL_KEY] == tree.hub
     assert any(
-        f"caller={tree.hub} target={tree.standalone} outcome=archived" in r.getMessage()
+        f"caller={tree.hub!r} target={tree.standalone!r} outcome='archived'" in r.getMessage()
         for r in caplog.records
     )
     # Idempotent second call: no error, flagged as already archived.
@@ -148,9 +148,11 @@ def test_archive_ended_direct_child_archives_closes_and_audits(
     }
 
 
-def test_archive_refuses_grandchild(tree: _Tree) -> None:
-    """Same tree but not a DIRECT child: refused, nothing changes."""
+def test_archive_refuses_grandchild(tree: _Tree, caplog: pytest.LogCaptureFixture) -> None:
+    """Same tree but not a DIRECT child: refused, nothing changes, audited."""
+    caplog.set_level(logging.INFO, logger="omnigent.audit.session_archive")
     out = _invoke(SysSessionArchiveTool(), tree.grandchild, tree.ctx)
+    assert any("outcome='session_out_of_tree'" in r.getMessage() for r in caplog.records)
     assert out["error"] == "session_out_of_tree"
     row = tree.store.get_conversation(tree.grandchild)
     assert row is not None and row.archived is False
@@ -173,7 +175,7 @@ def test_archive_refuses_top_level_and_other_tree(tree: _Tree) -> None:
     assert row is not None and row.archived is False
 
 
-@pytest.mark.parametrize("status", ["running", "waiting"])
+@pytest.mark.parametrize("status", ["running", "waiting", "launching"])
 def test_archive_refuses_running_child(
     tree: _Tree, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
@@ -195,3 +197,26 @@ def test_archive_schema_is_strict() -> None:
     assert params["required"] == ["conversation_id"]
     assert set(params["properties"]) == {"conversation_id"}
     assert params["additionalProperties"] is False
+
+
+def test_archive_refuses_child_with_pending_elicitation(
+    tree: _Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child parked on an elicitation is live work, not ended."""
+    from omnigent.runtime import pending_elicitations
+
+    monkeypatch.setattr(
+        pending_elicitations, "count_for", lambda cid: 1 if cid == tree.standalone else 0
+    )
+    out = _invoke(SysSessionArchiveTool(), tree.standalone, tree.ctx)
+    assert out["error"] == "session_running" and out["reason"] == "pending_input"
+
+
+def test_close_untitled_child_gets_unique_tombstone(tree: _Tree) -> None:
+    """A child created without a title (store defaults it) still closes."""
+    child = tree.store.create_conversation(kind="sub_agent", parent_conversation_id=tree.hub)
+    original = child.title or ""
+    out = _invoke(SysSessionCloseTool(), child.id, tree.ctx)
+    assert out["closed"] is True
+    row = tree.store.get_conversation(child.id)
+    assert row is not None and row.title == f"{original}{_CLOSED_TITLE_INFIX}{child.id}"

@@ -9,7 +9,6 @@ sub-agent. See designs/STEERABLE_SUBAGENTS.md for the full design.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,9 +21,11 @@ from omnigent.spec import AgentSpec
 from omnigent.stores import ConversationStore
 from omnigent.tools.base import Tool, ToolContext
 from omnigent.util.session_lifecycle import (
+    ARCHIVED_BY_PARENT_LABEL_KEY,
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
     CLOSED_TITLE_INFIX,
+    audit_session_archive,
     is_session_closed,
 )
 
@@ -1827,33 +1828,6 @@ class SysSessionCloseTool(Tool):
         )
 
 
-# Label recording which parent archived a child via ``sys_session_archive``.
-ARCHIVED_BY_PARENT_LABEL_KEY = "omnigent.archived_by_parent"
-
-
-def _audit_session_archive(
-    *, caller_id: str, target_id: str, outcome: str, reason: str | None = None
-) -> None:
-    """
-    Emit one structured audit record for a ``sys_session_archive`` attempt.
-
-    Same logger and shape as the runner REST path so both executors audit
-    identically. Only ids and the outcome are logged.
-
-    :param caller_id: The archiving parent conversation id.
-    :param target_id: The requested child conversation id.
-    :param outcome: ``"archived"``, ``"already_archived"``, or an error code.
-    :param reason: Optional refusal detail.
-    """
-    logging.getLogger("omnigent.audit.session_archive").info(
-        "sys_session_archive caller=%s target=%s outcome=%s reason=%s",
-        caller_id,
-        target_id,
-        outcome,
-        reason or "-",
-    )
-
-
 class SysSessionArchiveTool(Tool):
     """
     Archive one of the caller's own ENDED direct child sessions.
@@ -1939,11 +1913,11 @@ class SysSessionArchiveTool(Tool):
                 target = json.loads(resolution).get("conversation_id", "-")
             except (ValueError, AttributeError):
                 target = "-"
-            _audit_session_archive(caller_id=caller_id, target_id=str(target), outcome="refused")
+            audit_session_archive(caller_id=caller_id, target_id=str(target), outcome="refused")
             return resolution
         child = resolution.child
         if child.parent_conversation_id != caller_id:
-            _audit_session_archive(
+            audit_session_archive(
                 caller_id=caller_id, target_id=child.id, outcome="session_out_of_tree"
             )
             return json.dumps(
@@ -1957,25 +1931,25 @@ class SysSessionArchiveTool(Tool):
                 }
             )
         if child.archived:
-            _audit_session_archive(
+            audit_session_archive(
                 caller_id=caller_id, target_id=child.id, outcome="already_archived"
             )
             return json.dumps(
                 {"archived": True, "already_archived": True, "conversation_id": child.id}
             )
-        status = _live_session_status(child.id)
-        if status in ("running", "waiting"):
-            _audit_session_archive(
+        running = _in_process_running_reason(child.id)
+        if running is not None:
+            audit_session_archive(
                 caller_id=caller_id,
                 target_id=child.id,
                 outcome="session_running",
-                reason=f"status={status}",
+                reason=running,
             )
             return json.dumps(
                 {
                     "error": "session_running",
                     "conversation_id": child.id,
-                    "reason": f"status={status}",
+                    "reason": running,
                     "message": (
                         "target child still has live work; wait for it to finish "
                         "(or cancel it) before archiving."
@@ -1984,12 +1958,20 @@ class SysSessionArchiveTool(Tool):
             )
         labelled, new_title = _close_tombstone_for_conversation(child)
         labels = {ARCHIVED_BY_PARENT_LABEL_KEY: caller_id}
-        if not is_session_closed(child.labels, child.title):
-            resolution.conv_store.update_conversation(child.id, title=new_title)
+        already_closed = is_session_closed(child.labels, child.title)
+        if not already_closed:
             labels[CLOSED_LABEL_KEY] = CLOSED_LABEL_VALUE
+        # Labels first (closed marker blocks new input), then title + archived
+        # in one row update. The in-process executor has no runner process to
+        # reap, so the PATCH route's archive-stop side effect does not apply;
+        # it also emits no ``child_session_updated`` event (UI refreshes on reload).
         resolution.conv_store.set_labels(child.id, labels)
-        resolution.conv_store.update_conversation(child.id, archived=True)
-        _audit_session_archive(caller_id=caller_id, target_id=child.id, outcome="archived")
+        resolution.conv_store.update_conversation(
+            child.id,
+            title=None if already_closed else new_title,
+            archived=True,
+        )
+        audit_session_archive(caller_id=caller_id, target_id=child.id, outcome="archived")
         return json.dumps(
             {
                 "archived": True,
@@ -2014,6 +1996,31 @@ def _live_session_status(conversation_id: str) -> str | None:
         return None
     value = _session_status_cache.get(conversation_id)
     return value if isinstance(value, str) else None
+
+
+# In-process statuses that mean "no live turn". ``None`` = no runner has ever
+# reported status for the row (never started), which is also ended.
+_IN_PROCESS_ENDED_STATUSES = frozenset({"idle", "failed"})
+
+
+def _in_process_running_reason(conversation_id: str) -> str | None:
+    """
+    Return why a child is not ended for the in-process archive, else ``None``.
+
+    Conservative allow-list: only an unknown (never reported), ``idle`` or
+    ``failed`` status passes, and a parked elicitation always refuses.
+
+    :param conversation_id: The child session id.
+    :returns: A short reason, e.g. ``"status=launching"``, or ``None``.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    status = _live_session_status(conversation_id)
+    if status is not None and status not in _IN_PROCESS_ENDED_STATUSES:
+        return f"status={status}"
+    if pending_elicitations.count_for(conversation_id) > 0:
+        return "pending_input"
+    return None
 
 
 def _parse_session_args(
