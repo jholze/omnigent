@@ -358,6 +358,8 @@ def start_live_server(
             "-m",
             "omnigent.cli",
             "server",
+            "--host",
+            "127.0.0.1",
             "--port",
             str(port),
             "--database-uri",
@@ -372,7 +374,9 @@ def start_live_server(
         stdout=log_handle,
         stderr=subprocess.STDOUT,
     )
-    base_url = f"http://localhost:{port}"
+    # Pin IPv4 on both sides: "localhost" may resolve to ::1 first, and the port
+    # reserved by find_free_port() is only guaranteed free on 127.0.0.1.
+    base_url = f"http://127.0.0.1:{port}"
 
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -380,7 +384,9 @@ def start_live_server(
             resp = httpx.get(f"{base_url}/health", timeout=2)
             if resp.status_code == 200:
                 return proc, base_url
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.TimeoutException):
+            # A loaded CI worker can stall a single 2s probe (ConnectTimeout);
+            # keep polling until the 30s startup deadline instead of erroring.
             pass
         time.sleep(0.5)
 
@@ -453,7 +459,7 @@ def upload_agent(client: httpx.Client, agent_dir: Path) -> str:
     the agent registered on the server.
 
     :param client: HTTP client pointed at the live server, e.g.
-        ``httpx.Client(base_url="http://localhost:58234")``.
+        ``httpx.Client(base_url="http://127.0.0.1:58234")``.
     :param agent_dir: Filesystem path to the agent bundle root
         (the directory containing ``config.yaml``), e.g.
         ``Path("/tmp/agent_bundle")``.

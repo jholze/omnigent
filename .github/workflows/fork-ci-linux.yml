@@ -75,6 +75,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra all --extra postgres --group test
 
+      - name: Diagnose known Linux-only failures (full tracebacks first)
+        continue-on-error: true
+        run: |
+          git --version
+          uv run pytest \
+            tests/runtime/test_filesystem_registry.py::test_untracked_cache_enable_helper_sets_repo_config \
+            "tests/host/test_cli_host.py::test_background_host_web_ui_open_preference" \
+            -p no:cacheprovider -q --tb=long -x || true
+
       - name: Run pytest (SQLite, not databricks)
         shell: bash
         env:
