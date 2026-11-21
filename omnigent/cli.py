@@ -2166,6 +2166,7 @@ def cli() -> None:
 # Keep in sync with ``@cli.command()`` decorations below.
 _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
     {
+        "admin",
         "agent",
         "agy",
         "antigravity",
@@ -15088,6 +15089,10 @@ from omnigent.cli_manager_webhook import (  # noqa: E402
 )
 
 _register_manager_webhook_commands(cli)
+
+from omnigent.cli_admin import register_admin_commands as _register_admin_commands  # noqa: E402
+
+_register_admin_commands(cli)
 
 
 if __name__ == "__main__":

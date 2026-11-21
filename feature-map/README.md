@@ -250,6 +250,8 @@ map an area, remove it here in the same change.
 - Integrations, extensions, and remote sandboxes: `omnigent integration`,
   `omnigent extensions`, `omnigent sandbox`
 - Manager webhook: `omnigent manager-webhook`
+- Server-local operator commands: `omnigent admin` (agent-account create, list,
+  revoke)
 
 **Partly mapped:** embedded authentication covers project writes and supporting
 account-context tests; other resource APIs and real identity-provider journeys

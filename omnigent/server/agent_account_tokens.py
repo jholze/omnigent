@@ -28,6 +28,31 @@ def agent_account_secret() -> str | None:
     return raw or None
 
 
+_LIMIT_ENV = "OMNIGENT_AGENT_ACCOUNT_LIMIT"
+DEFAULT_AGENT_ACCOUNT_LIMIT = 5
+_MAX_AGENT_ACCOUNT_LIMIT = 100
+
+
+def agent_account_limit() -> int:
+    """Return the active-agent-account limit per owner.
+
+    Reads ``OMNIGENT_AGENT_ACCOUNT_LIMIT`` from the process environment on
+    every call, so the server and the ``omnigent admin`` CLI each honor their
+    own environment. Unset, non-integer, or non-positive values fall back to the default
+    of 5; values above 100 are capped. A typo never makes the limit unbounded.
+    """
+    raw = os.environ.get(_LIMIT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_AGENT_ACCOUNT_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_AGENT_ACCOUNT_LIMIT
+    if value <= 0:
+        return DEFAULT_AGENT_ACCOUNT_LIMIT
+    return min(value, _MAX_AGENT_ACCOUNT_LIMIT)
+
+
 def agent_token_path_allowed(path: str) -> bool:
     """Whether an ``ogc_`` token may authenticate *path*.
 
