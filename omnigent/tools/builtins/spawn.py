@@ -22,9 +22,11 @@ from omnigent.stores import ConversationStore
 from omnigent.tools.base import Tool, ToolContext
 from omnigent.tools.builtins.session_message import SESSION_MESSAGE_MAX_CHARS
 from omnigent.util.session_lifecycle import (
+    ARCHIVED_BY_PARENT_LABEL_KEY,
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
     CLOSED_TITLE_INFIX,
+    audit_session_archive,
     is_session_closed,
 )
 
@@ -1401,6 +1403,32 @@ def _agent_title_from_conversation(child: Conversation) -> _AgentTitle:
     return _AgentTitle(agent=sa_agent, title=sa_title)
 
 
+def _close_tombstone_for_conversation(child: Conversation) -> tuple[_AgentTitle, str]:
+    """
+    Derive the reported identity and tombstoned title for closing a child.
+
+    Named sub-agents (``"<agent>:<title>"``) keep the canonical
+    ``"<agent>:<title>:closed:<id>"`` rewrite. Children launched with
+    ``sys_session_create(agent_id=...)`` keep their verbatim title (often
+    without a colon) and have no ``sub_agent_name`` declaration; for them
+    the agent label falls back to ``sub_agent_name`` (or ``"agent"``) and
+    the closed marker is appended to the verbatim title, so
+    :func:`title_without_closed_marker` restores the original. Mirrors the
+    runner REST path (``_close_tombstone`` in
+    :mod:`omnigent.runner.tool_dispatch`).
+
+    :param child: The child :class:`Conversation` being closed.
+    :returns: ``(identity, new_title)``.
+    """
+    raw_title = child.title or ""
+    visible, _marker, _suffix = raw_title.partition(_CLOSED_TITLE_INFIX)
+    if ":" in visible:
+        labelled = _agent_title_from_conversation(child)
+        return labelled, f"{labelled.agent}:{labelled.title}{_CLOSED_TITLE_INFIX}{child.id}"
+    labelled = _AgentTitle(agent=child.sub_agent_name or "agent", title=visible)
+    return labelled, f"{visible}{_CLOSED_TITLE_INFIX}{child.id}"
+
+
 def _resolve_caller_tree(ctx: ToolContext) -> _CallerTree:
     """
     Resolve the caller's conversation and its tree's root.
@@ -1929,11 +1957,7 @@ class SysSessionCloseTool(Tool):
         busy_error = _busy_check_or_none(child_conv_id=resolution.child.id)
         if busy_error is not None:
             return busy_error
-        labelled = _agent_title_from_conversation(resolution.child)
-        # Re-build the tombstoned title from the parsed components so
-        # the marker lands in the canonical position even if the
-        # original title used uncommon characters around the colon.
-        new_title = f"{labelled.agent}:{labelled.title}{_CLOSED_TITLE_INFIX}{resolution.child.id}"
+        labelled, new_title = _close_tombstone_for_conversation(resolution.child)
         resolution.conv_store.update_conversation(resolution.child.id, title=new_title)
         resolution.conv_store.set_labels(
             resolution.child.id,
@@ -1947,6 +1971,201 @@ class SysSessionCloseTool(Tool):
                 "title": labelled.title,
             }
         )
+
+
+class SysSessionArchiveTool(Tool):
+    """
+    Archive one of the caller's own ENDED direct child sessions.
+
+    Lets an orchestrating (hub) agent clean up finished sub-agents without
+    the owner. Guard rails, enforced on both dispatch paths (this
+    in-process tool and the runner's ``_session_archive_via_rest``):
+
+    - only a DIRECT child of the caller (never siblings, grandchildren,
+      top-level sessions or other trees);
+    - only when the child has no live work (``session_running`` otherwise);
+    - archive only, never delete: items stay readable and the owner can
+      unarchive; the child is also tombstoned like ``sys_session_close``;
+    - every attempt is audited (logger ``omnigent.audit.session_archive``)
+      and a successful archive stamps ``omnigent.archived_by_parent`` on
+      the child.
+    """
+
+    @classmethod
+    def name(cls) -> str:
+        """:returns: ``"sys_session_archive"``."""
+        return "sys_session_archive"
+
+    @classmethod
+    def description(cls) -> str:
+        """:returns: Human-readable description of the tool."""
+        return (
+            "Archive one of YOUR OWN direct child sub-agent sessions after it "
+            "has finished (no running turn). Never deletes: history stays "
+            "readable and the owner can unarchive. The child is also closed, "
+            "so a later sys_session_send with the same (agent, title) starts "
+            "a fresh child. Returns session_out_of_tree if the target is not "
+            "your direct child, session_not_a_sub_agent for a top-level "
+            "session, or session_running if it still has live work."
+        )
+
+    def get_schema(self) -> dict[str, Any]:
+        """
+        Return the OpenAI-format tool schema.
+
+        :returns: Dict with ``"type": "function"`` and a ``"function"`` sub-dict.
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": SysSessionArchiveTool.name(),
+                "description": SysSessionArchiveTool.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "string",
+                            "description": (
+                                "The ended child's conversation_id, from "
+                                "sys_session_list or a prior "
+                                "sys_session_create / sys_session_send handle. "
+                                "Must be a direct child of the caller."
+                            ),
+                        },
+                    },
+                    "required": ["conversation_id"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+    def invoke(self, arguments: str, ctx: ToolContext) -> str:
+        """
+        Verify the target is an ended direct child, then archive it.
+
+        :param arguments: JSON arguments, e.g. ``'{"conversation_id": "conv_abc"}'``.
+        :param ctx: Server-side execution context.
+        :returns: JSON ``{"archived": true, ...}`` on success; a JSON error otherwise.
+        """
+        resolution = _resolve_session_call(
+            arguments=arguments,
+            ctx=ctx,
+            tool_name=SysSessionArchiveTool.name(),
+        )
+        caller_id = _resolve_parent_conversation_id(ctx)
+        if isinstance(resolution, str):
+            try:
+                target = json.loads(resolution).get("conversation_id", "-")
+            except (ValueError, AttributeError):
+                target = "-"
+            audit_session_archive(caller_id=caller_id, target_id=str(target), outcome="refused")
+            return resolution
+        child = resolution.child
+        if child.parent_conversation_id != caller_id:
+            audit_session_archive(
+                caller_id=caller_id, target_id=child.id, outcome="session_out_of_tree"
+            )
+            return json.dumps(
+                {
+                    "error": "session_out_of_tree",
+                    "conversation_id": child.id,
+                    "message": (
+                        "target is not a direct child of the calling session; "
+                        "sys_session_archive only archives the caller's own children."
+                    ),
+                }
+            )
+        if child.archived:
+            audit_session_archive(
+                caller_id=caller_id, target_id=child.id, outcome="already_archived"
+            )
+            return json.dumps(
+                {"archived": True, "already_archived": True, "conversation_id": child.id}
+            )
+        running = _in_process_running_reason(child.id)
+        if running is not None:
+            audit_session_archive(
+                caller_id=caller_id,
+                target_id=child.id,
+                outcome="session_running",
+                reason=running,
+            )
+            return json.dumps(
+                {
+                    "error": "session_running",
+                    "conversation_id": child.id,
+                    "reason": running,
+                    "message": (
+                        "target child still has live work; wait for it to finish "
+                        "(or cancel it) before archiving."
+                    ),
+                }
+            )
+        labelled, new_title = _close_tombstone_for_conversation(child)
+        labels = {ARCHIVED_BY_PARENT_LABEL_KEY: caller_id}
+        already_closed = is_session_closed(child.labels, child.title)
+        if not already_closed:
+            labels[CLOSED_LABEL_KEY] = CLOSED_LABEL_VALUE
+        # Labels first (closed marker blocks new input), then title + archived
+        # in one row update. The in-process executor has no runner process to
+        # reap, so the PATCH route's archive-stop side effect does not apply;
+        # it also emits no ``child_session_updated`` event (UI refreshes on reload).
+        resolution.conv_store.set_labels(child.id, labels)
+        resolution.conv_store.update_conversation(
+            child.id,
+            title=None if already_closed else new_title,
+            archived=True,
+        )
+        audit_session_archive(caller_id=caller_id, target_id=child.id, outcome="archived")
+        return json.dumps(
+            {
+                "archived": True,
+                "conversation_id": child.id,
+                "agent": labelled.agent,
+                "title": labelled.title,
+            }
+        )
+
+
+def _live_session_status(conversation_id: str) -> str | None:
+    """
+    Best-effort relay-fed live status for a session (server process only).
+
+    :param conversation_id: The session id.
+    :returns: ``"running"`` / ``"waiting"`` / ``"idle"`` / ... or ``None``
+        when unknown (no runner has reported status).
+    """
+    try:
+        from omnigent.server.routes._sessions.common import _session_status_cache
+    except ImportError:  # pragma: no cover - server routes always importable in-process
+        return None
+    value = _session_status_cache.get(conversation_id)
+    return value if isinstance(value, str) else None
+
+
+# In-process statuses that mean "no live turn". ``None`` = no runner has ever
+# reported status for the row (never started), which is also ended.
+_IN_PROCESS_ENDED_STATUSES = frozenset({"idle", "failed"})
+
+
+def _in_process_running_reason(conversation_id: str) -> str | None:
+    """
+    Return why a child is not ended for the in-process archive, else ``None``.
+
+    Conservative allow-list: only an unknown (never reported), ``idle`` or
+    ``failed`` status passes, and a parked elicitation always refuses.
+
+    :param conversation_id: The child session id.
+    :returns: A short reason, e.g. ``"status=launching"``, or ``None``.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    status = _live_session_status(conversation_id)
+    if status is not None and status not in _IN_PROCESS_ENDED_STATUSES:
+        return f"status={status}"
+    if pending_elicitations.count_for(conversation_id) > 0:
+        return "pending_input"
+    return None
 
 
 def _parse_session_args(

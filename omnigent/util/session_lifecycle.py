@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 CLOSED_LABEL_KEY = "omnigent.closed"
@@ -83,4 +84,39 @@ def is_session_closed(
     """
     return (labels or {}).get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE or has_closed_title_marker(
         title
+    )
+
+
+# Label stamped on a child archived by its parent via ``sys_session_archive``.
+# Informational only: any client with edit access can PATCH labels, so the
+# authoritative record is the audit log (:func:`audit_session_archive`).
+ARCHIVED_BY_PARENT_LABEL_KEY = "omnigent.archived_by_parent"
+
+_SESSION_ARCHIVE_AUDIT_LOGGER = logging.getLogger("omnigent.audit.session_archive")
+
+
+def audit_session_archive(
+    *, caller_id: str, target_id: str, outcome: str, reason: str | None = None
+) -> None:
+    """
+    Emit one structured audit record for a ``sys_session_archive`` attempt.
+
+    Shared by the runner REST path and the in-process tool so both audit
+    identically. Logged at INFO on ``omnigent.audit.session_archive`` for
+    every attempt (success and refusal) with ids and the outcome only; no
+    titles or message bodies. Values are ``repr``-quoted so a model-supplied
+    id containing newlines cannot forge extra audit lines.
+
+    :param caller_id: The archiving parent session id, e.g. ``"conv_hub"``.
+    :param target_id: The requested child session id (model-supplied).
+    :param outcome: ``"archived"``, ``"already_archived"``, or the error
+        code returned to the LLM, e.g. ``"session_running"``.
+    :param reason: Optional refusal detail, e.g. ``"status=running"``.
+    """
+    _SESSION_ARCHIVE_AUDIT_LOGGER.info(
+        "sys_session_archive caller=%r target=%r outcome=%r reason=%r",
+        caller_id,
+        target_id,
+        outcome,
+        reason,
     )
