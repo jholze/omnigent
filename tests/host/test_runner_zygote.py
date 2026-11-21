@@ -1735,6 +1735,11 @@ def child_sink(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, objec
     monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
     monkeypatch.setattr(_zygote.os, "_exit", _raise_child_exited)
     runner_logger = logging.getLogger("omnigent.runner._entry")
+    # A real child configures INFO logging; in-process CLI tests on the same
+    # xdist worker may leave the root logger at WARNING, which would drop the
+    # INFO row before it reaches the sink. Pin the level for this fixture.
+    previous_level = runner_logger.level
+    runner_logger.setLevel(logging.INFO)
     dl.attach_debug_log_sink([runner_logger], source="runner", level=logging.INFO, send=_slow_send)
     sink = dl._active_sink
     assert sink is not None
@@ -1743,6 +1748,7 @@ def child_sink(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, objec
         yield rows
     finally:
         sink.close()
+        runner_logger.setLevel(previous_level)
         for name in ("omnigent.runner._entry", dl.SSE_LOGGER_NAME, dl.AUDIT_LOGGER_NAME):
             logging.getLogger(name).removeHandler(sink)
 
