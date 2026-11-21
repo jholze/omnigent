@@ -326,7 +326,16 @@ def _identity_in_group(identities: dict[int, float], pgid: int) -> bool:
     for pid, create_time in identities.items():
         try:
             proc = psutil.Process(pid)
-            if _process_start_stamp(proc) == create_time and _getpgid_fn(pid) == pgid:
+            if _process_start_stamp(proc) != create_time:
+                continue
+            if pid == pgid:
+                # The observed leader still holds the group's ID (alive, or an
+                # unreaped zombie), so no other group can carry it. Checked
+                # before getpgid(): macOS fails getpgid() with ESRCH for a
+                # zombie leader while Linux still reports its group, and the
+                # group's surviving members would otherwise be left running.
+                return True
+            if _getpgid_fn(pid) == pgid:
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             continue

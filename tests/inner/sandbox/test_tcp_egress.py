@@ -61,7 +61,7 @@ from omnigent.inner.terminal import (
 )
 from omnigent.spec.parser import _parse_os_env_sandbox
 from tests._helpers.polling import poll_until
-from tests.inner.git_ssh_fixture import _nonloopback_ip
+from tests.inner.git_ssh_fixture import _nonloopback_ip, sandbox_git
 from tests.inner.sandbox.conftest import run_async
 
 
@@ -874,7 +874,7 @@ def test_tcp_connector_supports_real_ssh_proxy_command(
             ),
         )
         command = (
-            f"git ls-remote {shlex.quote(url)} > result 2> error; "
+            f"{sandbox_git()} ls-remote {shlex.quote(url)} > result 2> error; "
             "printf '%s' $? > status; exec sleep 30"
         )
         terminal = create_terminal_instance(

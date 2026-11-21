@@ -2610,6 +2610,11 @@ def test_background_host_web_ui_open_preference(
     """Both background entry points honor the flag and environment preference."""
     _patch_background_host_spawn(monkeypatch, tmp_path)
     monkeypatch.setattr("omnigent.cli._stdin_is_tty", lambda: True)
+    # The opened link is derived from the local-server record (pidfile port +
+    # base-path sidecar in the worker-wide OMNIGENT_DATA_DIR) and the public
+    # base / base-path env vars. Pin all of them, as the public-base tests do,
+    # so state other tests leave on this xdist worker can't rewrite the URL.
+    monkeypatch.setattr("omnigent.host.local_server._read_local_server_pid_file", lambda: None)
     opened: list[tuple[str, bool]] = []
 
     with patch(
@@ -2622,6 +2627,8 @@ def test_background_host_web_ui_open_preference(
             env={
                 "OMNIGENT_HOST_NO_OPEN": no_open_env,
                 "OMNIGENT_HOST_OPEN_IN_DESKTOP": desktop_env,
+                "OMNIGENT_PUBLIC_BASE_URL": None,
+                "OMNIGENT_WEB_BASE_PATH": None,
             },
         )
 

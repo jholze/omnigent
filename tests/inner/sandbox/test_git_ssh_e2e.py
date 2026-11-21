@@ -15,6 +15,7 @@ from omnigent.inner.datamodel import GitSshBinding, OSEnvSandboxSpec, OSEnvSpec,
 from omnigent.inner.os_env import create_os_environment
 from omnigent.inner.terminal import create_terminal_instance
 from tests._helpers.polling import poll_until
+from tests.inner.git_ssh_fixture import sandbox_git
 from tests.inner.sandbox.conftest import run_async
 
 
@@ -81,11 +82,13 @@ def test_git_ssh_clone_inside_sandboxed_terminal(
     workspace.mkdir()
     marker = workspace / "result"
     detail = workspace / "git-output"
+    git = sandbox_git()
+    other_url = shlex.quote(url.replace("repo.git", "other.git"))
     command = (
         f"( set -x; test ! -r {shlex.quote(binding.identity_file)} && "
-        f"git clone --branch main {shlex.quote(url)} cloned && "
-        f"! git ls-remote {shlex.quote(url.replace('repo.git', 'other.git'))} >/dev/null 2>&1 && "
-        f"! git -C cloned push {shlex.quote(url)} HEAD:denied >/dev/null 2>&1 "
+        f"{git} clone --branch main {shlex.quote(url)} cloned && "
+        f"! {git} ls-remote {other_url} >/dev/null 2>&1 && "
+        f"! {git} -C cloned push {shlex.quote(url)} HEAD:denied >/dev/null 2>&1 "
         f") > {shlex.quote(str(detail))} 2>&1 "
         f"&& printf success > {shlex.quote(str(marker))} "
         f"|| printf failure > {shlex.quote(str(marker))}"

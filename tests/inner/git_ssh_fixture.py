@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import shlex
 import shutil
 import socket
 import subprocess
@@ -19,6 +20,20 @@ def _run(
     *args: str, cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, check=True)
+
+
+def sandbox_git() -> str:
+    """Return the host's git as a shell word for commands run inside a sandbox.
+
+    A sandboxed ``bash -l`` rebuilds PATH (path_helper on macOS), so a bare
+    ``git`` resolves to ``/usr/bin/git``. On macOS that is an xcrun shim which
+    loads ``libxcrun`` from the selected developer directory; with full Xcode
+    selected that lives under ``/Applications``, which Seatbelt does not expose,
+    and the shim fails before git runs. The git found on this process's PATH
+    (Homebrew under ``/opt``, or ``/usr/bin/git`` on Linux) is sandbox-readable
+    and is the same git the fixture's server side uses.
+    """
+    return shlex.quote(shutil.which("git") or "git")
 
 
 def _nonloopback_ip() -> str | None:

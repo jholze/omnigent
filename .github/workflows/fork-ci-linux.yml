@@ -5,6 +5,13 @@ name: Fork CI (Linux)
 # semantics, GNU tooling) and skip on darwin with a reason naming this job;
 # here they run in full, together with the rest of the SQLite suite.
 #
+# Sharded like upstream ci.yml: one job per group in
+# .github/scripts/ci/python-matrix.json (lanes needing an extra such as
+# databricks/slack are skipped). A single job running the whole suite under
+# -n 4 grew past the hosted runner's memory after ~65 minutes and was killed
+# ("runner received a shutdown signal"), never printing a summary; fresh
+# workers per group keep each job bounded and mirror upstream's isolation.
+#
 # GitHub-hosted runner: pull requests to main/epic/** and pushes to main only.
 # Same gate as fork-ci.yml: jholze's same-repo pull requests (fork pull
 # requests skip before a runner starts) and pushes to main. pull_request_target
@@ -36,11 +43,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pytest-linux:
-    name: Pytest (SQLite, Linux)
+  matrix:
+    name: Linux pytest groups
     if: ${{ (github.event_name == 'push' && github.repository == 'jholze/omnigent') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.actor == 'jholze' || github.event.pull_request.user.login == 'jholze') && github.event.pull_request.draft != true) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 5
+    outputs:
+      groups: ${{ steps.groups.outputs.groups }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/ci
+
+      - name: Select groups without extras
+        id: groups
+        run: |
+          groups="$(jq -c '[.[] | select(.extra == null and .markexpr == null)]' .github/scripts/ci/python-matrix.json)"
+          test "$(jq length <<<"$groups")" -gt 0
+          echo "groups=$groups" >> "$GITHUB_OUTPUT"
+
+  pytest-linux-group:
+    name: Pytest Linux (${{ matrix.group }})
+    needs: matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.groups) }}
     steps:
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -75,53 +107,54 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra all --extra postgres --group test
 
-      - name: Diagnose known Linux-only failures (full tracebacks first)
-        continue-on-error: true
-        run: |
-          git --version
-          uv run pytest \
-            tests/runtime/test_filesystem_registry.py::test_untracked_cache_enable_helper_sets_repo_config \
-            "tests/host/test_cli_host.py::test_background_host_web_ui_open_preference" \
-            -p no:cacheprovider -q --tb=long -x || true
-
       - name: Run pytest (SQLite, not databricks)
         shell: bash
         env:
           PYTHONFAULTHANDLER: "1"
           OMNIGENT_TEST_TIMEOUT_SCALE: "4"
           PYTEST_PROGRESS_LOG_DIR: artifacts/progress
+          GROUP_PATHS: ${{ matrix.paths }}
+          GROUP_WORKERS: ${{ matrix.workers || '4' }}
+          GROUP_DIST: ${{ matrix.dist || 'loadfile' }}
+          GROUP_NAME: ${{ matrix.group }}
         run: |
           mkdir -p artifacts artifacts/progress
           unset OPENAI_API_KEY ANTHROPIC_API_KEY DATABRICKS_TOKEN
-          run_suite() {
-            local name="$1"
-            shift
-            uv run pytest "$@" \
-              -m "not databricks" \
-              --timeout=300 \
-              --junitxml="artifacts/pytest-${name}.xml" \
-              -v --tb=short -r a \
-              || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in ${name}; treating as a pass." || exit "$rc"; }
-          }
-          # Same three processes as fork-ci.yml: tests/inner mutates sys.path
-          # and loads a worker watchdog, and integration shares one mock server.
-          run_suite main tests \
-            --ignore=tests/e2e \
-            --ignore=tests/e2e_ui \
-            --ignore=tests/codex_parity \
-            --ignore=tests/integration \
-            --ignore=tests/inner \
-            -n 4 \
-            --dist=worksteal
-          run_suite inner tests/inner -n 4 --dist=worksteal
-          run_suite integration tests/integration
+          xdist=()
+          if [ "$GROUP_WORKERS" != "0" ]; then
+            xdist=(-n "$GROUP_WORKERS" "--dist=$GROUP_DIST")
+          fi
+          # GROUP_PATHS word-splits into pytest args (paths and --ignore=...).
+          # shellcheck disable=SC2086
+          uv run pytest $GROUP_PATHS "${xdist[@]}" \
+            -m "not databricks" \
+            --timeout=300 \
+            --junitxml="artifacts/pytest-${GROUP_NAME}.xml" \
+            -v --tb=short -r a \
+            || { rc=$?; [ "$rc" -eq 5 ] && echo "::notice::No tests collected in ${GROUP_NAME}; treating as a pass." || exit "$rc"; }
 
       - name: Upload pytest artifacts
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: fork-pytest-linux-${{ github.run_id }}
+          name: fork-pytest-linux-${{ matrix.group }}-${{ github.run_id }}
           path: artifacts/
           retention-days: 7
           if-no-files-found: ignore
+
+  pytest-linux:
+    # Stable check name for the whole Linux lane: green only when every group passed.
+    name: Pytest (SQLite, Linux)
+    needs: [matrix, pytest-linux-group]
+    if: ${{ always() && needs.matrix.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every group to pass
+        env:
+          MATRIX_RESULT: ${{ needs.matrix.result }}
+          GROUPS_RESULT: ${{ needs.pytest-linux-group.result }}
+        run: |
+          echo "matrix=$MATRIX_RESULT groups=$GROUPS_RESULT"
+          test "$MATRIX_RESULT" = "success" && test "$GROUPS_RESULT" = "success"

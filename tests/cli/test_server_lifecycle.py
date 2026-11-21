@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -210,10 +211,19 @@ def test_server_background_with_base_path_sets_env_before_spawning(
 
     monkeypatch.setattr("omnigent.cli.ensure_local_omnigent_server", _fake_ensure)
 
-    result = CliRunner().invoke(cli, ["server", "--background", "--base-path", "/proxy/6767"])
+    # ``server`` assigns os.environ in-process. monkeypatch.delenv on an unset
+    # variable records nothing to restore, so name it in the runner's env:
+    # CliRunner restores the keys it was given, keeping the value out of
+    # later tests on this worker (it rewrote their local web UI links).
+    result = CliRunner().invoke(
+        cli,
+        ["server", "--background", "--base-path", "/proxy/6767"],
+        env={"OMNIGENT_WEB_BASE_PATH": None},
+    )
 
     assert result.exit_code == 0, result.output
     assert seen_env["OMNIGENT_WEB_BASE_PATH"] == "/proxy/6767"
+    assert "OMNIGENT_WEB_BASE_PATH" not in os.environ
 
 
 def test_server_background_reuses(monkeypatch: pytest.MonkeyPatch) -> None:
