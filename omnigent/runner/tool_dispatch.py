@@ -301,6 +301,7 @@ _SESSION_QUERY_TOOLS = frozenset(
         "sys_session_get_history",
         "sys_session_list",
         "sys_session_close",
+        "sys_session_archive",
         "sys_session_get_info",
         "sys_session_share",
     }
@@ -5136,6 +5137,8 @@ async def _execute_session_query_tool(
         return await _session_get_info_via_rest(args, conversation_id, server_client)
     if tool_name == "sys_session_share":
         return await _session_share_via_rest(args, conversation_id, server_client, agent_spec)
+    if tool_name == "sys_session_archive":
+        return await _session_archive_via_rest(args, conversation_id, server_client)
     return await _session_close_via_rest(args, conversation_id, server_client)
 
 
@@ -6493,12 +6496,15 @@ async def _session_get_history_via_rest(
 async def _fetch_close_target(
     target_id: str,
     server_client: httpx.AsyncClient,
+    tool_name: str = "sys_session_close",
 ) -> _JsonObject | str:
     """
     Fetch + status-classify the close target's session snapshot.
 
     :param target_id: The conversation id to close, e.g. ``"conv_abc123"``.
     :param server_client: HTTP client pointed at the Omnigent server.
+    :param tool_name: Tool name echoed into generic errors, e.g.
+        ``"sys_session_archive"``.
     :returns: The parsed snapshot dict on HTTP 200; otherwise a JSON
         error string (``session_not_found`` for 404,
         ``session_out_of_tree`` for 401/403, a generic status error
@@ -6507,16 +6513,16 @@ async def _fetch_close_target(
     try:
         snap = await server_client.get(f"/v1/sessions/{target_id}", timeout=30.0)
     except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": f"sys_session_close failed: {exc}"})
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
     if snap.status_code == 404:
         return json.dumps({"error": "session_not_found", "conversation_id": target_id})
     if snap.status_code in (401, 403):
         return json.dumps({"error": "session_out_of_tree", "conversation_id": target_id})
     if snap.status_code != 200:
-        return json.dumps({"error": f"sys_session_close returned {snap.status_code}"})
+        return json.dumps({"error": f"{tool_name} returned {snap.status_code}"})
     body = _string_object_dict(snap.json())
     if body is None:
-        return json.dumps({"error": "sys_session_close returned malformed session data"})
+        return json.dumps({"error": f"{tool_name} returned malformed session data"})
     return body
 
 
@@ -6571,6 +6577,66 @@ async def _close_tree_scope_error(
     return None
 
 
+@dataclass(frozen=True)
+class _CloseTombstone:
+    """
+    Identity + tombstoned title for a sub-agent being closed or archived.
+
+    :param agent: Agent label reported to the LLM, e.g. ``"researcher"``
+        or ``"equent-coder"``.
+    :param title: Instance title reported to the LLM, e.g. ``"auth"`` or
+        ``"X | coder | smoke"``.
+    :param new_title: Stored title to PATCH, carrying the closed marker so
+        the ``(parent, title)`` unique slot is freed, e.g.
+        ``"researcher:auth:closed:conv_abc"``.
+    """
+
+    agent: str
+    title: str
+    new_title: str
+
+
+def _close_tombstone(target_snap: _JsonObject, target_id: str) -> _CloseTombstone:
+    """
+    Derive the close tombstone for a sub-agent snapshot.
+
+    Named-mode children (``sys_session_send``) store ``"<agent>:<title>"``
+    and keep the canonical ``"<agent>:<title>:closed:<id>"`` rewrite.
+    ``sys_session_create(agent_id=...)`` children keep their verbatim
+    title (often without any colon, e.g. ``"X | coder | smoke"``) and
+    have no ``sub_agent_name``; their identity comes from the snapshot's
+    ``sub_agent_name`` / ``agent_name`` (same fallback as
+    :func:`_send_to_existing_session`) and the marker is appended to the
+    verbatim title so :func:`title_without_closed_marker` restores it.
+
+    Previously a title without a colon made close return
+    ``session_not_a_sub_agent`` even though the server reported the row
+    as ``kind: sub_agent`` with a parent.
+
+    :param target_snap: The target's ``GET /v1/sessions/{id}`` snapshot.
+    :param target_id: The target session id, e.g. ``"conv_abc123"``.
+    :returns: The derived :class:`_CloseTombstone`.
+    """
+    display_title = title_without_closed_marker(_optional_string(target_snap.get("title"))) or ""
+    parsed = _parse_session_title(display_title)
+    if parsed.agent is not None and parsed.title is not None:
+        return _CloseTombstone(
+            agent=parsed.agent,
+            title=parsed.title,
+            new_title=f"{parsed.agent}:{parsed.title}{_CLOSED_TITLE_INFIX}{target_id}",
+        )
+    agent_label = (
+        _optional_string(target_snap.get("sub_agent_name"))
+        or _optional_string(target_snap.get("agent_name"))
+        or "agent"
+    )
+    return _CloseTombstone(
+        agent=agent_label,
+        title=display_title,
+        new_title=f"{display_title}{_CLOSED_TITLE_INFIX}{target_id}",
+    )
+
+
 async def _session_close_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -6619,10 +6685,8 @@ async def _session_close_via_rest(
     )
     if scope_error is not None:
         return scope_error
-    parsed = _parse_session_title(_optional_string(target_snap.get("title")))
-    if parsed.agent is None or parsed.title is None:
-        return json.dumps({"error": "session_not_a_sub_agent", "conversation_id": target_id})
-    new_title = f"{parsed.agent}:{parsed.title}{_CLOSED_TITLE_INFIX}{target_id}"
+    tombstone = _close_tombstone(target_snap, target_id)
+    new_title = tombstone.new_title
     try:
         patch = await server_client.patch(
             f"/v1/sessions/{target_id}",
@@ -6644,8 +6708,198 @@ async def _session_close_via_rest(
         {
             "closed": True,
             "conversation_id": target_id,
-            "agent": parsed.agent,
-            "title": parsed.title,
+            "agent": tombstone.agent,
+            "title": tombstone.title,
+        }
+    )
+
+
+# Label recording which parent session archived a child via
+# ``sys_session_archive`` (persisted audit trail on the child row).
+ARCHIVED_BY_PARENT_LABEL_KEY = "omnigent.archived_by_parent"
+
+# Snapshot ``status`` values that mean the child has no live turn. ``running``
+# and ``waiting`` (parked on an elicitation / input) are NOT ended.
+_ARCHIVE_ENDED_STATUSES = frozenset({"idle", "failed"})
+# Runner-local sub-agent work statuses that mean the send has finished.
+_ARCHIVE_TERMINAL_WORK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _archive_running_reason(target_snap: _JsonObject, target_id: str) -> str | None:
+    """
+    Return why a child is not ended (so must not be archived), else ``None``.
+
+    Conservative: any sign of live work refuses the archive. Checks the
+    server snapshot (``status``, ``active_response_id``, background
+    shells, pending elicitations / inputs) and the runner-local sub-agent
+    work registry (a send still ``launching`` / ``running`` / ``waiting``).
+
+    :param target_snap: The child's ``GET /v1/sessions/{id}`` snapshot.
+    :param target_id: The child session id, e.g. ``"conv_abc123"``.
+    :returns: A short reason string, e.g. ``"status=running"``, or
+        ``None`` when the child is ended.
+    """
+    from omnigent.runner import subagent_work as _subagent_work
+
+    status = target_snap.get("status")
+    if status not in _ARCHIVE_ENDED_STATUSES:
+        return f"status={status}"
+    if target_snap.get("active_response_id"):
+        return "active_response"
+    background = target_snap.get("background_task_count")
+    if isinstance(background, int) and background > 0:
+        return "background_tasks"
+    if target_snap.get("pending_elicitations") or target_snap.get("pending_inputs"):
+        return "pending_input"
+    work = _subagent_work.get_subagent_work(target_id)
+    if work is not None and work.status not in _ARCHIVE_TERMINAL_WORK_STATUSES:
+        return f"work={work.status}"
+    return None
+
+
+def _audit_session_archive(
+    *, caller_id: str, target_id: str, outcome: str, reason: str | None = None
+) -> None:
+    """
+    Emit one structured audit record for a ``sys_session_archive`` attempt.
+
+    Logged at INFO on ``omnigent.audit.session_archive`` for every attempt
+    (success and refusal), carrying only ids and the outcome; no message
+    bodies or titles. Successful archives are also stamped on the child
+    row via :data:`ARCHIVED_BY_PARENT_LABEL_KEY`.
+
+    :param caller_id: The archiving parent session id.
+    :param target_id: The requested child session id.
+    :param outcome: ``"archived"``, ``"already_archived"``, or the error
+        code returned to the LLM, e.g. ``"session_running"``.
+    :param reason: Optional refusal detail, e.g. ``"status=running"``.
+    """
+    logging.getLogger("omnigent.audit.session_archive").info(
+        "sys_session_archive caller=%s target=%s outcome=%s reason=%s",
+        caller_id,
+        target_id,
+        outcome,
+        reason or "-",
+    )
+
+
+async def _session_archive_via_rest(
+    args: _JsonObject,
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> str:
+    """
+    Archive one of the caller's own ENDED direct child sessions.
+
+    Stricter than ``sys_session_close``: the target must be a direct
+    child (``parent_session_id`` equals the caller), and it must have no
+    live work (see :func:`_archive_running_reason`). Archive never
+    deletes: it PATCHes ``archived=true`` (which also lets the server reap
+    the child's harness processes), tombstones the child exactly like
+    close (closed label + freed title slot) and stamps
+    :data:`ARCHIVED_BY_PARENT_LABEL_KEY` with the caller id. Every attempt
+    is audited via :func:`_audit_session_archive`. Already-archived
+    children return success with ``already_archived: true`` and no write.
+
+    :param args: Parsed tool arguments; requires ``conversation_id``.
+    :param conversation_id: The calling (parent) session id.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :returns: JSON ``{"archived": true, ...}`` on success; otherwise a
+        JSON error: ``session_not_found``, ``session_not_a_sub_agent``
+        (top-level target), ``session_out_of_tree`` (not a direct child of
+        the caller, or access denied), or ``session_running``.
+    """
+    tool_name = "sys_session_archive"
+    target_id = args.get("conversation_id")
+    if not isinstance(target_id, str) or not target_id:
+        return json.dumps({"error": f"{tool_name} requires a non-empty 'conversation_id' string"})
+    target_snap = await _fetch_close_target(target_id, server_client, tool_name)
+    if isinstance(target_snap, str):
+        _audit_session_archive(
+            caller_id=conversation_id, target_id=target_id, outcome="lookup_failed"
+        )
+        return target_snap
+    parent_id = target_snap.get("parent_session_id")
+    if parent_id is None:
+        _audit_session_archive(
+            caller_id=conversation_id, target_id=target_id, outcome="session_not_a_sub_agent"
+        )
+        return json.dumps({"error": "session_not_a_sub_agent", "conversation_id": target_id})
+    if parent_id != conversation_id:
+        _audit_session_archive(
+            caller_id=conversation_id, target_id=target_id, outcome="session_out_of_tree"
+        )
+        return json.dumps(
+            {
+                "error": "session_out_of_tree",
+                "conversation_id": target_id,
+                "message": (
+                    "target is not a direct child of the calling session; "
+                    "sys_session_archive only archives the caller's own children."
+                ),
+            }
+        )
+    if target_snap.get("archived") is True:
+        _audit_session_archive(
+            caller_id=conversation_id, target_id=target_id, outcome="already_archived"
+        )
+        return json.dumps(
+            {"archived": True, "already_archived": True, "conversation_id": target_id}
+        )
+    running = _archive_running_reason(target_snap, target_id)
+    if running is not None:
+        _audit_session_archive(
+            caller_id=conversation_id,
+            target_id=target_id,
+            outcome="session_running",
+            reason=running,
+        )
+        return json.dumps(
+            {
+                "error": "session_running",
+                "conversation_id": target_id,
+                "reason": running,
+                "message": (
+                    "target child still has live work; wait for it to finish "
+                    "(or cancel it) before archiving."
+                ),
+            }
+        )
+    labels: dict[str, str] = {ARCHIVED_BY_PARENT_LABEL_KEY: conversation_id}
+    body: _JsonObject = {"archived": True, "labels": labels}
+    raw_labels = target_snap.get("labels")
+    target_labels = (
+        {str(k): str(v) for k, v in raw_labels.items()} if isinstance(raw_labels, dict) else {}
+    )
+    already_closed = is_session_closed(target_labels, _optional_string(target_snap.get("title")))
+    tombstone = _close_tombstone(target_snap, target_id)
+    if not already_closed:
+        labels[CLOSED_LABEL_KEY] = CLOSED_LABEL_VALUE
+        body["title"] = tombstone.new_title
+    try:
+        patch = await server_client.patch(f"/v1/sessions/{target_id}", json=body, timeout=30.0)
+    except Exception as exc:  # noqa: BLE001
+        _audit_session_archive(
+            caller_id=conversation_id, target_id=target_id, outcome="patch_failed"
+        )
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if patch.status_code != 200:
+        _audit_session_archive(
+            caller_id=conversation_id,
+            target_id=target_id,
+            outcome="patch_failed",
+            reason=str(patch.status_code),
+        )
+        if patch.status_code in (401, 403):
+            return json.dumps({"error": "session_out_of_tree", "conversation_id": target_id})
+        return json.dumps({"error": f"{tool_name} returned {patch.status_code}"})
+    _audit_session_archive(caller_id=conversation_id, target_id=target_id, outcome="archived")
+    return json.dumps(
+        {
+            "archived": True,
+            "conversation_id": target_id,
+            "agent": tombstone.agent,
+            "title": tombstone.title,
         }
     )
 

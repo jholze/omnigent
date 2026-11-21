@@ -34,6 +34,7 @@ from omnigent.tools.builtins import (
     SysScheduledTaskDeleteTool,
     SysScheduledTaskListTool,
     SysScheduledTaskUpdateTool,
+    SysSessionArchiveTool,
     SysSessionCloseTool,
     SysSessionCreateTool,
     SysSessionGetHistoryTool,
@@ -481,6 +482,9 @@ class ToolManager:
             sub_specs=sub_specs,
         )
         self._tools[SysSessionCloseTool.name()] = SysSessionCloseTool()
+        # Archive pairs with close: a parent may archive its own ENDED
+        # direct children (never delete, never non-children/running).
+        self._tools[SysSessionArchiveTool.name()] = SysSessionArchiveTool()
         # Model awareness pairs with the dispatch grant: the per-worker
         # listing exists to pick a valid ``args.model`` for send.
         self._tools[SysListModelsTool.name()] = SysListModelsTool(spec=self._spec)
