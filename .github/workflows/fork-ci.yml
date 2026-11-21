@@ -64,9 +64,9 @@ jobs:
           export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
           command -v uv
           uv --version
-      - name: Install dependencies (same extras as upstream lint.yml)
+      - name: Install dependencies (same groups/extras as upstream lint.yml)
         run: |
-          uv sync --locked --group lint \
+          uv sync --locked --group lint --group test \
             --extra hindsight \
             --extra nimble \
             --extra s3 \

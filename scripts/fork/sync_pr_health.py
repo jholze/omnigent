@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     raw = sys.stdin.read().strip()
     prs = json.loads(raw) if raw else []
-    result = classify(prs, now=dt.datetime.now(dt.timezone.utc), stale_days=args.stale_days)
+    result = classify(prs, now=dt.datetime.now(dt.UTC), stale_days=args.stale_days)
     if result is not None:
         state, summary, details = result
         print(f"{state}\t{summary}\t{json.dumps(details)}")

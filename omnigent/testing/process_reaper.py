@@ -124,10 +124,12 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
         return []
     me = os.getpid()
     leaked: list[psutil.Process] = []
-    for proc in psutil.process_iter():
+    for pid in psutil.pids():
+        if pid == me:
+            continue
         try:
-            if proc.pid == me:
-                continue
+            # An empty procfs stat record can fail before process_iter yields it.
+            proc = psutil.Process(pid)
             argv = _proc_argv(proc)
             cmdline = " ".join(argv)
             if "omnigent" not in cmdline or _is_pytest_process(argv):
@@ -138,7 +140,7 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
             ):
                 continue
             leaked.append(proc)
-        except _PROC_UNREADABLE:
+        except (*_PROC_UNREADABLE, IndexError):
             continue
     return leaked
 

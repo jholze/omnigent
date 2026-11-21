@@ -72,7 +72,7 @@ TEST_TAGS=okr_tour ./scripts/run_odoo_tests.sh
 Tours hängen nicht an Demo-XML. `test_okr_tour.py` sagt das ausdrücklich: Odoo.sh-Testdatenbanken installieren ohne Demo. `_ensure_tour_cycle()` sucht den Zyklus `Q4 2026` und das Objective `OKR Tour Draft Objective` und legt sie an, wenn sie fehlen. Danach:
 
 ```python
-self.start_tour('/odoo/okr', 'okr_my_okrs_smoke_tour', login='admin')
+self.start_tour("/odoo/okr", "okr_my_okrs_smoke_tour", login="admin")
 ```
 
 Dieselben Datensätze stehen zusätzlich in `bloopark_okr/data/okr_tour_data.xml` mit `noupdate="1"`. Der Smoke auf der Dev-Instanz nutzt `bloopark_okr/data/okr_smoke_seed.xml` (Zyklus Q2 2026, Company- und Team-Objective, Key Results). Demo bleibt in `bloopark_okr/demo/okr_demo_data.xml` und ist für die Tests nicht die Quelle.

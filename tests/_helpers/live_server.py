@@ -9,6 +9,7 @@ The credential/profile-aware helpers below also support compatibility builds.
 The credential/profile-aware API provides three primitives:
 
 - :func:`find_free_port` — pick a free TCP port for the server.
+- :func:`reserve_port` — hold a free port until its process is about to bind.
 - :func:`make_live_server_fixture` — factory that builds a
   session-scoped pytest fixture starting a real
   ``omnigent.cli server`` subprocess. The subprocess inherits
@@ -64,11 +65,29 @@ def find_free_port() -> int:
     """
     Find a free TCP port by binding to port 0.
 
+    The port is released before this returns, so another listener can claim it
+    first; use :func:`reserve_port` when other sockets bind in the meantime.
+
     :returns: An available port number, e.g. ``58234``.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    with reserve_port() as sock:
+        return sock.getsockname()[1]
+
+
+@contextmanager
+def reserve_port() -> Iterator[socket.socket]:
+    """
+    Hold a free loopback TCP port until the caller releases it.
+
+    Close the yielded socket immediately before the owning process binds the
+    port, so ephemeral listeners started earlier cannot be assigned it.
+
+    :returns: A context manager yielding the bound socket; read the port from
+        ``sock.getsockname()[1]``.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield sock
 
 
 def local_server_env(
@@ -140,13 +159,15 @@ def isolated_process_env(
     return env
 
 
-def terminate_process(proc: subprocess.Popen[bytes] | subprocess.Popen[str] | None) -> None:
-    """Reap a running child, escalating SIGTERM to SIGKILL after ten seconds."""
+def terminate_process(
+    proc: subprocess.Popen[bytes] | subprocess.Popen[str] | None, *, timeout_s: float = 10
+) -> None:
+    """Reap a running child, escalating SIGTERM to SIGKILL after ``timeout_s`` seconds."""
     if proc is None or proc.poll() is not None:
         return
     proc.send_signal(signal.SIGTERM)
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
@@ -162,13 +183,15 @@ def isolated_local_server(
     env: Mapping[str, str | None] | None = None,
     base_env: Mapping[str, str] | None = None,
     extra_args: Sequence[str] = (),
-    cwd: Path | None = None,
+    cwd: Path | str | None = None,
+    executable: str = sys.executable,
 ) -> Iterator[str]:
     """Run this checkout's server; yield its URL and retain server.log.
 
     Supply a bootstrap only when the scenario needs a fault installed before
     the CLI starts. Defaults to single-user header auth; env can override or
     remove defaults (None removes a key). Extra CLI args configure agents, etc.
+    ``executable`` lets a compatibility run use its pinned server interpreter.
     HOME and data belong to this server. Existing profile/compatibility tests should use
     :func:`start_live_server` instead.
     """
@@ -181,7 +204,7 @@ def isolated_local_server(
     with log_path.open("w") as log:
         proc = subprocess.Popen(
             [
-                sys.executable,
+                executable,
                 "-c",
                 bootstrap,
                 "server",
@@ -335,6 +358,8 @@ def start_live_server(
             "-m",
             "omnigent.cli",
             "server",
+            "--host",
+            "127.0.0.1",
             "--port",
             str(port),
             "--database-uri",
@@ -349,7 +374,9 @@ def start_live_server(
         stdout=log_handle,
         stderr=subprocess.STDOUT,
     )
-    base_url = f"http://localhost:{port}"
+    # Pin IPv4 on both sides: "localhost" may resolve to ::1 first, and the port
+    # reserved by find_free_port() is only guaranteed free on 127.0.0.1.
+    base_url = f"http://127.0.0.1:{port}"
 
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -357,7 +384,9 @@ def start_live_server(
             resp = httpx.get(f"{base_url}/health", timeout=2)
             if resp.status_code == 200:
                 return proc, base_url
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.TimeoutException):
+            # A loaded CI worker can stall a single 2s probe (ConnectTimeout);
+            # keep polling until the 30s startup deadline instead of erroring.
             pass
         time.sleep(0.5)
 
@@ -430,7 +459,7 @@ def upload_agent(client: httpx.Client, agent_dir: Path) -> str:
     the agent registered on the server.
 
     :param client: HTTP client pointed at the live server, e.g.
-        ``httpx.Client(base_url="http://localhost:58234")``.
+        ``httpx.Client(base_url="http://127.0.0.1:58234")``.
     :param agent_dir: Filesystem path to the agent bundle root
         (the directory containing ``config.yaml``), e.g.
         ``Path("/tmp/agent_bundle")``.
