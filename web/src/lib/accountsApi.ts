@@ -17,6 +17,12 @@
  */
 
 import { withBasePath } from "./basePath";
+import { withRoutingKey } from "./host";
+
+// Standalone accounts endpoints skip the embed transport, so they add the routing key here.
+function accountsFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(withBasePath(path), withRoutingKey(init, { hostless: true }));
+}
 
 /** Body of POST /auth/login. */
 export interface LoginRequest {
@@ -71,7 +77,7 @@ export interface CurrentAccount {
 export async function login(body: LoginRequest): Promise<LoginResult> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/auth/login"), {
+    res = await accountsFetch("/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -126,11 +132,25 @@ export async function login(body: LoginRequest): Promise<LoginResult> {
  */
 export async function logout(): Promise<void> {
   try {
-    await fetch(withBasePath("/auth/logout"), { method: "POST" });
+    await accountsFetch("/auth/logout", { method: "POST" });
   } catch {
     // Network error — the cookie is still in the browser, but the
     // next authenticated request will 401 and bounce to login.
   }
+}
+
+/**
+ * End the browser session and leave the app. Accounts mode clears the cookie and
+ * opens the login form; OIDC follows the server's /auth/logout redirect. Both
+ * navigate with a full page load so client caches reset.
+ */
+export async function signOutOfBrowserSession(accountsEnabled: boolean): Promise<void> {
+  if (accountsEnabled) {
+    await logout();
+    window.location.href = withBasePath("/login");
+    return;
+  }
+  window.location.href = withBasePath("/auth/logout");
 }
 
 /**
@@ -147,7 +167,7 @@ export async function logout(): Promise<void> {
 export async function getMe(): Promise<CurrentAccount | null> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/auth/me"), { cache: "no-store" });
+    res = await accountsFetch("/auth/me", { cache: "no-store" });
   } catch {
     return null;
   }
@@ -279,7 +299,7 @@ export interface RegisterRequest {
 export async function register(body: RegisterRequest): Promise<LoginResult> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/auth/register"), {
+    res = await accountsFetch("/auth/register", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -332,7 +352,7 @@ export type ChangePasswordResult = { ok: true } | { ok: false; error: string };
 export async function changePassword(body: ChangePasswordRequest): Promise<ChangePasswordResult> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/auth/users/me/password"), {
+    res = await accountsFetch("/auth/users/me/password", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -373,7 +393,7 @@ export interface SetupRequest {
 export async function setup(body: SetupRequest): Promise<LoginResult> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/auth/setup"), {
+    res = await accountsFetch("/auth/setup", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -489,7 +509,7 @@ async function adminRequest<T extends { ok: true }>(
 export async function listUsers(): Promise<AccountListEntry[] | null> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/auth/users"), { cache: "no-store" });
+    res = await accountsFetch("/auth/users", { cache: "no-store" });
   } catch {
     return null;
   }
@@ -508,7 +528,7 @@ export async function listUsers(): Promise<AccountListEntry[] | null> {
 export async function createInvite(isAdmin: boolean): Promise<InviteCreated | AdminFailure> {
   return adminRequest<InviteCreated>(
     () =>
-      fetch(withBasePath("/auth/invite"), {
+      accountsFetch("/auth/invite", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ is_admin: isAdmin }),
@@ -540,7 +560,7 @@ export async function createInvite(isAdmin: boolean): Promise<InviteCreated | Ad
 export async function deleteUser(userId: string): Promise<{ ok: true } | AdminFailure> {
   let res: Response;
   try {
-    res = await fetch(withBasePath(`/auth/users/${encodeURIComponent(userId)}`), {
+    res = await accountsFetch(`/auth/users/${encodeURIComponent(userId)}`, {
       method: "DELETE",
     });
   } catch {
@@ -566,7 +586,7 @@ export async function deleteUser(userId: string): Promise<{ ok: true } | AdminFa
 export async function resetUserPassword(userId: string): Promise<PasswordReset | AdminFailure> {
   return adminRequest<PasswordReset>(
     () =>
-      fetch(withBasePath(`/auth/users/${encodeURIComponent(userId)}/reset`), {
+      accountsFetch(`/auth/users/${encodeURIComponent(userId)}/reset`, {
         method: "POST",
       }),
     (body) => {

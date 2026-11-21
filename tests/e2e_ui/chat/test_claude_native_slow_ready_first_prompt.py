@@ -19,7 +19,7 @@ What this test drives
 The rig launches the session's Claude Code terminal through a wrapper
 (``OMNIGENT_CLAUDE_PATH``, the documented harness-command override) that
 prints boot output — so ``capture-pane`` frames are non-empty, matching the
-reported "0 empty captures" — sleeps past the 30s readiness gate, and only
+reported "0 empty captures" — sleeps past the base readiness budget, and only
 then exec's the real ``claude`` CLI. So the terminal becomes ready *late*,
 exactly like a slow host connect.
 
@@ -38,8 +38,9 @@ delivered and answered once the terminal is ready.
 Making the failure deterministic
 --------------------------------
 The wrapper waits for a marker written at readiness-gate entry before
-starting its boot delay (:data:`_READY_DELAY_S`). Browser setup cannot
-consume the delay, which exceeds the 30s base budget. The real ``claude``
+starting its boot delay. PR coverage uses a 2s base budget and a 4s delay;
+nightly retains the production 30s budget and 45s delay. Browser setup cannot
+consume the delay. The real ``claude``
 CLI runs against the mock LLM (a mock anthropic provider is
 written into the rig's isolated ``OMNIGENT_CONFIG_HOME``), so no live
 Anthropic credentials are needed and the delivered turn gets a mock reply.
@@ -60,7 +61,6 @@ import secrets
 import shlex
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import sys
@@ -73,6 +73,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.live_server import find_free_port
 from tests.e2e_ui.conftest import _create_native_claude_session
 from tests.e2e_ui.messages.test_message_render_parity import (
     _ensure_chat_view,
@@ -115,12 +116,6 @@ _FIRST_PROMPT = (
     "Audit the universe DAO layer for SQL anti-patterns. "
     f"Reply with exactly this token and nothing else: {_ECHO_TOKEN}"
 )
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 # Proxy-blind client: CI forces an egress proxy via HTTP(S)_PROXY env vars
@@ -183,7 +178,9 @@ def _no_proxy_env() -> dict[str, str]:
     return env
 
 
-def _write_slow_ready_claude_wrapper(bin_dir: Path, real_claude: str, gate_started: Path) -> Path:
+def _write_slow_ready_claude_wrapper(
+    bin_dir: Path, real_claude: str, gate_started: Path, *, delay_s: float = _READY_DELAY_S
+) -> Path:
     """Write a ``claude`` wrapper that becomes ready only after a slow boot.
 
     The wrapper prints boot output (so ``capture-pane`` frames are non-empty,
@@ -194,6 +191,7 @@ def _write_slow_ready_claude_wrapper(bin_dir: Path, real_claude: str, gate_start
     :param bin_dir: Directory to write the wrapper into.
     :param real_claude: Absolute path of the real ``claude`` binary to exec.
     :param gate_started: Marker written when delivery enters the readiness gate.
+    :param delay_s: Boot delay after delivery enters the readiness gate.
     :returns: The absolute path of the wrapper executable.
     """
     wrapper = bin_dir / "claude"
@@ -204,70 +202,14 @@ def _write_slow_ready_claude_wrapper(bin_dir: Path, real_claude: str, gate_start
         'echo "Claude Code — connecting to host..."\n'
         'echo "This is taking longer than usual."\n'
         f"while [ ! -f {shlex.quote(str(gate_started))} ]; do sleep 0.05; done\n"
-        f"sleep {_READY_DELAY_S}\n"
+        f"sleep {delay_s}\n"
         f'exec {shlex.quote(real_claude)} "$@"\n'
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return wrapper
 
 
-def _trust_observer_source(trust_record: Path) -> str:
-    """Python source that records each ``ensure_claude_workspace_trusted`` call.
-
-    The runner imports that helper by name after this module is installed, so
-    the wrapper has to replace the function on the bridge module at startup.
-
-    :param trust_record: JSONL path the wrapper appends one object to per call.
-    :returns: Source lines appended to the rig's startup module.
-    """
-    return (
-        "trust_record = Path(" + repr(str(trust_record)) + ")\n"
-        "trust_workspace = bridge.ensure_claude_workspace_trusted\n"
-        "def observe_trust(workspace, env=None):\n"
-        "    config_path = bridge.claude_global_config_path(Path(workspace), env)\n"
-        "    project_cwd = str(Path(workspace).resolve())\n"
-        "    error = None\n"
-        "    try:\n"
-        "        trust_workspace(workspace, env)\n"
-        "    except Exception as exc:\n"
-        "        error = type(exc).__name__ + ': ' + str(exc)\n"
-        "        raise\n"
-        "    finally:\n"
-        "        accepted = None\n"
-        "        onboarded = None\n"
-        "        if config_path.is_file():\n"
-        "            try:\n"
-        "                data = json.loads(config_path.read_text(encoding='utf-8'))\n"
-        "            except (OSError, json.JSONDecodeError):\n"
-        "                data = None\n"
-        "            if isinstance(data, dict):\n"
-        "                onboarded = data.get('hasCompletedOnboarding')\n"
-        "                projects = data.get('projects')\n"
-        "                if isinstance(projects, dict):\n"
-        "                    project = projects.get(project_cwd)\n"
-        "                    if isinstance(project, dict):\n"
-        "                        accepted = project.get('hasTrustDialogAccepted')\n"
-        "        effective = os.environ if env is None else env\n"
-        "        record = {\n"
-        "            'workspace': str(workspace),\n"
-        "            'project_cwd': project_cwd,\n"
-        "            'process_cwd': os.getcwd(),\n"
-        "            'config_path': str(config_path),\n"
-        "            'config_exists_after': config_path.is_file(),\n"
-        "            'has_completed_onboarding': onboarded is True,\n"
-        "            'has_trust_dialog_accepted': accepted is True,\n"
-        "            'home': effective.get('HOME'),\n"
-        "            'claude_config_dir': effective.get('CLAUDE_CONFIG_DIR'),\n"
-        "            'error': error,\n"
-        "        }\n"
-        "        trust_record.parent.mkdir(parents=True, exist_ok=True)\n"
-        "        with trust_record.open('a', encoding='utf-8') as handle:\n"
-        "            handle.write(json.dumps(record) + '\\n')\n"
-        "bridge.ensure_claude_workspace_trusted = observe_trust\n"
-    )
-
-
-def _rig_python(work: Path, gate_started: Path, trust_record: Path | None = None) -> str:
+def _rig_python(work: Path, gate_started: Path, *, ready_timeout_s: float | None = None) -> str:
     """Build an interpreter whose isolated mode can import this checkout.
 
     The claude-native bridge invokes its hook scripts (the transcript
@@ -282,7 +224,7 @@ def _rig_python(work: Path, gate_started: Path, trust_record: Path | None = None
 
     :param work: The rig's scratch directory.
     :param gate_started: Marker for the test-only readiness observer, including under ``-I``.
-    :param trust_record: When set, record each trust-seed call to this JSONL file.
+    :param ready_timeout_s: Optional base budget in the spawned bridge process.
     :returns: Absolute path of the rig venv's ``python``.
     """
     venv_dir = work / "rig-venv"
@@ -304,24 +246,23 @@ def _rig_python(work: Path, gate_started: Path, trust_record: Path | None = None
             root = str(Path(spec.origin).resolve().parents[1])
             if root not in roots:
                 roots.append(root)
-    gate_source = (
-        "import json\n"
-        "import os\n"
-        "import time\n"
+    (site_packages / "omnigent_slow_ready_gate.py").write_text(
+        "import json, time\n"
         "from pathlib import Path\n"
         "from omnigent.harnesses.claude_native import bridge\n"
         f"gate_started = Path({str(gate_started)!r})\n"
         "wait_for_prompt = bridge._wait_for_claude_prompt_ready\n"
-        "def observe_wait(socket_path, tmux_target, *, timeout_s, bridge_dir=None):\n"
+        "def observe_wait(socket_path, tmux_target, *, timeout_s, bridge_dir=None, "
+        "extend_for_slow_boot=True):\n"
+        f"    if {ready_timeout_s!r} is not None:\n"
+        f"        timeout_s = {ready_timeout_s!r}\n"
         "    if not gate_started.exists():\n"
-        "        gate_started.write_text(str(time.monotonic()))\n"
+        "        gate_started.write_text(json.dumps({'started_at': time.monotonic(), "
+        "'timeout_s': timeout_s}))\n"
         "    wait_for_prompt(socket_path, tmux_target, timeout_s=timeout_s, "
-        "bridge_dir=bridge_dir)\n"
+        "bridge_dir=bridge_dir, extend_for_slow_boot=extend_for_slow_boot)\n"
         "bridge._wait_for_claude_prompt_ready = observe_wait\n"
     )
-    if trust_record is not None:
-        gate_source += _trust_observer_source(trust_record)
-    (site_packages / "omnigent_slow_ready_gate.py").write_text(gate_source)
     (site_packages / "omnigent_rig.pth").write_text(
         "\n".join([*roots, parent_purelib, "import omnigent_slow_ready_gate"]) + "\n"
     )
@@ -329,16 +270,15 @@ def _rig_python(work: Path, gate_started: Path, trust_record: Path | None = None
 
 
 @pytest.mark.timeout(30)
-def test_slow_ready_wrapper_waits_for_delivery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(f"{__name__}._READY_DELAY_S", 0.1)
+def test_slow_ready_wrapper_waits_for_delivery(tmp_path: Path) -> None:
     gate_started = tmp_path / "gate started"
     real_claude = tmp_path / "real claude"
     real_claude.write_text("#!/usr/bin/env bash\necho READY\n")
     real_claude.chmod(0o755)
-    wrapper = _write_slow_ready_claude_wrapper(tmp_path, str(real_claude), gate_started)
-    rig_python = _rig_python(tmp_path, gate_started)
+    wrapper = _write_slow_ready_claude_wrapper(
+        tmp_path, str(real_claude), gate_started, delay_s=0.1
+    )
+    rig_python = _rig_python(tmp_path, gate_started, ready_timeout_s=0.05)
     process = subprocess.Popen(
         [str(wrapper)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
@@ -353,7 +293,7 @@ def test_slow_ready_wrapper_waits_for_delivery(
                 rig_python,
                 "-I",
                 "-c",
-                "from pathlib import Path\n"
+                "import json\nfrom pathlib import Path\n"
                 "from omnigent.harnesses.claude_native import bridge\n"
                 f"assert not Path({str(gate_started)!r}).exists()\n"
                 "bridge._capture_pane = lambda *_: '────────────────\\n❯ \\n────────────────'\n"
@@ -369,160 +309,29 @@ def test_slow_ready_wrapper_waits_for_delivery(
         stdout, stderr = process.communicate(timeout=5)
         assert process.returncode == 0, stderr
         assert stdout.strip() == "READY"
-        assert time.monotonic() - float(gate_started.read_text()) >= _READY_DELAY_S
+        observed = json.loads(gate_started.read_text())
+        assert observed["timeout_s"] == 0.05
+        assert time.monotonic() - observed["started_at"] >= 0.1
     finally:
         if process.poll() is None:
             process.kill()
         process.communicate(timeout=5)
 
 
-def _capture_claude_panes(base_url: str, session_id: str) -> str:
-    """Return tmux pane text for the session's terminals, or why it is missing.
-
-    :param base_url: Base URL of the rig's server.
-    :param session_id: Session whose terminal resources name the tmux socket.
-    :returns: Captured pane text, including a short header per terminal.
-    """
-    try:
-        response = _client.get(
-            f"{base_url}/v1/sessions/{session_id}/resources",
-            timeout=5.0,
-        )
-    except httpx.HTTPError as exc:
-        return f"(resources request failed: {exc})"
-    if response.status_code != 200:
-        return f"(resources HTTP {response.status_code}: {response.text[:500]})"
-    payload = response.json()
-    rows = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        return "(resources payload had no terminal list)"
-    chunks: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict) or row.get("type") != "terminal":
-            continue
-        metadata = row.get("metadata")
-        name = row.get("name")
-        if not isinstance(metadata, dict):
-            chunks.append(f"{name}: (no terminal metadata)")
-            continue
-        socket = metadata.get("tmux_socket")
-        target = metadata.get("tmux_target")
-        if not isinstance(socket, str) or not isinstance(target, str):
-            chunks.append(f"{name}: (no tmux socket)")
-            continue
-        try:
-            captured = subprocess.run(
-                ["tmux", "-S", socket, "capture-pane", "-p", "-S", "-200", "-t", target],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            chunks.append(f"{name} {socket} {target}: ({exc})")
-            continue
-        text = captured.stdout if captured.returncode == 0 else captured.stderr
-        chunks.append(f"--- {name} {socket} {target} ---\n{text}")
-    if not chunks:
-        return "(no terminal resource)"
-    return "\n".join(chunks)
-
-
-def _read_trust_seed(artifacts: Path) -> str:
-    """Return the trust-seed JSONL, or a note that the helper never ran.
-
-    :param artifacts: The rig's artifact directory.
-    :returns: The recorded seed calls.
-    """
-    path = artifacts / "claude-trust-seed.jsonl"
-    if not path.is_file():
-        return "(ensure_claude_workspace_trusted was not observed)"
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _write_slow_ready_failure(artifacts: Path, *, pane: str, seed: str) -> str:
-    """Save pane text and the trust-seed record, and return a failure excerpt.
-
-    :param artifacts: Directory already passed to the rig server as
-        ``--artifact-location``.
-    :param pane: Captured tmux text.
-    :param seed: JSONL from the trust-seed observer.
-    :returns: Text safe to append to the assertion (pane capped).
-    """
-    report = (
-        "slow-ready failure evidence\n"
-        f"trust seed ({artifacts / 'claude-trust-seed.jsonl'}):\n{seed}\n\n"
-        f"tmux pane:\n{pane}\n"
-    )
-    artifacts.mkdir(parents=True, exist_ok=True)
-    (artifacts / "slow-ready-failure.txt").write_text(report, encoding="utf-8")
-    visible = pane
-    if len(visible) > 4000:
-        visible = visible[:4000] + "\n…(pane truncated; full text is in slow-ready-failure.txt)"
-    return (
-        "slow-ready failure evidence\n"
-        f"trust seed:\n{seed}\n\n"
-        f"tmux pane:\n{visible}\n"
-        f"artifact: {artifacts / 'slow-ready-failure.txt'}"
-    )
-
-
-@pytest.mark.timeout(30)
-def test_slow_ready_rig_records_trust_seed(tmp_path: Path) -> None:
-    """The rig interpreter records the config path and cwd the seed writes."""
-    workspace = tmp_path / "workspace"
-    home = tmp_path / "home"
-    workspace.mkdir()
-    home.mkdir()
-    record = tmp_path / "artifacts" / "claude-trust-seed.jsonl"
-    rig_python = _rig_python(tmp_path, tmp_path / "gate-started", trust_record=record)
-    completed = subprocess.run(
-        [
-            rig_python,
-            "-I",
-            "-c",
-            "from pathlib import Path\n"
-            "from omnigent.harnesses.claude_native.bridge import "
-            "ensure_claude_workspace_trusted\n"
-            f"ensure_claude_workspace_trusted(Path({str(workspace)!r}), "
-            f"env={{'HOME': {str(home)!r}}})\n",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr
-    payload = json.loads(record.read_text(encoding="utf-8").splitlines()[-1])
-    assert payload["project_cwd"] == str(workspace.resolve())
-    assert payload["config_path"] == str(home / ".claude.json")
-    assert payload["has_trust_dialog_accepted"] is True
-    assert payload["has_completed_onboarding"] is True
-    assert payload["error"] is None
-    assert Path(payload["config_path"]).is_file()
-
-
-def test_slow_ready_failure_report_keeps_pane_and_seed(tmp_path: Path) -> None:
-    """A failure artifact keeps the pane text and the seeded config path."""
-    artifacts = tmp_path / "artifacts"
-    seed = '{"config_path": "/tmp/home/.claude.json", "project_cwd": "/work"}'
-    report = _write_slow_ready_failure(
-        artifacts,
-        pane="Do you trust the files in this folder?",
-        seed=seed,
-    )
-    saved = (artifacts / "slow-ready-failure.txt").read_text(encoding="utf-8")
-    assert "Do you trust the files in this folder?" in saved
-    assert "/tmp/home/.claude.json" in saved
-    assert "/work" in report
-    assert "slow-ready-failure.txt" in report
-
-
-@pytest.fixture
+@pytest.fixture(
+    params=[
+        pytest.param((2.0, 4.0), id="short-readiness-budget"),
+        pytest.param(
+            (None, _READY_DELAY_S), id="production-readiness-budget", marks=pytest.mark.nightly
+        ),
+    ]
+)
 def slow_ready_claude_session(
     built_spa: None,
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[tuple[str, str, Path, Path]]:
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[str, str, Path, float, float | None]]:
     """A claude-native wrapper session whose Claude terminal becomes ready late.
 
     Spawns a dedicated server + runner whose claude-native harness command
@@ -532,7 +341,7 @@ def slow_ready_claude_session(
     credentials), then creates and binds the same claude-native wrapper
     session ``omnigent claude`` ships.
 
-    :returns: ``(base_url, session_id, gate_started, artifacts)``.
+    :returns: Server, session, readiness marker, boot delay and optional base budget.
     """
     if shutil.which("tmux") is None:
         pytest.skip("tmux is required for the claude-native terminal rig")
@@ -548,9 +357,11 @@ def slow_ready_claude_session(
     for path in (config_home, home_dir, wrapper_bin, artifacts):
         path.mkdir(parents=True, exist_ok=True)
     gate_started = work / "readiness-gate-started"
-    trust_record = artifacts / "claude-trust-seed.jsonl"
-    wrapper = _write_slow_ready_claude_wrapper(wrapper_bin, real_claude, gate_started)
-    rig_python = _rig_python(work, gate_started, trust_record=trust_record)
+    ready_timeout_s, delay_s = request.param
+    wrapper = _write_slow_ready_claude_wrapper(
+        wrapper_bin, real_claude, gate_started, delay_s=delay_s
+    )
+    rig_python = _rig_python(work, gate_started, ready_timeout_s=ready_timeout_s)
 
     # Mock anthropic provider so the real ``claude`` boots against the mock
     # LLM (no live credentials) — mirrors ``native_claude_mock_session``.
@@ -566,7 +377,7 @@ def slow_ready_claude_session(
         f"        default: {_CLAUDE_MOCK_MODEL}\n"
     )
 
-    port = _free_port()
+    port = find_free_port()
     base_url = f"http://127.0.0.1:{port}"
     binding_token = secrets.token_urlsafe(32)
 
@@ -652,7 +463,7 @@ def slow_ready_claude_session(
             )
 
         session_id = _create_native_claude_session(base_url, runner_id)
-        yield (base_url, session_id, gate_started, artifacts)
+        yield (base_url, session_id, gate_started, delay_s, ready_timeout_s)
     finally:
         if session_id is not None:
             with contextlib.suppress(httpx.HTTPError):
@@ -674,7 +485,7 @@ def slow_ready_claude_session(
 @pytest.mark.timeout(400)
 def test_claude_native_first_prompt_survives_slow_terminal_boot(
     page: Page,
-    slow_ready_claude_session: tuple[str, str, Path, Path],
+    slow_ready_claude_session: tuple[str, str, Path, float, float | None],
     mock_llm_server_url: str,
 ) -> None:
     """The first prompt must be delivered even when the terminal is slow to become ready.
@@ -690,71 +501,55 @@ def test_claude_native_first_prompt_survives_slow_terminal_boot(
     """
     from tests.e2e_ui.conftest import set_fallback_mock_llm
 
-    base_url, session_id, gate_started, artifacts = slow_ready_claude_session
+    base_url, session_id, gate_started, delay_s, ready_timeout_s = slow_ready_claude_session
 
     # Make the mock LLM echo the token so a delivered turn is unmistakable.
     set_fallback_mock_llm(mock_llm_server_url, "default", _ECHO_TOKEN)
     set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, _ECHO_TOKEN)
 
-    try:
-        page.goto(f"{base_url}/c/{session_id}")
+    page.goto(f"{base_url}/c/{session_id}")
 
-        # The session is terminal-first: wait for the runner to create the
-        # session terminal (the slow-ready wrapper) and attach — exactly what
-        # the reporter saw before sending the first prompt.
-        expect(page.get_by_test_id("view-mode-toggle")).to_be_visible(
-            timeout=_TERMINAL_READY_TIMEOUT_MS
-        )
-        _select_view_mode(page, "Terminal")
-        terminal = page.locator(_TERMINAL_VIEW).last
-        expect(terminal).to_have_attribute(
-            "data-state", "connected", timeout=_TERMINAL_READY_TIMEOUT_MS
-        )
+    # The session is terminal-first: wait for the runner to create the
+    # session terminal (the slow-ready wrapper) and attach — exactly what
+    # the reporter saw before sending the first prompt.
+    expect(page.get_by_test_id("view-mode-toggle")).to_be_visible(
+        timeout=_TERMINAL_READY_TIMEOUT_MS
+    )
+    _select_view_mode(page, "Terminal")
+    terminal = page.locator(_TERMINAL_VIEW).last
+    expect(terminal).to_have_attribute(
+        "data-state", "connected", timeout=_TERMINAL_READY_TIMEOUT_MS
+    )
 
-        # Send the FIRST prompt from the web composer while the terminal is still
-        # booting (the racy path): the readiness gate must hold the message until
-        # the terminal is ready rather than dropping it at the 30s cap.
-        _ensure_chat_view(page)
-        assert not gate_started.exists(), "startup delay began before the first message"
-        _send(page, _FIRST_PROMPT)
-        sent_at = time.monotonic()
-        _log.info("first prompt sent; waiting for the turn outcome")
+    # Send the FIRST prompt from the web composer while the terminal is still
+    # booting (the racy path): the readiness gate must hold the message until
+    # the terminal is ready rather than dropping it at the 30s cap.
+    _ensure_chat_view(page)
+    assert not gate_started.exists(), "startup delay began before the first message"
+    _send(page, _FIRST_PROMPT)
+    sent_at = time.monotonic()
+    _log.info("first prompt sent; waiting for the turn outcome")
 
-        # Wait for the turn to reach a terminal, user-visible outcome: either an
-        # assistant reply (the prompt was delivered and answered) or an error
-        # pill (the turn failed — the silent-drop bug).
-        outcome = page.locator(_ERROR_PILL).or_(page.locator(_ASSISTANT))
-        expect(outcome.first).to_be_visible(timeout=int(_TURN_OUTCOME_TIMEOUT_S * 1000))
-        elapsed = time.monotonic() - sent_at
-        _log.info("turn reached a user-visible outcome after %.0fs", elapsed)
-        assert gate_started.exists(), "delivery never entered the readiness gate"
-        assert time.monotonic() - float(gate_started.read_text()) >= _READY_DELAY_S
+    # Wait for the turn to reach a terminal, user-visible outcome: either an
+    # assistant reply (the prompt was delivered and answered) or an error
+    # pill (the turn failed — the silent-drop bug).
+    outcome = page.locator(_ERROR_PILL).or_(page.locator(_ASSISTANT))
+    expect(outcome.first).to_be_visible(timeout=int(_TURN_OUTCOME_TIMEOUT_S * 1000))
+    elapsed = time.monotonic() - sent_at
+    _log.info("turn reached a user-visible outcome after %.0fs", elapsed)
+    assert gate_started.exists(), "delivery never entered the readiness gate"
 
-        # Durable assertion against the canonical transcript: the first prompt
-        # must have been delivered and answered (an assistant item echoing the
-        # token), and the turn must not have failed with an error item.
-        error_messages, assistant_texts = _await_transcript_outcome(base_url, session_id)
-        delivered = any(_ECHO_TOKEN in text for text in assistant_texts)
+    # Durable assertion against the canonical transcript: the first prompt
+    # must have been delivered and answered (an assistant item echoing the
+    # token), and the turn must not have failed with an error item.
+    error_messages, assistant_texts = _await_transcript_outcome(base_url, session_id)
+    delivered = any(_ECHO_TOKEN in text for text in assistant_texts)
 
-        assert delivered, (
-            f"No assistant reply echoed {_ECHO_TOKEN!r} after {elapsed:.0f}s. "
-            f"Turn errors: {error_messages or '<none>'}. "
-            f"Assistant text: {assistant_texts or '<none>'}"
-        )
-    except Exception as exc:
-        # Pane text plus the config path the trust seed wrote. This is the
-        # evidence for a real TUI dialog versus a false prompt match; it does
-        # not answer the dialog or change the launch.
-        try:
-            evidence = _write_slow_ready_failure(
-                artifacts,
-                pane=_capture_claude_panes(base_url, session_id),
-                seed=_read_trust_seed(artifacts),
-            )
-        except Exception as diag_exc:
-            evidence = f"(slow-ready diagnostic capture failed: {diag_exc})"
-        if exc.args and isinstance(exc.args[0], str):
-            exc.args = (exc.args[0] + "\n\n" + evidence, *exc.args[1:])
-        else:
-            exc.add_note(evidence)
-        raise
+    assert delivered, (
+        f"No assistant reply echoed {_ECHO_TOKEN!r} after {elapsed:.0f}s. "
+        f"Turn errors: {error_messages or '<none>'}. "
+        f"Assistant text: {assistant_texts or '<none>'}"
+    )
+    observed = json.loads(gate_started.read_text())
+    assert observed["timeout_s"] == (30.0 if ready_timeout_s is None else ready_timeout_s)
+    assert time.monotonic() - observed["started_at"] >= delay_s > observed["timeout_s"]
