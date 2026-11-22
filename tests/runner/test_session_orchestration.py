@@ -1405,7 +1405,10 @@ async def test_explicit_host_create_preserves_worktree_and_project(
     [
         {"placement": "host"},
         {"placement": "same_host", "host_id": "host"},
-        {"workspace": "/repo"},
+        # workspace with an independent placement other than host/child is
+        # rejected before any request (a bare workspace now means a child's
+        # own workspace, which is validated against the parent instead).
+        {"placement": "same_host", "workspace": "/repo"},
         {"placement": "host", "host_id": "host", "workspace": "/repo", "git": {}},
     ],
 )
@@ -1552,3 +1555,129 @@ async def test_pr_link_uncertain_delivery_is_not_retried(failure):
         )
     assert len(posts) == 1
     assert ("refused" if failure == "forbidden" else "could not be confirmed") in result["error"]
+
+
+def _child_create_handler(parent_ws, *, host_id="host-A", child_id="child1"):
+    """MockTransport handler: parent snapshot GET + child create POST.
+
+    Records POST requests on the returned ``posts`` list so tests can assert
+    whether (and with what body) a child session was created.
+    """
+    posts = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path == "/v1/sessions/manager":
+            return httpx.Response(
+                200,
+                json={"id": "manager", "host_id": host_id, "workspace": str(parent_ws)},
+            )
+        posts.append(request)
+        return httpx.Response(201, json={"id": child_id, "agent_id": "worker"})
+
+    return handler, posts
+
+
+async def _run_child_create(handler, args):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        return json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "worker", "placement": "child", **args}),
+                server_client=client,
+                conversation_id="manager",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_child_accepts_in_reach_workspace(tmp_path, monkeypatch):
+    """A child workspace inside the parent's workspace is validated and forwarded."""
+    import os as _os
+
+    from omnigent.runner import subagent_work
+
+    monkeypatch.setattr(subagent_work, "register_child_session", Mock())
+    monkeypatch.setattr(subagent_work, "register_subagent_work", Mock())
+    parent_ws = tmp_path / "repo"
+    child_ws = parent_ws / "pkg" / "child"
+    child_ws.mkdir(parents=True)
+    handler, posts = _child_create_handler(parent_ws)
+
+    result = await _run_child_create(handler, {"workspace": str(child_ws)})
+
+    assert "error" not in result, result
+    assert len(posts) == 1
+    body = json.loads(posts[0].content)
+    assert _os.path.realpath(body["workspace"]) == _os.path.realpath(child_ws)
+    assert body["parent_session_id"] == "manager"
+    # host_id is inherited from the parent since the child omitted it.
+    assert body["host_id"] == "host-A"
+
+
+@pytest.mark.asyncio
+async def test_child_rejects_out_of_reach_workspace(tmp_path):
+    """A workspace outside the parent's workspace is refused, creating no session."""
+    parent_ws = tmp_path / "repo"
+    parent_ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    handler, posts = _child_create_handler(parent_ws)
+
+    result = await _run_child_create(handler, {"workspace": str(outside)})
+
+    assert "error" in result
+    assert "no session was created" in result["error"]
+    assert posts == []
+
+
+@pytest.mark.asyncio
+async def test_child_rejects_foreign_host(tmp_path):
+    """A host_id other than the parent's is refused, creating no session."""
+    parent_ws = tmp_path / "repo"
+    parent_ws.mkdir()
+    handler, posts = _child_create_handler(parent_ws, host_id="host-A")
+
+    result = await _run_child_create(handler, {"host_id": "host-B"})
+
+    assert "error" in result
+    assert "parent's host" in result["error"]
+    assert posts == []
+
+
+@pytest.mark.asyncio
+async def test_child_forwards_git_worktree_request(tmp_path, monkeypatch):
+    """A child git request is forwarded so the server creates the worktree."""
+    from omnigent.runner import subagent_work
+
+    monkeypatch.setattr(subagent_work, "register_child_session", Mock())
+    monkeypatch.setattr(subagent_work, "register_subagent_work", Mock())
+    parent_ws = tmp_path / "repo"
+    parent_ws.mkdir()
+    handler, posts = _child_create_handler(parent_ws)
+
+    result = await _run_child_create(
+        handler, {"git": {"branch_name": "feat/42", "base_branch": "main"}}
+    )
+
+    assert "error" not in result, result
+    assert len(posts) == 1
+    body = json.loads(posts[0].content)
+    assert body["git"] == {"branch_name": "feat/42", "base_branch": "main"}
+    # With no explicit workspace the child inherits the parent's repo to fork from.
+    assert body["workspace"] == str(parent_ws)
+
+
+@pytest.mark.asyncio
+async def test_child_malformed_git_is_rejected(tmp_path):
+    """A malformed git block is refused before any create."""
+    parent_ws = tmp_path / "repo"
+    parent_ws.mkdir()
+    handler, posts = _child_create_handler(parent_ws)
+
+    result = await _run_child_create(handler, {"git": {"base_branch": "main"}})
+
+    assert "error" in result
+    assert "branch_name" in result["error"]
+    assert posts == []

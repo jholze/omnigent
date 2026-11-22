@@ -3585,6 +3585,100 @@ def test_resolve_environment_runner_workspace_overrides_absolute_spec_cwd(
     assert os.path.realpath(env.cwd) == os.path.realpath(workspace)
 
 
+def _git_init_repo(path: Path) -> Path:
+    """Create a one-commit git repo at *path* for worktree-based tests."""
+    path.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    for args in (
+        ["init", "-b", "main"],
+        ["config", "user.email", "dev@example.com"],
+        ["config", "user.name", "Example Dev"],
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True, env=env)
+    (path / "README.md").write_text("hello\n")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True, env=env
+    )
+    return path
+
+
+def _child_spec() -> SimpleNamespace:
+    return SimpleNamespace(
+        os_env=OSEnvSpec(
+            type="caller_process",
+            cwd=".",
+            sandbox=OSEnvSandboxSpec(type="none"),
+        )
+    )
+
+
+def test_child_workspace_inside_runner_workspace_becomes_env_root(
+    tmp_path: Path,
+) -> None:
+    """A child whose own workspace is a subdir of the runner workspace roots there.
+
+    Issue #205: the child's file-tool root follows the child's session
+    workspace, not the shared hub/runner workspace.
+    """
+    runner_ws = tmp_path / "repo"
+    child_ws = runner_ws / "pkg" / "child"
+    child_ws.mkdir(parents=True)
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=False)
+    reg.register_child_workspace("conv_child", str(child_ws))
+
+    root = reg.compute_default_env_root("conv_child", _child_spec())
+    assert root == str(child_ws.resolve())
+
+    env = reg.resolve_environment("conv_child", DEFAULT_ENVIRONMENT_ID, _child_spec())
+    assert os.path.realpath(env.cwd) == os.path.realpath(child_ws)
+    # A sibling session with no registered child workspace still gets the hub root.
+    assert reg.compute_default_env_root("conv_hub", _child_spec()) == str(runner_ws.resolve())
+
+
+def test_child_worktree_of_same_repo_becomes_env_root(tmp_path: Path) -> None:
+    """A child whose workspace is a worktree of the runner repo roots in the worktree."""
+    runner_ws = _git_init_repo(tmp_path / "repo")
+    from omnigent.host.git_worktree import create_worktree
+
+    created = create_worktree(repo_path=str(runner_ws), branch_name="feat/x", base_branch="main")
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=False)
+    reg.register_child_workspace("conv_wt", created.worktree_path)
+
+    root = reg.compute_default_env_root("conv_wt", _child_spec())
+    assert os.path.realpath(root) == os.path.realpath(created.worktree_path)
+
+
+def test_out_of_reach_child_workspace_is_ignored(tmp_path: Path) -> None:
+    """Defense in depth: an out-of-reach workspace never overrides the runner root.
+
+    Even if an unrelated path were somehow recorded for a child, the registry
+    keeps today's runner-workspace-wins behaviour rather than widening reach.
+    """
+    runner_ws = tmp_path / "repo"
+    runner_ws.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=False)
+    reg.register_child_workspace("conv_bad", str(outside))
+
+    assert reg.compute_default_env_root("conv_bad", _child_spec()) == str(runner_ws.resolve())
+    env = reg.resolve_environment("conv_bad", DEFAULT_ENVIRONMENT_ID, _child_spec())
+    assert os.path.realpath(env.cwd) == os.path.realpath(runner_ws)
+
+
+def test_register_child_workspace_clear_restores_runner_root(tmp_path: Path) -> None:
+    """Clearing a recorded child workspace returns the session to the runner root."""
+    runner_ws = tmp_path / "repo"
+    child_ws = runner_ws / "child"
+    child_ws.mkdir(parents=True)
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=False)
+    reg.register_child_workspace("conv_c", str(child_ws))
+    assert reg.compute_default_env_root("conv_c", _child_spec()) == str(child_ws.resolve())
+    reg.register_child_workspace("conv_c", None)
+    assert reg.compute_default_env_root("conv_c", _child_spec()) == str(runner_ws.resolve())
+
+
 @pytest.mark.asyncio
 async def test_blocked_reason_survives_pane_redraws(tmp_path: Path) -> None:
     """The parked reason survives the pane redrawing underneath the dialog.

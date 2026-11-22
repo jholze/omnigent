@@ -2692,6 +2692,11 @@ def create_runner_app(
             if snapshot.ok and snapshot.agent_id is not None:
                 if _session_cache_generation_is_current(session_id, generation):
                     _session_snapshot_cache[session_id] = snapshot
+            # Backup for the envelope registration (legacy servers, cache
+            # re-fetches): a child's own workspace roots its file tools, gated
+            # by the registry's containment check.
+            if snapshot.ok and snapshot.parent_session_id and snapshot.workspace:
+                resource_registry.register_child_workspace(session_id, snapshot.workspace)
             return snapshot
 
     async def _session_workspace_value(session_id: str) -> str | None:
@@ -2782,6 +2787,13 @@ def create_runner_app(
         )
         _session_start_cache[session_id] = float(snapshot.created_at)
         _session_workspace_cache[session_id] = snapshot.workspace
+        # A child with its own persisted workspace roots its file tools there
+        # instead of the shared runner workspace — but only when that workspace
+        # passes the registry's containment check (defense in depth). A
+        # top-level session, or a child that inherited the hub's workspace,
+        # records nothing new here and keeps today's behaviour.
+        if snapshot.parent_session_id and snapshot.workspace:
+            resource_registry.register_child_workspace(session_id, snapshot.workspace)
         if envelope.sub_agent_name:
             _session_sub_agent_names[session_id] = envelope.sub_agent_name
         if snapshot.reasoning_effort:

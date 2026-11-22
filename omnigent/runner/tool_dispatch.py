@@ -2146,6 +2146,102 @@ def _apply_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]
             body[key] = value
 
 
+def _validate_spawn_git_shape(git: object) -> str | None:
+    """Validate the optional ``sys_session_create`` ``git`` block.
+
+    Shared by placement ``host`` and ``child``: both accept a worktree request
+    of the shape ``{"branch_name": ..., "base_branch"?: ...}``.
+
+    :param git: The raw ``git`` argument (``None`` when absent).
+    :returns: A JSON error string when the block is malformed, else ``None``.
+    """
+    if git is None:
+        return None
+    if (
+        not isinstance(git, dict)
+        or not isinstance(git.get("branch_name"), str)
+        or not git["branch_name"].strip()
+        or set(git) - {"branch_name", "base_branch"}
+        or (
+            "base_branch" in git
+            and (not isinstance(git["base_branch"], str) or not git["base_branch"].strip())
+        )
+    ):
+        return json.dumps({"error": "git requires branch_name and an optional base_branch"})
+    return None
+
+
+def _validate_child_placement(
+    args: _JsonObject,
+    inherited: dict[str, str],
+    runner_workspace: Path | None,
+) -> tuple[str | None, str | None]:
+    """Validate a child's explicit ``host_id`` / ``workspace`` against its parent.
+
+    A child runs on its parent's host, so a different ``host_id`` is refused.
+    An explicit ``workspace`` is accepted only when it resolves (after symlink
+    resolution) to the parent's workspace, a directory inside it, or a git
+    worktree of the same repository — the same reach the runner enforces when
+    it later roots the child's file tools there.
+
+    :param args: Parsed ``sys_session_create`` arguments.
+    :param inherited: The parent's spawn bindings (``host_id`` / ``workspace``).
+    :param runner_workspace: The runner's workspace, a fallback base when the
+        parent snapshot carried no workspace.
+    :returns: ``(error, resolved_workspace)`` — a JSON error string and
+        ``None`` on rejection, or ``(None, resolved_or_None)`` when accepted.
+    """
+    parent_host = inherited.get("host_id")
+    parent_workspace = inherited.get("workspace")
+    requested_host = args.get("host_id")
+    if requested_host is not None:
+        if not isinstance(requested_host, str) or not requested_host.strip():
+            return json.dumps({"error": "host_id must be a nonempty string"}), None
+        if parent_host is not None and requested_host != parent_host:
+            return (
+                json.dumps(
+                    {
+                        "error": "A child runs on its parent's host; omit host_id or pass the "
+                        "parent's host. No session was created."
+                    }
+                ),
+                None,
+            )
+    requested_workspace = args.get("workspace")
+    if requested_workspace is None:
+        return None, None
+    if not isinstance(requested_workspace, str) or not requested_workspace.strip():
+        return json.dumps({"error": "workspace must be a nonempty string"}), None
+    base = parent_workspace or (str(runner_workspace) if runner_workspace is not None else None)
+    if not base:
+        return (
+            json.dumps(
+                {
+                    "error": "Cannot place a child workspace: the parent has no workspace. "
+                    "No session was created."
+                }
+            ),
+            None,
+        )
+    from omnigent.runner.child_workspace import resolve_child_workspace_within_reach
+
+    resolved = resolve_child_workspace_within_reach(requested_workspace, base)
+    if resolved is None:
+        return (
+            json.dumps(
+                {
+                    "error": (
+                        f"workspace {requested_workspace!r} must be the parent's workspace, a "
+                        "directory inside it, or a git worktree of the same repository on the "
+                        "parent's host; it was rejected and no session was created."
+                    )
+                }
+            ),
+            None,
+        )
+    return None, resolved
+
+
 def _strip_inherited_spawn_bindings(body: _JsonObject, inherited: dict[str, str]) -> bool:
     """Remove inherited keys that still match *inherited*. Return True if any were removed."""
     stripped = False
@@ -3972,26 +4068,38 @@ async def _execute_session_create(
     explicit_placement = {
         key: args[key] for key in ("host_id", "workspace", "git") if args.get(key) is not None
     }
-    if explicit_placement and placement != "host":
-        return json.dumps({"error": "host_id, workspace and git require placement='host'"})
+    # A child may carry its own workspace / git worktree / host (defaulting to
+    # the parent's) so an orchestrator can give it an isolated checkout; the
+    # independent placements other than host still reject these.
+    if explicit_placement and placement not in ("host", "child"):
+        return json.dumps(
+            {"error": "host_id, workspace and git require placement='host' or 'child'"}
+        )
+    if explicit_placement and placement == "child" and has_config_path:
+        return json.dumps(
+            {"error": "A child workspace, host_id or git requires agent_id, not config_path"}
+        )
+    git_shape_error = _validate_spawn_git_shape(args.get("git"))
+    if git_shape_error is not None:
+        return git_shape_error
     if placement == "host":
         if any(
             not isinstance(args.get(key), str) or not str(args[key]).strip()
             for key in ("host_id", "workspace")
         ):
             return json.dumps({"error": "placement='host' requires host_id and workspace"})
-        git = args.get("git")
-        if git is not None and (
-            not isinstance(git, dict)
-            or not isinstance(git.get("branch_name"), str)
-            or not git["branch_name"].strip()
-            or set(git) - {"branch_name", "base_branch"}
-            or (
-                "base_branch" in git
-                and (not isinstance(git["base_branch"], str) or not git["base_branch"].strip())
-            )
-        ):
-            return json.dumps({"error": "git requires branch_name and an optional base_branch"})
+    # Validate a child's explicit host/workspace against the parent before any
+    # session exists, so a rejected workspace leaves nothing behind. The parent
+    # bindings fetched here are reused when the create body is assembled.
+    child_inherited_bindings: dict[str, str] | None = None
+    resolved_child_workspace: str | None = None
+    if placement == "child" and explicit_placement:
+        child_inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+        child_error, resolved_child_workspace = _validate_child_placement(
+            args, child_inherited_bindings, runner_workspace
+        )
+        if child_error is not None:
+            return child_error
     project_error = _project_argument_error(args, placement)
     if project_error is not None:
         return project_error
@@ -4071,9 +4179,23 @@ async def _execute_session_create(
                 }
     # Native spawn tools do not expose host/workspace/project; a child copies
     # the parent's so it stays on the same machine and filing (fork feature).
+    # An orchestrator may instead give a child its own in-reach workspace, git
+    # worktree, or (the parent's) host; those explicit fields are set first so
+    # the inheritance only fills what the child omitted.
     inherited_bindings: dict[str, str] = {}
     if placement == "child":
-        inherited_bindings = await _parent_spawn_bindings(server_client, conversation_id)
+        inherited_bindings = (
+            child_inherited_bindings
+            if child_inherited_bindings is not None
+            else await _parent_spawn_bindings(server_client, conversation_id)
+        )
+        if resolved_child_workspace is not None:
+            body["workspace"] = resolved_child_workspace
+        if args.get("host_id") is not None:
+            body["host_id"] = args["host_id"]
+        if args.get("git") is not None:
+            # The server creates the worktree off the (inherited) parent repo.
+            body["git"] = args["git"]
         _apply_inherited_spawn_bindings(body, inherited_bindings)
     unconfirmed_creation = {
         "error": "Session creation could not be confirmed; "

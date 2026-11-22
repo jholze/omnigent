@@ -709,6 +709,51 @@ def _create_worktree(
     )
 
 
+def git_common_dir(path: str, *, timeout: float | None = None) -> str | None:
+    """Return the realpath of the git common dir for *path*, or ``None``.
+
+    ``git rev-parse --git-common-dir`` points at the shared ``.git`` of the
+    main work tree, which every linked worktree of a repository reports
+    identically. Two paths with an equal common dir are therefore in the SAME
+    repository — the reliable, path-string-independent way to test that.
+
+    :param path: Absolute path to probe, e.g. a worktree directory.
+    :param timeout: Bound for the git call; ``None`` uses :data:`_GIT_TIMEOUT_S`.
+    :returns: The resolved common-dir path, or ``None`` when *path* is not a
+        directory, not inside a git work tree, or git is unavailable. Never
+        raises — callers use this to classify untrusted paths.
+    """
+    if not Path(path).is_dir():
+        return None
+    try:
+        result = _run_git(["rev-parse", "--git-common-dir"], cwd=path, timeout=timeout)
+    except WorktreeError:
+        return None
+    if result.returncode != 0:
+        return None
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = Path(path) / common_dir
+    return os.path.realpath(common_dir)
+
+
+def same_repository(path_a: str, path_b: str, *, timeout: float | None = None) -> bool:
+    """Whether two existing paths belong to the same git repository.
+
+    Compares git common dirs (see :func:`git_common_dir`), so a linked worktree
+    and its main checkout — or two worktrees of one repo — compare equal, while
+    a path in an unrelated repository does not. Never raises.
+
+    :param path_a: First absolute path, e.g. a candidate child workspace.
+    :param path_b: Second absolute path, e.g. the hub's workspace.
+    :returns: ``True`` only when both resolve to the same git common dir.
+    """
+    common_a = git_common_dir(path_a, timeout=timeout)
+    if common_a is None:
+        return False
+    return common_a == git_common_dir(path_b, timeout=timeout)
+
+
 def _main_repo_for_worktree(worktree_path: str, *, timeout: float | None = None) -> str:
     """Find the main repository work tree for a linked worktree.
 
