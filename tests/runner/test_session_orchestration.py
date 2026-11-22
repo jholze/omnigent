@@ -1647,6 +1647,32 @@ async def test_child_rejects_foreign_host(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_child_rejects_explicit_host_when_parent_has_none(tmp_path):
+    """An explicit host_id is refused when the parent snapshot carries no host.
+
+    A child always runs on its parent's host; when the parent has none, the only
+    valid choice is to omit host_id, so any explicit value is rejected before a
+    session is created.
+    """
+    parent_ws = tmp_path / "repo"
+    parent_ws.mkdir()
+    posts = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path == "/v1/sessions/manager":
+            # Parent snapshot without a host_id.
+            return httpx.Response(200, json={"id": "manager", "workspace": str(parent_ws)})
+        posts.append(request)
+        return httpx.Response(201, json={"id": "child1", "agent_id": "worker"})
+
+    result = await _run_child_create(handler, {"host_id": "host-B"})
+
+    assert "error" in result
+    assert "parent's host" in result["error"]
+    assert posts == []
+
+
+@pytest.mark.asyncio
 async def test_child_forwards_git_worktree_request(tmp_path, monkeypatch):
     """A child git request is forwarded so the server creates the worktree."""
     from omnigent.runner import subagent_work

@@ -2197,7 +2197,10 @@ def _validate_child_placement(
     if requested_host is not None:
         if not isinstance(requested_host, str) or not requested_host.strip():
             return json.dumps({"error": "host_id must be a nonempty string"}), None
-        if parent_host is not None and requested_host != parent_host:
+        # A child runs on its parent's host. Any explicit host_id that isn't the
+        # parent's is refused — including when the parent has no host_id, where
+        # the only valid choice is to omit it.
+        if requested_host != parent_host:
             return (
                 json.dumps(
                     {

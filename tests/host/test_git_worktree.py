@@ -23,8 +23,10 @@ from omnigent.host.git_worktree import (
     CreatedWorktree,
     WorktreeError,
     create_worktree,
+    git_common_dir,
     list_worktrees,
     remove_worktree,
+    same_repository,
     validate_branch_name,
 )
 
@@ -145,6 +147,31 @@ def git_repo(tmp_path: Path) -> Iterator[Path]:
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "init")
     yield repo
+
+
+def test_same_repository_ignores_ambient_git_dir(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ambient ``GIT_DIR`` must not make two unrelated repos compare equal.
+
+    The repository-classification path discovers the repo from ``cwd`` alone;
+    if it honoured ``GIT_DIR`` from the process env, every probe would report
+    that one common dir and ``same_repository`` would be ``True`` for any two
+    existing directories — defeating the child-workspace containment check.
+    """
+    other = (tmp_path / "other").resolve()
+    other.mkdir()
+    _git(other, "init", "-q", "-b", "main")
+    (other / "README.md").write_text("hi")
+    _git(other, "add", ".")
+    _git(other, "commit", "-q", "-m", "init")
+
+    # Point git's discovery env at git_repo's .git; without stripping it the
+    # classification call would resolve every path to this common dir.
+    monkeypatch.setenv("GIT_DIR", str(git_repo / ".git"))
+
+    assert not same_repository(str(git_repo), str(other))
+    assert git_common_dir(str(git_repo)) != git_common_dir(str(other))
 
 
 @pytest.mark.parametrize("base_branch", [None, "main", "master"])
@@ -862,7 +889,9 @@ def timed_git(monkeypatch: pytest.MonkeyPatch) -> _TimedGit:
     real_exec = git_worktree_module._exec_git
     monkeypatch.setattr(git_worktree_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
 
-    def run(argv: list[str], *, cwd: str, timeout: float) -> subprocess.CompletedProcess[str]:
+    def run(
+        argv: list[str], *, cwd: str, timeout: float, strip_discovery_env: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         command = f"worktree {argv[1]}" if argv[0] == "worktree" else argv[0]
         hangs = command in timed.time_out or timed.hang_after in {c for c, _ in timed.bounds}
         timed.bounds.append((command, timeout))
@@ -873,7 +902,7 @@ def timed_git(monkeypatch: pytest.MonkeyPatch) -> _TimedGit:
         clock[0] += timed.elapsed_s.get(command, 0.0)
         if command in timed.fail:
             return subprocess.CompletedProcess(argv, 1, "", f"{command} failed")
-        return real_exec(argv, cwd=cwd, timeout=timeout)
+        return real_exec(argv, cwd=cwd, timeout=timeout, strip_discovery_env=strip_discovery_env)
 
     monkeypatch.setattr(git_worktree_module, "_exec_git", run)
     return timed

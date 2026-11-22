@@ -2789,9 +2789,11 @@ def create_runner_app(
         _session_workspace_cache[session_id] = snapshot.workspace
         # A child with its own persisted workspace roots its file tools there
         # instead of the shared runner workspace — but only when that workspace
-        # passes the registry's containment check (defense in depth). A
-        # top-level session, or a child that inherited the hub's workspace,
-        # records nothing new here and keeps today's behaviour.
+        # passes the registry's containment check (defense in depth) AND resolves
+        # to something other than the runner workspace. A child that merely
+        # inherited the hub's workspace is still recorded here, but the registry
+        # treats an equal-to-runner-workspace root as no override, so it keeps
+        # per-session isolation. A top-level session records nothing.
         if snapshot.parent_session_id and snapshot.workspace:
             resource_registry.register_child_workspace(session_id, snapshot.workspace)
         if envelope.sub_agent_name:

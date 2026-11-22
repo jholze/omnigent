@@ -35,6 +35,7 @@ from omnigent.runner.resource_registry import (
     SessionResourceRegistry,
     TerminalExitEvent,
     TerminalLifecycle,
+    _contained_session_dir,
     _sanitize_session_id,
     _session_workspace,
     _terminal_exit_diagnostics,
@@ -3676,6 +3677,76 @@ def test_register_child_workspace_clear_restores_runner_root(tmp_path: Path) -> 
     reg.register_child_workspace("conv_c", str(child_ws))
     assert reg.compute_default_env_root("conv_c", _child_spec()) == str(child_ws.resolve())
     reg.register_child_workspace("conv_c", None)
+    assert reg.compute_default_env_root("conv_c", _child_spec()) == str(runner_ws.resolve())
+
+
+def test_inherited_workspace_child_keeps_per_session_isolation(tmp_path: Path) -> None:
+    """A child that inherited the hub workspace keeps per_session_workspace isolation.
+
+    Issue #205 regression: recording the runner workspace itself as the child's
+    workspace (the inherited-workspace case) must NOT root the child at the
+    shared workspace. With ``per_session_workspace=True`` the child must still
+    land in its isolated per-session subdir, so siblings cannot read each other.
+    """
+    runner_ws = tmp_path / "repo"
+    runner_ws.mkdir()
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=True)
+    # The child merely inherited the hub's workspace (AC-3 omitted-workspace case).
+    reg.register_child_workspace("conv_child", str(runner_ws))
+
+    root = reg.compute_default_env_root("conv_child", _child_spec())
+    session_dir = str(Path(_contained_session_dir(runner_ws, "conv_child")).resolve())
+    assert root == session_dir
+    assert root != str(runner_ws.resolve())
+
+
+def test_child_root_resolution_is_memoized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated resolutions run the same-repository git check at most once.
+
+    Issue #205: the containment check for a worktree child forks git; memoizing
+    the resolved root keeps that off the per-resolution (and lock-held) path.
+    """
+    runner_ws = _git_init_repo(tmp_path / "repo")
+    from omnigent.host import git_worktree
+
+    created = git_worktree.create_worktree(
+        repo_path=str(runner_ws), branch_name="feat/x", base_branch="main"
+    )
+    calls: list[tuple[str, str]] = []
+    real_same_repository = git_worktree.same_repository
+
+    def counting_same_repository(path_a: str, path_b: str, **kwargs: object) -> bool:
+        calls.append((path_a, path_b))
+        return real_same_repository(path_a, path_b, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(git_worktree, "same_repository", counting_same_repository)
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=False)
+    reg.register_child_workspace("conv_wt", created.worktree_path)
+
+    for _ in range(3):
+        root = reg.compute_default_env_root("conv_wt", _child_spec())
+        assert os.path.realpath(root) == os.path.realpath(created.worktree_path)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_session_clears_child_workspace(tmp_path: Path) -> None:
+    """``cleanup_session`` drops the child's recorded workspace and memo."""
+    runner_ws = tmp_path / "repo"
+    child_ws = runner_ws / "child"
+    child_ws.mkdir(parents=True)
+    reg = SessionResourceRegistry(runner_workspace=runner_ws, per_session_workspace=False)
+    reg.register_child_workspace("conv_c", str(child_ws))
+    # Prime the memo so we also prove it is invalidated, not just the record.
+    assert reg.compute_default_env_root("conv_c", _child_spec()) == str(child_ws.resolve())
+
+    await reg.cleanup_session("conv_c")
+
+    with reg._child_workspaces_lock:
+        assert "conv_c" not in reg._child_workspaces
+        assert "conv_c" not in reg._child_root_memo
     assert reg.compute_default_env_root("conv_c", _child_spec()) == str(runner_ws.resolve())
 
 

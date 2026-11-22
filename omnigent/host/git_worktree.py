@@ -41,6 +41,21 @@ _CREATE_DEADLINE: ContextVar[tuple[float, float] | None] = ContextVar(
 # Max directory-collision suffixes (``-2`` .. ``-N``) before giving up.
 _MAX_DIR_COLLISION_SUFFIX: int = 50
 
+# Git repo-discovery env vars that override cwd-based discovery. The repository
+# CLASSIFICATION path (``git_common_dir`` / ``same_repository``) runs with these
+# removed so an ambient ``GIT_DIR`` in the runner/server process cannot make
+# every probe report one common dir — which would make any two directories look
+# like the same repository and defeat the child-workspace containment check.
+# ``GIT_CEILING_DIRECTORIES`` is intentionally kept: it only bounds the upward
+# search and cannot force a false same-repo match.
+_GIT_DISCOVERY_ENV_VARS: tuple[str, ...] = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_INDEX_FILE",
+)
+
 # Chars git refuses in a ref: space, control chars, ``~^:?*[\``, DEL.
 # (``..``, leading ``-``/``.``, ``/`` edges, ``.lock``, ``@{`` are
 # checked separately.)
@@ -112,22 +127,32 @@ def _sanitize_dirname(branch_name: str) -> str:
     return branch_name.strip("/").replace("/", "-")
 
 
-def _exec_git(args: list[str], *, cwd: str, timeout: float) -> subprocess.CompletedProcess[str]:
+def _exec_git(
+    args: list[str], *, cwd: str, timeout: float, strip_discovery_env: bool = False
+) -> subprocess.CompletedProcess[str]:
     """Spawn one git command, killing it after ``timeout`` seconds.
 
     :param args: Git argv *after* ``git``, e.g. ``["rev-parse", "--show-toplevel"]``.
     :param cwd: Working directory to run git in.
     :param timeout: Seconds to allow before killing git.
+    :param strip_discovery_env: When ``True``, drop git's repo-discovery env
+        vars (:data:`_GIT_DISCOVERY_ENV_VARS`) so discovery uses ``cwd`` alone.
+        Used by the repository-classification path; other helpers keep the
+        ambient environment unchanged.
     :returns: The completed process with captured text stdout/stderr.
     :raises FileNotFoundError: If git is not installed.
     :raises subprocess.TimeoutExpired: If the command exceeds ``timeout``.
     """
+    # Keep failure diagnostics stable for repository classification, and
+    # fail a credential prompt at once instead of holding the create budget.
+    env = {**os.environ, "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0"}
+    if strip_discovery_env:
+        for var in _GIT_DISCOVERY_ENV_VARS:
+            env.pop(var, None)
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
-        # Keep failure diagnostics stable for repository classification, and
-        # fail a credential prompt at once instead of holding the create budget.
-        env={**os.environ, "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0"},
+        env=env,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -141,6 +166,7 @@ def _run_git(
     *,
     cwd: str,
     timeout: float | None = None,
+    strip_discovery_env: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning the completed process.
 
@@ -154,6 +180,9 @@ def _run_git(
         ``"/Users/alice/myrepo"``.
     :param timeout: Seconds to allow before killing git. Defaults to
         :data:`_GIT_TIMEOUT_S`.
+    :param strip_discovery_env: Forwarded to :func:`_exec_git`; drop git's
+        repo-discovery env vars so discovery uses ``cwd`` alone. Used by the
+        repository-classification path only.
     :returns: The completed process with captured text stdout/stderr.
     :raises WorktreeError: If git is not installed, the command
         exceeds ``timeout``, or the create's deadline passes.
@@ -166,7 +195,7 @@ def _run_git(
         if remaining < bound:
             bound, cut_by_deadline = remaining, True
     try:
-        return _exec_git(args, cwd=cwd, timeout=bound)
+        return _exec_git(args, cwd=cwd, timeout=bound, strip_discovery_env=strip_discovery_env)
     except FileNotFoundError as exc:
         raise WorktreeError("git is not installed on the host") from exc
     except subprocess.TimeoutExpired as exc:
@@ -717,6 +746,9 @@ def git_common_dir(path: str, *, timeout: float | None = None) -> str | None:
     identically. Two paths with an equal common dir are therefore in the SAME
     repository — the reliable, path-string-independent way to test that.
 
+    Runs with git's repo-discovery env vars stripped so an ambient ``GIT_DIR``
+    cannot force every probe to one common dir; discovery uses *path* alone.
+
     :param path: Absolute path to probe, e.g. a worktree directory.
     :param timeout: Bound for the git call; ``None`` uses :data:`_GIT_TIMEOUT_S`.
     :returns: The resolved common-dir path, or ``None`` when *path* is not a
@@ -726,7 +758,9 @@ def git_common_dir(path: str, *, timeout: float | None = None) -> str | None:
     if not Path(path).is_dir():
         return None
     try:
-        result = _run_git(["rev-parse", "--git-common-dir"], cwd=path, timeout=timeout)
+        result = _run_git(
+            ["rev-parse", "--git-common-dir"], cwd=path, timeout=timeout, strip_discovery_env=True
+        )
     except WorktreeError:
         return None
     if result.returncode != 0:
@@ -743,6 +777,17 @@ def same_repository(path_a: str, path_b: str, *, timeout: float | None = None) -
     Compares git common dirs (see :func:`git_common_dir`), so a linked worktree
     and its main checkout — or two worktrees of one repo — compare equal, while
     a path in an unrelated repository does not. Never raises.
+
+    Both inputs must be absolute: discovery runs from each path, and the
+    common-dir comparison is case-sensitive, so a differently-cased in-repo path
+    on a case-insensitive filesystem (macOS) errs toward ``False`` (rejection),
+    which is the safe direction for a containment gate.
+
+    This proves only that both paths map to the same git common dir — NOT that
+    *path_a* is a real worktree. A planted ``.git`` gitfile (``gitdir: <hub>``)
+    inside an otherwise-unrelated directory makes git report the hub's common
+    dir, so such a directory compares equal here; callers must not treat a
+    ``True`` result as proof the path is a legitimately registered worktree.
 
     :param path_a: First absolute path, e.g. a candidate child workspace.
     :param path_b: Second absolute path, e.g. the hub's workspace.
