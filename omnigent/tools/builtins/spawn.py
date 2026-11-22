@@ -1023,18 +1023,26 @@ class SysSessionCreateTool(Tool):
                         },
                         "host_id": {
                             "type": "string",
-                            "description": "Owned host ID; required for placement='host'.",
+                            "description": (
+                                "Owned host ID; required for placement='host'. For "
+                                "placement='child' it defaults to the parent's host and "
+                                "may only be the parent's host."
+                            ),
                         },
                         "workspace": {
                             "type": "string",
                             "description": (
-                                "Absolute path on the chosen host; required for placement='host'."
+                                "Absolute path on the chosen host; required for "
+                                "placement='host'. For placement='child' an optional own "
+                                "workspace — the parent's workspace, a directory inside it, "
+                                "or an existing git worktree of the same repository."
                             ),
                         },
                         "git": {
                             "type": "object",
                             "description": (
-                                "For placement='host', create a new worktree from workspace."
+                                "For placement='host' or 'child', create a new worktree from "
+                                "the (child: parent's) workspace and run the session in it."
                             ),
                             "properties": {
                                 "branch_name": {"type": "string", "minLength": 1},

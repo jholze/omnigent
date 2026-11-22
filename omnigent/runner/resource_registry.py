@@ -621,6 +621,22 @@ class SessionResourceRegistry:
             terminal_registry.environment_resolver = self._resolve_terminal_environment
         self._runner_workspace = runner_workspace
         self._per_session_workspace = per_session_workspace
+        # Orchestrated children may run in their OWN workspace (a worktree of,
+        # or a directory inside, the hub's). The runner records a child's
+        # persisted workspace here; it becomes the file-tool env root only when
+        # it passes the same containment check used at creation time. Absent or
+        # out-of-reach, the runner workspace wins exactly as before. Guarded by
+        # its own lock because it is read while ``_lock`` is already held (by
+        # the primary-env resolution path), and ``_lock`` is not reentrant.
+        self._child_workspaces: dict[str, str] = {}
+        # Resolved env root per child session, memoized so the containment
+        # check (which may fork git) runs once per session instead of on every
+        # env/terminal/filesystem resolution. A present key — value ``str`` or
+        # ``None`` — means "already resolved"; it is invalidated whenever the
+        # recorded workspace changes (:meth:`register_child_workspace`) and on
+        # cleanup. Guarded by ``_child_workspaces_lock`` alongside the record.
+        self._child_root_memo: dict[str, str | None] = {}
+        self._child_workspaces_lock = threading.Lock()
         self._primary_envs: dict[str, OSEnvironment] = {}
         self._primary_env_specs: dict[str, OSEnvSpec | None] = {}
         self._client_surfaces: dict[str, str] = {}
@@ -1392,6 +1408,10 @@ class SessionResourceRegistry:
         :param agent_spec: Agent spec for env creation.
         :returns: The primary :class:`OSEnvironment`.
         """
+        # Resolve (and memoize) the child workspace root before taking
+        # ``self._lock`` so its one-time git probe never runs while the global
+        # registry lock is held, stalling every other session's operations.
+        self._child_workspace_env_root(session_id)
         with self._lock:
             requested_spec = os_env_spec or getattr(agent_spec, "os_env", None)
             if requested_spec is not None:
@@ -1432,9 +1452,83 @@ class SessionResourceRegistry:
             self._primary_env_specs[session_id] = deepcopy(requested_spec)
             return os_env
 
+    def register_child_workspace(self, session_id: str, workspace: str | None) -> None:
+        """Record an orchestrated child's own workspace (or clear it).
+
+        The runner calls this when it learns a child session's persisted
+        workspace (e.g. from the session-init envelope). The value is only a
+        candidate: :meth:`_child_workspace_env_root` adopts it as the env root
+        after the containment check, so a stale or hostile value can never
+        widen a child's reach past the runner workspace's repository.
+
+        :param session_id: Child session/conversation identifier.
+        :param workspace: The child's persisted absolute workspace, or ``None``
+            / empty to clear a previously recorded one.
+        """
+        with self._child_workspaces_lock:
+            if workspace and workspace.strip():
+                self._child_workspaces[session_id] = workspace.strip()
+            else:
+                self._child_workspaces.pop(session_id, None)
+            # The recorded workspace changed; drop any memoized resolution.
+            self._child_root_memo.pop(session_id, None)
+
+    def _child_workspace_env_root(self, session_id: str) -> str | None:
+        """Resolved child workspace to use as the env root, or ``None``.
+
+        Returns the child's own workspace ONLY when it is recorded, a runner
+        workspace is set, the child workspace passes the shared containment
+        check relative to that runner workspace, AND it resolves to something
+        OTHER than the runner workspace itself. A child that merely inherited
+        the hub's workspace therefore returns ``None`` so the caller keeps the
+        runner-workspace-wins behaviour — which, under ``per_session_workspace``,
+        is per-session isolation rather than the shared root.
+
+        The resolution (which may fork git for the same-repository worktree
+        case) is memoized per session and computed without ``self._lock`` held,
+        so the subprocess runs once and never serializes other sessions.
+        """
+        if self._runner_workspace is None:
+            return None
+        with self._child_workspaces_lock:
+            if session_id in self._child_root_memo:
+                return self._child_root_memo[session_id]
+            candidate = self._child_workspaces.get(session_id)
+        resolved = self._resolve_child_root(candidate)
+        with self._child_workspaces_lock:
+            # Only memoize when the recorded workspace is still the one we
+            # resolved; a concurrent re-registration already invalidated it.
+            if self._child_workspaces.get(session_id) == candidate:
+                self._child_root_memo[session_id] = resolved
+        return resolved
+
+    def _resolve_child_root(self, candidate: str | None) -> str | None:
+        """Resolve a recorded child workspace to an env root, or ``None``.
+
+        ``None`` when there is no candidate, it fails the containment check, or
+        it resolves to the runner workspace itself (an inherited-workspace
+        child, which must keep per-session isolation). May fork git; call it
+        WITHOUT ``self._lock`` or ``_child_workspaces_lock`` held.
+        """
+        if self._runner_workspace is None or not candidate:
+            return None
+        from omnigent.runner.child_workspace import resolve_child_workspace_within_reach
+
+        resolved = resolve_child_workspace_within_reach(candidate, str(self._runner_workspace))
+        if resolved is None:
+            return None
+        # An inherited hub workspace is not a distinct child root: fall back to
+        # the runner-workspace path so per_session_workspace isolation holds.
+        if resolved == os.path.realpath(str(self._runner_workspace)):
+            return None
+        return resolved
+
     def _effective_primary_spec(self, session_id: str, spec: OSEnvSpec) -> OSEnvSpec:
         """Use the same workspace identity for tools and inherited terminals."""
-        if self._runner_workspace is not None:
+        child_root = self._child_workspace_env_root(session_id)
+        if child_root is not None:
+            cwd = child_root
+        elif self._runner_workspace is not None:
             cwd = (
                 _contained_session_dir(self._runner_workspace, session_id)
                 if self._per_session_workspace
@@ -1477,11 +1571,16 @@ class SessionResourceRegistry:
         from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
         from omnigent.inner.os_env import create_os_environment
 
+        # An orchestrated child with its own in-reach workspace roots its
+        # default environment there, matching compute_default_env_root.
+        child_root = self._child_workspace_env_root(session_id)
         # Prefer the CLI launch workspace so that the OS environment
         # cwd matches the filesystem-registry watch path.  Fall back
         # to the per-session temp dir for remote/cloud runners that
         # have no workspace affinity.
-        if self._runner_workspace is not None:
+        if child_root is not None:
+            default_cwd = child_root
+        elif self._runner_workspace is not None:
             if self._per_session_workspace:
                 # Isolate sessions under the shared workspace.
                 default_cwd = _contained_session_dir(self._runner_workspace, session_id)
@@ -1567,6 +1666,12 @@ class SessionResourceRegistry:
             spec_os_env = getattr(agent_spec, "os_env", None)
             if spec_os_env is None:
                 return None
+
+        # An orchestrated child with its own in-reach workspace wins over the
+        # runner workspace, so the filesystem endpoints report the child's root.
+        child_root = self._child_workspace_env_root(session_id)
+        if child_root is not None:
+            return str(Path(child_root).resolve())
 
         # Runner workspace wins when set. Per-session subdirectory
         # isolation is preserved so concurrent sessions
@@ -2761,6 +2866,9 @@ class SessionResourceRegistry:
         """
         with self._lock:
             status_poller = self._status_pollers.get(session_id)
+        with self._child_workspaces_lock:
+            self._child_workspaces.pop(session_id, None)
+            self._child_root_memo.pop(session_id, None)
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)
